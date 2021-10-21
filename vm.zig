@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const VMError = error {
+const VMError = error{
     Unreachable,
     IncompleteInstruction,
     UnknownInstruction,
@@ -14,6 +14,18 @@ const Instruction = enum(u8) {
     I32_Add = 0x6A,
     I32_Sub = 0x6B,
     I32_Mul = 0x6C,
+    I32_Div_S = 0x6D,
+    I32_Div_U = 0x6E,
+    I32_Rem_S = 0x6F,
+    I32_Rem_U = 0x70,
+    I32_And = 0x71,
+    I32_Or = 0x72,
+    I32_Xor = 0x73,
+    I32_Shl = 0x74,
+    I32_Shr_S = 0x75,
+    I32_Shr_U = 0x76,
+    I32_Rotl = 0x77,
+    I32_Rotr = 0x78,
 };
 
 const Type = enum {
@@ -28,6 +40,11 @@ const TypedValue = union(Type) {
     I64: i64,
     F32: f32,
     F64: f64,
+};
+
+const I32ToU32 = union {
+    I32: i32,
+    U32: u32,
 };
 
 const Stack = struct {
@@ -52,15 +69,15 @@ const Stack = struct {
     }
 
     fn pop_i32(self: *Self) !i32 {
-        var typed:TypedValue = self.pop();
+        var typed: TypedValue = self.pop();
         switch (typed) {
             Type.I32 => |value| return value,
             else => return error.TypeMismatch,
         }
     }
 
-    fn push_i32(self: *Self, v:i32) !void {
-        var typed = TypedValue{.I32 = v};
+    fn push_i32(self: *Self, v: i32) !void {
+        var typed = TypedValue{ .I32 = v };
         try self.push(typed);
     }
 
@@ -72,60 +89,119 @@ const Stack = struct {
 };
 
 fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
-    var index:usize = 0;
+    var stream = std.io.fixedBufferStream(bytecode);
+    var reader = stream.reader();
 
-    while (index < bytecode.len) {
-        const instruction:Instruction = @intToEnum(Instruction, bytecode[index]);
-        index += 1;
+    while (stream.pos < stream.buffer.len) {
+        const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
 
         switch (instruction) {
             Instruction.Unreachable => {
                 return error.Unreachable;
             },
-            Instruction.Noop => {
-                index += 1;
-            },
+            Instruction.Noop => {},
             Instruction.I32_Const => {
-                var v:i32 = 0;
-
-                if (index + 3 >= bytecode.len) {
+                if (stream.pos + 3 >= stream.buffer.len) {
                     return error.IncompleteInstruction;
                 }
 
-                // little endian
-                // v = v | @shlExact(@as(bytecode[index + 0], i32), 0);
-                // v = v | @shlExact(@as(bytecode[index + 1], i32), 8);
-                // v = v | @shlExact(@as(bytecode[index + 2], i32), 16);
-                // v = v | @shlExact(@as(bytecode[index + 3], i32), 24);
-
-                // big endian
-                v = v | @shlExact(@as(i32, bytecode[index + 0]), 24);
-                v = v | @shlExact(@as(i32, bytecode[index + 1]), 16);
-                v = v | @shlExact(@as(i32, bytecode[index + 2]), 8);
-                v = v | @shlExact(@as(i32, bytecode[index + 3]), 0);
-
+                var v: i32 = try reader.readIntBig(i32);
                 try stack.push_i32(v);
-
-                index += 4;
             },
             Instruction.I32_Add => {
-                var v2:i32 = try stack.pop_i32();
-                var v1:i32 = try stack.pop_i32();
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
                 var result = v1 + v2;
                 try stack.push_i32(result);
             },
             Instruction.I32_Sub => {
-                var v2:i32 = try stack.pop_i32();
-                var v1:i32 = try stack.pop_i32();
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
                 var result = v1 - v2;
                 try stack.push_i32(result);
             },
             Instruction.I32_Mul => {
-                var v2:i32 = try stack.pop_i32();
-                var v1:i32 = try stack.pop_i32();
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
                 var value = v1 * v2;
                 try stack.push_i32(value);
-            }
+            },
+            Instruction.I32_Div_S => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var value = try std.math.divTrunc(i32, v1, v2);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Div_U => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var value_unsigned = try std.math.divFloor(u32, v1, v2);
+                var value = @bitCast(i32, value_unsigned);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Rem_S => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var value = @rem(v1, v2);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Rem_U => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var value = @bitCast(i32, v1 % v2);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_And => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var value = @bitCast(i32, v1 & v2);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Or => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var value = @bitCast(i32, v1 | v2);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Xor => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var value = @bitCast(i32, v1 ^ v2);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Shl => {
+                var shift_unsafe: i32 = try stack.pop_i32();
+                var int: i32 = try stack.pop_i32();
+                var shift = @intCast(u5, shift_unsafe);
+                var value = int << shift;
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Shr_S => {
+                var shift_unsafe: i32 = try stack.pop_i32();
+                var int: i32 = try stack.pop_i32();
+                var shift = @intCast(u5, shift_unsafe);
+                var value = int >> shift;
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Shr_U => {
+                var shift_unsafe: i32 = try stack.pop_i32();
+                var int: u32 = @bitCast(u32, try stack.pop_i32());
+                var shift = @intCast(u5, shift_unsafe);
+                var value = @bitCast(i32, int >> shift);
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Rotl => {
+                var rot: u32 = @bitCast(u32, try stack.pop_i32());
+                var int: u32 = @bitCast(u32, try stack.pop_i32());
+                var value = @bitCast(i32, std.math.rotl(u32, int, rot));
+                try stack.push_i32(value);
+            },
+            Instruction.I32_Rotr => {
+                var rot: u32 = @bitCast(u32, try stack.pop_i32());
+                var int: u32 = @bitCast(u32, try stack.pop_i32());
+                var value = @bitCast(i32, std.math.rotr(u32, int, rot));
+                try stack.push_i32(value);
+            },
             // else => return error.UnknownInstruction,
         }
     }
@@ -137,8 +213,22 @@ fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
     return 0;
 }
 
+fn testExecuteAndExpect(bytecode: []const u8, expected: u32) !void {
+    var stack = Stack.init(std.testing.allocator);
+    defer stack.deinit();
+
+    var result: i32 = try executeBytecode(bytecode, &stack);
+    var result_u32 = @bitCast(u32, result);
+    if (result_u32 != expected) {
+        std.debug.print("result: 0x{X}\n", .{result});
+    }
+    try std.testing.expect(expected == result_u32);
+}
+
 test "unreachable" {
-    var bytecode = [_]u8{ 0x00, };
+    var bytecode = [_]u8{
+        0x00,
+    };
 
     var stack = Stack.init(std.testing.allocator);
     defer stack.deinit();
@@ -147,67 +237,151 @@ test "unreachable" {
     if (result) |_| {
         return error.TestUnexpectedResult;
     } else |err| {
-        try std.testing.expect(err == VMError.Unreachable);   
+        try std.testing.expect(err == VMError.Unreachable);
     }
 }
 
 test "noop" {
-    var bytecode = [_]u8{   0x01, 0x01, 0x01, 0x01, 0x01, 
-                            0x01, 0x01, 0x01, 0x01, 0x01,
-                            0x01, 0x01, 0x01, 0x01, 0x01,
-                            0x01, 0x01, 0x01, 0x01, 0x01,  };
-
-    var stack = Stack.init(std.testing.allocator);
-    defer stack.deinit();
-
-    var result:i32 = try executeBytecode(&bytecode, &stack);
-    try std.testing.expect(0x0 == result);
+    var bytecode = [_]u8{
+        0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01,
+    };
+    try testExecuteAndExpect(&bytecode, 0x0);
 }
 
 test "i32_add" {
-    var bytecode = [_]u8{   0x41, 0x00, 0x10, 0x00, 0x01,
-                            0x41, 0x00, 0x00, 0x02, 0x01,
-                            0x6A, };
-
-    var stack = Stack.init(std.testing.allocator);
-    defer stack.deinit();
-
-    var result:i32 = try executeBytecode(&bytecode, &stack);
-    try std.testing.expect(0x100202 == result);
+    var bytecode = [_]u8{
+        0x41, 0x00, 0x10, 0x00, 0x01,
+        0x41, 0x00, 0x00, 0x02, 0x01,
+        0x6A,
+    };
+    try testExecuteAndExpect(&bytecode, 0x100202);
 }
 
 test "i32_sub" {
-    var bytecode = [_]u8{   0x41, 0x00, 0x10, 0x00, 0x01,
-                            0x41, 0x00, 0x00, 0x02, 0x01,
-                            0x6B, };
-
-    var stack = Stack.init(std.testing.allocator);
-    defer stack.deinit();
-
-    var result:i32 = try executeBytecode(&bytecode, &stack);
-    try std.testing.expect(0xFFE00 == result);
+    var bytecode = [_]u8{
+        0x41, 0x00, 0x10, 0x00, 0x01,
+        0x41, 0x00, 0x00, 0x02, 0x01,
+        0x6B,
+    };
+    try testExecuteAndExpect(&bytecode, 0xFFE00);
 }
 
 test "i32_mul" {
-    var bytecode = [_]u8{   0x41, 0x00, 0x00, 0x02, 0x00,
-                            0x41, 0x00, 0x00, 0x03, 0x00,
-                            0x6C, };
-
-    var stack = Stack.init(std.testing.allocator);
-    defer stack.deinit();
-
-    var result:i32 = try executeBytecode(&bytecode, &stack);
-    try std.testing.expect(0x60000 == result);
+    var bytecode = [_]u8{
+        0x41, 0x00, 0x00, 0x02, 0x00,
+        0x41, 0x00, 0x00, 0x03, 0x00,
+        0x6C,
+    };
+    try testExecuteAndExpect(&bytecode, 0x60000);
 }
 
-test "i32_div" {
-    var bytecode = [_]u8{   0x41, 0x00, 0x00, 0x02, 0x00,
-                            0x41, 0x00, 0x00, 0x03, 0x00,
-                            0x6C, };
+test "i32_div_s" {
+    var bytecode = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0x00, 0x00, 0x02, 0x00,
+        0x6D,
+    };
+    try testExecuteAndExpect(&bytecode, 0xFFFFFFFD); //-3
+}
 
-    var stack = Stack.init(std.testing.allocator);
-    defer stack.deinit();
+test "i32_div_u" {
+    var bytecode = [_]u8{
+        0x41, 0x80, 0x00, 0x06, 0x00,
+        0x41, 0x00, 0x00, 0x02, 0x00,
+        0x6E,
+    };
+    try testExecuteAndExpect(&bytecode, 0x400003);
+}
 
-    var result:i32 = try executeBytecode(&bytecode, &stack);
-    try std.testing.expect(0x60000 == result);
+test "i32_rem_s" {
+    var bytecode = [_]u8{
+        0x41, 0xFF, 0xFF, 0xF9, 0x9A, // -0x666
+        0x41, 0x00, 0x00, 0x02, 0x00,
+        0x6F,
+    };
+    try testExecuteAndExpect(&bytecode, 0xFFFFFF9A); // -0x66
+}
+
+test "i32_rem_u" {
+    var bytecode = [_]u8{
+        0x41, 0x80, 0x00, 0x06, 0x66,
+        0x41, 0x00, 0x00, 0x02, 0x00,
+        0x70,
+    };
+    try testExecuteAndExpect(&bytecode, 0x66);
+}
+
+test "i32_and" {
+    var bytecode = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x41, 0x11, 0x22, 0x33, 0x44,
+        0x71,
+    };
+    try testExecuteAndExpect(&bytecode, 0x11223344);
+}
+
+test "i32_or" {
+    var bytecode = [_]u8{
+        0x41, 0xFF, 0x00, 0xFF, 0x00,
+        0x41, 0x11, 0x22, 0x33, 0x44,
+        0x72,
+    };
+    try testExecuteAndExpect(&bytecode, 0xFF22FF44);
+}
+
+test "i32_xor" {
+    var bytecode = [_]u8{
+        0x41, 0xF0, 0xF0, 0xF0, 0xF0,
+        0x41, 0x0F, 0x0F, 0xF0, 0xF0,
+        0x73,
+    };
+    try testExecuteAndExpect(&bytecode, 0xFFFF0000);
+}
+
+test "i32_shl" {
+    var bytecode = [_]u8{
+        0x41, 0x80, 0x01, 0x01, 0x01,
+        0x41, 0x00, 0x00, 0x00, 0x02,
+        0x74,
+    };
+    try testExecuteAndExpect(&bytecode, 0x40404);
+}
+
+test "i32_shr_s" {
+    var bytecode = [_]u8{
+        0x41, 0x80, 0x01, 0x01, 0x01,
+        0x41, 0x00, 0x00, 0x00, 0x01,
+        0x75,
+    };
+    try testExecuteAndExpect(&bytecode, 0xC0008080);
+}
+
+test "i32_shr_u" {
+    var bytecode = [_]u8{
+        0x41, 0x80, 0x01, 0x01, 0x01,
+        0x41, 0x00, 0x00, 0x00, 0x01,
+        0x76,
+    };
+    try testExecuteAndExpect(&bytecode, 0x40008080);
+}
+
+test "i32_rotl" {
+    var bytecode = [_]u8{
+        0x41, 0x80, 0x01, 0x01, 0x01,
+        0x41, 0x00, 0x00, 0x00, 0x02,
+        0x77,
+    };
+    try testExecuteAndExpect(&bytecode, 0x00040406);
+}
+
+test "i32_rotr" {
+    var bytecode = [_]u8{
+        0x41, 0x80, 0x01, 0x01, 0x01,
+        0x41, 0x00, 0x00, 0x00, 0x02,
+        0x78,
+    };
+    try testExecuteAndExpect(&bytecode, 0x60004040);
 }
