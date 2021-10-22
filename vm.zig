@@ -11,6 +11,17 @@ const Instruction = enum(u8) {
     Unreachable = 0x00,
     Noop = 0x01,
     I32_Const = 0x41,
+    I32_Eqz = 0x45,
+    I32_Eq = 0x46,
+    I32_NE = 0x47,
+    I32_LT_S = 0x48,
+    I32_LT_U = 0x49,
+    I32_GT_S = 0x4A,
+    I32_GT_U = 0x4B,
+    I32_LE_S = 0x4C,
+    I32_LE_U = 0x4D,
+    I32_GE_S = 0x4E,
+    I32_GE_U = 0x4F,
     I32_Add = 0x6A,
     I32_Sub = 0x6B,
     I32_Mul = 0x6C,
@@ -107,6 +118,71 @@ fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
 
                 var v: i32 = try reader.readIntBig(i32);
                 try stack.push_i32(v);
+            },
+            Instruction.I32_Eqz => {
+                var v1: i32 = try stack.pop_i32();
+                var result: i32 = if (v1 == 0) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_Eq => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var result: i32 = if (v1 == v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_NE => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var result: i32 = if (v1 != v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_LT_S => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var result: i32 = if (v1 < v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_LT_U => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var result: i32 = if (v1 < v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_GT_S => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var result: i32 = if (v1 > v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_GT_U => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var result: i32 = if (v1 > v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_LE_S => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var result: i32 = if (v1 <= v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_LE_U => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var result: i32 = if (v1 <= v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_GE_S => {
+                var v2: i32 = try stack.pop_i32();
+                var v1: i32 = try stack.pop_i32();
+                var result: i32 = if (v1 >= v2) 1 else 0;
+                try stack.push_i32(result);
+            },
+            Instruction.I32_GE_U => {
+                var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                var result: i32 = if (v1 >= v2) 1 else 0;
+                try stack.push_i32(result);
             },
             Instruction.I32_Add => {
                 var v2: i32 = try stack.pop_i32();
@@ -220,7 +296,7 @@ fn testExecuteAndExpect(bytecode: []const u8, expected: u32) !void {
     var result: i32 = try executeBytecode(bytecode, &stack);
     var result_u32 = @bitCast(u32, result);
     if (result_u32 != expected) {
-        std.debug.print("result: 0x{X}\n", .{result});
+        std.debug.print("expected: 0x{X}, result: 0x{X}\n", .{ @bitCast(u32, expected), result_u32 });
     }
     try std.testing.expect(expected == result_u32);
 }
@@ -249,6 +325,208 @@ test "noop" {
         0x01, 0x01, 0x01, 0x01, 0x01,
     };
     try testExecuteAndExpect(&bytecode, 0x0);
+}
+
+test "i32_eqz" {
+    var bytecode1 = [_]u8{
+        0x41, 0x00, 0x00, 0x00, 0x00,
+        0x45,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x1);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x00, 0x01,
+        0x45,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x0);
+}
+
+test "i32_eq" {
+    var bytecode1 = [_]u8{
+        0x41, 0x00, 0x00, 0x00, 0x00,
+        0x41, 0x00, 0x00, 0x00, 0x00,
+        0x46,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x1);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x80, 0x00, 0x00, 0x00,
+        0x41, 0x00, 0x00, 0x00, 0x00,
+        0x46,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x0);
+}
+
+test "i32_ne" {
+    var bytecode1 = [_]u8{
+        0x41, 0x00, 0x00, 0x00, 0x00,
+        0x41, 0x00, 0x00, 0x00, 0x00,
+        0x47,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x0);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x80, 0x00, 0x00, 0x00,
+        0x41, 0x00, 0x00, 0x00, 0x00,
+        0x47,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x1);
+}
+
+test "i32_lt_s" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x48,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x1);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x48,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x0);
+}
+
+test "i32_lt_u" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x49,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x0);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
+        0x49,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x1);
+}
+
+test "i32_gt_s" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x4A,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x0);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4A,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x1);
+}
+
+test "i32_gt_u" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x4B,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x1);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
+        0x4B,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x0);
+}
+
+test "i32_le_s" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x4C,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x1);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4C,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x0);
+
+    var bytecode3 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4C,
+    };
+    try testExecuteAndExpect(&bytecode3, 0x1);
+}
+
+test "i32_le_u" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x4D,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x0);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4D,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x1);
+
+    var bytecode3 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4D,
+    };
+    try testExecuteAndExpect(&bytecode3, 0x1);
+}
+
+test "i32_ge_s" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x4E,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x0);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4E,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x1);
+
+    var bytecode3 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4E,
+    };
+    try testExecuteAndExpect(&bytecode3, 0x1);
+}
+
+test "i32_ge_u" {
+    var bytecode1 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x4F,
+    };
+    try testExecuteAndExpect(&bytecode1, 0x1);
+
+    var bytecode2 = [_]u8{
+        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4F,
+    };
+    try testExecuteAndExpect(&bytecode2, 0x0);
+
+    var bytecode3 = [_]u8{
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
+        0x4F,
+    };
+    try testExecuteAndExpect(&bytecode3, 0x1);
 }
 
 test "i32_add" {
