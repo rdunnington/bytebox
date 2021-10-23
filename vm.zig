@@ -1,5 +1,11 @@
 const std = @import("std");
 
+const VmParseError = error{
+    InvalidMagicSignature,
+    UnsupportedWasmVersion,
+    InvalidBytecode,
+};
+
 const VMError = error{
     Unreachable,
     IncompleteInstruction,
@@ -39,14 +45,18 @@ const Instruction = enum(u8) {
     I32_Rotr = 0x78,
 };
 
-const Type = enum {
-    I32,
-    I64,
-    F32,
-    F64,
+const Type = enum(u8) {
+    Void = 0x00,
+    I32 = 0x7F,
+    I64 = 0x7E,
+    F32 = 0x7D,
+    F64 = 0x7C,
+    // FuncRef = 0x70,
+    // ExternRef = 0x6F,
 };
 
 const TypedValue = union(Type) {
+    Void: void,
     I32: i32,
     I64: i64,
     F32: f32,
@@ -97,6 +107,172 @@ const Stack = struct {
     }
 
     stack: std.ArrayList(TypedValue),
+};
+
+const FunctionType = struct {
+    types: std.ArrayList(Type),
+    numParams: u32,
+};
+
+const Function = struct {
+    typeIndex: u32,
+    bytecodeOffset: u32,
+    locals: std.ArrayList(Type),
+};
+
+const VmState = struct {
+    const Self = @This();
+
+    const BytecodeMemUsage = enum {
+        UseExisting,
+        Copy,
+    };
+
+    const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
+
+    fn parseWasm(externalBytecode: []const u8, bytecodeMemUsage: BytecodeMemUsage, allocator: *std.mem.Allocator) !Self {
+        var bytecode_mem_usage = std.ArrayList(u8).init(allocator);
+        errdefer bytecode_mem_usage.deinit();
+
+        var bytecode: []const u8 = undefined;
+        switch (bytecodeMemUsage) {
+            .UseExisting => bytecode = externalBytecode,
+            .Copy => {
+                bytecode_mem_usage.appendSlice(externalBytecode);
+                bytecode = bytecode_mem_usage.items;
+            },
+        }
+
+        var vm = Self{
+            .bytecode = bytecode,
+            .bytecode_mem_usage = bytecode_mem_usage,
+            .types = std.ArrayList(FunctionType).init(allocator),
+            .functions = std.ArrayList(Function).init(allocator),
+            .stack = Stack.init(allocator),
+        };
+        errdefer vm.deinit();
+
+        var stream = std.io.fixedBufferStream(bytecode);
+        var reader = stream.reader();
+
+        // wasm header
+        {
+            const magic = try reader.readIntBig(u32);
+            if (magic != 0x0061736D) {
+                return error.InvalidMagicSignature;
+            }
+            const version = try reader.readIntBig(u32);
+            if (version != 1) {
+                return error.UnsupportedWasmVersion;
+            }
+        }
+
+        while (reader.pos < reader.buffer.len) {
+            const section_id: Section = @intToEnum(Section, try reader.readByte());
+            const size_bytes: usize = try reader.readIntBig(u32);
+            switch (section_id) {
+                .FunctionType => {
+                    const num_types = try reader.readIntBig(u32);
+                    var types_left = num_types;
+                    while (types_left > 0) {
+                        types_left -= 1;
+
+                        const sentinel = try reader.readByte();
+                        if (sentinel != 0x60) {
+                            return error.InvalidBytecode;
+                        }
+
+                        const num_params = try reader.readIntBig(u32);
+
+                        var func = FunctionType{ .numParams = num_params, .types = std.ArrayList(Type).init(allocator) };
+                        errdefer func.types.deinit();
+
+                        var params_left = num_params;
+                        while (params_left > 0) {
+                            params_left -= 1;
+
+                            var param_type = @intToEnum(Type, try reader.readByte());
+                            try func.types.append(param_type);
+                        }
+
+                        const num_returns = try reader.readIntBig(u32);
+                        var returns_left = num_returns;
+                        while (returns_left > 0) {
+                            returns_left -= 1;
+
+                            var return_type = @intToEnum(Type, try reader.readByte());
+                            try func.types.append(return_type);
+                        }
+
+                        try vm.types.append(func);
+                    }
+                },
+                .Function => {
+                    const num_funcs = try reader.readIntBig(u32);
+                    var funcs_left = num_funcs;
+                    while (funcs_left > 0) {
+                        funcs_left -= 1;
+
+                        var func = Function{
+                            .typeIndex = try reader.readIntBig(u32),
+                            .bytecodeOffset = 0, // we'll fix these up later when we find them in the Code section
+                            .locals = std.ArrayList(u32).init(0),
+                        };
+                        errdefer func.locals.deinit();
+                        try vm.functions.append(func);
+                    }
+                },
+                .Code => {
+                    const num_codes = try reader.readIntBig(u32);
+                    var code_index = 0;
+                    while (code_index < num_codes) {
+                        code_index += 1;
+
+                        var code_size = try reader.readIntBig(u32);
+                        var code_begin_pos = stream.pos;
+
+                        const num_locals = try reader.readIntBig(u32);
+                        var locals_index = 0;
+                        while (locals_index < num_locals) {
+                            locals_index += 1;
+                            const local_type = @intToEnum(Type, try reader.readByte());
+                            try vm.functions.items[code_index].locals.append(local_type);
+                        }
+
+                        vm.functions.items[code_index].bytecodeOffset = stream.pos;
+
+                        try stream.seekTo(code_begin_pos);
+                        try stream.seekBy(code_size); // skip the function body, TODO validation later
+                    }
+                },
+                else => {
+                    std.debug.print("Skipping module section {}", .{section_id});
+                    try stream.seekBy(size_bytes);
+                },
+            }
+        }
+
+        return vm;
+    }
+
+    fn deinit(self: *Self) void {
+        for (self.types.items) |item| {
+            item.types.deinit();
+        }
+        for (self.functions.items) |item| {
+            item.local.deinit(0);
+        }
+
+        self.types.deinit();
+        self.functions.deinit();
+        self.stack.deinit();
+    }
+
+    bytecode: []const u8,
+    bytecode_mem_usage: std.ArrayList(u8),
+    types: std.ArrayList(FunctionType),
+    functions: std.ArrayList(Function),
+    stack: Stack,
 };
 
 fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
