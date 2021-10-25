@@ -4,6 +4,7 @@ const VmParseError = error{
     InvalidMagicSignature,
     UnsupportedWasmVersion,
     InvalidBytecode,
+    InvalidExport,
 };
 
 const VMError = error{
@@ -11,6 +12,7 @@ const VMError = error{
     IncompleteInstruction,
     UnknownInstruction,
     TypeMismatch,
+    UnknownExport,
 };
 
 const Instruction = enum(u8) {
@@ -112,6 +114,13 @@ const Stack = struct {
 const FunctionType = struct {
     types: std.ArrayList(Type),
     numParams: u32,
+
+    fn getParams(self: *const FunctionType) []const Type {
+        return self.types.items[0..self.numParams];
+    }
+    fn getReturns(self: *const FunctionType) []const Type {
+        return self.types.items[self.numParams..];
+    }
 };
 
 const Function = struct {
@@ -129,6 +138,30 @@ const VmState = struct {
     };
 
     const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
+
+    const ExportType = enum(u8) {
+        Function = 0x00,
+        Table = 0x01,
+        Memory = 0x02,
+        Global = 0x03,
+    };
+
+    const Export = struct { name: std.ArrayList(u8), index: u32 };
+
+    const Exports = struct {
+        functions: std.ArrayList(Export),
+        tables: std.ArrayList(Export),
+        memories: std.ArrayList(Export),
+        globals: std.ArrayList(Export),
+    };
+
+    bytecode: []const u8,
+    bytecode_mem_usage: std.ArrayList(u8),
+    types: std.ArrayList(FunctionType),
+    functions: std.ArrayList(Function),
+    exports: Exports,
+    stack: Stack,
+    callstack: std.ArrayList(*Function),
 
     fn parseWasm(externalBytecode: []const u8, bytecodeMemUsage: BytecodeMemUsage, allocator: *std.mem.Allocator) !Self {
         var bytecode_mem_usage = std.ArrayList(u8).init(allocator);
@@ -148,7 +181,14 @@ const VmState = struct {
             .bytecode_mem_usage = bytecode_mem_usage,
             .types = std.ArrayList(FunctionType).init(allocator),
             .functions = std.ArrayList(Function).init(allocator),
+            .exports = Exports{
+                .functions = std.ArrayList(Export).init(allocator),
+                .tables = std.ArrayList(Export).init(allocator),
+                .memories = std.ArrayList(Export).init(allocator),
+                .globals = std.ArrayList(Export).init(allocator),
+            },
             .stack = Stack.init(allocator),
+            .callstack = std.ArrayList(*Function).init(allocator),
         };
         errdefer vm.deinit();
 
@@ -245,6 +285,27 @@ const VmState = struct {
                         try stream.seekBy(code_size); // skip the function body, TODO validation later
                     }
                 },
+                .Export => {
+                    const num_exports = try reader.readIntBig(u32);
+
+                    const name_length = try reader.readIntBig(u32);
+                    var name = std.ArrayList(u8).init(allocator);
+                    try name.resize(name_length);
+                    errdefer name.deinit();
+                    try stream.read(name.items);
+
+                    const exportType = @intToEnum(ExportType, try reader.readByte());
+                    const exportIndex = try reader.readIntBig(u32);
+                    switch (exportType) {
+                        .Function => {
+                            if (exportIndex >= vm.functions.items.len) {
+                                return error.InvalidExport;
+                            }
+                            const export_ = Export{ .name = name, .index = exportIndex };
+                            vm.exports.functions.append(export_);
+                        },
+                    }
+                },
                 else => {
                     std.debug.print("Skipping module section {}", .{section_id});
                     try stream.seekBy(size_bytes);
@@ -262,207 +323,267 @@ const VmState = struct {
         for (self.functions.items) |item| {
             item.local.deinit(0);
         }
+        for (self.exports.functions.items) |item| {
+            item.name.deinit();
+        }
+        for (self.exports.tables.items) |item| {
+            item.name.deinit();
+        }
+        for (self.exports.memories.items) |item| {
+            item.name.deinit();
+        }
+        for (self.exports.globals.items) |item| {
+            item.name.deinit();
+        }
+
+        self.exports.functions.deinit();
+        self.exports.tables.deinit();
+        self.exports.memories.deinit();
+        self.exports.globals.deinit();
 
         self.types.deinit();
         self.functions.deinit();
         self.stack.deinit();
+        self.callstack.deinit();
     }
 
-    bytecode: []const u8,
-    bytecode_mem_usage: std.ArrayList(u8),
-    types: std.ArrayList(FunctionType),
-    functions: std.ArrayList(Function),
-    stack: Stack,
+    fn callFunc(self: *Self, name: []const u8, params: []const TypedValue, comptime returnType) returnType {
+        const value = self.callFuncGeneric(name, params);
+        return switch (returnType) {
+            i32 => returnType.I32,
+            u32 => @bitCast(u32, returnType.I32),
+            i64 => returnType.I64,
+            u64 => @bitCast(u64, returnType.I64),
+            f32 => returnType.F32,
+            f64 => returnType.F64,
+            else => @compileError("Invalid return type. Supported return types: i32, u32, i64, u64, f32, f64"),
+        };
+    }
+
+    fn callFuncGeneric(self: *const Self, name: []const u8, params: []const TypedValue) !TypedValue {
+        for (self.exports.functions.items) |funcExport| {
+            if (std.mem.eql(u8, name, funcExport.name.items)) {
+                const func: Function = vm.functions.items[funcExport.index];
+                const funcTypeParams: []const Type = vm.types.items[func.typeIndex].getParams();
+
+                // validate param types
+                if (params.len != funcTypeParams.len) {
+                    return error.TypeMismatch;
+                }
+
+                for (params) |param, i| {
+                    if (std.meta.Tag(param) != funcTypeParams[i]) {
+                        return error.TypeMismatch;
+                    }
+                }
+
+                // push function state
+                for (params) |param| {
+                    vm.stack.push(param);
+                }
+                vm.callstack.append(&func);
+
+                // call function
+                executeBytecode(func.bytecodeOffset);
+            }
+        }
+
+        return error.UnknownExport;
+    }
+
+    fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
+        var stream = std.io.fixedBufferStream(bytecode);
+        var reader = stream.reader();
+
+        while (stream.pos < stream.buffer.len) {
+            const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
+
+            switch (instruction) {
+                Instruction.Unreachable => {
+                    return error.Unreachable;
+                },
+                Instruction.Noop => {},
+                Instruction.I32_Const => {
+                    if (stream.pos + 3 >= stream.buffer.len) {
+                        return error.IncompleteInstruction;
+                    }
+
+                    var v: i32 = try reader.readIntBig(i32);
+                    try stack.push_i32(v);
+                },
+                Instruction.I32_Eqz => {
+                    var v1: i32 = try stack.pop_i32();
+                    var result: i32 = if (v1 == 0) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_Eq => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result: i32 = if (v1 == v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_NE => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result: i32 = if (v1 != v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_LT_S => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result: i32 = if (v1 < v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_LT_U => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var result: i32 = if (v1 < v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_GT_S => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result: i32 = if (v1 > v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_GT_U => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var result: i32 = if (v1 > v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_LE_S => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result: i32 = if (v1 <= v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_LE_U => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var result: i32 = if (v1 <= v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_GE_S => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result: i32 = if (v1 >= v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_GE_U => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var result: i32 = if (v1 >= v2) 1 else 0;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_Add => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result = v1 + v2;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_Sub => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var result = v1 - v2;
+                    try stack.push_i32(result);
+                },
+                Instruction.I32_Mul => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var value = v1 * v2;
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Div_S => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var value = try std.math.divTrunc(i32, v1, v2);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Div_U => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var value_unsigned = try std.math.divFloor(u32, v1, v2);
+                    var value = @bitCast(i32, value_unsigned);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Rem_S => {
+                    var v2: i32 = try stack.pop_i32();
+                    var v1: i32 = try stack.pop_i32();
+                    var value = @rem(v1, v2);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Rem_U => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var value = @bitCast(i32, v1 % v2);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_And => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var value = @bitCast(i32, v1 & v2);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Or => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var value = @bitCast(i32, v1 | v2);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Xor => {
+                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var value = @bitCast(i32, v1 ^ v2);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Shl => {
+                    var shift_unsafe: i32 = try stack.pop_i32();
+                    var int: i32 = try stack.pop_i32();
+                    var shift = @intCast(u5, shift_unsafe);
+                    var value = int << shift;
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Shr_S => {
+                    var shift_unsafe: i32 = try stack.pop_i32();
+                    var int: i32 = try stack.pop_i32();
+                    var shift = @intCast(u5, shift_unsafe);
+                    var value = int >> shift;
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Shr_U => {
+                    var shift_unsafe: i32 = try stack.pop_i32();
+                    var int: u32 = @bitCast(u32, try stack.pop_i32());
+                    var shift = @intCast(u5, shift_unsafe);
+                    var value = @bitCast(i32, int >> shift);
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Rotl => {
+                    var rot: u32 = @bitCast(u32, try stack.pop_i32());
+                    var int: u32 = @bitCast(u32, try stack.pop_i32());
+                    var value = @bitCast(i32, std.math.rotl(u32, int, rot));
+                    try stack.push_i32(value);
+                },
+                Instruction.I32_Rotr => {
+                    var rot: u32 = @bitCast(u32, try stack.pop_i32());
+                    var int: u32 = @bitCast(u32, try stack.pop_i32());
+                    var value = @bitCast(i32, std.math.rotr(u32, int, rot));
+                    try stack.push_i32(value);
+                },
+                // else => return error.UnknownInstruction,
+            }
+        }
+
+        if (stack.size() > 0) {
+            return try stack.pop_i32();
+        }
+
+        return 0;
+    }
 };
 
 fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
-    var stream = std.io.fixedBufferStream(bytecode);
-    var reader = stream.reader();
-
-    while (stream.pos < stream.buffer.len) {
-        const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
-
-        switch (instruction) {
-            Instruction.Unreachable => {
-                return error.Unreachable;
-            },
-            Instruction.Noop => {},
-            Instruction.I32_Const => {
-                if (stream.pos + 3 >= stream.buffer.len) {
-                    return error.IncompleteInstruction;
-                }
-
-                var v: i32 = try reader.readIntBig(i32);
-                try stack.push_i32(v);
-            },
-            Instruction.I32_Eqz => {
-                var v1: i32 = try stack.pop_i32();
-                var result: i32 = if (v1 == 0) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_Eq => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result: i32 = if (v1 == v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_NE => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result: i32 = if (v1 != v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_LT_S => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result: i32 = if (v1 < v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_LT_U => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var result: i32 = if (v1 < v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_GT_S => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result: i32 = if (v1 > v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_GT_U => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var result: i32 = if (v1 > v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_LE_S => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result: i32 = if (v1 <= v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_LE_U => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var result: i32 = if (v1 <= v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_GE_S => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result: i32 = if (v1 >= v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_GE_U => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var result: i32 = if (v1 >= v2) 1 else 0;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_Add => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result = v1 + v2;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_Sub => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var result = v1 - v2;
-                try stack.push_i32(result);
-            },
-            Instruction.I32_Mul => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var value = v1 * v2;
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Div_S => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var value = try std.math.divTrunc(i32, v1, v2);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Div_U => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var value_unsigned = try std.math.divFloor(u32, v1, v2);
-                var value = @bitCast(i32, value_unsigned);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Rem_S => {
-                var v2: i32 = try stack.pop_i32();
-                var v1: i32 = try stack.pop_i32();
-                var value = @rem(v1, v2);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Rem_U => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var value = @bitCast(i32, v1 % v2);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_And => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var value = @bitCast(i32, v1 & v2);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Or => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var value = @bitCast(i32, v1 | v2);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Xor => {
-                var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                var v1: u32 = @bitCast(u32, try stack.pop_i32());
-                var value = @bitCast(i32, v1 ^ v2);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Shl => {
-                var shift_unsafe: i32 = try stack.pop_i32();
-                var int: i32 = try stack.pop_i32();
-                var shift = @intCast(u5, shift_unsafe);
-                var value = int << shift;
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Shr_S => {
-                var shift_unsafe: i32 = try stack.pop_i32();
-                var int: i32 = try stack.pop_i32();
-                var shift = @intCast(u5, shift_unsafe);
-                var value = int >> shift;
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Shr_U => {
-                var shift_unsafe: i32 = try stack.pop_i32();
-                var int: u32 = @bitCast(u32, try stack.pop_i32());
-                var shift = @intCast(u5, shift_unsafe);
-                var value = @bitCast(i32, int >> shift);
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Rotl => {
-                var rot: u32 = @bitCast(u32, try stack.pop_i32());
-                var int: u32 = @bitCast(u32, try stack.pop_i32());
-                var value = @bitCast(i32, std.math.rotl(u32, int, rot));
-                try stack.push_i32(value);
-            },
-            Instruction.I32_Rotr => {
-                var rot: u32 = @bitCast(u32, try stack.pop_i32());
-                var int: u32 = @bitCast(u32, try stack.pop_i32());
-                var value = @bitCast(i32, std.math.rotr(u32, int, rot));
-                try stack.push_i32(value);
-            },
-            // else => return error.UnknownInstruction,
-        }
-    }
-
-    if (stack.size() > 0) {
-        return try stack.pop_i32();
-    }
-
-    return 0;
+    return VmState.executeBytecode(bytecode, stack);
 }
 
 fn testExecuteAndExpect(bytecode: []const u8, expected: u32) !void {
