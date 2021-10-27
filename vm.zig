@@ -1,5 +1,21 @@
 const std = @import("std");
 
+const ArrayListWriterContext = struct {
+    const Self = @This();
+
+    buffer: *std.ArrayList(u8),
+    pos: usize = 0,
+
+    fn writer(self: *Self) type {
+        return std.io.Writer(self, anyerror, Self.write);
+    }
+
+    fn write(context: *Self, bytes: []const u8) !usize {
+        try context.buffer.replaceRange(pos, bytes.len, bytes);
+        self.pos += bytes.len;
+    }
+};
+
 const VmParseError = error{
     InvalidMagicSignature,
     UnsupportedWasmVersion,
@@ -18,6 +34,7 @@ const VMError = error{
 const Instruction = enum(u8) {
     Unreachable = 0x00,
     Noop = 0x01,
+    End = 0x0B,
     I32_Const = 0x41,
     I32_Eqz = 0x45,
     I32_Eq = 0x46,
@@ -111,6 +128,10 @@ const Stack = struct {
     stack: std.ArrayList(TypedValue),
 };
 
+const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
+
+const function_type_sentinel_byte: u8 = 0x60;
+
 const FunctionType = struct {
     types: std.ArrayList(Type),
     numParams: u32,
@@ -123,10 +144,58 @@ const FunctionType = struct {
     }
 };
 
+const FunctionTypeContext = struct {
+    const Self = @This();
+
+    fn hash(self: *Self, f: *const FunctionType) u64 {
+        var seed: u64 = std.hash.Murmur2_64.hashWithSeed(std.mem.asBytes(f.types.items));
+        return std.hash.Murmur2_64.hashWithSeed(std.mem.asBytes(&f.numParams), seed);
+    }
+
+    fn eql(self: *Self, a: *const FunctionType, b: *const FunctionType) bool {
+        if (a.numParams != b.numParams or a.types.items.len != b.types.items.len) {
+            return false;
+        }
+
+        for (a.types.items) |typeA, i| {
+            var typeB = b.types.items[i];
+            if (typeA != typeB) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    fn less(context: void, a: *const FunctionType, b: *const FunctionType) bool {
+        var order = Self.order(context, a, b);
+        return order == std.math.lt;
+    }
+
+    fn order(context: void, a: *const FunctionType, b: *const FunctionType) std.math.Order {
+        var hashA = Self.hash(a);
+        var hashB = Self.hash(b);
+
+        if (hashA < hashB) {
+            return std.math.lt;
+        } else if (hashA > hashB) {
+            return std.math.gt;
+        } else {
+            return std.math.eq;
+        }
+    }
+};
+
 const Function = struct {
     typeIndex: u32,
     bytecodeOffset: u32,
     locals: std.ArrayList(Type),
+};
+
+const StackFrame = struct {
+    func: *const Function,
+    stackBaseIndex: u32,
+    locals: []const TypedValue,
 };
 
 const VmState = struct {
@@ -136,8 +205,6 @@ const VmState = struct {
         UseExisting,
         Copy,
     };
-
-    const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
 
     const ExportType = enum(u8) {
         Function = 0x00,
@@ -218,7 +285,7 @@ const VmState = struct {
                         types_left -= 1;
 
                         const sentinel = try reader.readByte();
-                        if (sentinel != 0x60) {
+                        if (sentinel != function_type_sentinel_byte) {
                             return error.InvalidBytecode;
                         }
 
@@ -347,20 +414,21 @@ const VmState = struct {
         self.callstack.deinit();
     }
 
-    fn callFunc(self: *Self, name: []const u8, params: []const TypedValue, comptime returnType) returnType {
-        const value = self.callFuncGeneric(name, params);
-        return switch (returnType) {
-            i32 => returnType.I32,
-            u32 => @bitCast(u32, returnType.I32),
-            i64 => returnType.I64,
-            u64 => @bitCast(u64, returnType.I64),
-            f32 => returnType.F32,
-            f64 => returnType.F64,
-            else => @compileError("Invalid return type. Supported return types: i32, u32, i64, u64, f32, f64"),
-        };
-    }
+    //fn callFunc(self: *Self, name: []const u8, params: []const TypedValue, comptime returnType) returnType {
+    //    const value = self.callFuncGeneric(name, params);
+    //    return switch (returnType) {
+    //        void => void,
+    //        i32 => returnType.I32,
+    //        u32 => @bitCast(u32, returnType.I32),
+    //        i64 => returnType.I64,
+    //        u64 => @bitCast(u64, returnType.I64),
+    //        f32 => returnType.F32,
+    //        f64 => returnType.F64,
+    //        else => @compileError("Invalid return type. Supported return types: void, i32, u32, i64, u64, f32, f64"),
+    //    };
+    //}
 
-    fn callFuncGeneric(self: *const Self, name: []const u8, params: []const TypedValue) !TypedValue {
+    fn callFuncGeneric(self: *const Self, name: []const u8, params: []const TypedValue, returns: []TypedValue) !void {
         for (self.exports.functions.items) |funcExport| {
             if (std.mem.eql(u8, name, funcExport.name.items)) {
                 const func: Function = vm.functions.items[funcExport.index];
@@ -377,22 +445,30 @@ const VmState = struct {
                     }
                 }
 
-                // push function state
-                for (params) |param| {
-                    vm.stack.push(param);
-                }
-                vm.callstack.append(&func);
-
-                // call function
+                // push the stack frame and call the function
+                vm.callstack.append(StackFrame{ .func = &func, .stackBaseIndex = 0, .locals = params });
                 executeBytecode(func.bytecodeOffset);
+
+                if (stack.size() != returns.len) {
+                    return error.TypeMismatch;
+                }
+
+                if (returns.len > 0) {
+                    var index: i32 = returns.len - 1;
+                    while (index >= 0) {
+                        returns[index] = stack.pop();
+                    }
+                }
+                return;
             }
         }
 
         return error.UnknownExport;
     }
 
-    fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
-        var stream = std.io.fixedBufferStream(bytecode);
+    fn executeBytecode(bytecodeOffset: u32) void {
+        var stream = std.io.fixedBufferStream(vm.bytecode);
+        stream.seekPos(bytecodeOffset);
         var reader = stream.reader();
 
         while (stream.pos < stream.buffer.len) {
@@ -403,6 +479,10 @@ const VmState = struct {
                     return error.Unreachable;
                 },
                 Instruction.Noop => {},
+                Instruction.End => {
+                    return;
+                    // return from function for now. in the future needs to handle returning from blocks
+                },
                 Instruction.I32_Const => {
                     if (stream.pos + 3 >= stream.buffer.len) {
                         return error.IncompleteInstruction;
@@ -573,29 +653,254 @@ const VmState = struct {
                 // else => return error.UnknownInstruction,
             }
         }
-
-        if (stack.size() > 0) {
-            return try stack.pop_i32();
-        }
-
-        return 0;
     }
 };
 
-fn executeBytecode(bytecode: []const u8, stack: *Stack) !i32 {
-    return VmState.executeBytecode(bytecode, stack);
-}
+const WasmBuilder = struct {
+    const Self = @This();
+
+    const FunctionBuilder = struct {
+        ftype: FunctionType,
+        instructions: std.ArrayList(u8),
+    };
+
+    allocator: *std.mem.Allocator,
+    functions: std.ArrayList(FunctionBuilder),
+
+    bytecode: std.ArrayList(u8),
+    needsRebuild: bool,
+
+    fn init(allocator: *std.mem.Allocator) Self {
+        return Self{
+            .allocator = allocator,
+            .functions = std.ArrayList(Function).init(allocator),
+            .bytecode = std.ArrayList(u8).init(allocator),
+        };
+    }
+
+    fn deinit(self: *Self) void {
+        for (self.functions) |func| {
+            func.ftype.types.deinit();
+            func.instructions.deinit();
+        }
+        self.functions.deinit();
+        self.bytecode.deinit();
+    }
+
+    fn addFunc(self: *Self, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) void {
+        const f = FunctionBuilder{
+            .ftype = FunctionType{
+                .types = std.ArrayList(Type).init(self.allocator),
+                .numParams = params.len,
+            },
+            .locals = std.ArrayList(Type).init(self.allocator),
+            .instructions = std.ArrayList(u8).init(self.allocator),
+        };
+        errdefer f.ftype.types.deinit();
+        errdefer f.locals.deinit();
+        errdefer f.instructions.deinit();
+
+        try f.ftype.types.appendSlice(params);
+        try f.ftype.types.appendSlice(returns);
+        try f.locals.appendSlice(locals);
+        try f.instructions.appendSlice(instructions);
+
+        try self.functions.append(f);
+
+        self.needsRebuild = true;
+    }
+
+    fn buildBytecode(self: *Self) void {
+        self.bytecode.clearRetainingCapacity();
+
+        // dedupe function types
+        const FunctionTypeSet = std.HashMap(*FunctionType, *FunctionType, FunctionTypeContext, std.hash_map.default_max_load_percentage);
+        var functionTypeSet = FunctionTypeSet.init(self.allocator);
+        defer functionTypeSet.deinit();
+
+        for (self.functions) |func| {
+            var entry = functionTypeSet.getOrPut(func.ftype, func.ftype);
+        }
+
+        var functionTypes = std.ArrayList(*FunctionType);
+        functionTypes.ensureCapacity(functionTypeSet.count());
+        {
+            var iter = functionTypeSet.iterator();
+            var entry = iter.next();
+            while (entry != null) {
+                functionTypes.append(entry.key_ptr);
+                entry = iter.next();
+            }
+        }
+        std.sort.sort(FuntionType, functionTypes.items, {}, FunctionTypeContext.less);
+
+        // types section
+        var sectionFunctionTypes = std.ArrayList(u8).init(self.allocator);
+        defer sectionFunctionTypes.deinit();
+        {
+            var writer_context = ArrayListWriterContext{ .buffer = &sectionFunctionTypes };
+            var writer = writer_context.writer();
+
+            try writer.writeByte(Section.FunctionType);
+            try writer.writeIntBig(u32, 0); // placeholder for size
+
+            try writer.writeIntBig(u32, functionTypes.items.len);
+
+            for (functionTypes.items) |funcType| {
+                writer.writeByte(function_type_sentinel_byte);
+
+                var params = funcType.getParams();
+                var returns = funcType.getReturns();
+
+                writer.writeIntBig(u32, params.len);
+                for (params) |v| {
+                    try writer.writeByte(v);
+                }
+                writer.writeIntBig(u32, returns.len);
+                for (returns) |v| {
+                    try writer.writeByte(v);
+                }
+            }
+
+            writer_context.pos = 1;
+            try writer.writeIntBig(sectionFunctionTypes.items.len - writer_context.pos);
+        }
+
+        // function section
+        var sectionFunctions = std.ArrayList(u8).init(self.allocator);
+        defer sectionFunctions.deinit();
+        {
+            var writer_context = ArrayListWriterContext{ .buffer = &sectionFunctions };
+            var writer = writer_context.writer();
+
+            try writer.writeByte(Section.Function);
+            try writer.writeIntBig(0); // placeholder size
+
+            try writer.writeIntBig(self.functions.items.len);
+            for (self.functions) |func| {
+                var index: ?usize = std.sort.sort(FunctionType, func.ftype, functionTypes.items, FunctionTypeContext, FunctionTypeContext.order);
+                try writer.writeIntBig(index.?);
+            }
+
+            writer_context.pos = 1;
+            try writer.writeIntBig(sectionFunction.items.len - writer_context.pos);
+        }
+
+        // code section
+        var sectionCode = std.ArrayList(u8).init(self.allocator);
+        defer sectionCode.deinit();
+        {
+            var writer_context = ArrayListWriterContext{ .buffer = &sectionCode };
+            var writer = writer_context.writer();
+
+            try writer.writeByte(Section.Code);
+            try writer.writeIntBig(0); // placeholder size
+            try writer.writeIntBig(self.functions.items.len);
+
+            for (self.functions.items) |func| {
+                const code_size_pos = writer_context.pos;
+                try writer.writeIntBig(0); //placeholder code size
+
+                const code_begin_pos = writer_context.pos;
+
+                try writer.writeIntBig(func.locals.items.len);
+                for (func.locals.items) |local| {
+                    try writer.writeByte(local);
+                }
+                try writer.write(func.instructions);
+                // TODO should the client supply an end instruction instead?
+                try writer.writeByte(Instruction.End);
+
+                const code_end_pos = writer_context.pos;
+                writer_context.pos = code_size_pos;
+                writer.writeIntBig(code_end_pos - code_begin_pos);
+                writer_context.pos = code_end_pos;
+            }
+
+            writer_context.pos = 1;
+            try writer.writeIntBig(sectionCode.items.len - writer_context.pos);
+        }
+
+        // stitch all sections
+        const header = [_]u8{
+            0x00, 0x61, 0x73, 0x6D,
+            0x00, 0x00, 0x00, 0x01,
+        };
+
+        self.bytecode.appendSlice(header);
+        self.bytecode.appendSlice(sectionFunctionTypes.items);
+        self.bytecode.appendSlice(sectionFunctions.items);
+        self.bytecode.appendSlice(sectionCode.items);
+    }
+
+    fn getBytecode(self: *Self) []const u8 {
+        if (self.needsRebuild) {
+            self.buildBytecode();
+        }
+
+        return self.bytecode.items;
+    }
+};
 
 fn testExecuteAndExpect(bytecode: []const u8, expected: u32) !void {
-    var stack = Stack.init(std.testing.allocator);
-    defer stack.deinit();
+    var builder = WasmBuilder.init(std.testing.allocator);
+    builder.deinit();
 
-    var result: i32 = try executeBytecode(bytecode, &stack);
-    var result_u32 = @bitCast(u32, result);
+    const params = &[_]Type{};
+    const returns = &[_]Type{.I32};
+    const locals = &[_]Type{};
+    builder.addFunc("testFunc", params, returns, locals, bytecode);
+
+    const rebuiltBytecode = builder.getBytecode();
+
+    var vm = VmState.parseWasm(rebuiltBytecode, .UseExisting, std.testing.allocator);
+    defer vm.deinit();
+
+    var returns = [1]TypedValue{};
+    try vm.callFuncGeneric("testFunc", &[_]TypedValue{}, &returns);
+
+    var result_u32 = @bitCast(u32, returns[0].I32);
     if (result_u32 != expected) {
         std.debug.print("expected: 0x{X}, result: 0x{X}\n", .{ @bitCast(u32, expected), result_u32 });
     }
     try std.testing.expect(expected == result_u32);
+}
+
+test "wasm builder: 1 func" {
+    var builder = WasmBuilder.init(std.testing.allocator);
+    builder.deinit();
+
+    builder.addFunc(&[_]Type{.I64}, &[_]Type{.I32}, &[_]Type{.I32}, &[_]Type{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
+    var bytecode = builder.getBytecode();
+
+    // zig fmt: off
+    const expected = [_]u8{
+        0x00, 0x61, 0x73, 0x6D, // magic
+        0x00, 0x00, 0x00, 0x01, // version
+        Section.FunctionType,
+        0x00, 0x00, 0x00, 0x09, // section size
+        0x00, 0x00, 0x00, 0x01, // num types
+        function_type_sentinel_byte,
+        0x01, // num params
+        Type.I64,
+        0x01, // num returns
+        Type.I32,
+        Section.Function,
+        0x00, 0x00, 0x00, 0x05, // section size
+        0x00, 0x00, 0x00, 0x01, // num functions
+        0x00, // index to types
+        Section.Code,
+        0x00, 0x00, 0x00, 0x13, // section size
+        0x00, 0x00, 0x00, 0x01, // num codes
+        0x00, 0x00, 0x00, 0x0B, // code size
+        0x00, 0x00, 0x00, 0x02, // num locals
+        Type.I32, Type.I64,     // local array
+        0x01, 0x01, 0x01, 0x01, // bytecode
+        0x0B,                   // function end
+    };
+    // zig fmt: on
+
+    std.testing.expect(std.mem.eql(u8, bytecode, expected));
 }
 
 test "unreachable" {
