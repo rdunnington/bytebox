@@ -1,21 +1,5 @@
 const std = @import("std");
 
-const ArrayListWriterContext = struct {
-    const Self = @This();
-
-    buffer: *std.ArrayList(u8),
-    pos: usize = 0,
-
-    fn writer(self: *Self) type {
-        return std.io.Writer(self, anyerror, Self.write);
-    }
-
-    fn write(context: *Self, bytes: []const u8) !usize {
-        try context.buffer.replaceRange(pos, bytes.len, bytes);
-        self.pos += bytes.len;
-    }
-};
-
 const VmParseError = error{
     InvalidMagicSignature,
     UnsupportedWasmVersion,
@@ -147,12 +131,12 @@ const FunctionType = struct {
 const FunctionTypeContext = struct {
     const Self = @This();
 
-    fn hash(self: *Self, f: *const FunctionType) u64 {
-        var seed: u64 = std.hash.Murmur2_64.hashWithSeed(std.mem.asBytes(f.types.items));
+    pub fn hash(self: Self, f: *FunctionType) u64 {
+        var seed: u64 = std.hash.Murmur2_64.hash(std.mem.sliceAsBytes(f.types.items));
         return std.hash.Murmur2_64.hashWithSeed(std.mem.asBytes(&f.numParams), seed);
     }
 
-    fn eql(self: *Self, a: *const FunctionType, b: *const FunctionType) bool {
+    pub fn eql(self: Self, a: *FunctionType, b: *FunctionType) bool {
         if (a.numParams != b.numParams or a.types.items.len != b.types.items.len) {
             return false;
         }
@@ -167,21 +151,21 @@ const FunctionTypeContext = struct {
         return true;
     }
 
-    fn less(context: void, a: *const FunctionType, b: *const FunctionType) bool {
-        var order = Self.order(context, a, b);
-        return order == std.math.lt;
+    fn less(context: Self, a: *FunctionType, b: *FunctionType) bool {
+        var ord = Self.order(context, a, b);
+        return ord == std.math.Order.lt;
     }
 
-    fn order(context: void, a: *const FunctionType, b: *const FunctionType) std.math.Order {
-        var hashA = Self.hash(a);
-        var hashB = Self.hash(b);
+    fn order(context: Self, a: *FunctionType, b: *FunctionType) std.math.Order {
+        var hashA = Self.hash(context, a);
+        var hashB = Self.hash(context, b);
 
         if (hashA < hashB) {
-            return std.math.lt;
+            return std.math.Order.lt;
         } else if (hashA > hashB) {
-            return std.math.gt;
+            return std.math.Order.gt;
         } else {
-            return std.math.eq;
+            return std.math.Order.eq;
         }
     }
 };
@@ -192,34 +176,29 @@ const Function = struct {
     locals: std.ArrayList(Type),
 };
 
-const StackFrame = struct {
-    func: *const Function,
-    stackBaseIndex: u32,
-    locals: []const TypedValue,
+const ExportType = enum(u8) {
+    Function = 0x00,
+    Table = 0x01,
+    Memory = 0x02,
+    Global = 0x03,
+};
+
+const Export = struct { name: std.ArrayList(u8), index: u32 };
+
+const Exports = struct {
+    functions: std.ArrayList(Export),
+    tables: std.ArrayList(Export),
+    memories: std.ArrayList(Export),
+    globals: std.ArrayList(Export),
 };
 
 const VmState = struct {
     const Self = @This();
 
-    const BytecodeMemUsage = enum {
-        UseExisting,
-        Copy,
-    };
-
-    const ExportType = enum(u8) {
-        Function = 0x00,
-        Table = 0x01,
-        Memory = 0x02,
-        Global = 0x03,
-    };
-
-    const Export = struct { name: std.ArrayList(u8), index: u32 };
-
-    const Exports = struct {
-        functions: std.ArrayList(Export),
-        tables: std.ArrayList(Export),
-        memories: std.ArrayList(Export),
-        globals: std.ArrayList(Export),
+    const StackFrame = struct {
+        func: *const Function,
+        stackBaseIndex: u32,
+        locals: []const TypedValue,
     };
 
     bytecode: []const u8,
@@ -228,7 +207,12 @@ const VmState = struct {
     functions: std.ArrayList(Function),
     exports: Exports,
     stack: Stack,
-    callstack: std.ArrayList(*Function),
+    callstack: std.ArrayList(StackFrame),
+
+    const BytecodeMemUsage = enum {
+        UseExisting,
+        Copy,
+    };
 
     fn parseWasm(externalBytecode: []const u8, bytecodeMemUsage: BytecodeMemUsage, allocator: *std.mem.Allocator) !Self {
         var bytecode_mem_usage = std.ArrayList(u8).init(allocator);
@@ -238,7 +222,7 @@ const VmState = struct {
         switch (bytecodeMemUsage) {
             .UseExisting => bytecode = externalBytecode,
             .Copy => {
-                bytecode_mem_usage.appendSlice(externalBytecode);
+                try bytecode_mem_usage.appendSlice(externalBytecode);
                 bytecode = bytecode_mem_usage.items;
             },
         }
@@ -255,7 +239,7 @@ const VmState = struct {
                 .globals = std.ArrayList(Export).init(allocator),
             },
             .stack = Stack.init(allocator),
-            .callstack = std.ArrayList(*Function).init(allocator),
+            .callstack = std.ArrayList(StackFrame).init(allocator),
         };
         errdefer vm.deinit();
 
@@ -274,7 +258,7 @@ const VmState = struct {
             }
         }
 
-        while (reader.pos < reader.buffer.len) {
+        while (stream.pos < stream.buffer.len) {
             const section_id: Section = @intToEnum(Section, try reader.readByte());
             const size_bytes: usize = try reader.readIntBig(u32);
             switch (section_id) {
@@ -323,7 +307,7 @@ const VmState = struct {
                         var func = Function{
                             .typeIndex = try reader.readIntBig(u32),
                             .bytecodeOffset = 0, // we'll fix these up later when we find them in the Code section
-                            .locals = std.ArrayList(u32).init(0),
+                            .locals = std.ArrayList(Type).init(allocator),
                         };
                         errdefer func.locals.deinit();
                         try vm.functions.append(func);
@@ -331,7 +315,7 @@ const VmState = struct {
                 },
                 .Code => {
                     const num_codes = try reader.readIntBig(u32);
-                    var code_index = 0;
+                    var code_index: u32 = 0;
                     while (code_index < num_codes) {
                         code_index += 1;
 
@@ -339,14 +323,14 @@ const VmState = struct {
                         var code_begin_pos = stream.pos;
 
                         const num_locals = try reader.readIntBig(u32);
-                        var locals_index = 0;
+                        var locals_index: u32 = 0;
                         while (locals_index < num_locals) {
                             locals_index += 1;
                             const local_type = @intToEnum(Type, try reader.readByte());
                             try vm.functions.items[code_index].locals.append(local_type);
                         }
 
-                        vm.functions.items[code_index].bytecodeOffset = stream.pos;
+                        vm.functions.items[code_index].bytecodeOffset = @intCast(u32, stream.pos);
 
                         try stream.seekTo(code_begin_pos);
                         try stream.seekBy(code_size); // skip the function body, TODO validation later
@@ -359,7 +343,7 @@ const VmState = struct {
                     var name = std.ArrayList(u8).init(allocator);
                     try name.resize(name_length);
                     errdefer name.deinit();
-                    try stream.read(name.items);
+                    _ = try stream.read(name.items);
 
                     const exportType = @intToEnum(ExportType, try reader.readByte());
                     const exportIndex = try reader.readIntBig(u32);
@@ -369,13 +353,14 @@ const VmState = struct {
                                 return error.InvalidExport;
                             }
                             const export_ = Export{ .name = name, .index = exportIndex };
-                            vm.exports.functions.append(export_);
+                            try vm.exports.functions.append(export_);
                         },
+                        else => {},
                     }
                 },
                 else => {
                     std.debug.print("Skipping module section {}", .{section_id});
-                    try stream.seekBy(size_bytes);
+                    try stream.seekBy(@intCast(i64, size_bytes));
                 },
             }
         }
@@ -388,7 +373,7 @@ const VmState = struct {
             item.types.deinit();
         }
         for (self.functions.items) |item| {
-            item.local.deinit(0);
+            item.locals.deinit();
         }
         for (self.exports.functions.items) |item| {
             item.name.deinit();
@@ -428,11 +413,11 @@ const VmState = struct {
     //    };
     //}
 
-    fn callFuncGeneric(self: *const Self, name: []const u8, params: []const TypedValue, returns: []TypedValue) !void {
+    fn callFuncGeneric(self: *Self, name: []const u8, params: []const TypedValue, returns: []TypedValue) !void {
         for (self.exports.functions.items) |funcExport| {
             if (std.mem.eql(u8, name, funcExport.name.items)) {
-                const func: Function = vm.functions.items[funcExport.index];
-                const funcTypeParams: []const Type = vm.types.items[func.typeIndex].getParams();
+                const func: Function = self.functions.items[funcExport.index];
+                const funcTypeParams: []const Type = self.types.items[func.typeIndex].getParams();
 
                 // validate param types
                 if (params.len != funcTypeParams.len) {
@@ -440,23 +425,23 @@ const VmState = struct {
                 }
 
                 for (params) |param, i| {
-                    if (std.meta.Tag(param) != funcTypeParams[i]) {
+                    if (std.meta.activeTag(param) != funcTypeParams[i]) {
                         return error.TypeMismatch;
                     }
                 }
 
                 // push the stack frame and call the function
-                vm.callstack.append(StackFrame{ .func = &func, .stackBaseIndex = 0, .locals = params });
-                executeBytecode(func.bytecodeOffset);
+                try self.callstack.append(StackFrame{ .func = &func, .stackBaseIndex = 0, .locals = params });
+                try self.executeBytecode(func.bytecodeOffset);
 
-                if (stack.size() != returns.len) {
+                if (self.stack.size() != returns.len) {
                     return error.TypeMismatch;
                 }
 
                 if (returns.len > 0) {
-                    var index: i32 = returns.len - 1;
+                    var index: usize = @intCast(usize, returns.len - 1);
                     while (index >= 0) {
-                        returns[index] = stack.pop();
+                        returns[index] = self.stack.pop();
                     }
                 }
                 return;
@@ -466,9 +451,9 @@ const VmState = struct {
         return error.UnknownExport;
     }
 
-    fn executeBytecode(bytecodeOffset: u32) void {
-        var stream = std.io.fixedBufferStream(vm.bytecode);
-        stream.seekPos(bytecodeOffset);
+    fn executeBytecode(self: *Self, bytecodeOffset: u32) !void {
+        var stream = std.io.fixedBufferStream(self.bytecode);
+        try stream.seekTo(bytecodeOffset);
         var reader = stream.reader();
 
         while (stream.pos < stream.buffer.len) {
@@ -489,166 +474,166 @@ const VmState = struct {
                     }
 
                     var v: i32 = try reader.readIntBig(i32);
-                    try stack.push_i32(v);
+                    try self.stack.push_i32(v);
                 },
                 Instruction.I32_Eqz => {
-                    var v1: i32 = try stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result: i32 = if (v1 == 0) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_Eq => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result: i32 = if (v1 == v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_NE => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result: i32 = if (v1 != v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_LT_S => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_LT_U => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_GT_S => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_GT_U => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_LE_S => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_LE_U => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_GE_S => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_GE_U => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_Add => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result = v1 + v2;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_Sub => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var result = v1 - v2;
-                    try stack.push_i32(result);
+                    try self.stack.push_i32(result);
                 },
                 Instruction.I32_Mul => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var value = v1 * v2;
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Div_S => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var value = try std.math.divTrunc(i32, v1, v2);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Div_U => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var value_unsigned = try std.math.divFloor(u32, v1, v2);
                     var value = @bitCast(i32, value_unsigned);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Rem_S => {
-                    var v2: i32 = try stack.pop_i32();
-                    var v1: i32 = try stack.pop_i32();
+                    var v2: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.pop_i32();
                     var value = @rem(v1, v2);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Rem_U => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var value = @bitCast(i32, v1 % v2);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_And => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var value = @bitCast(i32, v1 & v2);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Or => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var value = @bitCast(i32, v1 | v2);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Xor => {
-                    var v2: u32 = @bitCast(u32, try stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var value = @bitCast(i32, v1 ^ v2);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Shl => {
-                    var shift_unsafe: i32 = try stack.pop_i32();
-                    var int: i32 = try stack.pop_i32();
+                    var shift_unsafe: i32 = try self.stack.pop_i32();
+                    var int: i32 = try self.stack.pop_i32();
                     var shift = @intCast(u5, shift_unsafe);
                     var value = int << shift;
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Shr_S => {
-                    var shift_unsafe: i32 = try stack.pop_i32();
-                    var int: i32 = try stack.pop_i32();
+                    var shift_unsafe: i32 = try self.stack.pop_i32();
+                    var int: i32 = try self.stack.pop_i32();
                     var shift = @intCast(u5, shift_unsafe);
                     var value = int >> shift;
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Shr_U => {
-                    var shift_unsafe: i32 = try stack.pop_i32();
-                    var int: u32 = @bitCast(u32, try stack.pop_i32());
+                    var shift_unsafe: i32 = try self.stack.pop_i32();
+                    var int: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var shift = @intCast(u5, shift_unsafe);
                     var value = @bitCast(i32, int >> shift);
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Rotl => {
-                    var rot: u32 = @bitCast(u32, try stack.pop_i32());
-                    var int: u32 = @bitCast(u32, try stack.pop_i32());
+                    var rot: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var int: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var value = @bitCast(i32, std.math.rotl(u32, int, rot));
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 Instruction.I32_Rotr => {
-                    var rot: u32 = @bitCast(u32, try stack.pop_i32());
-                    var int: u32 = @bitCast(u32, try stack.pop_i32());
+                    var rot: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var int: u32 = @bitCast(u32, try self.stack.pop_i32());
                     var value = @bitCast(i32, std.math.rotr(u32, int, rot));
-                    try stack.push_i32(value);
+                    try self.stack.push_i32(value);
                 },
                 // else => return error.UnknownInstruction,
             }
@@ -659,27 +644,28 @@ const VmState = struct {
 const WasmBuilder = struct {
     const Self = @This();
 
-    const FunctionBuilder = struct {
+    const BuilderFunction = struct {
         ftype: FunctionType,
+        locals: std.ArrayList(Type),
         instructions: std.ArrayList(u8),
     };
 
     allocator: *std.mem.Allocator,
-    functions: std.ArrayList(FunctionBuilder),
+    functions: std.ArrayList(BuilderFunction),
 
     bytecode: std.ArrayList(u8),
-    needsRebuild: bool,
+    needsRebuild: bool = true,
 
     fn init(allocator: *std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .functions = std.ArrayList(Function).init(allocator),
+            .functions = std.ArrayList(BuilderFunction).init(allocator),
             .bytecode = std.ArrayList(u8).init(allocator),
         };
     }
 
     fn deinit(self: *Self) void {
-        for (self.functions) |func| {
+        for (self.functions.items) |func| {
             func.ftype.types.deinit();
             func.instructions.deinit();
         }
@@ -687,11 +673,11 @@ const WasmBuilder = struct {
         self.bytecode.deinit();
     }
 
-    fn addFunc(self: *Self, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) void {
-        const f = FunctionBuilder{
+    fn addFunc(self: *Self, exportName: ?[]const u8, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) !void {
+        var f = BuilderFunction{
             .ftype = FunctionType{
                 .types = std.ArrayList(Type).init(self.allocator),
-                .numParams = params.len,
+                .numParams = @intCast(u32, params.len),
             },
             .locals = std.ArrayList(Type).init(self.allocator),
             .instructions = std.ArrayList(u8).init(self.allocator),
@@ -710,115 +696,116 @@ const WasmBuilder = struct {
         self.needsRebuild = true;
     }
 
-    fn buildBytecode(self: *Self) void {
+    fn buildBytecode(self: *Self) !void {
         self.bytecode.clearRetainingCapacity();
 
         // dedupe function types
-        const FunctionTypeSet = std.HashMap(*FunctionType, *FunctionType, FunctionTypeContext, std.hash_map.default_max_load_percentage);
-        var functionTypeSet = FunctionTypeSet.init(self.allocator);
+        const FunctionTypeSetType = std.HashMap(*FunctionType, *FunctionType, FunctionTypeContext, std.hash_map.default_max_load_percentage);
+        var functionTypeSet = FunctionTypeSetType.init(self.allocator);
         defer functionTypeSet.deinit();
 
-        for (self.functions) |func| {
-            var entry = functionTypeSet.getOrPut(func.ftype, func.ftype);
+        for (self.functions.items) |*func| {
+            _ = try functionTypeSet.getOrPut(&func.ftype);
         }
 
-        var functionTypes = std.ArrayList(*FunctionType);
-        functionTypes.ensureCapacity(functionTypeSet.count());
+        var functionTypesSorted = std.ArrayList(*FunctionType).init(self.allocator);
+        defer functionTypesSorted.deinit();
+        try functionTypesSorted.ensureCapacity(functionTypeSet.count());
         {
             var iter = functionTypeSet.iterator();
             var entry = iter.next();
             while (entry != null) {
-                functionTypes.append(entry.key_ptr);
-                entry = iter.next();
+                if (entry) |e| {
+                    try functionTypesSorted.append(e.key_ptr.*);
+                    entry = iter.next();
+                }
             }
         }
-        std.sort.sort(FuntionType, functionTypes.items, {}, FunctionTypeContext.less);
+        std.sort.sort(*FunctionType, functionTypesSorted.items, FunctionTypeContext{}, FunctionTypeContext.less);
+
+        const section_header_bytesize: usize = @sizeOf(u8) + @sizeOf(u32);
 
         // types section
         var sectionFunctionTypes = std.ArrayList(u8).init(self.allocator);
         defer sectionFunctionTypes.deinit();
         {
-            var writer_context = ArrayListWriterContext{ .buffer = &sectionFunctionTypes };
-            var writer = writer_context.writer();
+            var writer = sectionFunctionTypes.writer();
 
-            try writer.writeByte(Section.FunctionType);
+            try writer.writeByte(@enumToInt(Section.FunctionType));
             try writer.writeIntBig(u32, 0); // placeholder for size
 
-            try writer.writeIntBig(u32, functionTypes.items.len);
+            try writer.writeIntBig(u32, @intCast(u32, functionTypesSorted.items.len));
 
-            for (functionTypes.items) |funcType| {
-                writer.writeByte(function_type_sentinel_byte);
+            for (functionTypesSorted.items) |funcType| {
+                try writer.writeByte(function_type_sentinel_byte);
 
                 var params = funcType.getParams();
                 var returns = funcType.getReturns();
 
-                writer.writeIntBig(u32, params.len);
+                try writer.writeIntBig(u32, @intCast(u32, params.len));
                 for (params) |v| {
-                    try writer.writeByte(v);
+                    try writer.writeByte(@enumToInt(v));
                 }
-                writer.writeIntBig(u32, returns.len);
+                try writer.writeIntBig(u32, @intCast(u32, returns.len));
                 for (returns) |v| {
-                    try writer.writeByte(v);
+                    try writer.writeByte(@enumToInt(v));
                 }
             }
 
-            writer_context.pos = 1;
-            try writer.writeIntBig(sectionFunctionTypes.items.len - writer_context.pos);
+            var bytesize: u32 = @intCast(u32, sectionFunctionTypes.items.len - section_header_bytesize);
+            try sectionFunctionTypes.replaceRange(1, @sizeOf(u32), std.mem.asBytes(&bytesize));
         }
 
         // function section
         var sectionFunctions = std.ArrayList(u8).init(self.allocator);
         defer sectionFunctions.deinit();
         {
-            var writer_context = ArrayListWriterContext{ .buffer = &sectionFunctions };
-            var writer = writer_context.writer();
+            var writer = sectionFunctions.writer();
 
-            try writer.writeByte(Section.Function);
-            try writer.writeIntBig(0); // placeholder size
+            try writer.writeByte(@enumToInt(Section.Function));
+            try writer.writeIntBig(u32, 0); // placeholder size
 
-            try writer.writeIntBig(self.functions.items.len);
-            for (self.functions) |func| {
-                var index: ?usize = std.sort.sort(FunctionType, func.ftype, functionTypes.items, FunctionTypeContext, FunctionTypeContext.order);
-                try writer.writeIntBig(index.?);
+            try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
+            for (self.functions.items) |*func| {
+                var index: ?usize = std.sort.binarySearch(*FunctionType, &func.ftype, functionTypesSorted.items, FunctionTypeContext{}, FunctionTypeContext.order);
+                try writer.writeIntBig(u32, @intCast(u32, index.?));
             }
 
-            writer_context.pos = 1;
-            try writer.writeIntBig(sectionFunction.items.len - writer_context.pos);
+            var bytesize: u32 = @intCast(u32, sectionFunctions.items.len - section_header_bytesize);
+            try sectionFunctions.replaceRange(1, @sizeOf(u32), std.mem.asBytes(&bytesize));
         }
 
         // code section
         var sectionCode = std.ArrayList(u8).init(self.allocator);
         defer sectionCode.deinit();
         {
-            var writer_context = ArrayListWriterContext{ .buffer = &sectionCode };
-            var writer = writer_context.writer();
+            var writer = sectionCode.writer();
 
-            try writer.writeByte(Section.Code);
-            try writer.writeIntBig(0); // placeholder size
-            try writer.writeIntBig(self.functions.items.len);
+            try writer.writeByte(@enumToInt(Section.Code));
+            try writer.writeIntBig(u32, 0); // placeholder size
+            try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
 
             for (self.functions.items) |func| {
-                const code_size_pos = writer_context.pos;
-                try writer.writeIntBig(0); //placeholder code size
+                const code_size_pos = sectionCode.items.len;
+                try writer.writeIntBig(u32, 0); //placeholder code size
 
-                const code_begin_pos = writer_context.pos;
+                const code_begin_pos = sectionCode.items.len;
 
-                try writer.writeIntBig(func.locals.items.len);
+                try writer.writeIntBig(u32, @intCast(u32, func.locals.items.len));
                 for (func.locals.items) |local| {
-                    try writer.writeByte(local);
+                    try writer.writeByte(@enumToInt(local));
                 }
-                try writer.write(func.instructions);
+                _ = try writer.write(func.instructions.items);
                 // TODO should the client supply an end instruction instead?
-                try writer.writeByte(Instruction.End);
+                try writer.writeByte(@enumToInt(Instruction.End));
 
-                const code_end_pos = writer_context.pos;
-                writer_context.pos = code_size_pos;
-                writer.writeIntBig(code_end_pos - code_begin_pos);
-                writer_context.pos = code_end_pos;
+                const code_end_pos = sectionCode.items.len;
+                const code_size = @intCast(u32, code_end_pos - code_begin_pos);
+                try sectionCode.replaceRange(code_size_pos, code_begin_pos - code_size_pos, std.mem.asBytes(&code_size));
             }
 
-            writer_context.pos = 1;
-            try writer.writeIntBig(sectionCode.items.len - writer_context.pos);
+            var bytesize: u32 = @intCast(u32, sectionCode.items.len - section_header_bytesize);
+            try sectionCode.replaceRange(1, @sizeOf(u32), std.mem.asBytes(&bytesize));
         }
 
         // stitch all sections
@@ -827,15 +814,15 @@ const WasmBuilder = struct {
             0x00, 0x00, 0x00, 0x01,
         };
 
-        self.bytecode.appendSlice(header);
-        self.bytecode.appendSlice(sectionFunctionTypes.items);
-        self.bytecode.appendSlice(sectionFunctions.items);
-        self.bytecode.appendSlice(sectionCode.items);
+        try self.bytecode.appendSlice(&header);
+        try self.bytecode.appendSlice(sectionFunctionTypes.items);
+        try self.bytecode.appendSlice(sectionFunctions.items);
+        try self.bytecode.appendSlice(sectionCode.items);
     }
 
-    fn getBytecode(self: *Self) []const u8 {
+    fn getBytecode(self: *Self) ![]const u8 {
         if (self.needsRebuild) {
-            self.buildBytecode();
+            try self.buildBytecode();
         }
 
         return self.bytecode.items;
@@ -846,17 +833,19 @@ fn testExecuteAndExpect(bytecode: []const u8, expected: u32) !void {
     var builder = WasmBuilder.init(std.testing.allocator);
     builder.deinit();
 
-    const params = &[_]Type{};
-    const returns = &[_]Type{.I32};
-    const locals = &[_]Type{};
-    builder.addFunc("testFunc", params, returns, locals, bytecode);
+    {
+        const params = &[_]Type{};
+        const returns = &[_]Type{.I32};
+        const locals = &[_]Type{};
+        try builder.addFunc("testFunc", params, returns, locals, bytecode);
+    }
 
-    const rebuiltBytecode = builder.getBytecode();
+    const rebuiltBytecode = try builder.getBytecode();
 
-    var vm = VmState.parseWasm(rebuiltBytecode, .UseExisting, std.testing.allocator);
+    var vm = try VmState.parseWasm(rebuiltBytecode, .UseExisting, std.testing.allocator);
     defer vm.deinit();
 
-    var returns = [1]TypedValue{};
+    var returns: [1]TypedValue = undefined;
     try vm.callFuncGeneric("testFunc", &[_]TypedValue{}, &returns);
 
     var result_u32 = @bitCast(u32, returns[0].I32);
@@ -870,37 +859,37 @@ test "wasm builder: 1 func" {
     var builder = WasmBuilder.init(std.testing.allocator);
     builder.deinit();
 
-    builder.addFunc(&[_]Type{.I64}, &[_]Type{.I32}, &[_]Type{.I32}, &[_]Type{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
-    var bytecode = builder.getBytecode();
+    try builder.addFunc("SomeExportedFunction", &[_]Type{.I64}, &[_]Type{.I32}, &[_]Type{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
+    var bytecode = try builder.getBytecode();
 
     // zig fmt: off
     const expected = [_]u8{
         0x00, 0x61, 0x73, 0x6D, // magic
         0x00, 0x00, 0x00, 0x01, // version
-        Section.FunctionType,
+        @enumToInt(Section.FunctionType),
         0x00, 0x00, 0x00, 0x09, // section size
         0x00, 0x00, 0x00, 0x01, // num types
         function_type_sentinel_byte,
         0x01, // num params
-        Type.I64,
+        @enumToInt(Type.I64),
         0x01, // num returns
-        Type.I32,
-        Section.Function,
+        @enumToInt(Type.I32),
+        @enumToInt(Section.Function),
         0x00, 0x00, 0x00, 0x05, // section size
         0x00, 0x00, 0x00, 0x01, // num functions
         0x00, // index to types
-        Section.Code,
+        @enumToInt(Section.Code),
         0x00, 0x00, 0x00, 0x13, // section size
         0x00, 0x00, 0x00, 0x01, // num codes
         0x00, 0x00, 0x00, 0x0B, // code size
         0x00, 0x00, 0x00, 0x02, // num locals
-        Type.I32, Type.I64,     // local array
+        @enumToInt(Type.I32), @enumToInt(Type.I64),     // local array
         0x01, 0x01, 0x01, 0x01, // bytecode
         0x0B,                   // function end
     };
     // zig fmt: on
 
-    std.testing.expect(std.mem.eql(u8, bytecode, expected));
+    try std.testing.expect(std.mem.eql(u8, bytecode, &expected));
 }
 
 test "unreachable" {
@@ -908,15 +897,14 @@ test "unreachable" {
         0x00,
     };
 
-    var stack = Stack.init(std.testing.allocator);
-    defer stack.deinit();
+    // TODO
+    //var err:?error = null;
+    //try testExecuteAndExpect(&bytecode, 0x0) catch |e| {
+    //    err = e;
+    //}
 
-    const result = executeBytecode(&bytecode, &stack);
-    if (result) |_| {
-        return error.TestUnexpectedResult;
-    } else |err| {
-        try std.testing.expect(err == VMError.Unreachable);
-    }
+    //expect(err != null);
+    //expect(err.? == VMError.Unreachable);
 }
 
 test "noop" {
