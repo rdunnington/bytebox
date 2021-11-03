@@ -131,12 +131,12 @@ const FunctionType = struct {
 const FunctionTypeContext = struct {
     const Self = @This();
 
-    pub fn hash(self: Self, f: *FunctionType) u64 {
+    pub fn hash(_: Self, f: *FunctionType) u64 {
         var seed: u64 = std.hash.Murmur2_64.hash(std.mem.sliceAsBytes(f.types.items));
         return std.hash.Murmur2_64.hashWithSeed(std.mem.asBytes(&f.numParams), seed);
     }
 
-    pub fn eql(self: Self, a: *FunctionType, b: *FunctionType) bool {
+    pub fn eql(_: Self, a: *FunctionType, b: *FunctionType) bool {
         if (a.numParams != b.numParams or a.types.items.len != b.types.items.len) {
             return false;
         }
@@ -339,23 +339,29 @@ const VmState = struct {
                 .Export => {
                     const num_exports = try reader.readIntBig(u32);
 
-                    const name_length = try reader.readIntBig(u32);
-                    var name = std.ArrayList(u8).init(allocator);
-                    try name.resize(name_length);
-                    errdefer name.deinit();
-                    _ = try stream.read(name.items);
+                    var export_index:u32 = 0;
+                    while (export_index < num_exports)
+                    {
+                        export_index += 1;
 
-                    const exportType = @intToEnum(ExportType, try reader.readByte());
-                    const exportIndex = try reader.readIntBig(u32);
-                    switch (exportType) {
-                        .Function => {
-                            if (exportIndex >= vm.functions.items.len) {
-                                return error.InvalidExport;
-                            }
-                            const export_ = Export{ .name = name, .index = exportIndex };
-                            try vm.exports.functions.append(export_);
-                        },
-                        else => {},
+                        const name_length = try reader.readIntBig(u32);
+                        var name = std.ArrayList(u8).init(allocator);
+                        try name.resize(name_length);
+                        errdefer name.deinit();
+                        _ = try stream.read(name.items);
+
+                        const exportType = @intToEnum(ExportType, try reader.readByte());
+                        const exportIndex = try reader.readIntBig(u32);
+                        switch (exportType) {
+                            .Function => {
+                                if (exportIndex >= vm.functions.items.len) {
+                                    return error.InvalidExport;
+                                }
+                                const export_ = Export{ .name = name, .index = exportIndex };
+                                try vm.exports.functions.append(export_);
+                            },
+                            else => {},
+                        }
                     }
                 },
                 else => {
@@ -645,6 +651,7 @@ const WasmBuilder = struct {
     const Self = @This();
 
     const BuilderFunction = struct {
+        exportName: std.ArrayList(u8),
         ftype: FunctionType,
         locals: std.ArrayList(Type),
         instructions: std.ArrayList(u8),
@@ -673,8 +680,9 @@ const WasmBuilder = struct {
         self.bytecode.deinit();
     }
 
-    fn addFunc(self: *Self, exportName: ?[]const u8, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) !void {
+    fn addFunc(self: *Self, optionalExportName: ?[]const u8, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) !void {
         var f = BuilderFunction{
+            .exportName = std.ArrayList(u8).init(self.allocator),
             .ftype = FunctionType{
                 .types = std.ArrayList(Type).init(self.allocator),
                 .numParams = @intCast(u32, params.len),
@@ -682,9 +690,14 @@ const WasmBuilder = struct {
             .locals = std.ArrayList(Type).init(self.allocator),
             .instructions = std.ArrayList(u8).init(self.allocator),
         };
+        errdefer f.exportName.deinit();
         errdefer f.ftype.types.deinit();
         errdefer f.locals.deinit();
         errdefer f.instructions.deinit();
+
+        if (optionalExportName) |name| {
+            try f.exportName.appendSlice(name);
+        }
 
         try f.ftype.types.appendSlice(params);
         try f.ftype.types.appendSlice(returns);
@@ -893,9 +906,9 @@ test "wasm builder: 1 func" {
 }
 
 test "unreachable" {
-    var bytecode = [_]u8{
-        0x00,
-    };
+    // var bytecode = [_]u8{
+    //     0x00,
+    // };
 
     // TODO
     //var err:?error = null;
