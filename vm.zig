@@ -69,11 +69,6 @@ const TypedValue = union(Type) {
     F64: f64,
 };
 
-const I32ToU32 = union {
-    I32: i32,
-    U32: u32,
-};
-
 const Stack = struct {
     const Self = @This();
 
@@ -769,7 +764,7 @@ const WasmBuilder = struct {
 
         self.bytecode.clearRetainingCapacity();
 
-        // dedupe function types
+        // dedupe function types and sort for quick lookup
         const FunctionTypeSetType = std.HashMap(*FunctionType, *FunctionType, FunctionTypeContext, std.hash_map.default_max_load_percentage);
         var functionTypeSet = FunctionTypeSetType.init(self.allocator);
         defer functionTypeSet.deinit();
@@ -794,126 +789,102 @@ const WasmBuilder = struct {
         }
         std.sort.sort(*FunctionType, functionTypesSorted.items, FunctionTypeContext{}, FunctionTypeContext.less);
 
-        // types section
-        var sectionFunctionTypes = std.ArrayList(u8).init(self.allocator);
-        defer sectionFunctionTypes.deinit();
-        {
-            var writer = sectionFunctionTypes.writer();
+        // Serialize header and sections
 
-            try writer.writeByte(@enumToInt(Section.FunctionType));
-            try writer.writeIntBig(u32, 0); // placeholder for size
-
-            try writer.writeIntBig(u32, @intCast(u32, functionTypesSorted.items.len));
-            for (functionTypesSorted.items) |funcType| {
-                try writer.writeByte(function_type_sentinel_byte);
-
-                var params = funcType.getParams();
-                var returns = funcType.getReturns();
-
-                try writer.writeIntBig(u32, @intCast(u32, params.len));
-                for (params) |v| {
-                    try writer.writeByte(@enumToInt(v));
-                }
-                try writer.writeIntBig(u32, @intCast(u32, returns.len));
-                for (returns) |v| {
-                    try writer.writeByte(@enumToInt(v));
-                }
-            }
-
-            try LocalHelpers.WriteSectionSize(sectionFunctionTypes.items);
-        }
-
-        // function section
-        var sectionFunctions = std.ArrayList(u8).init(self.allocator);
-        defer sectionFunctions.deinit();
-        {
-            var writer = sectionFunctions.writer();
-
-            try writer.writeByte(@enumToInt(Section.Function));
-            try writer.writeIntBig(u32, 0); // placeholder size
-
-            try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
-            for (self.functions.items) |*func| {
-                var index: ?usize = std.sort.binarySearch(*FunctionType, &func.ftype, functionTypesSorted.items, FunctionTypeContext{}, FunctionTypeContext.order);
-                try writer.writeIntBig(u32, @intCast(u32, index.?));
-            }
-
-            try LocalHelpers.WriteSectionSize(sectionFunctions.items);
-        }
-
-        // exports section
-        var sectionExports = std.ArrayList(u8).init(self.allocator);
-        defer sectionExports.deinit();
-        {
-            var writer = sectionExports.writer();
-
-            try writer.writeByte(@enumToInt(Section.Export));
-            try writer.writeIntBig(u32, 0);
-
-            const num_exports_pos = sectionExports.items.len;
-            try writer.writeIntBig(u32, 0); // placeholder num exports
-
-            var num_exports:u32 = 0;
-            for (self.functions.items) |func, i|
-            {
-                if (func.exportName.items.len > 0) {
-                    num_exports += 1;
-
-                    try writer.writeIntBig(u32, @intCast(u32, func.exportName.items.len));
-                    _ = try writer.write(func.exportName.items);
-                    try writer.writeByte(@enumToInt(ExportType.Function));
-                    try writer.writeIntBig(u32, @intCast(u32, i));
-                }
-            }
-
-            try LocalHelpers.WriteU32AtOffset(sectionExports.items, num_exports_pos, num_exports);
-            try LocalHelpers.WriteSectionSize(sectionExports.items);
-        }
-
-        // code section
-        var sectionCode = std.ArrayList(u8).init(self.allocator);
-        defer sectionCode.deinit();
-        {
-            var writer = sectionCode.writer();
-
-            try writer.writeByte(@enumToInt(Section.Code));
-            try writer.writeIntBig(u32, 0); // placeholder size
-
-            try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
-            for (self.functions.items) |func| {
-                const code_size_pos = sectionCode.items.len;
-                try writer.writeIntBig(u32, 0); //placeholder code size
-
-                const code_begin_pos = sectionCode.items.len;
-
-                try writer.writeIntBig(u32, @intCast(u32, func.locals.items.len));
-                for (func.locals.items) |local| {
-                    try writer.writeByte(@enumToInt(local));
-                }
-                _ = try writer.write(func.instructions.items);
-                // TODO should the client supply an end instruction instead?
-                try writer.writeByte(@enumToInt(Instruction.End));
-
-                const code_end_pos = sectionCode.items.len;
-                const code_size = @intCast(u32, code_end_pos - code_begin_pos);
-
-                try LocalHelpers.WriteU32AtOffset(sectionCode.items, code_size_pos, code_size);
-            }
-
-            try LocalHelpers.WriteSectionSize(sectionCode.items);
-        }
-
-        // stitch all sections
         const header = [_]u8{
             0x00, 0x61, 0x73, 0x6D,
             0x00, 0x00, 0x00, 0x01,
         };
 
         try self.bytecode.appendSlice(&header);
-        try self.bytecode.appendSlice(sectionFunctionTypes.items);
-        try self.bytecode.appendSlice(sectionFunctions.items);
-        try self.bytecode.appendSlice(sectionExports.items);
-        try self.bytecode.appendSlice(sectionCode.items);
+
+        var sectionBytes = std.ArrayList(u8).init(self.allocator);
+        defer sectionBytes.deinit();
+        try sectionBytes.ensureCapacity(1024 * 4);
+
+        const sectionsToSerialize = [_]Section{ .FunctionType, .Function, .Export, .Code };
+        for (sectionsToSerialize) |section| {
+            sectionBytes.clearRetainingCapacity();
+            var writer = sectionBytes.writer();
+            try writer.writeByte(@enumToInt(section));
+            try writer.writeIntBig(u32, 0); // placeholder for size
+
+            switch (section) {
+                .FunctionType => {
+                    try writer.writeIntBig(u32, @intCast(u32, functionTypesSorted.items.len));
+                    for (functionTypesSorted.items) |funcType| {
+                        try writer.writeByte(function_type_sentinel_byte);
+
+                        var params = funcType.getParams();
+                        var returns = funcType.getReturns();
+
+                        try writer.writeIntBig(u32, @intCast(u32, params.len));
+                        for (params) |v| {
+                            try writer.writeByte(@enumToInt(v));
+                        }
+                        try writer.writeIntBig(u32, @intCast(u32, returns.len));
+                        for (returns) |v| {
+                            try writer.writeByte(@enumToInt(v));
+                        }
+                    }
+                },
+                .Function => {
+                    try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
+                    for (self.functions.items) |*func| {
+                        var context = FunctionTypeContext{};
+                        var index: ?usize = std.sort.binarySearch(*FunctionType, &func.ftype, functionTypesSorted.items, context, FunctionTypeContext.order);
+                        try writer.writeIntBig(u32, @intCast(u32, index.?));
+                    }
+                },
+                .Export => {
+                    const num_exports_pos = sectionBytes.items.len;
+                    try writer.writeIntBig(u32, 0); // placeholder num exports
+
+                    var num_exports:u32 = 0;
+                    for (self.functions.items) |func, i| {
+                        if (func.exportName.items.len > 0) {
+                            num_exports += 1;
+
+                            try writer.writeIntBig(u32, @intCast(u32, func.exportName.items.len));
+                            _ = try writer.write(func.exportName.items);
+                            try writer.writeByte(@enumToInt(ExportType.Function));
+                            try writer.writeIntBig(u32, @intCast(u32, i));
+                        }
+                    }
+
+                    try LocalHelpers.WriteU32AtOffset(sectionBytes.items, num_exports_pos, num_exports);
+                },
+                .Code => {
+                    try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
+                    for (self.functions.items) |func| {
+                        const code_size_pos = sectionBytes.items.len;
+                        try writer.writeIntBig(u32, 0); //placeholder code size
+
+                        const code_begin_pos = sectionBytes.items.len;
+
+                        try writer.writeIntBig(u32, @intCast(u32, func.locals.items.len));
+                        for (func.locals.items) |local| {
+                            try writer.writeByte(@enumToInt(local));
+                        }
+                        _ = try writer.write(func.instructions.items);
+                        // TODO should the client supply an end instruction instead?
+                        try writer.writeByte(@enumToInt(Instruction.End));
+
+                        const code_end_pos = sectionBytes.items.len;
+                        const code_size = @intCast(u32, code_end_pos - code_begin_pos);
+
+                        try LocalHelpers.WriteU32AtOffset(sectionBytes.items, code_size_pos, code_size);
+                    }
+                },
+                else => { 
+                    unreachable;
+                }
+            }
+
+            try LocalHelpers.WriteSectionSize(sectionBytes.items);
+
+            try self.bytecode.appendSlice(sectionBytes.items);
+        }
     }
 
     fn getBytecode(self: *Self) ![]const u8 {
