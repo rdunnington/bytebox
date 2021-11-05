@@ -263,7 +263,7 @@ const VmState = struct {
             const size_bytes: usize = try reader.readIntBig(u32);
             switch (section_id) {
                 .FunctionType => {
-                    std.debug.print("parseWasm: section: FunctionType\n", .{});
+                    // std.debug.print("parseWasm: section: FunctionType\n", .{});
                     const num_types = try reader.readIntBig(u32);
                     var types_index:u32 = 0;
                     while (types_index < num_types) {
@@ -300,7 +300,7 @@ const VmState = struct {
                     }
                 },
                 .Function => {
-                    std.debug.print("parseWasm: section: Function\n", .{});
+                    // std.debug.print("parseWasm: section: Function\n", .{});
 
                     const num_funcs = try reader.readIntBig(u32);
                     var func_index:u32 = 0;
@@ -316,33 +316,8 @@ const VmState = struct {
                         func_index += 1;
                     }
                 },
-                .Code => {
-                    std.debug.print("parseWasm: section: Code\n", .{});
-
-                    const num_codes = try reader.readIntBig(u32);
-                    var code_index: u32 = 0;
-                    while (code_index < num_codes) {
-                        var code_size = try reader.readIntBig(u32);
-                        var code_begin_pos = stream.pos;
-
-                        const num_locals = try reader.readIntBig(u32);
-                        var locals_index: u32 = 0;
-                        while (locals_index < num_locals) {
-                            locals_index += 1;
-                            const local_type = @intToEnum(Type, try reader.readByte());
-                            try vm.functions.items[code_index].locals.append(local_type);
-                        }
-
-                        vm.functions.items[code_index].bytecodeOffset = @intCast(u32, stream.pos);
-
-                        try stream.seekTo(code_begin_pos);
-                        try stream.seekBy(code_size); // skip the function body, TODO validation later
-
-                        code_index += 1;
-                    }
-                },
                 .Export => {
-                    std.debug.print("parseWasm: section: Export\n", .{});
+                    // std.debug.print("parseWasm: section: Export\n", .{});
 
                     const num_exports = try reader.readIntBig(u32);
 
@@ -369,6 +344,32 @@ const VmState = struct {
                         }
 
                         export_index += 1;
+                    }
+                },
+
+                .Code => {
+                    // std.debug.print("parseWasm: section: Code\n", .{});
+
+                    const num_codes = try reader.readIntBig(u32);
+                    var code_index: u32 = 0;
+                    while (code_index < num_codes) {
+                        var code_size = try reader.readIntBig(u32);
+                        var code_begin_pos = stream.pos;
+
+                        const num_locals = try reader.readIntBig(u32);
+                        var locals_index: u32 = 0;
+                        while (locals_index < num_locals) {
+                            locals_index += 1;
+                            const local_type = @intToEnum(Type, try reader.readByte());
+                            try vm.functions.items[code_index].locals.append(local_type);
+                        }
+
+                        vm.functions.items[code_index].bytecodeOffset = @intCast(u32, stream.pos);
+
+                        try stream.seekTo(code_begin_pos);
+                        try stream.seekBy(code_size); // skip the function body, TODO validation later
+
+                        code_index += 1;
                     }
                 },
                 else => {
@@ -448,14 +449,14 @@ const VmState = struct {
                 try self.executeBytecode(func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
-                    std.debug.print("stack size: {}, returns.len: {}\n", .{self.stack.size(), returns.len});
+                    // std.debug.print("stack size: {}, returns.len: {}\n", .{self.stack.size(), returns.len});
                     return error.TypeMismatch;
                 }
 
                 if (returns.len > 0) {
                     var index: i32 = @intCast(i32, returns.len - 1);
                     while (index >= 0) {
-                        std.debug.print("stack size: {}, index: {}\n", .{self.stack.size(), index});
+                        // std.debug.print("stack size: {}, index: {}\n", .{self.stack.size(), index});
                         returns[@intCast(usize, index)] = self.stack.pop();
                         index -= 1;
                     }
@@ -812,8 +813,6 @@ const WasmBuilder = struct {
             try LocalHelpers.WriteSectionSize(sectionFunctions.items);
         }
 
-        std.debug.print("blah 1\n", .{});
-
         // exports section
         var sectionExports = std.ArrayList(u8).init(self.allocator);
         defer sectionExports.deinit();
@@ -826,13 +825,9 @@ const WasmBuilder = struct {
             const num_exports_pos = sectionExports.items.len;
             try writer.writeIntBig(u32, 0); // placeholder num exports
 
-            std.debug.print("blah 2\n", .{});
-
             var num_exports:u32 = 0;
             for (self.functions.items) |func, i|
             {
-                std.debug.print("blah 3 {}\n", .{i});
-
                 if (func.exportName.items.len > 0) {
                     num_exports += 1;
 
@@ -842,7 +837,6 @@ const WasmBuilder = struct {
                     try writer.writeIntBig(u32, @intCast(u32, i));
                 }
             }
-            std.debug.print("blah 4\n", .{});
 
             try LocalHelpers.WriteU32AtOffset(sectionExports.items, num_exports_pos, num_exports);
             try LocalHelpers.WriteSectionSize(sectionExports.items);
@@ -907,8 +901,6 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalExpected: ?u32) !void {
     var builder = WasmBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    std.debug.print("test 1\n", .{});
-
     {
         const params = &[_]Type{};
         const returns = &[_]Type{.I32};
@@ -916,16 +908,10 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalExpected: ?u32) !void {
         try builder.addFunc("testFunc", params, returns, locals, bytecode);
     }
 
-    std.debug.print("test 2\n", .{});
-
     const rebuiltBytecode = try builder.getBytecode();
-
-    std.debug.print("test 3\n", .{});
 
     var vm = try VmState.parseWasm(rebuiltBytecode, .UseExisting, std.testing.allocator);
     defer vm.deinit();
-
-    std.debug.print("test 4\n", .{});
 
     var returns = std.ArrayList(TypedValue).init(std.testing.allocator);
     defer returns.deinit();
@@ -935,8 +921,6 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalExpected: ?u32) !void {
     }
 
     try vm.callFuncGeneric("testFunc", &[_]TypedValue{}, returns.items);
-
-    std.debug.print("test 5\n", .{});
 
     if (optionalExpected) |expected|
     {
@@ -1003,20 +987,21 @@ test "wasm builder" {
     try std.testing.expect(std.mem.eql(u8, bytecode, &expected));
 }
 
-// test "unreachable" {
-//     // var bytecode = [_]u8{
-//     //     0x00,
-//     // };
+test "unreachable" {
+    var bytecode = [_]u8{
+        0x00,
+    };
 
-//     // TODO
-//     //var err:?error = null;
-//     //try testExecuteAndExpect(&bytecode, 0x0) catch |e| {
-//     //    err = e;
-//     //}
+    var didCatchError:bool = false;
+    var didCatchCorrectError:bool = false;
+    testExecuteAndExpect(&bytecode, null) catch |e| {
+        didCatchError = true;
+        didCatchCorrectError = (e == VMError.Unreachable);
+    };
 
-//     //expect(err != null);
-//     //expect(err.? == VMError.Unreachable);
-// }
+    try std.testing.expect(didCatchError);
+    try std.testing.expect(didCatchCorrectError);
+}
 
 test "noop" {
     var bytecode = [_]u8{
