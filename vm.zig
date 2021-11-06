@@ -5,6 +5,7 @@ const VmParseError = error{
     UnsupportedWasmVersion,
     InvalidBytecode,
     InvalidExport,
+    InvalidGlobalInit,
 };
 
 const VMError = error{
@@ -22,6 +23,8 @@ const Instruction = enum(u8) {
     Local_Get = 0x20,
     Local_Set = 0x21,
     Local_Tee = 0x22,
+    Global_Get = 0x23,
+    Global_Set = 0x24,
     I32_Const = 0x41,
     I32_Eqz = 0x45,
     I32_Eq = 0x46,
@@ -67,6 +70,16 @@ const TypedValue = union(Type) {
     I64: i64,
     F32: f32,
     F64: f64,
+};
+
+const GlobalValue = struct {
+    const Mut = enum(u8) {
+        Mutable,
+        Immutable,
+    };
+
+    value: TypedValue,
+    mut: Mut,
 };
 
 const Stack = struct {
@@ -123,6 +136,7 @@ const Stack = struct {
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
 
 const function_type_sentinel_byte: u8 = 0x60;
+const max_global_init_size:usize = 32;
 
 const FunctionType = struct {
     types: std.ArrayList(Type),
@@ -217,6 +231,7 @@ const VmState = struct {
     bytecode_mem_usage: std.ArrayList(u8),
     types: std.ArrayList(FunctionType),
     functions: std.ArrayList(Function),
+    globals: std.ArrayList(GlobalValue),
     exports: Exports,
     stack: Stack,
     callstack: std.ArrayList(StackFrame),
@@ -245,6 +260,7 @@ const VmState = struct {
             .bytecode_mem_usage = bytecode_mem_usage,
             .types = std.ArrayList(FunctionType).init(allocator),
             .functions = std.ArrayList(Function).init(allocator),
+            .globals = std.ArrayList(GlobalValue).init(allocator),
             .exports = Exports{
                 .functions = std.ArrayList(Export).init(allocator),
                 .tables = std.ArrayList(Export).init(allocator),
@@ -329,14 +345,45 @@ const VmState = struct {
                         func_index += 1;
                     }
                 },
+                .Global => {
+                    const num_globals = try reader.readIntBig(u32);
+
+                    var global_index: u32 = 0;
+                    while (global_index < num_globals) {
+                        var mut = @intToEnum(GlobalValue.Mut, try reader.readByte());
+                        var valtype = @intToEnum(Type, try reader.readByte());
+
+                        var init = std.ArrayList(u8).init(allocator);
+                        try reader.readUntilDelimiterArrayList(&init, @enumToInt(Instruction.End), max_global_init_size);
+
+                        // TODO validate init instructions are a constant expression
+                        // TODO handle referencing other globals before they're initialized, maybe use a 
+                        //      warmup phase after the parse is complete
+                        try vm.executeWasm(init.items, 0);
+                        if (vm.stack.size() != 1) {
+                            return error.InvalidGlobalInit;
+                        }
+                        var value = try vm.stack.pop();
+
+                        if (std.meta.activeTag(value) != valtype) {
+                            return error.InvalidGlobalInit;
+                        }
+
+                        try vm.globals.append(GlobalValue{
+                            .value = value,
+                            .mut = mut,
+                        });
+
+                        global_index += 1;
+                    }
+                },
                 .Export => {
                     // std.debug.print("parseWasm: section: Export\n", .{});
 
                     const num_exports = try reader.readIntBig(u32);
 
                     var export_index:u32 = 0;
-                    while (export_index < num_exports)
-                    {
+                    while (export_index < num_exports) {
                         const name_length = try reader.readIntBig(u32);
                         var name = std.ArrayList(u8).init(allocator);
                         try name.resize(name_length);
@@ -452,7 +499,7 @@ const VmState = struct {
                 }
 
                 try self.callstack.append(StackFrame{ .func = &func, .stackBaseIndex = 0, .locals = locals.items });
-                try self.executeBytecode(func.bytecodeOffset);
+                try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
                     // std.debug.print("stack size: {}, returns.len: {}\n", .{self.stack.size(), returns.len});
@@ -474,9 +521,9 @@ const VmState = struct {
         return error.UnknownExport;
     }
 
-    fn executeBytecode(self: *Self, bytecodeOffset: u32) !void {
-        var stream = std.io.fixedBufferStream(self.bytecode);
-        try stream.seekTo(bytecodeOffset);
+    fn executeWasm(self: *Self, bytecode: []const u8, offset: u32) !void {
+        var stream = std.io.fixedBufferStream(bytecode);
+        try stream.seekTo(offset);
         var reader = stream.reader();
 
         while (stream.pos < stream.buffer.len) {
@@ -508,6 +555,16 @@ const VmState = struct {
                     var stackframe:StackFrame = self.callstack.items[self.callstack.items.len - 1];
                     var v:TypedValue = try self.stack.top();
                     stackframe.locals[locals_index] = v;
+                },
+                Instruction.Global_Get => {
+                    var global_index = try reader.readIntBig(u32);
+                    var global = &self.globals.items[global_index];
+                    try self.stack.push(global.value);
+                },
+                Instruction.Global_Set => {
+                    var global_index = try reader.readIntBig(u32);
+                    var global = &self.globals.items[global_index];
+                    global.value = try self.stack.pop();
                 },
                 Instruction.I32_Const => {
                     if (stream.pos + 3 >= stream.buffer.len) {
@@ -692,8 +749,16 @@ const WasmBuilder = struct {
         instructions: std.ArrayList(u8),
     };
 
+    const BuilderGlobal = struct {
+        exportName: std.ArrayList(u8),
+        type: Type,
+        mut: GlobalValue.Mut,
+        initInstructions: std.ArrayList(u8),
+    };
+
     allocator: *std.mem.Allocator,
     functions: std.ArrayList(BuilderFunction),
+    globals: std.ArrayList(BuilderGlobal),
     bytecode: std.ArrayList(u8),
     needsRebuild: bool = true,
 
@@ -701,22 +766,27 @@ const WasmBuilder = struct {
         return Self{
             .allocator = allocator,
             .functions = std.ArrayList(BuilderFunction).init(allocator),
+            .globals = std.ArrayList(BuilderGlobal).init(allocator),
             .bytecode = std.ArrayList(u8).init(allocator),
         };
     }
 
     fn deinit(self: *Self) void {
-        for (self.functions.items) |func| {
+        for (self.functions.items) |*func| {
             func.exportName.deinit();
             func.ftype.types.deinit();
             func.locals.deinit();
             func.instructions.deinit();
         }
+        for (self.globals.items) |*global| {
+            global.exportName.deinit();
+            global.initInstructions.deinit();
+        }
         self.functions.deinit();
         self.bytecode.deinit();
     }
 
-    fn addFunc(self: *Self, optionalName: ?[]const u8, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) !void {
+    fn addFunc(self: *Self, exportName: ?[]const u8, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) !void {
         var f = BuilderFunction{
             .exportName = std.ArrayList(u8).init(self.allocator),
             .ftype = FunctionType{
@@ -731,16 +801,44 @@ const WasmBuilder = struct {
         errdefer f.locals.deinit();
         errdefer f.instructions.deinit();
 
-        if (optionalName) |name| {
+        if (exportName) |name| {
             try f.exportName.appendSlice(name);
         }
-
         try f.ftype.types.appendSlice(params);
         try f.ftype.types.appendSlice(returns);
         try f.locals.appendSlice(locals);
         try f.instructions.appendSlice(instructions);
 
         try self.functions.append(f);
+
+        self.needsRebuild = true;
+    }
+
+    fn addGlobal(self: *Self, exportName: ?[]const u8, valtype: Type, mut: GlobalValue.Mut, initInstructions: []const u8) !void {
+        var g = BuilderGlobal{
+            .exportName = std.ArrayList(u8).init(self.allocator),
+            .type = valtype,
+            .mut = mut,
+            .initInstructions = std.ArrayList(u8).init(self.allocator),
+        };
+        errdefer g.exportName.deinit();
+        errdefer g.initInstructions.deinit();
+
+        if (exportName) |name| {
+            try g.exportName.appendSlice(name);
+        }
+        if (initInstructions.len == 0) {
+            return error.InvalidGlobalInit;
+        }
+        if (initInstructions.len > max_global_init_size) {
+            return error.InvalidGlobalInit;
+        }        
+        if (initInstructions[initInstructions.len - 1] != @enumToInt(Instruction.End)) {
+            return error.InvalidGlobalInit;
+        }
+        try g.initInstructions.appendSlice(initInstructions);
+
+        try self.globals.append(g);
 
         self.needsRebuild = true;
     }
@@ -802,7 +900,7 @@ const WasmBuilder = struct {
         defer sectionBytes.deinit();
         try sectionBytes.ensureCapacity(1024 * 4);
 
-        const sectionsToSerialize = [_]Section{ .FunctionType, .Function, .Export, .Code };
+        const sectionsToSerialize = [_]Section{ .FunctionType, .Function, .Global, .Export, .Code };
         for (sectionsToSerialize) |section| {
             sectionBytes.clearRetainingCapacity();
             var writer = sectionBytes.writer();
@@ -834,6 +932,14 @@ const WasmBuilder = struct {
                         var context = FunctionTypeContext{};
                         var index: ?usize = std.sort.binarySearch(*FunctionType, &func.ftype, functionTypesSorted.items, context, FunctionTypeContext.order);
                         try writer.writeIntBig(u32, @intCast(u32, index.?));
+                    }
+                },
+                .Global => {
+                    try writer.writeIntBig(u32, @intCast(u32, self.globals.items.len));
+                    for (self.globals.items) |global| {
+                        try writer.writeByte(@enumToInt(global.mut));
+                        try writer.writeByte(@enumToInt(global.type));
+                        _ = try writer.write(global.initInstructions.items);
                     }
                 },
                 .Export => {
@@ -1003,6 +1109,9 @@ test "wasm builder" {
         0x00, 0x00, 0x00, 0x08, // section size
         0x00, 0x00, 0x00, 0x01, // num functions
         0x00, 0x00, 0x00, 0x00, // index to types
+        @enumToInt(Section.Global),
+        0x00, 0x00, 0x00, 0x04, // section size
+        0x00, 0x00, 0x00, 0x00, // num globals
         @enumToInt(Section.Export),
         0x00, 0x00, 0x00, 0x11, // section size
         0x00, 0x00, 0x00, 0x01, // num exports
@@ -1083,6 +1192,14 @@ test "local_set" {
     var locals = [_]Type{.I32};
     var expected = [_]TypedValue{.{.I32 = 0x1337}};
     try testExecuteAndExpect(&bytecode, &params, &locals, &expected);
+}
+
+test "global_get" {
+    // TODO
+}
+
+test "global_set" {
+    // TODO
 }
 
 test "local_tee" {
