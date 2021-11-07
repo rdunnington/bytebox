@@ -78,8 +78,16 @@ const GlobalValue = struct {
         Immutable,
     };
 
-    value: TypedValue,
     mut: Mut,
+    value: TypedValue,
+};
+
+// others such as null ref, funcref, or another global
+const GlobalValueInitTag = enum {
+    Value,
+};
+const GlobalValueInitOptions = union(GlobalValueInitTag) {
+    Value: TypedValue,
 };
 
 const Stack = struct {
@@ -400,6 +408,13 @@ const VmState = struct {
                                 const export_ = Export{ .name = name, .index = exportIndex };
                                 try vm.exports.functions.append(export_);
                             },
+                            .Global => {
+                                if (exportIndex >= vm.globals.items.len) {
+                                    return error.InvalidExport;
+                                }
+                                const export_ = Export{ .name = name, .index = exportIndex };
+                                try vm.exports.globals.append(export_);
+                            },
                             else => {},
                         }
 
@@ -449,6 +464,7 @@ const VmState = struct {
         for (self.functions.items) |item| {
             item.locals.deinit();
         }
+
         for (self.exports.functions.items) |item| {
             item.name.deinit();
         }
@@ -778,11 +794,14 @@ const WasmBuilder = struct {
             func.locals.deinit();
             func.instructions.deinit();
         }
+        self.functions.deinit();
+
         for (self.globals.items) |*global| {
             global.exportName.deinit();
             global.initInstructions.deinit();
         }
-        self.functions.deinit();
+        self.globals.deinit();
+
         self.bytecode.deinit();
     }
 
@@ -814,7 +833,7 @@ const WasmBuilder = struct {
         self.needsRebuild = true;
     }
 
-    fn addGlobal(self: *Self, exportName: ?[]const u8, valtype: Type, mut: GlobalValue.Mut, initInstructions: []const u8) !void {
+    fn addGlobal(self: *Self, exportName: ?[]const u8, valtype: Type, mut: GlobalValue.Mut, initOpts:GlobalValueInitOptions) !void {
         var g = BuilderGlobal{
             .exportName = std.ArrayList(u8).init(self.allocator),
             .type = valtype,
@@ -827,16 +846,13 @@ const WasmBuilder = struct {
         if (exportName) |name| {
             try g.exportName.appendSlice(name);
         }
-        if (initInstructions.len == 0) {
-            return error.InvalidGlobalInit;
+
+        switch (initOpts) {
+            .Value => |v| {
+                var writer = g.initInstructions.writer();
+                try writeTypedValue(v, writer);
+            },
         }
-        if (initInstructions.len > max_global_init_size) {
-            return error.InvalidGlobalInit;
-        }        
-        if (initInstructions[initInstructions.len - 1] != @enumToInt(Instruction.End)) {
-            return error.InvalidGlobalInit;
-        }
-        try g.initInstructions.appendSlice(initInstructions);
 
         try self.globals.append(g);
 
@@ -957,6 +973,16 @@ const WasmBuilder = struct {
                             try writer.writeIntBig(u32, @intCast(u32, i));
                         }
                     }
+                    for (self.globals.items) |global, i| {
+                        if (global.exportName.items.len > 0) {
+                            num_exports += 1;
+
+                            try writer.writeIntBig(u32, @intCast(u32, global.exportName.items.len));
+                            _ = try writer.write(global.exportName.items);
+                            try writer.writeByte(@enumToInt(ExportType.Global));
+                            try writer.writeIntBig(u32, @intCast(u32, i));
+                        }
+                    }
 
                     try LocalHelpers.WriteU32AtOffset(sectionBytes.items, num_exports_pos, num_exports);
                 },
@@ -1001,6 +1027,31 @@ const WasmBuilder = struct {
         return self.bytecode.items;
     }
 };
+
+fn writeTypedValue(value:TypedValue, writer: anytype) !void {
+    switch (value) {
+        .I32 => |v| {
+            try writer.writeByte(@enumToInt(Instruction.I32_Const));
+            try writer.writeIntBig(i32, v);
+        },
+        else => unreachable,
+        // .I64 => |v| {
+        //     try writer.writeByte(@enumToInt(Instruction.I64_Const));
+        //     try writer.writeIntBig(i64, v);
+        // },
+        // .F32 => |v| {
+        //     try writer.writeByte(@enumToInt(Instruction.F32_Const));
+        //     try writer.writeIntBig(f32, v);
+        // },
+        // .F64 => |v| {
+        //     try writer.writeByte(@enumToInt(Instruction.F64_Const));
+        //     try writer.writeIntBig(f64, v);
+        // },
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Tests
 
 fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, optionalLocals:?[]Type, expectedReturns:?[]TypedValue) !void {
     var builder = WasmBuilder.init(std.testing.allocator);
@@ -1079,19 +1130,9 @@ test "wasm builder" {
     var builder = WasmBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
+    try builder.addGlobal("glb1", Type.I32, GlobalValue.Mut.Immutable, GlobalValueInitOptions{.Value = TypedValue{.I32=0x88}});
     try builder.addFunc("abcd", &[_]Type{.I64}, &[_]Type{.I32}, &[_]Type{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
     var bytecode = try builder.getBytecode();
-
-    // std.debug.print("bytecode: \n\t", .{});
-    // var tab:u32 = 0;
-    // for (bytecode) |byte| {
-    //     if (tab == 4) {
-    //         std.debug.print("\n\t", .{});
-    //         tab = 0;
-    //     }
-    //     tab += 1;
-    //     std.debug.print("0x{X:2} ", .{byte});
-    // }
 
     // zig fmt: off
     const expected = [_]u8{
@@ -1110,14 +1151,21 @@ test "wasm builder" {
         0x00, 0x00, 0x00, 0x01, // num functions
         0x00, 0x00, 0x00, 0x00, // index to types
         @enumToInt(Section.Global),
-        0x00, 0x00, 0x00, 0x04, // section size
-        0x00, 0x00, 0x00, 0x00, // num globals
+        0x00, 0x00, 0x00, 0x0B, // section size
+        0x00, 0x00, 0x00, 0x01, // num globals
+        @enumToInt(GlobalValue.Mut.Immutable),
+        @enumToInt(Type.I32),
+        0x41, 0x00, 0x00, 0x00, 0x88, // const i32 instruction 
         @enumToInt(Section.Export),
-        0x00, 0x00, 0x00, 0x11, // section size
-        0x00, 0x00, 0x00, 0x01, // num exports
+        0x00, 0x00, 0x00, 0x1E, // section size
+        0x00, 0x00, 0x00, 0x02, // num exports
         0x00, 0x00, 0x00, 0x04, // size of export name (1)
         0x61, 0x62, 0x63, 0x64, // "abcd"
         @enumToInt(ExportType.Function),
+        0x00, 0x00, 0x00, 0x00, // index of export
+        0x00, 0x00, 0x00, 0x04, // size of export name (2)
+        0x67, 0x6C, 0x62, 0x31, // "glb1"
+        @enumToInt(ExportType.Global),
         0x00, 0x00, 0x00, 0x00, // index of export
         @enumToInt(Section.Code),
         0x00, 0x00, 0x00, 0x13, // section size
@@ -1130,7 +1178,33 @@ test "wasm builder" {
     };
     // zig fmt: on
 
-    try std.testing.expect(std.mem.eql(u8, bytecode, &expected));
+    const areEqual = std.mem.eql(u8, bytecode, &expected);
+
+    if (!areEqual) {
+        std.debug.print("expected: \n\t", .{});
+        var tab:u32 = 0;
+        for (expected) |byte| {
+            if (tab == 4) {
+                std.debug.print("\n\t", .{});
+                tab = 0;
+            }
+            tab += 1;
+            std.debug.print("0x{X:2} ", .{byte});
+        }
+
+        std.debug.print("actual: \n\t", .{});
+        tab = 0;
+        for (bytecode) |byte| {
+            if (tab == 4) {
+                std.debug.print("\n\t", .{});
+                tab = 0;
+            }
+            tab += 1;
+            std.debug.print("0x{X:2} ", .{byte});
+        }
+    }
+
+    try std.testing.expect(areEqual);
 }
 
 test "unreachable" {
