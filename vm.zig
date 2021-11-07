@@ -14,6 +14,7 @@ const VMError = error{
     UnknownInstruction,
     TypeMismatch,
     UnknownExport,
+    AttemptToSetImmutable,
 };
 
 const Instruction = enum(u8) {
@@ -362,6 +363,7 @@ const VmState = struct {
                         var valtype = @intToEnum(Type, try reader.readByte());
 
                         var init = std.ArrayList(u8).init(allocator);
+                        defer init.deinit();
                         try reader.readUntilDelimiterArrayList(&init, @enumToInt(Instruction.End), max_global_init_size);
 
                         // TODO validate init instructions are a constant expression
@@ -485,6 +487,7 @@ const VmState = struct {
 
         self.types.deinit();
         self.functions.deinit();
+        self.globals.deinit();
         self.stack.deinit();
         self.callstack.deinit();
     }
@@ -580,6 +583,9 @@ const VmState = struct {
                 Instruction.Global_Set => {
                     var global_index = try reader.readIntBig(u32);
                     var global = &self.globals.items[global_index];
+                    if (global.mut == GlobalValue.Mut.Immutable) {
+                        return error.AttemptToSetImmutable;
+                    }
                     global.value = try self.stack.pop();
                 },
                 Instruction.I32_Const => {
@@ -851,6 +857,7 @@ const WasmBuilder = struct {
             .Value => |v| {
                 var writer = g.initInstructions.writer();
                 try writeTypedValue(v, writer);
+                try writer.writeByte(@enumToInt(Instruction.End));
             },
         }
 
@@ -861,6 +868,8 @@ const WasmBuilder = struct {
 
     fn buildBytecode(self: *Self) !void {
         const LocalHelpers = struct{
+            const section_header_bytesize: usize = @sizeOf(u8) + @sizeOf(u32);
+
             fn WriteU32AtOffset(sectionBytes: []u8, offset:usize, value:u32) !void {
                 std.debug.assert(offset < sectionBytes.len);
                 var stream = std.io.fixedBufferStream(sectionBytes);
@@ -870,7 +879,6 @@ const WasmBuilder = struct {
             }
 
             fn WriteSectionSize(sectionBytes: []u8) !void {
-                const section_header_bytesize: usize = @sizeOf(u8) + @sizeOf(u32);
 
                 try WriteU32AtOffset(sectionBytes, 1, @intCast(u32, sectionBytes.len - section_header_bytesize));
             }
@@ -1013,9 +1021,11 @@ const WasmBuilder = struct {
                 }
             }
 
+            // skip this section if there's nothing in it
             try LocalHelpers.WriteSectionSize(sectionBytes.items);
-
-            try self.bytecode.appendSlice(sectionBytes.items);
+            if (sectionBytes.items.len > LocalHelpers.section_header_bytesize) {
+                try self.bytecode.appendSlice(sectionBytes.items);
+            }
         }
     }
 
@@ -1053,7 +1063,17 @@ fn writeTypedValue(value:TypedValue, writer: anytype) !void {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Tests
 
-fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, optionalLocals:?[]Type, expectedReturns:?[]TypedValue) !void {
+const TestGlobal = struct {
+    exportName: ?[]const u8,
+    initValue: TypedValue,
+    mut: GlobalValue.Mut,
+};
+
+const TestOptions = struct {
+    globals: ?[]const TestGlobal = null,
+};
+
+fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, optionalLocals:?[]Type, expectedReturns:?[]TypedValue, options:TestOptions) !void {
     var builder = WasmBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
@@ -1078,6 +1098,17 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, opti
 
         const locals = optionalLocals orelse &[_]Type{};
         try builder.addFunc("testFunc", params.items, returns.items, locals, bytecode);
+
+        if (options.globals) |globals| {
+            for (globals) |global| {
+                var valtype = std.meta.activeTag(global.initValue);
+                var initOpts = GlobalValueInitOptions{
+                    .Value = global.initValue,
+                };
+
+                try builder.addGlobal(global.exportName, valtype, global.mut, initOpts);
+            }
+        }
     }
 
     const rebuiltBytecode = try builder.getBytecode();
@@ -1269,11 +1300,57 @@ test "local_set" {
 }
 
 test "global_get" {
-    // TODO
+    var bytecode = [_]u8{
+        0x23,// get global
+        0x00, 0x00, 0x00, 0x00, // at index 0
+    };
+    var globals = [_]TestGlobal {
+        .{
+            .exportName = "abcd",
+            .initValue = TypedValue{.I32 = 0x1337},
+            .mut = GlobalValue.Mut.Immutable,
+        },
+    };
+    var options = TestOptions{
+        .globals = &globals,
+    };
+    var expected = [_]TypedValue{.{.I32 = 0x1337}};
+    try testExecuteAndExpect(&bytecode, null, null, &expected, options);
 }
 
 test "global_set" {
-    // TODO
+    var bytecode = [_]u8{
+        0x41,
+        0x00, 0x00, 0x13, 0x37,
+        0x24, // set global
+        0x00, 0x00, 0x00, 0x00, // at index 0
+        0x23, // get global
+        0x00, 0x00, 0x00, 0x00, // at index 0
+    };
+    var globals = [_]TestGlobal {
+        .{
+            .exportName = null,
+            .initValue = TypedValue{.I32 = 0x0},
+            .mut = GlobalValue.Mut.Mutable,
+        },
+    };
+    var options = TestOptions{
+        .globals = &globals,
+    };
+    var expected = [_]TypedValue{.{.I32 = 0x1337}};
+
+    try testExecuteAndExpect(&bytecode, null, null, &expected, options);
+
+    globals[0].mut = GlobalValue.Mut.Immutable;
+    var didCatchError = false;
+    var didCatchCorrectError = false;
+    testExecuteAndExpect(&bytecode, null, null, &expected, options) catch |err| {
+        didCatchError = true;
+        didCatchCorrectError = (err == VMError.AttemptToSetImmutable);
+    };
+
+    try std.testing.expect(didCatchError);
+    try std.testing.expect(didCatchCorrectError);
 }
 
 test "local_tee" {
