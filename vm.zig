@@ -16,6 +16,7 @@ const VMError = error{
     TypeMismatch,
     UnknownExport,
     AttemptToSetImmutable,
+    MissingCallFrame,
 };
 
 const Instruction = enum(u8) {
@@ -86,7 +87,7 @@ const GlobalValue = struct {
     value: TypedValue,
 };
 
-// others such as null ref, funcref, or another global
+// others such as null ref, funcref, or an imported global
 const GlobalValueInitTag = enum {
     Value,
 };
@@ -94,12 +95,28 @@ const GlobalValueInitOptions = union(GlobalValueInitTag) {
     Value: TypedValue,
 };
 
+const CallFrame = struct {
+    func: *const Function,
+    locals: std.ArrayList(TypedValue),
+};
+
+const StackItemType = enum(u8) {
+    Value,
+    Label,
+    Frame,
+};
+const StackItem = union(StackItemType) {
+    Value: TypedValue,
+    Label: void,
+    Frame: CallFrame,
+};
+
 const Stack = struct {
     const Self = @This();
 
     fn init(allocator: *std.mem.Allocator) Self {
         return Self{
-            .stack = std.ArrayList(TypedValue).init(allocator),
+            .stack = std.ArrayList(StackItem).init(allocator),
         };
     }
 
@@ -107,42 +124,88 @@ const Stack = struct {
         self.stack.deinit();
     }
 
-    fn top(self: *Self) !TypedValue {
+    fn top(self: *Self) !*StackItem {
         if (self.stack.items.len > 0) {
-            return self.stack.items[self.stack.items.len - 1];
-        }
-        return error.OutOfBounds;        
-    }
-
-    fn pop(self: *Self) !TypedValue {
-        if (self.stack.items.len > 0) {
-            return self.stack.orderedRemove(self.stack.items.len - 1);
+            return &self.stack.items[self.stack.items.len - 1];
         }
         return error.OutOfBounds;
     }
 
-    fn push(self: *Self, v: TypedValue) !void {
-        try self.stack.append(v);
+    fn pop(self: *Self) !StackItem {
+        if (self.stack.items.len > 0) {
+            const index = self.stack.items.len - 1;
+            return self.stack.orderedRemove(index);
+        }
+        return error.OutOfBounds;
     }
 
-    fn pop_i32(self: *Self) !i32 {
-        var typed: TypedValue = try self.pop();
+    fn topValue(self: *Self) !TypedValue {
+        var item = try self.top();
+        switch (item.*) {
+            .Value => |v| return v,
+            else => return error.TypeMismatch,
+        }
+    }
+
+    fn popValue(self: *Self) !TypedValue {
+        var item = try self.pop();
+        switch (item) {
+            .Value => |v| return v,
+            else => return error.TypeMismatch,
+        }
+    }
+
+    fn pushValue(self: *Self, v: TypedValue) !void {
+        var item = StackItem{.Value = v};
+        try self.stack.append(item);
+    }
+
+    fn pushCallFrame(self: *Self, frame: CallFrame) !void {
+        var item = StackItem{.Frame = frame};
+        try self.stack.append(item);
+    }
+
+    fn popFrame(self: *Self) !void {
+        var item = try self.pop();
+        switch (item) {
+            .Frame => |frame| {
+                frame.locals.deinit();
+            },
+            else => return error.TypeMismatch,
+        }
+    }
+    
+    fn findCurrentFrame(self: *Self) ?*CallFrame {
+        var item_index:i32 = @intCast(i32, self.stack.items.len) - 1;
+        while (item_index >= 0) {
+            var index = @intCast(usize, item_index);
+            if (std.meta.activeTag(self.stack.items[index]) == .Frame) {
+                return &self.stack.items[index].Frame;
+            }
+            item_index -= 1;
+        }
+
+        return null;
+    }
+
+    fn popI32(self: *Self) !i32 {
+        var typed: TypedValue = try self.popValue();
         switch (typed) {
             Type.I32 => |value| return value,
             else => return error.TypeMismatch,
         }
     }
 
-    fn push_i32(self: *Self, v: i32) !void {
+    fn pushI32(self: *Self, v: i32) !void {
         var typed = TypedValue{ .I32 = v };
-        try self.push(typed);
+        try self.pushValue(typed);
     }
 
     fn size(self: *Self) usize {
         return self.stack.items.len;
     }
 
-    stack: std.ArrayList(TypedValue),
+    stack: std.ArrayList(StackItem),
 };
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
@@ -232,12 +295,6 @@ const Exports = struct {
 const VmState = struct {
     const Self = @This();
 
-    const StackFrame = struct {
-        func: *const Function,
-        stackBaseIndex: u32,
-        locals: []TypedValue,
-    };
-
     allocator: *std.mem.Allocator,
     bytecode: []const u8,
     bytecode_mem_usage: std.ArrayList(u8),
@@ -246,7 +303,6 @@ const VmState = struct {
     globals: std.ArrayList(GlobalValue),
     exports: Exports,
     stack: Stack,
-    callstack: std.ArrayList(StackFrame),
 
     const BytecodeMemUsage = enum {
         UseExisting,
@@ -280,7 +336,6 @@ const VmState = struct {
                 .globals = std.ArrayList(Export).init(allocator),
             },
             .stack = Stack.init(allocator),
-            .callstack = std.ArrayList(StackFrame).init(allocator),
         };
         errdefer vm.deinit();
 
@@ -370,13 +425,12 @@ const VmState = struct {
                         try reader.readUntilDelimiterArrayList(&init, @enumToInt(Instruction.End), max_global_init_size);
 
                         // TODO validate init instructions are a constant expression
-                        // TODO handle referencing other globals before they're initialized, maybe use a 
-                        //      warmup phase after the parse is complete
+                        // TODO validate global references are for imports only
                         try vm.executeWasm(init.items, 0);
                         if (vm.stack.size() != 1) {
                             return error.InvalidGlobalInit;
                         }
-                        var value = try vm.stack.pop();
+                        var value = try vm.stack.popValue();
 
                         if (std.meta.activeTag(value) != valtype) {
                             return error.InvalidGlobalInit;
@@ -492,7 +546,6 @@ const VmState = struct {
         self.functions.deinit();
         self.globals.deinit();
         self.stack.deinit();
-        self.callstack.deinit();
     }
 
     fn callFunc(self: *Self, name: []const u8, params: []const TypedValue, returns: []TypedValue) !void {
@@ -514,13 +567,12 @@ const VmState = struct {
                 }
 
                 var locals = std.ArrayList(TypedValue).init(self.allocator);
-                defer locals.deinit();
                 try locals.resize(func.locals.items.len);
                 for (params) |v, i| {
                     locals.items[i] = v;
                 }
 
-                try self.callstack.append(StackFrame{ .func = &func, .stackBaseIndex = 0, .locals = locals.items });
+                try self.stack.pushCallFrame(CallFrame{.func = &func, .locals = locals});
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
@@ -532,7 +584,7 @@ const VmState = struct {
                     var index: i32 = @intCast(i32, returns.len - 1);
                     while (index >= 0) {
                         // std.debug.print("stack size: {}, index: {}\n", .{self.stack.size(), index});
-                        returns[@intCast(usize, index)] = try self.stack.pop();
+                        returns[@intCast(usize, index)] = try self.stack.popValue();
                         index -= 1;
                     }
                 }
@@ -557,16 +609,39 @@ const VmState = struct {
                 },
                 Instruction.Noop => {},
                 Instruction.End => {
-                    return;
-                    // return from function for now. in the future needs to handle returning from blocks
+                    // assume return from function for now. in the future needs to handle returning from blocks
+                    var frameOrNull: ?*CallFrame = self.stack.findCurrentFrame();
+                    if (frameOrNull) |frame| {
+                        const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
+
+                        var returns = std.ArrayList(TypedValue).init(self.allocator);
+                        defer returns.deinit();
+                        try returns.ensureCapacity(returnTypes.len);
+
+                        for (returnTypes) |valtype| {
+                            var value = try self.stack.popValue();
+                            if (valtype != std.meta.activeTag(value)) {
+                                return error.TypeMismatch;
+                            }
+
+                            try returns.append(value);
+                        }
+
+                        try self.stack.popFrame();
+
+                        while (returns.items.len > 0) {
+                            var item = returns.orderedRemove(returns.items.len - 1);
+                            try self.stack.pushValue(item);
+                        }
+                    }
                 },
                 Instruction.Drop => {
-                    _ = try self.stack.pop();
+                    _ = try self.stack.popValue();
                 },
                 Instruction.Select => {
-                    var boolean = try self.stack.pop();
-                    var v2 = try self.stack.pop();
-                    var v1 = try self.stack.pop();
+                    var boolean = try self.stack.popValue();
+                    var v2 = try self.stack.popValue();
+                    var v1 = try self.stack.popValue();
 
                     if (builtin.mode == .Debug) {
                         if (std.meta.activeTag(boolean) != Type.I32) {
@@ -577,33 +652,39 @@ const VmState = struct {
                     }
 
                     if (boolean.I32 != 0) {
-                        try self.stack.push(v1);
+                        try self.stack.pushValue(v1);
                     } else {
-                        try self.stack.push(v2);
+                        try self.stack.pushValue(v2);
                     }
                 },
                 Instruction.Local_Get => {
                     var locals_index = try reader.readIntBig(u32);
-                    var stackframe:StackFrame = self.callstack.items[self.callstack.items.len - 1];
-                    var v:TypedValue = stackframe.locals[locals_index];
-                    try self.stack.push(v);
+                    var frameOrNull:?*CallFrame = self.stack.findCurrentFrame();
+                    if (frameOrNull) |frame| {
+                        var v:TypedValue = frame.locals.items[locals_index];
+                        try self.stack.pushValue(v);
+                    }
                 },
                 Instruction.Local_Set => {
                     var locals_index = try reader.readIntBig(u32);
-                    var stackframe:StackFrame = self.callstack.items[self.callstack.items.len - 1];
-                    var v:TypedValue = try self.stack.pop();
-                    stackframe.locals[locals_index] = v;
+                    var frameOrNull:?*CallFrame = self.stack.findCurrentFrame();
+                    if (frameOrNull) |frame| {
+                        var v:TypedValue = try self.stack.popValue();
+                        frame.locals.items[locals_index] = v;
+                    }
                 },
                 Instruction.Local_Tee => {
                     var locals_index = try reader.readIntBig(u32);
-                    var stackframe:StackFrame = self.callstack.items[self.callstack.items.len - 1];
-                    var v:TypedValue = try self.stack.top();
-                    stackframe.locals[locals_index] = v;
+                    var frameOrNull:?*CallFrame = self.stack.findCurrentFrame();
+                    if (frameOrNull) |frame| {
+                        var v:TypedValue = try self.stack.topValue();
+                        frame.locals.items[locals_index] = v;
+                    }
                 },
                 Instruction.Global_Get => {
                     var global_index = try reader.readIntBig(u32);
                     var global = &self.globals.items[global_index];
-                    try self.stack.push(global.value);
+                    try self.stack.pushValue(global.value);
                 },
                 Instruction.Global_Set => {
                     var global_index = try reader.readIntBig(u32);
@@ -611,7 +692,7 @@ const VmState = struct {
                     if (global.mut == GlobalValue.Mut.Immutable) {
                         return error.AttemptToSetImmutable;
                     }
-                    global.value = try self.stack.pop();
+                    global.value = try self.stack.popValue();
                 },
                 Instruction.I32_Const => {
                     if (stream.pos + 3 >= stream.buffer.len) {
@@ -619,166 +700,166 @@ const VmState = struct {
                     }
 
                     var v: i32 = try reader.readIntBig(i32);
-                    try self.stack.push_i32(v);
+                    try self.stack.pushI32(v);
                 },
                 Instruction.I32_Eqz => {
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 == 0) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_Eq => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 == v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_NE => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 != v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_LT_S => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_LT_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_GT_S => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_GT_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_LE_S => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_LE_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_GE_S => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_GE_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_Add => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result = v1 + v2;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_Sub => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var result = v1 - v2;
-                    try self.stack.push_i32(result);
+                    try self.stack.pushI32(result);
                 },
                 Instruction.I32_Mul => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var value = v1 * v2;
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Div_S => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var value = try std.math.divTrunc(i32, v1, v2);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Div_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var value_unsigned = try std.math.divFloor(u32, v1, v2);
                     var value = @bitCast(i32, value_unsigned);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Rem_S => {
-                    var v2: i32 = try self.stack.pop_i32();
-                    var v1: i32 = try self.stack.pop_i32();
+                    var v2: i32 = try self.stack.popI32();
+                    var v1: i32 = try self.stack.popI32();
                     var value = @rem(v1, v2);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Rem_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var value = @bitCast(i32, v1 % v2);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_And => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var value = @bitCast(i32, v1 & v2);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Or => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var value = @bitCast(i32, v1 | v2);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Xor => {
-                    var v2: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var v1: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var value = @bitCast(i32, v1 ^ v2);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Shl => {
-                    var shift_unsafe: i32 = try self.stack.pop_i32();
-                    var int: i32 = try self.stack.pop_i32();
+                    var shift_unsafe: i32 = try self.stack.popI32();
+                    var int: i32 = try self.stack.popI32();
                     var shift = @intCast(u5, shift_unsafe);
                     var value = int << shift;
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Shr_S => {
-                    var shift_unsafe: i32 = try self.stack.pop_i32();
-                    var int: i32 = try self.stack.pop_i32();
+                    var shift_unsafe: i32 = try self.stack.popI32();
+                    var int: i32 = try self.stack.popI32();
                     var shift = @intCast(u5, shift_unsafe);
                     var value = int >> shift;
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Shr_U => {
-                    var shift_unsafe: i32 = try self.stack.pop_i32();
-                    var int: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var shift_unsafe: i32 = try self.stack.popI32();
+                    var int: u32 = @bitCast(u32, try self.stack.popI32());
                     var shift = @intCast(u5, shift_unsafe);
                     var value = @bitCast(i32, int >> shift);
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Rotl => {
-                    var rot: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var int: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var rot: u32 = @bitCast(u32, try self.stack.popI32());
+                    var int: u32 = @bitCast(u32, try self.stack.popI32());
                     var value = @bitCast(i32, std.math.rotl(u32, int, rot));
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 Instruction.I32_Rotr => {
-                    var rot: u32 = @bitCast(u32, try self.stack.pop_i32());
-                    var int: u32 = @bitCast(u32, try self.stack.pop_i32());
+                    var rot: u32 = @bitCast(u32, try self.stack.popI32());
+                    var int: u32 = @bitCast(u32, try self.stack.popI32());
                     var value = @bitCast(i32, std.math.rotr(u32, int, rot));
-                    try self.stack.push_i32(value);
+                    try self.stack.pushI32(value);
                 },
                 // else => return error.UnknownInstruction,
             }
