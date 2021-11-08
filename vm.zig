@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const VmParseError = error{
     InvalidMagicSignature,
@@ -21,6 +22,8 @@ const Instruction = enum(u8) {
     Unreachable = 0x00,
     Noop = 0x01,
     End = 0x0B,
+    Drop = 0x1A,
+    Select = 0x1B,
     Local_Get = 0x20,
     Local_Set = 0x21,
     Local_Tee = 0x22,
@@ -556,6 +559,28 @@ const VmState = struct {
                 Instruction.End => {
                     return;
                     // return from function for now. in the future needs to handle returning from blocks
+                },
+                Instruction.Drop => {
+                    _ = try self.stack.pop();
+                },
+                Instruction.Select => {
+                    var boolean = try self.stack.pop();
+                    var v2 = try self.stack.pop();
+                    var v1 = try self.stack.pop();
+
+                    if (builtin.mode == .Debug) {
+                        if (std.meta.activeTag(boolean) != Type.I32) {
+                            return error.TypeMismatch;
+                        } else if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
+                            return error.TypeMismatch;
+                        }
+                    }
+
+                    if (boolean.I32 != 0) {
+                        try self.stack.push(v1);
+                    } else {
+                        try self.stack.push(v2);
+                    }
                 },
                 Instruction.Local_Get => {
                     var locals_index = try reader.readIntBig(u32);
@@ -1150,11 +1175,11 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, opti
 
 fn testExecuteAndExpectU32Return(bytecode: []const u8, expected:u32) !void {
     var expectedReturns = [_]TypedValue{.{.I32 = @bitCast(i32, expected)}};
-    try testExecuteAndExpect(bytecode, null, null, &expectedReturns);
+    try testExecuteAndExpect(bytecode, null, null, &expectedReturns, .{});
 }
 
 fn testExecute(bytecode: []const u8) !void {
-    try testExecuteAndExpect(bytecode, null, null, null);
+    try testExecuteAndExpect(bytecode, null, null, null, .{});
 }
 
 test "wasm builder" {
@@ -1212,7 +1237,7 @@ test "wasm builder" {
     const areEqual = std.mem.eql(u8, bytecode, &expected);
 
     if (!areEqual) {
-        std.debug.print("expected: \n\t", .{});
+        std.debug.print("\n\nexpected: \n\t", .{});
         var tab:u32 = 0;
         for (expected) |byte| {
             if (tab == 4) {
@@ -1223,7 +1248,7 @@ test "wasm builder" {
             std.debug.print("0x{X:2} ", .{byte});
         }
 
-        std.debug.print("actual: \n\t", .{});
+        std.debug.print("\n\nactual: \n\t", .{});
         tab = 0;
         for (bytecode) |byte| {
             if (tab == 4) {
@@ -1265,6 +1290,41 @@ test "noop" {
     try testExecute(&bytecode);
 }
 
+test "drop" {
+    var bytecode = [_]u8{
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x13, 0x37,
+        0x41, // set constant values on stack
+        0x00, 0x00, 0xBE, 0xEF,
+        0x1A, // drop top value
+    };
+    try testExecuteAndExpectU32Return(&bytecode, 0x1337);
+}
+
+test "select" {
+    var bytecode1 = [_]u8{
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x13, 0x37,
+        0x41,
+        0x00, 0x00, 0xBE, 0xEF,
+        0x41,
+        0x00, 0x00, 0x00, 0xFF, //nonzero should pick val1
+        0x1B, // select
+    };
+    try testExecuteAndExpectU32Return(&bytecode1, 0x1337);
+
+    var bytecode2 = [_]u8{
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x13, 0x37,
+        0x41,
+        0x00, 0x00, 0xBE, 0xEF,
+        0x41,
+        0x00, 0x00, 0x00, 0x00, //zero should pick val2
+        0x1B, // select
+    };
+    try testExecuteAndExpectU32Return(&bytecode2, 0xBEEF);
+}
+
 test "local_get" {
     var bytecode = [_]u8{
         0x20, 
@@ -1273,7 +1333,7 @@ test "local_get" {
     var params = [_]TypedValue{.{.I32 = 0x1337}};
     var locals = [_]Type{.I32};
     var expected = [_]TypedValue{.{.I32 = 0x1337}};
-    try testExecuteAndExpect(&bytecode, &params, &locals, &expected);
+    try testExecuteAndExpect(&bytecode, &params, &locals, &expected, .{});
 }
 
 test "local_set" {
@@ -1296,7 +1356,23 @@ test "local_set" {
     var params = [_]TypedValue{};
     var locals = [_]Type{.I32};
     var expected = [_]TypedValue{.{.I32 = 0x1337}};
-    try testExecuteAndExpect(&bytecode, &params, &locals, &expected);
+    try testExecuteAndExpect(&bytecode, &params, &locals, &expected, .{});
+}
+
+test "local_tee" {
+    var bytecode = [_]u8{
+        0x41, // set constant value on stack
+        0x00, 0x00, 0x13, 0x37,
+        0x22, // leave value on stack but also put it in locals
+        0x00, 0x00, 0x00, 0x00,
+        0x20, // push local onto stack
+        0x00, 0x00, 0x00, 0x00,
+        0x6A, // add 2 stack values, 0x1337 + 0x1337 = 0x266E
+    };
+    var params = [_]TypedValue{.{.I32 = 0x1337}};
+    var locals = [_]Type{.I32};
+    var expected = [_]TypedValue{.{.I32 = 0x266E}};
+    try testExecuteAndExpect(&bytecode, &params, &locals, &expected, .{});
 }
 
 test "global_get" {
@@ -1352,23 +1428,6 @@ test "global_set" {
     try std.testing.expect(didCatchError);
     try std.testing.expect(didCatchCorrectError);
 }
-
-test "local_tee" {
-    var bytecode = [_]u8{
-        0x41, // set constant value on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x22, // leave value on stack but also put it in locals
-        0x00, 0x00, 0x00, 0x00,
-        0x20, // push local onto stack
-        0x00, 0x00, 0x00, 0x00,
-        0x6A, // add 2 stack values, 0x1337 + 0x1337 = 0x266E
-    };
-    var params = [_]TypedValue{.{.I32 = 0x1337}};
-    var locals = [_]Type{.I32};
-    var expected = [_]TypedValue{.{.I32 = 0x266E}};
-    try testExecuteAndExpect(&bytecode, &params, &locals, &expected);
-}
-
 
 test "i32_eqz" {
     var bytecode1 = [_]u8{
