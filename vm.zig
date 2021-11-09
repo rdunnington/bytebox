@@ -109,7 +109,7 @@ const StackItemType = enum(u8) {
 };
 const StackItem = union(StackItemType) {
     Value: TypedValue,
-    Label: void,
+    Label: u32,
     Frame: CallFrame,
 };
 
@@ -149,6 +149,11 @@ const Stack = struct {
         }
     }
 
+    fn pushValue(self: *Self, v: TypedValue) !void {
+        var item = StackItem{.Value = v};
+        try self.stack.append(item);
+    }
+
     fn popValue(self: *Self) !TypedValue {
         var item = try self.pop();
         switch (item) {
@@ -157,9 +162,19 @@ const Stack = struct {
         }
     }
 
-    fn pushValue(self: *Self, v: TypedValue) !void {
-        var item = StackItem{.Value = v};
+    fn pushLabel(self:*Self) !void {
+        var item = StackItem{.Label = self.nextLabel};
         try self.stack.append(item);
+        self.nextLabel += 1;
+    }
+
+    fn popLabel(self: *Self) !void {
+        var item = try self.pop();
+        switch (item) {
+            .Label => {},
+            else => return error.TypeMismatch,
+        }
+        self.nextLabel -= 1;
     }
 
     fn pushFrame(self: *Self, frame: CallFrame) !void {
@@ -208,6 +223,7 @@ const Stack = struct {
     }
 
     stack: std.ArrayList(StackItem),
+    nextLabel: u32 = 0,
 };
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
@@ -575,6 +591,7 @@ const VmState = struct {
                 }
 
                 try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals, .return_offset = null});
+                try self.stack.pushLabel();
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
@@ -633,6 +650,7 @@ const VmState = struct {
 
                         var return_offset_or_null = frame.return_offset;
 
+                        try self.stack.popLabel();
                         try self.stack.popFrame();
 
                         while (returns.items.len > 0) {
@@ -672,7 +690,7 @@ const VmState = struct {
                     }
 
                     try self.stack.pushFrame(frame);
-                    // try self.stack.pushLabel(); // TODO
+                    try self.stack.pushLabel();
                     try stream.seekTo(func.bytecodeOffset);
                 },
                 Instruction.Drop => {
