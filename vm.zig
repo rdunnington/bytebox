@@ -96,10 +96,14 @@ const GlobalValueInitOptions = union(GlobalValueInitTag) {
     Value: TypedValue,
 };
 
+const Label = struct{
+    index:u32,
+    continuation: ?u32,
+};
+
 const CallFrame = struct {
     func: *const Function,
     locals: std.ArrayList(TypedValue),
-    return_offset: ?u32,
 };
 
 const StackItemType = enum(u8) {
@@ -109,7 +113,7 @@ const StackItemType = enum(u8) {
 };
 const StackItem = union(StackItemType) {
     Value: TypedValue,
-    Label: u32,
+    Label: Label,
     Frame: CallFrame,
 };
 
@@ -162,19 +166,25 @@ const Stack = struct {
         }
     }
 
-    fn pushLabel(self:*Self) !void {
-        var item = StackItem{.Label = self.nextLabel};
+    fn pushLabel(self:*Self, continuation:?u32) !void {
+        var item = StackItem{.Label = .{
+            .index = self.nextLabel,
+            .continuation = continuation,
+        }};
         try self.stack.append(item);
         self.nextLabel += 1;
     }
 
-    fn popLabel(self: *Self) !void {
+    fn popLabel(self: *Self) !?u32 {
+        var continuation:?u32 = undefined;
         var item = try self.pop();
         switch (item) {
-            .Label => {},
+            .Label => |label| continuation = label.continuation,
             else => return error.TypeMismatch,
         }
         self.nextLabel -= 1;
+
+        return continuation;
     }
 
     fn pushFrame(self: *Self, frame: CallFrame) !void {
@@ -590,8 +600,8 @@ const VmState = struct {
                     locals.items[i] = v;
                 }
 
-                try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals, .return_offset = null});
-                try self.stack.pushLabel();
+                try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals,});
+                try self.stack.pushLabel(null);
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
@@ -648,9 +658,7 @@ const VmState = struct {
                             try returns.append(value);
                         }
 
-                        var return_offset_or_null = frame.return_offset;
-
-                        try self.stack.popLabel();
+                        var return_offset_or_null = try self.stack.popLabel();
                         try self.stack.popFrame();
 
                         while (returns.items.len > 0) {
@@ -663,6 +671,8 @@ const VmState = struct {
                         } else {
                             return; // no return offset means this should have been the first frame in the stack
                         }
+                    } else {
+                        return error.MissingCallFrame;
                     }
                 },
                 Instruction.Call => {
@@ -673,7 +683,6 @@ const VmState = struct {
                     var frame = CallFrame{
                         .func =  func,
                         .locals = std.ArrayList(TypedValue).init(self.allocator),
-                        .return_offset = @intCast(u32, stream.pos),
                     };
 
                     const param_types:[]const Type = functype.getParams();
@@ -689,8 +698,10 @@ const VmState = struct {
                         try frame.locals.append(value);
                     }
 
+                    const return_offset = @intCast(u32, stream.pos);
+
                     try self.stack.pushFrame(frame);
-                    try self.stack.pushLabel();
+                    try self.stack.pushLabel(return_offset);
                     try stream.seekTo(func.bytecodeOffset);
                 },
                 Instruction.Drop => {
