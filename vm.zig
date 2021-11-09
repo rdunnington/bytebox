@@ -99,7 +99,7 @@ const GlobalValueInitOptions = union(GlobalValueInitTag) {
 const CallFrame = struct {
     func: *const Function,
     locals: std.ArrayList(TypedValue),
-    returnOffset: ?u32,
+    return_offset: ?u32,
 };
 
 const StackItemType = enum(u8) {
@@ -574,7 +574,7 @@ const VmState = struct {
                     locals.items[i] = v;
                 }
 
-                try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals, .returnOffset = null});
+                try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals, .return_offset = null});
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
@@ -605,6 +605,8 @@ const VmState = struct {
         while (stream.pos < stream.buffer.len) {
             const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
 
+            // std.debug.print("found instruction: {}\n", .{instruction});
+
             switch (instruction) {
                 Instruction.Unreachable => {
                     return error.Unreachable;
@@ -629,7 +631,7 @@ const VmState = struct {
                             try returns.append(value);
                         }
 
-                        var return_offset_or_null = frame.returnOffset;
+                        var return_offset_or_null = frame.return_offset;
 
                         try self.stack.popFrame();
 
@@ -640,6 +642,8 @@ const VmState = struct {
 
                         if (return_offset_or_null) |return_offset| {
                             try stream.seekTo(return_offset);
+                        } else {
+                            return; // no return offset means this should have been the first frame in the stack
                         }
                     }
                 },
@@ -651,7 +655,7 @@ const VmState = struct {
                     var frame = CallFrame{
                         .func =  func,
                         .locals = std.ArrayList(TypedValue).init(self.allocator),
-                        .returnOffset = @intCast(u32, stream.pos) + 1,
+                        .return_offset = @intCast(u32, stream.pos),
                     };
 
                     const param_types:[]const Type = functype.getParams();
@@ -1420,9 +1424,70 @@ test "noop" {
 }
 
 test "call" {
+    var bytecode0 = [_]u8{
+        0x20, // push local 0 onto stack
+        0x00, 0x00, 0x00, 0x00,
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x04, 0x21,
+        0x6A, // add 2 stack values, 0x42 + 0x421 = 0x463
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x00, 0x01,
+        0x10, // call func at index 1
+    };
+
+    var bytecode1 = [_]u8{
+        0x20, // push local 0 onto stack
+        0x00, 0x00, 0x00, 0x00,
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x00, 0x02,
+        0x6C, // mul 2 stack values, 0x463 * 2 = 0x8C6
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x00, 0x02,
+        0x10, // call func at index 2
+    };
+
+    var bytecode2 = [_]u8{
+        0x20, // push param 0 onto stack
+        0x00, 0x00, 0x00, 0x00,
+        0x41, // set constant values on stack
+        0x00, 0x00, 0xBE, 0xEF,
+        0x6A, // add 2 stack values, 0x8C6 + 0xBEEF = 0xC7B5
+    };
+
+    var types = [_]Type{.I32};
+    var functions = [_]TestFunction{
+        .{
+            .exportName = "testFunc",
+            .bytecode = &bytecode0,
+            .params = &types,
+            .locals = &types,
+            .returns = &types,
+        },
+        .{
+            .bytecode = &bytecode1,
+            .params = &types,
+            .locals = &types,
+            .returns = &types,
+        },
+        .{
+            .bytecode = &bytecode2,
+            .params = &types,
+            .locals = &types,
+            .returns = &types,
+        },
+    };
+    var params = [_]TypedValue{.{.I32 = 0x42}};
+    var opts = TestOptions{
+        .functions = &functions,
+        .startFunctionParams = &params,
+    };
+    var expected = [_]TypedValue{.{.I32 = 0xC7B5}};
+
+    try testCallFunc(opts, &expected);
 }
 
 test "call recursive" {
+    // todo test when branches start working
 }
 
 test "drop" {
