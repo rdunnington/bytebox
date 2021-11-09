@@ -23,6 +23,7 @@ const Instruction = enum(u8) {
     Unreachable = 0x00,
     Noop = 0x01,
     End = 0x0B,
+    Call = 0x10,
     Drop = 0x1A,
     Select = 0x1B,
     Local_Get = 0x20,
@@ -98,6 +99,7 @@ const GlobalValueInitOptions = union(GlobalValueInitTag) {
 const CallFrame = struct {
     func: *const Function,
     locals: std.ArrayList(TypedValue),
+    returnOffset: ?u32,
 };
 
 const StackItemType = enum(u8) {
@@ -160,7 +162,7 @@ const Stack = struct {
         try self.stack.append(item);
     }
 
-    fn pushCallFrame(self: *Self, frame: CallFrame) !void {
+    fn pushFrame(self: *Self, frame: CallFrame) !void {
         var item = StackItem{.Frame = frame};
         try self.stack.append(item);
     }
@@ -572,7 +574,7 @@ const VmState = struct {
                     locals.items[i] = v;
                 }
 
-                try self.stack.pushCallFrame(CallFrame{.func = &func, .locals = locals});
+                try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals, .returnOffset = null});
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
@@ -609,9 +611,9 @@ const VmState = struct {
                 },
                 Instruction.Noop => {},
                 Instruction.End => {
-                    // assume return from function for now. in the future needs to handle returning from blocks
-                    var frameOrNull: ?*CallFrame = self.stack.findCurrentFrame();
-                    if (frameOrNull) |frame| {
+                    // assume return from function for now. in the future needs to handle returning from other types of blocks
+                    var frame_or_null: ?*CallFrame = self.stack.findCurrentFrame();
+                    if (frame_or_null) |frame| {
                         const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
 
                         var returns = std.ArrayList(TypedValue).init(self.allocator);
@@ -627,13 +629,47 @@ const VmState = struct {
                             try returns.append(value);
                         }
 
+                        var return_offset_or_null = frame.returnOffset;
+
                         try self.stack.popFrame();
 
                         while (returns.items.len > 0) {
                             var item = returns.orderedRemove(returns.items.len - 1);
                             try self.stack.pushValue(item);
                         }
+
+                        if (return_offset_or_null) |return_offset| {
+                            try stream.seekTo(return_offset);
+                        }
                     }
+                },
+                Instruction.Call => {
+                    var func_index = try self.stack.popI32();
+                    const func: *const Function = &self.functions.items[@intCast(usize, func_index)];
+                    const functype: *const FunctionType = &self.types.items[func.typeIndex];
+
+                    var frame = CallFrame{
+                        .func =  func,
+                        .locals = std.ArrayList(TypedValue).init(self.allocator),
+                        .returnOffset = @intCast(u32, stream.pos) + 1,
+                    };
+
+                    const param_types:[]const Type = functype.getParams();
+                    try frame.locals.ensureCapacity(param_types.len);
+
+                    var param_index = param_types.len;
+                    while (param_index > 0) {
+                        param_index -= 1;
+                        var value = try self.stack.popValue();
+                        if (std.meta.activeTag(value) != param_types[param_index]) {
+                            return error.TypeMismatch;
+                        }
+                        try frame.locals.append(value);
+                    }
+
+                    try self.stack.pushFrame(frame);
+                    // try self.stack.pushLabel(); // TODO
+                    try stream.seekTo(func.bytecodeOffset);
                 },
                 Instruction.Drop => {
                     _ = try self.stack.popValue();
@@ -659,24 +695,24 @@ const VmState = struct {
                 },
                 Instruction.Local_Get => {
                     var locals_index = try reader.readIntBig(u32);
-                    var frameOrNull:?*CallFrame = self.stack.findCurrentFrame();
-                    if (frameOrNull) |frame| {
+                    var frame_or_null:?*CallFrame = self.stack.findCurrentFrame();
+                    if (frame_or_null) |frame| {
                         var v:TypedValue = frame.locals.items[locals_index];
                         try self.stack.pushValue(v);
                     }
                 },
                 Instruction.Local_Set => {
                     var locals_index = try reader.readIntBig(u32);
-                    var frameOrNull:?*CallFrame = self.stack.findCurrentFrame();
-                    if (frameOrNull) |frame| {
+                    var frame_or_null:?*CallFrame = self.stack.findCurrentFrame();
+                    if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.popValue();
                         frame.locals.items[locals_index] = v;
                     }
                 },
                 Instruction.Local_Tee => {
                     var locals_index = try reader.readIntBig(u32);
-                    var frameOrNull:?*CallFrame = self.stack.findCurrentFrame();
-                    if (frameOrNull) |frame| {
+                    var frame_or_null:?*CallFrame = self.stack.findCurrentFrame();
+                    if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.topValue();
                         frame.locals.items[locals_index] = v;
                     }
@@ -1169,6 +1205,14 @@ fn writeTypedValue(value:TypedValue, writer: anytype) !void {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Tests
 
+const TestFunction = struct{
+    bytecode: []const u8,
+    exportName: ?[]const u8 = null,
+    params: ?[]Type = null,
+    locals: ?[]Type = null,
+    returns: ?[]Type = null,
+};
+
 const TestGlobal = struct {
     exportName: ?[]const u8,
     initValue: TypedValue,
@@ -1176,44 +1220,33 @@ const TestGlobal = struct {
 };
 
 const TestOptions = struct {
+    startFunctionIndex:u32 = 0,
+    startFunctionParams: ?[]TypedValue = null,
+    functions: [] const TestFunction,
     globals: ?[]const TestGlobal = null,
 };
 
-fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, optionalLocals:?[]Type, expectedReturns:?[]TypedValue, options:TestOptions) !void {
+fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
     var builder = WasmBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
+    for (options.functions) |func|
     {
-        var params = std.ArrayList(Type).init(std.testing.allocator);
-        var returns = std.ArrayList(Type).init(std.testing.allocator);
-        defer params.deinit();
-        defer returns.deinit();
+        const params = func.params orelse &[_]Type{};
+        const locals = func.locals orelse &[_]Type{};
+        const returns = func.returns orelse &[_]Type{};
 
-        if (optionalParams) |values| {
-            for (values) |v| {
-                try params.append(std.meta.activeTag(v));
-            }
-        }
+        try builder.addFunc(func.exportName, params, returns, locals, func.bytecode);
+    }
 
-        if (expectedReturns) |values| {
-            for (values) |v| {
-                var t = std.meta.activeTag(v);
-                try returns.append(t);
-            }
-        }
+    if (options.globals) |globals| {
+        for (globals) |global| {
+            var valtype = std.meta.activeTag(global.initValue);
+            var initOpts = GlobalValueInitOptions{
+                .Value = global.initValue,
+            };
 
-        const locals = optionalLocals orelse &[_]Type{};
-        try builder.addFunc("testFunc", params.items, returns.items, locals, bytecode);
-
-        if (options.globals) |globals| {
-            for (globals) |global| {
-                var valtype = std.meta.activeTag(global.initValue);
-                var initOpts = GlobalValueInitOptions{
-                    .Value = global.initValue,
-                };
-
-                try builder.addGlobal(global.exportName, valtype, global.mut, initOpts);
-            }
+            try builder.addGlobal(global.exportName, valtype, global.mut, initOpts);
         }
     }
 
@@ -1222,13 +1255,7 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, opti
     var vm = try VmState.parseWasm(rebuiltBytecode, .UseExisting, std.testing.allocator);
     defer vm.deinit();
 
-    var params = std.ArrayList(TypedValue).init(std.testing.allocator);
-    defer params.deinit();
-    if (optionalParams) |values| {
-        for (values) |v| {
-            try params.append(v);
-        }
-    }
+    const params = options.startFunctionParams orelse &[_]TypedValue{};
 
     var returns = std.ArrayList(TypedValue).init(std.testing.allocator);
     defer returns.deinit();
@@ -1237,7 +1264,8 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, opti
         try returns.resize(expected.len);
     }
 
-    try vm.callFunc("testFunc", params.items, returns.items);
+    var name = options.functions[options.startFunctionIndex].exportName orelse "";
+    try vm.callFunc(name, params, returns.items);
 
     if (expectedReturns) |expected|
     {
@@ -1254,13 +1282,33 @@ fn testExecuteAndExpect(bytecode: []const u8, optionalParams:?[]TypedValue, opti
     }
 }
 
-fn testExecuteAndExpectU32Return(bytecode: []const u8, expected:u32) !void {
+fn testCallFuncU32Return(bytecode: []const u8, expected:u32) !void {
+    var types = [_]Type{.I32};
+    var functions = [_]TestFunction{
+        .{
+            .bytecode = bytecode,
+            .exportName = "testFunc",
+            .returns = &types,
+        },
+    };
+    var opts = TestOptions{
+        .functions = &functions,
+    };
     var expectedReturns = [_]TypedValue{.{.I32 = @bitCast(i32, expected)}};
-    try testExecuteAndExpect(bytecode, null, null, &expectedReturns, .{});
+    try testCallFunc(opts, &expectedReturns);
 }
 
-fn testExecute(bytecode: []const u8) !void {
-    try testExecuteAndExpect(bytecode, null, null, null, .{});
+fn testCallFuncSimple(bytecode: []const u8) !void {
+    var opts = TestOptions{
+        .functions = &[_]TestFunction{
+            .{
+                .bytecode = bytecode,
+                .exportName = "testFunc",
+            },
+        },
+    };
+
+    try testCallFunc(opts, null);
 }
 
 test "wasm builder" {
@@ -1352,7 +1400,7 @@ test "unreachable" {
     var didCatchError:bool = false;
     var didCatchCorrectError:bool = false;
 
-    testExecute(&bytecode) catch |e| {
+    testCallFuncSimple(&bytecode) catch |e| {
         didCatchError = true;
         didCatchCorrectError = (e == VMError.Unreachable);
     };
@@ -1368,7 +1416,13 @@ test "noop" {
         0x01, 0x01, 0x01, 0x01, 0x01,
         0x01, 0x01, 0x01, 0x01, 0x01,
     };
-    try testExecute(&bytecode);
+    try testCallFuncSimple(&bytecode);
+}
+
+test "call" {
+}
+
+test "call recursive" {
 }
 
 test "drop" {
@@ -1379,7 +1433,7 @@ test "drop" {
         0x00, 0x00, 0xBE, 0xEF,
         0x1A, // drop top value
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x1337);
+    try testCallFuncU32Return(&bytecode, 0x1337);
 }
 
 test "select" {
@@ -1392,7 +1446,7 @@ test "select" {
         0x00, 0x00, 0x00, 0xFF, //nonzero should pick val1
         0x1B, // select
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x1337);
+    try testCallFuncU32Return(&bytecode1, 0x1337);
 
     var bytecode2 = [_]u8{
         0x41, // set constant values on stack
@@ -1403,7 +1457,7 @@ test "select" {
         0x00, 0x00, 0x00, 0x00, //zero should pick val2
         0x1B, // select
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0xBEEF);
+    try testCallFuncU32Return(&bytecode2, 0xBEEF);
 }
 
 test "local_get" {
@@ -1411,10 +1465,24 @@ test "local_get" {
         0x20, 
         0x00, 0x00, 0x00, 0x00,
     };
+
+    var types = [_]Type{.I32};
     var params = [_]TypedValue{.{.I32 = 0x1337}};
-    var locals = [_]Type{.I32};
+    var opts = TestOptions{
+        .startFunctionParams = &params,
+        .functions = &[_]TestFunction{
+            .{
+                .exportName = "testFunc",
+                .bytecode = &bytecode,
+                .params = &types,
+                .locals = &types,
+                .returns = &types,
+            }
+        },
+    };
     var expected = [_]TypedValue{.{.I32 = 0x1337}};
-    try testExecuteAndExpect(&bytecode, &params, &locals, &expected, .{});
+
+    try testCallFunc(opts, &expected);
 }
 
 test "local_set" {
@@ -1434,10 +1502,24 @@ test "local_set" {
         0x20, // push local value onto stack, should be 1337 since it was the first pushed
         0x00, 0x00, 0x00, 0x00,
     };
-    var params = [_]TypedValue{};
-    var locals = [_]Type{.I32};
+
+    var types = [_]Type{.I32};
+    var params = [_]TypedValue{.{.I32 = 0x1337}};
+    var opts = TestOptions{
+        .startFunctionParams = &params,
+        .functions = &[_]TestFunction{
+            .{
+                .exportName = "testFunc",
+                .bytecode = &bytecode,
+                .params = &types,
+                .locals = &types,
+                .returns = &types,
+            }
+        },
+    };
     var expected = [_]TypedValue{.{.I32 = 0x1337}};
-    try testExecuteAndExpect(&bytecode, &params, &locals, &expected, .{});
+
+    try testCallFunc(opts, &expected);
 }
 
 test "local_tee" {
@@ -1450,16 +1532,38 @@ test "local_tee" {
         0x00, 0x00, 0x00, 0x00,
         0x6A, // add 2 stack values, 0x1337 + 0x1337 = 0x266E
     };
+
+    var types = [_]Type{.I32};
     var params = [_]TypedValue{.{.I32 = 0x1337}};
-    var locals = [_]Type{.I32};
+    var opts = TestOptions{
+        .startFunctionParams = &params,
+        .functions = &[_]TestFunction{
+            .{
+                .exportName = "testFunc",
+                .bytecode = &bytecode,
+                .params = &types,
+                .locals = &types,
+                .returns = &types,
+            }
+        },
+    };
     var expected = [_]TypedValue{.{.I32 = 0x266E}};
-    try testExecuteAndExpect(&bytecode, &params, &locals, &expected, .{});
+
+    try testCallFunc(opts, &expected);
 }
 
 test "global_get" {
     var bytecode = [_]u8{
         0x23,// get global
         0x00, 0x00, 0x00, 0x00, // at index 0
+    };
+    var returns = [_]Type{.I32};
+    var functions = [_]TestFunction{
+        .{
+            .exportName = "testFunc",
+            .bytecode = &bytecode,
+            .returns = &returns,
+        }
     };
     var globals = [_]TestGlobal {
         .{
@@ -1469,10 +1573,11 @@ test "global_get" {
         },
     };
     var options = TestOptions{
+        .functions = &functions,
         .globals = &globals,
     };
     var expected = [_]TypedValue{.{.I32 = 0x1337}};
-    try testExecuteAndExpect(&bytecode, null, null, &expected, options);
+    try testCallFunc(options, &expected);
 }
 
 test "global_set" {
@@ -1484,6 +1589,7 @@ test "global_set" {
         0x23, // get global
         0x00, 0x00, 0x00, 0x00, // at index 0
     };
+    var returns = [_]Type{.I32};
     var globals = [_]TestGlobal {
         .{
             .exportName = null,
@@ -1491,17 +1597,25 @@ test "global_set" {
             .mut = GlobalValue.Mut.Mutable,
         },
     };
+    var functions = &[_]TestFunction{
+        .{
+            .exportName = "testFunc",
+            .bytecode = &bytecode,
+            .returns = &returns,
+        }
+    };
     var options = TestOptions{
+        .functions = functions,
         .globals = &globals,
     };
     var expected = [_]TypedValue{.{.I32 = 0x1337}};
 
-    try testExecuteAndExpect(&bytecode, null, null, &expected, options);
+    try testCallFunc(options, &expected);
 
     globals[0].mut = GlobalValue.Mut.Immutable;
     var didCatchError = false;
     var didCatchCorrectError = false;
-    testExecuteAndExpect(&bytecode, null, null, &expected, options) catch |err| {
+    testCallFunc(options, &expected) catch |err| {
         didCatchError = true;
         didCatchCorrectError = (err == VMError.AttemptToSetImmutable);
     };
@@ -1515,13 +1629,13 @@ test "i32_eqz" {
         0x41, 0x00, 0x00, 0x00, 0x00,
         0x45,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x1);
+    try testCallFuncU32Return(&bytecode1, 0x1);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x00, 0x01,
         0x45,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x0);
+    try testCallFuncU32Return(&bytecode2, 0x0);
 }
 
 test "i32_eq" {
@@ -1530,14 +1644,14 @@ test "i32_eq" {
         0x41, 0x00, 0x00, 0x00, 0x00,
         0x46,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x1);
+    try testCallFuncU32Return(&bytecode1, 0x1);
 
     var bytecode2 = [_]u8{
         0x41, 0x80, 0x00, 0x00, 0x00,
         0x41, 0x00, 0x00, 0x00, 0x00,
         0x46,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x0);
+    try testCallFuncU32Return(&bytecode2, 0x0);
 }
 
 test "i32_ne" {
@@ -1546,14 +1660,14 @@ test "i32_ne" {
         0x41, 0x00, 0x00, 0x00, 0x00,
         0x47,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x0);
+    try testCallFuncU32Return(&bytecode1, 0x0);
 
     var bytecode2 = [_]u8{
         0x41, 0x80, 0x00, 0x00, 0x00,
         0x41, 0x00, 0x00, 0x00, 0x00,
         0x47,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x1);
+    try testCallFuncU32Return(&bytecode2, 0x1);
 }
 
 test "i32_lt_s" {
@@ -1562,14 +1676,14 @@ test "i32_lt_s" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x48,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x1);
+    try testCallFuncU32Return(&bytecode1, 0x1);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x48,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x0);
+    try testCallFuncU32Return(&bytecode2, 0x0);
 }
 
 test "i32_lt_u" {
@@ -1578,14 +1692,14 @@ test "i32_lt_u" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x49,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x0);
+    try testCallFuncU32Return(&bytecode1, 0x0);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
         0x49,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x1);
+    try testCallFuncU32Return(&bytecode2, 0x1);
 }
 
 test "i32_gt_s" {
@@ -1594,14 +1708,14 @@ test "i32_gt_s" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x4A,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x0);
+    try testCallFuncU32Return(&bytecode1, 0x0);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4A,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x1);
+    try testCallFuncU32Return(&bytecode2, 0x1);
 }
 
 test "i32_gt_u" {
@@ -1610,14 +1724,14 @@ test "i32_gt_u" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x4B,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x1);
+    try testCallFuncU32Return(&bytecode1, 0x1);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
         0x4B,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x0);
+    try testCallFuncU32Return(&bytecode2, 0x0);
 }
 
 test "i32_le_s" {
@@ -1626,21 +1740,21 @@ test "i32_le_s" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x4C,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x1);
+    try testCallFuncU32Return(&bytecode1, 0x1);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4C,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x0);
+    try testCallFuncU32Return(&bytecode2, 0x0);
 
     var bytecode3 = [_]u8{
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4C,
     };
-    try testExecuteAndExpectU32Return(&bytecode3, 0x1);
+    try testCallFuncU32Return(&bytecode3, 0x1);
 }
 
 test "i32_le_u" {
@@ -1649,21 +1763,21 @@ test "i32_le_u" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x4D,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x0);
+    try testCallFuncU32Return(&bytecode1, 0x0);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4D,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x1);
+    try testCallFuncU32Return(&bytecode2, 0x1);
 
     var bytecode3 = [_]u8{
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4D,
     };
-    try testExecuteAndExpectU32Return(&bytecode3, 0x1);
+    try testCallFuncU32Return(&bytecode3, 0x1);
 }
 
 test "i32_ge_s" {
@@ -1672,21 +1786,21 @@ test "i32_ge_s" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x4E,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x0);
+    try testCallFuncU32Return(&bytecode1, 0x0);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4E,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x1);
+    try testCallFuncU32Return(&bytecode2, 0x1);
 
     var bytecode3 = [_]u8{
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4E,
     };
-    try testExecuteAndExpectU32Return(&bytecode3, 0x1);
+    try testCallFuncU32Return(&bytecode3, 0x1);
 }
 
 test "i32_ge_u" {
@@ -1695,21 +1809,21 @@ test "i32_ge_u" {
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x4F,
     };
-    try testExecuteAndExpectU32Return(&bytecode1, 0x1);
+    try testCallFuncU32Return(&bytecode1, 0x1);
 
     var bytecode2 = [_]u8{
         0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4F,
     };
-    try testExecuteAndExpectU32Return(&bytecode2, 0x0);
+    try testCallFuncU32Return(&bytecode2, 0x0);
 
     var bytecode3 = [_]u8{
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
         0x4F,
     };
-    try testExecuteAndExpectU32Return(&bytecode3, 0x1);
+    try testCallFuncU32Return(&bytecode3, 0x1);
 }
 
 test "i32_add" {
@@ -1718,7 +1832,7 @@ test "i32_add" {
         0x41, 0x00, 0x00, 0x02, 0x01,
         0x6A,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x100202);
+    try testCallFuncU32Return(&bytecode, 0x100202);
 }
 
 test "i32_sub" {
@@ -1727,7 +1841,7 @@ test "i32_sub" {
         0x41, 0x00, 0x00, 0x02, 0x01,
         0x6B,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0xFFE00);
+    try testCallFuncU32Return(&bytecode, 0xFFE00);
 }
 
 test "i32_mul" {
@@ -1736,7 +1850,7 @@ test "i32_mul" {
         0x41, 0x00, 0x00, 0x03, 0x00,
         0x6C,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x60000);
+    try testCallFuncU32Return(&bytecode, 0x60000);
 }
 
 test "i32_div_s" {
@@ -1745,7 +1859,7 @@ test "i32_div_s" {
         0x41, 0x00, 0x00, 0x02, 0x00,
         0x6D,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0xFFFFFFFD); //-3
+    try testCallFuncU32Return(&bytecode, 0xFFFFFFFD); //-3
 }
 
 test "i32_div_u" {
@@ -1754,7 +1868,7 @@ test "i32_div_u" {
         0x41, 0x00, 0x00, 0x02, 0x00,
         0x6E,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x400003);
+    try testCallFuncU32Return(&bytecode, 0x400003);
 }
 
 test "i32_rem_s" {
@@ -1763,7 +1877,7 @@ test "i32_rem_s" {
         0x41, 0x00, 0x00, 0x02, 0x00,
         0x6F,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0xFFFFFF9A); // -0x66
+    try testCallFuncU32Return(&bytecode, 0xFFFFFF9A); // -0x66
 }
 
 test "i32_rem_u" {
@@ -1772,7 +1886,7 @@ test "i32_rem_u" {
         0x41, 0x00, 0x00, 0x02, 0x00,
         0x70,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x66);
+    try testCallFuncU32Return(&bytecode, 0x66);
 }
 
 test "i32_and" {
@@ -1781,7 +1895,7 @@ test "i32_and" {
         0x41, 0x11, 0x22, 0x33, 0x44,
         0x71,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x11223344);
+    try testCallFuncU32Return(&bytecode, 0x11223344);
 }
 
 test "i32_or" {
@@ -1790,7 +1904,7 @@ test "i32_or" {
         0x41, 0x11, 0x22, 0x33, 0x44,
         0x72,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0xFF22FF44);
+    try testCallFuncU32Return(&bytecode, 0xFF22FF44);
 }
 
 test "i32_xor" {
@@ -1799,7 +1913,7 @@ test "i32_xor" {
         0x41, 0x0F, 0x0F, 0xF0, 0xF0,
         0x73,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0xFFFF0000);
+    try testCallFuncU32Return(&bytecode, 0xFFFF0000);
 }
 
 test "i32_shl" {
@@ -1808,7 +1922,7 @@ test "i32_shl" {
         0x41, 0x00, 0x00, 0x00, 0x02,
         0x74,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x40404);
+    try testCallFuncU32Return(&bytecode, 0x40404);
 }
 
 test "i32_shr_s" {
@@ -1817,7 +1931,7 @@ test "i32_shr_s" {
         0x41, 0x00, 0x00, 0x00, 0x01,
         0x75,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0xC0008080);
+    try testCallFuncU32Return(&bytecode, 0xC0008080);
 }
 
 test "i32_shr_u" {
@@ -1826,7 +1940,7 @@ test "i32_shr_u" {
         0x41, 0x00, 0x00, 0x00, 0x01,
         0x76,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x40008080);
+    try testCallFuncU32Return(&bytecode, 0x40008080);
 }
 
 test "i32_rotl" {
@@ -1835,7 +1949,7 @@ test "i32_rotl" {
         0x41, 0x00, 0x00, 0x00, 0x02,
         0x77,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x00040406);
+    try testCallFuncU32Return(&bytecode, 0x00040406);
 }
 
 test "i32_rotr" {
@@ -1844,5 +1958,5 @@ test "i32_rotr" {
         0x41, 0x00, 0x00, 0x00, 0x02,
         0x78,
     };
-    try testExecuteAndExpectU32Return(&bytecode, 0x60004040);
+    try testCallFuncU32Return(&bytecode, 0x60004040);
 }
