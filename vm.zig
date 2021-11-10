@@ -2,11 +2,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const VmParseError = error{
-    InvalidMagicSignature,
     UnsupportedWasmVersion,
+    InvalidMagicSignature,
     InvalidBytecode,
     InvalidExport,
     InvalidGlobalInit,
+    InvalidLabel,
 };
 
 const VMError = error{
@@ -23,6 +24,7 @@ const Instruction = enum(u8) {
     Unreachable = 0x00,
     Noop = 0x01,
     End = 0x0B,
+    Branch = 0x0C,
     Call = 0x10,
     Drop = 0x1A,
     Select = 0x1B,
@@ -59,6 +61,25 @@ const Instruction = enum(u8) {
     I32_Rotl = 0x77,
     I32_Rotr = 0x78,
 };
+
+fn instructionWidth(instruction:Instruction) u32 {
+    switch (instruction) {
+        .Local_Get => return 5,
+        .Local_Set => return 5,
+        .Local_Tee => return 5,
+        .Global_Get => return 5,
+        .Global_Set => return 5,
+        .I32_Const => return 5,
+        else => return 1,
+    }
+}
+
+fn doesInstructionExpectEnd(instruction:Instruction) bool {
+    switch (instruction) {
+        // .Call => return true,
+        else => return false,
+    }
+}
 
 const Type = enum(u8) {
     Void = 0x00,
@@ -97,8 +118,10 @@ const GlobalValueInitOptions = union(GlobalValueInitTag) {
 };
 
 const Label = struct{
-    index:u32,
+    id:u32,
+    arity: u32, // the number of args that need to be pushed onto the stack after this label is popped
     continuation: ?u32,
+    last_label_index: i32,
 };
 
 const CallFrame = struct {
@@ -166,30 +189,71 @@ const Stack = struct {
         }
     }
 
-    fn pushLabel(self:*Self, continuation:?u32) !void {
+    fn pushLabel(self:*Self, arity: u32, continuation:?u32) !void {
+        var id:u32 = 0;
+        if (self.last_label_index >= 0) {
+            var last_label: *Label = &self.stack.items[@intCast(usize, self.last_label_index)].Label;
+            id = last_label.id + 1;
+        }
+
         var item = StackItem{.Label = .{
-            .index = self.nextLabel,
+            .id = id,
+            .arity = arity,
             .continuation = continuation,
+            .last_label_index = self.last_label_index,
         }};
         try self.stack.append(item);
-        self.nextLabel += 1;
+
+        self.last_label_index = @intCast(i32, self.stack.items.len) - 1;
     }
 
-    fn popLabel(self: *Self) !?u32 {
-        var continuation:?u32 = undefined;
+    fn popLabel(self: *Self) !Label {
         var item = try self.pop();
-        switch (item) {
-            .Label => |label| continuation = label.continuation,
+        var label = switch (item) {
+            .Label => |label| label,
             else => return error.TypeMismatch,
-        }
-        self.nextLabel -= 1;
+        };
 
-        return continuation;
+        self.last_label_index = label.last_label_index;
+
+        return label;
+    }
+
+    fn findLabel(self: *Self, id: u32) !Label {
+        if (self.last_label_index < 0) {
+            return error.InvalidLabel;
+        }
+
+        var last_label: *Label = &self.stack.items[@intCast(usize, self.last_label_index)].Label;
+        if (last_label.id < id) {
+            return error.InvalidLabel;
+        }
+
+        var label_index = self.last_label_index;
+        while (label_index > 0) {
+            switch(self.stack.items[@intCast(usize, label_index)]) {
+                .Label => |label| {
+                    if (label.id == id) {
+                        return label;
+                    } else {
+                        label_index = label.last_label_index;
+                    }
+                },
+                else => {
+                    unreachable; // last_label_index should only point to Labels
+                },
+            }
+        }
+
+        unreachable;
     }
 
     fn pushFrame(self: *Self, frame: CallFrame) !void {
         var item = StackItem{.Frame = frame};
         try self.stack.append(item);
+
+        // frames reset the label index since you can't jump to labels in a different function
+        self.last_label_index = -1;
     }
 
     fn popFrame(self: *Self) !void {
@@ -200,9 +264,25 @@ const Stack = struct {
             },
             else => return error.TypeMismatch,
         }
+
+        // have to do a linear search since we don't know what the last index was
+        var item_index = self.stack.items.len;
+        while (item_index > 0) {
+            item_index -= 1;
+            switch(self.stack.items[item_index]) {
+                .Value => {},
+                .Label => {
+                    self.last_label_index = @intCast(i32, item_index);
+                    break;
+                },
+                .Frame => {
+                    unreachable; // frames should always be pushed with a label above them
+                },
+            }
+        }
     }
     
-    fn findCurrentFrame(self: *Self) ?*CallFrame {
+    fn findCurrentFrame(self: *Self) !*CallFrame {
         var item_index:i32 = @intCast(i32, self.stack.items.len) - 1;
         while (item_index >= 0) {
             var index = @intCast(usize, item_index);
@@ -212,7 +292,7 @@ const Stack = struct {
             item_index -= 1;
         }
 
-        return null;
+        return error.MissingCallFrame;
     }
 
     fn popI32(self: *Self) !i32 {
@@ -233,7 +313,7 @@ const Stack = struct {
     }
 
     stack: std.ArrayList(StackItem),
-    nextLabel: u32 = 0,
+    last_label_index: i32 = -1,
 };
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
@@ -330,6 +410,8 @@ const VmState = struct {
     functions: std.ArrayList(Function),
     globals: std.ArrayList(GlobalValue),
     exports: Exports,
+
+    label_continuations: std.AutoHashMap(u32, u32),
     stack: Stack,
 
     const BytecodeMemUsage = enum {
@@ -363,6 +445,7 @@ const VmState = struct {
                 .memories = std.ArrayList(Export).init(allocator),
                 .globals = std.ArrayList(Export).init(allocator),
             },
+            .label_continuations = std.AutoHashMap(u32, u32).init(allocator), // map of label offset to continuation offset.
             .stack = Stack.init(allocator),
         };
         errdefer vm.deinit();
@@ -512,11 +595,15 @@ const VmState = struct {
                 .Code => {
                     // std.debug.print("parseWasm: section: Code\n", .{});
 
+                    var label_offset_stack = std.ArrayList(u32).init(allocator);
+                    defer label_offset_stack.deinit();
+
                     const num_codes = try reader.readIntBig(u32);
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
-                        var code_size = try reader.readIntBig(u32);
-                        var code_begin_pos = stream.pos;
+                        // std.debug.print(">>> parsing code index {}\n", .{code_index});
+                        const code_size = try reader.readIntBig(u32);
+                        const code_begin_pos = stream.pos;
 
                         const num_locals = try reader.readIntBig(u32);
                         var locals_index: u32 = 0;
@@ -526,10 +613,35 @@ const VmState = struct {
                             try vm.functions.items[code_index].locals.append(local_type);
                         }
 
-                        vm.functions.items[code_index].bytecodeOffset = @intCast(u32, stream.pos);
+                        const bytecode_begin_offset = @intCast(u32, stream.pos);
+                        vm.functions.items[code_index].bytecodeOffset = bytecode_begin_offset;
+                        try label_offset_stack.append(bytecode_begin_offset);
 
-                        try stream.seekTo(code_begin_pos);
-                        try stream.seekBy(code_size); // skip the function body, TODO validation later
+                        while (true) {
+                            const instruction = @intToEnum(Instruction, try reader.readByte());
+                            // std.debug.print(">> {}\n", .{instruction});
+
+                            if (doesInstructionExpectEnd(instruction)) {
+                                const instruction_offset = @intCast(u32, stream.pos);
+                                try label_offset_stack.append(instruction_offset);
+                            } else if (instruction == .End) {
+                                const instruction_offset: u32 = label_offset_stack.orderedRemove(label_offset_stack.items.len - 1);
+                                if (label_offset_stack.items.len == 0) {
+                                    // std.debug.print("found the end\n", .{});
+                                    break;
+                                }
+                                const continuation = @intCast(u32, stream.pos);
+                                try vm.label_continuations.putNoClobber(instruction_offset, continuation);
+                            }
+
+                            const skip_size = instructionWidth(instruction) - @sizeOf(Instruction);
+                            try stream.seekBy(skip_size);
+                        }
+
+                        const code_actual_size = stream.pos - code_begin_pos;
+                        if (code_actual_size != code_size) {
+                            return error.InvalidBytecode;
+                        }
 
                         code_index += 1;
                     }
@@ -601,7 +713,7 @@ const VmState = struct {
                 }
 
                 try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals,});
-                try self.stack.pushLabel(null);
+                try self.stack.pushLabel(@intCast(u32, returns.len), null);
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
@@ -641,39 +753,78 @@ const VmState = struct {
                 Instruction.Noop => {},
                 Instruction.End => {
                     // assume return from function for now. in the future needs to handle returning from other types of blocks
-                    var frame_or_null: ?*CallFrame = self.stack.findCurrentFrame();
-                    if (frame_or_null) |frame| {
-                        const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
+                    var frame: *CallFrame = try self.stack.findCurrentFrame();
+                    const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
 
-                        var returns = std.ArrayList(TypedValue).init(self.allocator);
-                        defer returns.deinit();
-                        try returns.ensureCapacity(returnTypes.len);
+                    var returns = std.ArrayList(TypedValue).init(self.allocator);
+                    defer returns.deinit();
+                    try returns.ensureCapacity(returnTypes.len);
 
-                        for (returnTypes) |valtype| {
-                            var value = try self.stack.popValue();
-                            if (valtype != std.meta.activeTag(value)) {
-                                return error.TypeMismatch;
-                            }
-
-                            try returns.append(value);
+                    for (returnTypes) |valtype| {
+                        var value = try self.stack.popValue();
+                        if (valtype != std.meta.activeTag(value)) {
+                            return error.TypeMismatch;
                         }
 
-                        var return_offset_or_null = try self.stack.popLabel();
-                        try self.stack.popFrame();
-
-                        while (returns.items.len > 0) {
-                            var item = returns.orderedRemove(returns.items.len - 1);
-                            try self.stack.pushValue(item);
-                        }
-
-                        if (return_offset_or_null) |return_offset| {
-                            try stream.seekTo(return_offset);
-                        } else {
-                            return; // no return offset means this should have been the first frame in the stack
-                        }
-                    } else {
-                        return error.MissingCallFrame;
+                        try returns.append(value);
                     }
+
+                    const label:Label = try self.stack.popLabel();
+                    try self.stack.popFrame();
+
+                    while (returns.items.len > 0) {
+                        var item = returns.orderedRemove(returns.items.len - 1);
+                        try self.stack.pushValue(item);
+                    }
+
+                    if (label.continuation) |return_offset| {
+                        try stream.seekTo(return_offset);
+                    } else {
+                        return; // no return offset means this should have been the first frame in the stack
+                    }
+                },
+                Instruction.Branch => {
+                    const label_index = @intCast(u32, try self.stack.popI32());
+                    if (label_index == 0) {
+                        return error.InvalidLabel; // TODO maybe support jumping to the end of a function?
+                    }
+                    const label:Label = try self.stack.findLabel(label_index);
+
+                    var args = std.ArrayList(TypedValue).init(self.allocator);
+                    defer args.deinit();
+                    try args.ensureCapacity(label.arity);
+
+                    while (args.items.len < label.arity)
+                    {
+                        var value = try self.stack.popValue();
+                        try args.append(value);
+                    }
+
+                    while (true) {
+                        var topItem = try self.stack.top();
+                        switch (std.meta.activeTag(topItem.*)) {
+                            .Value => {
+                                _ = try self.stack.popValue();
+                            },
+                            .Frame => {
+                                return error.InvalidLabel;
+                            },
+                            .Label => {
+                                const popped_label:Label = try self.stack.popLabel();
+                                if (popped_label.id == label.id) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    while (args.items.len > 0) {
+                        var value = args.orderedRemove(args.items.len - 1);
+                        try self.stack.pushValue(value);
+                    }
+
+                     // continuation should always be non-null since jumping to 0-index labels is not allowed
+                    try stream.seekTo(label.continuation.?);
                 },
                 Instruction.Call => {
                     var func_index = try self.stack.popI32();
@@ -685,7 +836,8 @@ const VmState = struct {
                         .locals = std.ArrayList(TypedValue).init(self.allocator),
                     };
 
-                    const param_types:[]const Type = functype.getParams();
+                    const param_types: []const Type = functype.getParams();
+                    const return_types: []const Type = functype.getReturns();
                     try frame.locals.ensureCapacity(param_types.len);
 
                     var param_index = param_types.len;
@@ -701,7 +853,7 @@ const VmState = struct {
                     const return_offset = @intCast(u32, stream.pos);
 
                     try self.stack.pushFrame(frame);
-                    try self.stack.pushLabel(return_offset);
+                    try self.stack.pushLabel(@intCast(u32, return_types.len), return_offset);
                     try stream.seekTo(func.bytecodeOffset);
                 },
                 Instruction.Drop => {
@@ -728,7 +880,7 @@ const VmState = struct {
                 },
                 Instruction.Local_Get => {
                     var locals_index = try reader.readIntBig(u32);
-                    var frame_or_null:?*CallFrame = self.stack.findCurrentFrame();
+                    var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = frame.locals.items[locals_index];
                         try self.stack.pushValue(v);
@@ -736,7 +888,7 @@ const VmState = struct {
                 },
                 Instruction.Local_Set => {
                     var locals_index = try reader.readIntBig(u32);
-                    var frame_or_null:?*CallFrame = self.stack.findCurrentFrame();
+                    var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.popValue();
                         frame.locals.items[locals_index] = v;
@@ -744,7 +896,7 @@ const VmState = struct {
                 },
                 Instruction.Local_Tee => {
                     var locals_index = try reader.readIntBig(u32);
-                    var frame_or_null:?*CallFrame = self.stack.findCurrentFrame();
+                    var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.topValue();
                         frame.locals.items[locals_index] = v;
