@@ -23,6 +23,7 @@ const VMError = error{
 const Instruction = enum(u8) {
     Unreachable = 0x00,
     Noop = 0x01,
+    Block = 0x02,
     End = 0x0B,
     Branch = 0x0C,
     Call = 0x10,
@@ -70,19 +71,19 @@ fn instructionWidth(instruction:Instruction) u32 {
         .Global_Get => return 5,
         .Global_Set => return 5,
         .I32_Const => return 5,
+        .Block => return 2,
         else => return 1,
     }
 }
 
 fn doesInstructionExpectEnd(instruction:Instruction) bool {
     switch (instruction) {
-        // .Call => return true,
+        .Block => return true,
         else => return false,
     }
 }
 
 const Type = enum(u8) {
-    Void = 0x00,
     I32 = 0x7F,
     I64 = 0x7E,
     F32 = 0x7D,
@@ -92,7 +93,6 @@ const Type = enum(u8) {
 };
 
 const TypedValue = union(Type) {
-    Void: void,
     I32: i32,
     I64: i64,
     F32: f32,
@@ -219,6 +219,10 @@ const Stack = struct {
         return label;
     }
 
+    fn topLabel(self: *Self) Label {
+        return self.stack.items[@intCast(usize, self.last_label_index)].Label;
+    }
+
     fn findLabel(self: *Self, id: u32) !Label {
         if (self.last_label_index < 0) {
             return error.InvalidLabel;
@@ -319,6 +323,7 @@ const Stack = struct {
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
 
 const function_type_sentinel_byte: u8 = 0x60;
+const block_type_void_sentinel_byte: u8 = 0x40;
 const max_global_init_size:usize = 32;
 
 const FunctionType = struct {
@@ -617,9 +622,10 @@ const VmState = struct {
                         vm.functions.items[code_index].bytecodeOffset = bytecode_begin_offset;
                         try label_offset_stack.append(bytecode_begin_offset);
 
-                        while (true) {
+                        var parsing_code = true;
+                        while (parsing_code) {
                             const instruction = @intToEnum(Instruction, try reader.readByte());
-                            // std.debug.print(">> {}\n", .{instruction});
+                            // std.debug.print(">>>> {}\n", .{instruction});
 
                             if (doesInstructionExpectEnd(instruction)) {
                                 const instruction_offset = @intCast(u32, stream.pos);
@@ -628,8 +634,9 @@ const VmState = struct {
                                 const instruction_offset: u32 = label_offset_stack.orderedRemove(label_offset_stack.items.len - 1);
                                 if (label_offset_stack.items.len == 0) {
                                     // std.debug.print("found the end\n", .{});
-                                    break;
+                                    parsing_code = false;
                                 }
+
                                 const continuation = @intCast(u32, stream.pos);
                                 try vm.label_continuations.putNoClobber(instruction_offset, continuation);
                             }
@@ -640,6 +647,8 @@ const VmState = struct {
 
                         const code_actual_size = stream.pos - code_begin_pos;
                         if (code_actual_size != code_size) {
+                            // std.debug.print("expected code_size: {}, code_actual_size: {}\n", .{code_size, code_actual_size});
+                            // std.debug.print("stream.pos: {}, code_begin_pos: {}, code_begin_pos + code_size: {}\n", .{stream.pos, code_begin_pos, code_begin_pos + code_size});
                             return error.InvalidBytecode;
                         }
 
@@ -685,6 +694,7 @@ const VmState = struct {
         self.types.deinit();
         self.functions.deinit();
         self.globals.deinit();
+        self.label_continuations.deinit();
         self.stack.deinit();
     }
 
@@ -751,36 +761,67 @@ const VmState = struct {
                     return error.Unreachable;
                 },
                 Instruction.Noop => {},
-                Instruction.End => {
-                    // assume return from function for now. in the future needs to handle returning from other types of blocks
-                    var frame: *CallFrame = try self.stack.findCurrentFrame();
-                    const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
+                Instruction.Block => {
+                    const label_offset = @intCast(u32, stream.pos) - 1;
 
+                    var arity:u32 = 0; // TODO provide stronger type safety guarantees than just the arity of the label
+                    const blocktype = try reader.readByte();
+                    const valtype_or_err = std.meta.intToEnum(Type, blocktype);
+                    if (std.meta.isError(valtype_or_err)) {
+                        if (blocktype != block_type_void_sentinel_byte) {
+                            // TODO look up function type index
+                            unreachable;
+                        }
+                    } else {
+                        arity = 1;
+                    }
+
+                    const continuation = self.label_continuations.get(label_offset) orelse return error.InvalidLabel;
+                    try self.stack.pushLabel(arity, continuation);
+                },
+                Instruction.End => {
                     var returns = std.ArrayList(TypedValue).init(self.allocator);
                     defer returns.deinit();
-                    try returns.ensureCapacity(returnTypes.len);
 
-                    for (returnTypes) |valtype| {
-                        var value = try self.stack.popValue();
-                        if (valtype != std.meta.activeTag(value)) {
-                            return error.TypeMismatch;
+                    // first label means this is a function return, otherwise it's a block return
+                    const label:Label = self.stack.topLabel();
+                    if (label.id != 0) {
+                        try returns.ensureCapacity(label.arity);
+                        var returns_index:u32 = 0;
+                        while (returns_index < label.arity) {
+                            try returns.append(try self.stack.popValue());
+                            returns_index += 1;
+                        }
+                        _ = try self.stack.popLabel();
+                    } else {
+                        // assume return from function for now. in the future needs to handle returning from other types of blocks
+                        var frame: *CallFrame = try self.stack.findCurrentFrame();
+                        const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
+
+                        try returns.ensureCapacity(returnTypes.len);
+
+                        for (returnTypes) |valtype| {
+                            var value = try self.stack.popValue();
+                            if (valtype != std.meta.activeTag(value)) {
+                                return error.TypeMismatch;
+                            }
+
+                            try returns.append(value);
                         }
 
-                        try returns.append(value);
-                    }
+                        _ = try self.stack.popLabel();
+                        try self.stack.popFrame();
 
-                    const label:Label = try self.stack.popLabel();
-                    try self.stack.popFrame();
+                        while (returns.items.len > 0) {
+                            var item = returns.orderedRemove(returns.items.len - 1);
+                            try self.stack.pushValue(item);
+                        }
 
-                    while (returns.items.len > 0) {
-                        var item = returns.orderedRemove(returns.items.len - 1);
-                        try self.stack.pushValue(item);
-                    }
-
-                    if (label.continuation) |return_offset| {
-                        try stream.seekTo(return_offset);
-                    } else {
-                        return; // no return offset means this should have been the first frame in the stack
+                        if (label.continuation) |return_offset| {
+                            try stream.seekTo(return_offset);
+                        } else {
+                            return; // no return offset means this should have been the first frame in the stack
+                        }
                     }
                 },
                 Instruction.Branch => {
@@ -1602,6 +1643,52 @@ test "noop" {
         0x01, 0x01, 0x01, 0x01, 0x01,
     };
     try testCallFuncSimple(&bytecode);
+}
+
+test "block void" {
+    var bytecode1 = [_]u8{
+        0x02, block_type_void_sentinel_byte, // enter block with returns: void
+        0x0B, // end
+    };
+    try testCallFuncSimple(&bytecode1);
+
+    var bytecode2 = [_]u8{
+        0x02, block_type_void_sentinel_byte, // enter block with returns: void
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x13, 0x37,
+        0x0B, // end without popping stack value, this should be an error
+    };
+    var didCatchError = false;
+    testCallFuncSimple(&bytecode2) catch |e| {
+        didCatchError = (e == VMError.TypeMismatch);
+    };
+
+    try std.testing.expect(didCatchError);
+}
+
+test "block valtypes" {
+    var bytecode1 = [_]u8{
+        0x02, 0x7F, // enter block with returns: I32
+        0x41, // set constant values on stack
+        0x00, 0x00, 0x13, 0x37,
+        0x0B, // end
+    };
+    
+    try testCallFuncSimple(&bytecode1);
+
+    var bytecode2 = [_]u8{
+        0x02, 0x7F, // enter block with returns: I32
+        0x0B, // end
+    };
+    var didCatchError = false;
+    testCallFuncSimple(&bytecode2) catch |e| {
+        didCatchError = (e == VMError.TypeMismatch);
+    };
+    try std.testing.expect(didCatchError);
+}
+
+test "block functypes" {
+
 }
 
 test "call" {
