@@ -63,16 +63,34 @@ const Instruction = enum(u8) {
     I32_Rotr = 0x78,
 };
 
-fn instructionWidth(instruction:Instruction) u32 {
+const BytecodeBufferStream = std.io.FixedBufferStream([]const u8);
+
+fn skipInstruction(instruction:Instruction, stream: *BytecodeBufferStream) !void {
+    var reader = stream.reader();
+    _ = switch (instruction) {
+        .Local_Get => try std.leb.readULEB128(u32, reader),
+        .Local_Set => try std.leb.readULEB128(u32, reader),
+        .Local_Tee => try std.leb.readULEB128(u32, reader),
+        .Global_Get => try std.leb.readULEB128(u32, reader),
+        .Global_Set => try std.leb.readULEB128(u32, reader),
+        .I32_Const => try std.leb.readILEB128(i32, reader),
+        .Block => {
+            _ = try VmState.readBlockType(stream);
+        },
+        else => {}
+    };
+}
+
+fn isInstructionMultiByte(instruction:Instruction) bool {
     switch (instruction) {
-        .Local_Get => return 5,
-        .Local_Set => return 5,
-        .Local_Tee => return 5,
-        .Global_Get => return 5,
-        .Global_Set => return 5,
-        .I32_Const => return 5,
-        .Block => return 2,
-        else => return 1,
+        .Local_Get => return true,
+        .Local_Set => return true,
+        .Local_Tee => return true,
+        .Global_Get => return true,
+        .Global_Set => return true,
+        .I32_Const => return true,
+        .Block => return true,
+        else => return false,
     }
 }
 
@@ -115,6 +133,18 @@ const GlobalValueInitTag = enum {
 };
 const GlobalValueInitOptions = union(GlobalValueInitTag) {
     Value: TypedValue,
+};
+
+const BlockType = enum {
+    Void,
+    Valtype,
+    TypeIndex,
+};
+
+const BlockTypeValue = union(BlockType) {
+    Void: void,
+    Valtype: Type,
+    TypeIndex: u32,
 };
 
 const Label = struct{
@@ -416,7 +446,7 @@ const VmState = struct {
     globals: std.ArrayList(GlobalValue),
     exports: Exports,
 
-    label_continuations: std.AutoHashMap(u32, u32),
+    label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     stack: Stack,
 
     const BytecodeMemUsage = enum {
@@ -641,8 +671,9 @@ const VmState = struct {
                                 try vm.label_continuations.putNoClobber(instruction_offset, continuation);
                             }
 
-                            const skip_size = instructionWidth(instruction) - @sizeOf(Instruction);
-                            try stream.seekBy(skip_size);
+                            try skipInstruction(instruction, &stream);
+                            // const skip_size = instructionWidth(instruction) - @sizeOf(Instruction);
+                            // try stream.seekBy(skip_size);
                         }
 
                         const code_actual_size = stream.pos - code_begin_pos;
@@ -746,6 +777,28 @@ const VmState = struct {
         return error.UnknownExport;
     }
 
+    fn readBlockType(stream: *BytecodeBufferStream) !BlockTypeValue {
+        var reader = stream.reader();
+        const blocktype = try reader.readByte();
+        const valtype_or_err = std.meta.intToEnum(Type, blocktype);
+        if (std.meta.isError(valtype_or_err)) {
+            if (blocktype == block_type_void_sentinel_byte) {
+                return BlockTypeValue{.Void = {}};
+            } else {
+                stream.pos -= 1;
+                var index_33bit = try std.leb.readILEB128(i33, reader);
+                if (index_33bit < 0) {
+                    return error.InvalidBytecode;
+                }
+                var index:u32 = @intCast(u32, index_33bit);
+                return BlockTypeValue{.TypeIndex = index};
+            }
+        } else {
+            var valtype:Type = valtype_or_err catch unreachable;
+            return BlockTypeValue{.Valtype = valtype};
+        }
+    }
+
     fn executeWasm(self: *Self, bytecode: []const u8, offset: u32) !void {
         var stream = std.io.fixedBufferStream(bytecode);
         try stream.seekTo(offset);
@@ -764,17 +817,14 @@ const VmState = struct {
                 Instruction.Block => {
                     const label_offset = @intCast(u32, stream.pos) - 1;
 
-                    var arity:u32 = 0; // TODO provide stronger type safety guarantees than just the arity of the label
-                    const blocktype = try reader.readByte();
-                    const valtype_or_err = std.meta.intToEnum(Type, blocktype);
-                    if (std.meta.isError(valtype_or_err)) {
-                        if (blocktype != block_type_void_sentinel_byte) {
-                            // TODO look up function type index
-                            unreachable;
-                        }
-                    } else {
-                        arity = 1;
-                    }
+                    var blocktype = try readBlockType(&stream);
+                    var arity:u32 = switch (blocktype) {
+                        .Void => 0,
+                        .Valtype => 1,
+                        .TypeIndex => |index| @intCast(u32, self.types.items[index].getReturns().len),
+                    };
+
+                    // std.debug.print("blocktype: {}, arity: {}\n\n", .{blocktype, arity});
 
                     const continuation = self.label_continuations.get(label_offset) orelse return error.InvalidLabel;
                     try self.stack.pushLabel(arity, continuation);
@@ -920,7 +970,7 @@ const VmState = struct {
                     }
                 },
                 Instruction.Local_Get => {
-                    var locals_index = try reader.readIntBig(u32);
+                    var locals_index = try std.leb.readULEB128(u32, reader);
                     var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = frame.locals.items[locals_index];
@@ -928,7 +978,7 @@ const VmState = struct {
                     }
                 },
                 Instruction.Local_Set => {
-                    var locals_index = try reader.readIntBig(u32);
+                    var locals_index = try std.leb.readULEB128(u32, reader);
                     var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.popValue();
@@ -936,7 +986,7 @@ const VmState = struct {
                     }
                 },
                 Instruction.Local_Tee => {
-                    var locals_index = try reader.readIntBig(u32);
+                    var locals_index = try std.leb.readULEB128(u32, reader);
                     var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.topValue();
@@ -944,12 +994,13 @@ const VmState = struct {
                     }
                 },
                 Instruction.Global_Get => {
-                    var global_index = try reader.readIntBig(u32);
+                    var global_index = try std.leb.readULEB128(u32, reader);
+                    // std.debug.print("read index: {}\n", .{global_index});
                     var global = &self.globals.items[global_index];
                     try self.stack.pushValue(global.value);
                 },
                 Instruction.Global_Set => {
-                    var global_index = try reader.readIntBig(u32);
+                    var global_index = try std.leb.readULEB128(u32, reader);
                     var global = &self.globals.items[global_index];
                     if (global.mut == GlobalValue.Mut.Immutable) {
                         return error.AttemptToSetImmutable;
@@ -957,11 +1008,7 @@ const VmState = struct {
                     global.value = try self.stack.popValue();
                 },
                 Instruction.I32_Const => {
-                    if (stream.pos + 3 >= stream.buffer.len) {
-                        return error.IncompleteInstruction;
-                    }
-
-                    var v: i32 = try reader.readIntBig(i32);
+                    var v: i32 = try std.leb.readILEB128(i32, reader);// reader.readIntBig(i32);
                     try self.stack.pushI32(v);
                 },
                 Instruction.I32_Eqz => {
@@ -1129,17 +1176,91 @@ const VmState = struct {
     }
 };
 
-const WasmBuilder = struct {
+const FunctionBuilder = struct {
     const Self = @This();
 
-    const BuilderFunction = struct {
+    instructions: std.ArrayList(u8),
+
+    fn init(allocator: *std.mem.Allocator) Self {
+        return Self{
+            .instructions = std.ArrayList(u8).init(allocator),
+        };
+    }
+
+    fn deinit(self:*Self) void {
+        self.instructions.deinit();
+    }
+
+    fn add(self: *Self, comptime instruction:Instruction) !void {
+        if (isInstructionMultiByte(instruction)) {
+            unreachable; // Use one of the other add functions.
+        }
+
+        var writer = self.instructions.writer();
+        try writer.writeByte(@enumToInt(instruction));
+        // return self.addByte(@enumToInt(instruction));
+    }
+
+    fn addBlock(self: *Self, comptime blocktype: BlockType, param: anytype) !void {
+        var writer = self.instructions.writer();
+        try writer.writeByte(@enumToInt(Instruction.Block));
+
+        switch (blocktype) {
+            .Void => {
+                try writer.writeByte(block_type_void_sentinel_byte);
+            },
+            .Valtype => {
+                if (@TypeOf(param) != Type) {
+                    unreachable; // When adding a Valtype block, you must specify which Type it is.
+                }
+                try writer.writeByte(@enumToInt(param));
+            },
+            .TypeIndex => {
+                var index:i33 = param;
+                try std.leb.writeILEB128(writer, index);
+            }
+        }
+    }
+
+    fn addConstant(self: *Self, comptime T: type, value: T) !void {
+        var writer = self.instructions.writer();
+        switch (T) {
+            i32 => { 
+                try writer.writeByte(@enumToInt(Instruction.I32_Const));
+                try std.leb.writeILEB128(writer, value); 
+            },
+            // TODO i64, f32, f64
+            else => unreachable,
+        }
+    }
+
+    fn addVariable(self: *Self, instruction:Instruction, index:u32) !void {
+        switch (instruction) {
+            .Local_Get => {},
+            .Local_Set => {},
+            .Local_Tee => {},
+            .Global_Get => {},
+            .Global_Set => {},
+            else => unreachable,
+        }
+
+        var writer = self.instructions.writer();
+        try writer.writeByte(@enumToInt(instruction));
+        try std.leb.writeULEB128(writer, index);
+    }
+};
+
+const ModuleBuilder = struct {
+    const Self = @This();
+
+    const WasmFunction = struct {
         exportName: std.ArrayList(u8),
         ftype: FunctionType,
         locals: std.ArrayList(Type),
         instructions: std.ArrayList(u8),
     };
 
-    const BuilderGlobal = struct {
+    const WasmGlobal = struct {
         exportName: std.ArrayList(u8),
         type: Type,
         mut: GlobalValue.Mut,
@@ -1147,17 +1268,17 @@ const WasmBuilder = struct {
     };
 
     allocator: *std.mem.Allocator,
-    functions: std.ArrayList(BuilderFunction),
-    globals: std.ArrayList(BuilderGlobal),
-    bytecode: std.ArrayList(u8),
+    functions: std.ArrayList(WasmFunction),
+    globals: std.ArrayList(WasmGlobal),
+    wasm: std.ArrayList(u8),
     needsRebuild: bool = true,
 
     fn init(allocator: *std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .functions = std.ArrayList(BuilderFunction).init(allocator),
-            .globals = std.ArrayList(BuilderGlobal).init(allocator),
-            .bytecode = std.ArrayList(u8).init(allocator),
+            .functions = std.ArrayList(WasmFunction).init(allocator),
+            .globals = std.ArrayList(WasmGlobal).init(allocator),
+            .wasm = std.ArrayList(u8).init(allocator),
         };
     }
 
@@ -1176,11 +1297,11 @@ const WasmBuilder = struct {
         }
         self.globals.deinit();
 
-        self.bytecode.deinit();
+        self.wasm.deinit();
     }
 
     fn addFunc(self: *Self, exportName: ?[]const u8, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) !void {
-        var f = BuilderFunction{
+        var f = WasmFunction{
             .exportName = std.ArrayList(u8).init(self.allocator),
             .ftype = FunctionType{
                 .types = std.ArrayList(Type).init(self.allocator),
@@ -1208,7 +1329,7 @@ const WasmBuilder = struct {
     }
 
     fn addGlobal(self: *Self, exportName: ?[]const u8, valtype: Type, mut: GlobalValue.Mut, initOpts:GlobalValueInitOptions) !void {
-        var g = BuilderGlobal{
+        var g = WasmGlobal{
             .exportName = std.ArrayList(u8).init(self.allocator),
             .type = valtype,
             .mut = mut,
@@ -1234,7 +1355,7 @@ const WasmBuilder = struct {
         self.needsRebuild = true;
     }
 
-    fn buildBytecode(self: *Self) !void {
+    fn build(self: *Self) !void {
         const LocalHelpers = struct{
             const section_header_bytesize: usize = @sizeOf(u8) + @sizeOf(u32);
 
@@ -1252,7 +1373,7 @@ const WasmBuilder = struct {
             }
         };
 
-        self.bytecode.clearRetainingCapacity();
+        self.wasm.clearRetainingCapacity();
 
         // dedupe function types and sort for quick lookup
         const FunctionTypeSetType = std.HashMap(*FunctionType, *FunctionType, FunctionTypeContext, std.hash_map.default_max_load_percentage);
@@ -1286,7 +1407,7 @@ const WasmBuilder = struct {
             0x00, 0x00, 0x00, 0x01,
         };
 
-        try self.bytecode.appendSlice(&header);
+        try self.wasm.appendSlice(&header);
 
         var sectionBytes = std.ArrayList(u8).init(self.allocator);
         defer sectionBytes.deinit();
@@ -1392,17 +1513,17 @@ const WasmBuilder = struct {
             // skip this section if there's nothing in it
             try LocalHelpers.WriteSectionSize(sectionBytes.items);
             if (sectionBytes.items.len > LocalHelpers.section_header_bytesize) {
-                try self.bytecode.appendSlice(sectionBytes.items);
+                try self.wasm.appendSlice(sectionBytes.items);
             }
         }
     }
 
-    fn getBytecode(self: *Self) ![]const u8 {
+    fn getWasm(self: *Self) ![]const u8 {
         if (self.needsRebuild) {
-            try self.buildBytecode();
+            try self.build();
         }
 
-        return self.bytecode.items;
+        return self.wasm.items;
     }
 };
 
@@ -1410,7 +1531,7 @@ fn writeTypedValue(value:TypedValue, writer: anytype) !void {
     switch (value) {
         .I32 => |v| {
             try writer.writeByte(@enumToInt(Instruction.I32_Const));
-            try writer.writeIntBig(i32, v);
+            try std.leb.writeILEB128(writer, v);
         },
         else => unreachable,
         // .I64 => |v| {
@@ -1453,7 +1574,7 @@ const TestOptions = struct {
 };
 
 fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
-    var builder = WasmBuilder.init(std.testing.allocator);
+    var builder = ModuleBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
     for (options.functions) |func|
@@ -1476,9 +1597,8 @@ fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
         }
     }
 
-    const rebuiltBytecode = try builder.getBytecode();
-
-    var vm = try VmState.parseWasm(rebuiltBytecode, .UseExisting, std.testing.allocator);
+    const wasm = try builder.getWasm();
+    var vm = try VmState.parseWasm(wasm, .UseExisting, std.testing.allocator);
     defer vm.deinit();
 
     const params = options.startFunctionParams orelse &[_]TypedValue{};
@@ -1508,7 +1628,7 @@ fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
     }
 }
 
-fn testCallFuncU32Return(bytecode: []const u8, expected:u32) !void {
+fn testCallFuncI32Return(bytecode: []const u8, expected:i32) !void {
     var types = [_]Type{.I32};
     var functions = [_]TestFunction{
         .{
@@ -1520,8 +1640,12 @@ fn testCallFuncU32Return(bytecode: []const u8, expected:u32) !void {
     var opts = TestOptions{
         .functions = &functions,
     };
-    var expectedReturns = [_]TypedValue{.{.I32 = @bitCast(i32, expected)}};
+    var expectedReturns = [_]TypedValue{.{.I32 = expected}};
     try testCallFunc(opts, &expectedReturns);
+}
+
+fn testCallFuncU32Return(bytecode: []const u8, expected:u32) !void {
+    try testCallFuncI32Return(bytecode, @bitCast(i32, expected));
 }
 
 fn testCallFuncSimple(bytecode: []const u8) !void {
@@ -1537,13 +1661,13 @@ fn testCallFuncSimple(bytecode: []const u8) !void {
     try testCallFunc(opts, null);
 }
 
-test "wasm builder" {
-    var builder = WasmBuilder.init(std.testing.allocator);
+test "module builder" {
+    var builder = ModuleBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
     try builder.addGlobal("glb1", Type.I32, GlobalValue.Mut.Immutable, GlobalValueInitOptions{.Value = TypedValue{.I32=0x88}});
     try builder.addFunc("abcd", &[_]Type{.I64}, &[_]Type{.I32}, &[_]Type{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
-    var bytecode = try builder.getBytecode();
+    var wasm = try builder.getWasm();
 
     // zig fmt: off
     const expected = [_]u8{
@@ -1562,11 +1686,11 @@ test "wasm builder" {
         0x00, 0x00, 0x00, 0x01, // num functions
         0x00, 0x00, 0x00, 0x00, // index to types
         @enumToInt(Section.Global),
-        0x00, 0x00, 0x00, 0x0C, // section size
+        0x00, 0x00, 0x00, 0x0A, // section size
         0x00, 0x00, 0x00, 0x01, // num globals
         @enumToInt(GlobalValue.Mut.Immutable),
         @enumToInt(Type.I32),
-        0x41, 0x00, 0x00, 0x00, 0x88, 0x0B, // const i32 instruction and end
+        0x41, 0x88, 0x01, 0x0B, // const i32 instruction and end
         @enumToInt(Section.Export),
         0x00, 0x00, 0x00, 0x1E, // section size
         0x00, 0x00, 0x00, 0x02, // num exports
@@ -1589,7 +1713,7 @@ test "wasm builder" {
     };
     // zig fmt: on
 
-    const areEqual = std.mem.eql(u8, bytecode, &expected);
+    const areEqual = std.mem.eql(u8, wasm, &expected);
 
     if (!areEqual) {
         std.debug.print("\n\nexpected: \n\t", .{});
@@ -1605,7 +1729,7 @@ test "wasm builder" {
 
         std.debug.print("\n\nactual: \n\t", .{});
         tab = 0;
-        for (bytecode) |byte| {
+        for (wasm) |byte| {
             if (tab == 4) {
                 std.debug.print("\n\t", .{});
                 tab = 0;
@@ -1619,14 +1743,13 @@ test "wasm builder" {
 }
 
 test "unreachable" {
-    var bytecode = [_]u8{
-        0x00,
-    };
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.add(.Unreachable);
 
     var didCatchError:bool = false;
     var didCatchCorrectError:bool = false;
-
-    testCallFuncSimple(&bytecode) catch |e| {
+    testCallFuncSimple(builder.instructions.items) catch |e| {
         didCatchError = true;
         didCatchCorrectError = (e == VMError.Unreachable);
     };
@@ -1636,109 +1759,113 @@ test "unreachable" {
 }
 
 test "noop" {
-    var bytecode = [_]u8{
-        0x01, 0x01, 0x01, 0x01, 0x01,
-        0x01, 0x01, 0x01, 0x01, 0x01,
-        0x01, 0x01, 0x01, 0x01, 0x01,
-        0x01, 0x01, 0x01, 0x01, 0x01,
-    };
-    try testCallFuncSimple(&bytecode);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+    try builder.add(.Noop);
+
+    try testCallFuncSimple(builder.instructions.items);
 }
 
 test "block void" {
-    var bytecode1 = [_]u8{
-        0x02, block_type_void_sentinel_byte, // enter block with returns: void
-        0x0B, // end
-    };
-    try testCallFuncSimple(&bytecode1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
 
-    var bytecode2 = [_]u8{
-        0x02, block_type_void_sentinel_byte, // enter block with returns: void
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x0B, // end without popping stack value, this should be an error
-    };
+    try builder.addBlock(.Void, .{});
+    try builder.add(.End);
+    try testCallFuncSimple(builder.instructions.items);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(.Void, .{});
+    try builder.addConstant(i32, 0x1337);
+    try builder.add(.End);
     var didCatchError = false;
-    testCallFuncSimple(&bytecode2) catch |e| {
-        didCatchError = (e == VMError.TypeMismatch);
+    var didCatchCorrectError = false;
+    testCallFuncSimple(builder.instructions.items) catch |e| {
+        didCatchError = true;
+        didCatchCorrectError = (e == VMError.TypeMismatch);
     };
-
     try std.testing.expect(didCatchError);
 }
 
 test "block valtypes" {
-    var bytecode1 = [_]u8{
-        0x02, 0x7F, // enter block with returns: I32
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x0B, // end
-    };
-    
-    try testCallFuncSimple(&bytecode1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
 
-    var bytecode2 = [_]u8{
-        0x02, 0x7F, // enter block with returns: I32
-        0x0B, // end
-    };
+    try builder.addBlock(.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.add(.End);
+    try testCallFuncSimple(builder.instructions.items);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(.Valtype, Type.I32);
+    try builder.add(.End);
     var didCatchError = false;
-    testCallFuncSimple(&bytecode2) catch |e| {
-        didCatchError = (e == VMError.TypeMismatch);
+    var didCatchCorrectError = false;
+    testCallFuncSimple(builder.instructions.items) catch |e| {
+        didCatchError = true;
+        didCatchCorrectError = (e == VMError.TypeMismatch);
     };
     try std.testing.expect(didCatchError);
 }
 
-test "block functypes" {
-
-}
+// test "block typeidx" {
+    
+// }
 
 test "call" {
-    var bytecode0 = [_]u8{
-        0x20, // push local 0 onto stack
-        0x00, 0x00, 0x00, 0x00,
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x04, 0x21,
-        0x6A, // add 2 stack values, 0x42 + 0x421 = 0x463
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x00, 0x01,
-        0x10, // call func at index 1
-    };
+    var builder0 = FunctionBuilder.init(std.testing.allocator);
+    var builder1 = FunctionBuilder.init(std.testing.allocator);
+    var builder2 = FunctionBuilder.init(std.testing.allocator);
+    defer builder0.deinit();
+    defer builder1.deinit();
+    defer builder2.deinit();
 
-    var bytecode1 = [_]u8{
-        0x20, // push local 0 onto stack
-        0x00, 0x00, 0x00, 0x00,
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x00, 0x02,
-        0x6C, // mul 2 stack values, 0x463 * 2 = 0x8C6
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x00, 0x02,
-        0x10, // call func at index 2
-    };
+    try builder0.addVariable(Instruction.Local_Get, 0);
+    try builder0.addConstant(i32, 0x421);
+    try builder0.add(Instruction.I32_Add); // 0x42 + 0x421 = 0x463
+    try builder0.addConstant(i32, 0x01);
+    try builder0.add(Instruction.Call);
 
-    var bytecode2 = [_]u8{
-        0x20, // push param 0 onto stack
-        0x00, 0x00, 0x00, 0x00,
-        0x41, // set constant values on stack
-        0x00, 0x00, 0xBE, 0xEF,
-        0x6A, // add 2 stack values, 0x8C6 + 0xBEEF = 0xC7B5
-    };
+    try builder1.addVariable(Instruction.Local_Get, 0);
+    try builder1.addConstant(i32, 0x02);
+    try builder1.add(Instruction.I32_Mul); // 0x463 * 2 = 0x8C6
+    try builder1.addConstant(i32, 0x02);
+    try builder1.add(Instruction.Call);
+
+    try builder2.addVariable(Instruction.Local_Get, 0);
+    try builder2.addConstant(i32, 0xBEEF);
+    try builder2.add(Instruction.I32_Add); // 0x8C6 + 0xBEEF = 0xC7B5
 
     var types = [_]Type{.I32};
     var functions = [_]TestFunction{
         .{
             .exportName = "testFunc",
-            .bytecode = &bytecode0,
+            .bytecode = builder0.instructions.items,
             .params = &types,
             .locals = &types,
             .returns = &types,
         },
         .{
-            .bytecode = &bytecode1,
+            .bytecode = builder1.instructions.items,
             .params = &types,
             .locals = &types,
             .returns = &types,
         },
         .{
-            .bytecode = &bytecode2,
+            .bytecode = builder2.instructions.items,
             .params = &types,
             .locals = &types,
             .returns = &types,
@@ -1754,50 +1881,43 @@ test "call" {
     try testCallFunc(opts, &expected);
 }
 
-test "call recursive" {
-    // todo test when branches start working
-}
+// test "call recursive" {
+//     // todo test when branches start working
+// }
 
 test "drop" {
-    var bytecode = [_]u8{
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x41, // set constant values on stack
-        0x00, 0x00, 0xBE, 0xEF,
-        0x1A, // drop top value
-    };
-    try testCallFuncU32Return(&bytecode, 0x1337);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.Drop);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
 }
 
 test "select" {
-    var bytecode1 = [_]u8{
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x41,
-        0x00, 0x00, 0xBE, 0xEF,
-        0x41,
-        0x00, 0x00, 0x00, 0xFF, //nonzero should pick val1
-        0x1B, // select
-    };
-    try testCallFuncU32Return(&bytecode1, 0x1337);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
 
-    var bytecode2 = [_]u8{
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x41,
-        0x00, 0x00, 0xBE, 0xEF,
-        0x41,
-        0x00, 0x00, 0x00, 0x00, //zero should pick val2
-        0x1B, // select
-    };
-    try testCallFuncU32Return(&bytecode2, 0xBEEF);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.addConstant(i32, 0xFF); //nonzero should pick val1
+    try builder.add(Instruction.Select);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.addConstant(i32, 0x0); //zero should pick val2
+    try builder.add(Instruction.Select);
+    try testCallFuncI32Return(builder.instructions.items, 0xBEEF);
 }
 
 test "local_get" {
-    var bytecode = [_]u8{
-        0x20, 
-        0x00, 0x00, 0x00, 0x00,
-    };
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addVariable(Instruction.Local_Get, 0);
 
     var types = [_]Type{.I32};
     var params = [_]TypedValue{.{.I32 = 0x1337}};
@@ -1806,7 +1926,7 @@ test "local_get" {
         .functions = &[_]TestFunction{
             .{
                 .exportName = "testFunc",
-                .bytecode = &bytecode,
+                .bytecode = builder.instructions.items,
                 .params = &types,
                 .locals = &types,
                 .returns = &types,
@@ -1819,32 +1939,27 @@ test "local_get" {
 }
 
 test "local_set" {
-    var bytecode = [_]u8{
-        0x41, // set constant values on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x41,
-        0x00, 0x00, 0x13, 0x36,
-        0x41,
-        0x00, 0x00, 0x13, 0x35,
-        0x21, // pop stack value and set in local
-        0x00, 0x00, 0x00, 0x00,
-        0x21,
-        0x00, 0x00, 0x00, 0x00,
-        0x21,
-        0x00, 0x00, 0x00, 0x00,
-        0x20, // push local value onto stack, should be 1337 since it was the first pushed
-        0x00, 0x00, 0x00, 0x00,
-    };
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0x1336);
+    try builder.addConstant(i32, 0x1335);
+    try builder.addVariable(Instruction.Local_Set, 0); // pop stack values and set in local
+    try builder.addVariable(Instruction.Local_Set, 0);
+    try builder.addVariable(Instruction.Local_Set, 0);
+    try builder.addVariable(Instruction.Local_Get, 0); // push local value onto stack, should be 1337 since it was the first pushed
 
     var types = [_]Type{.I32};
-    var params = [_]TypedValue{.{.I32 = 0x1337}};
+    var emptyTypes = [_]Type{};
+    var params = [_]TypedValue{};
     var opts = TestOptions{
         .startFunctionParams = &params,
         .functions = &[_]TestFunction{
             .{
                 .exportName = "testFunc",
-                .bytecode = &bytecode,
-                .params = &types,
+                .bytecode = builder.instructions.items,
+                .params = &emptyTypes,
                 .locals = &types,
                 .returns = &types,
             }
@@ -1856,25 +1971,24 @@ test "local_set" {
 }
 
 test "local_tee" {
-    var bytecode = [_]u8{
-        0x41, // set constant value on stack
-        0x00, 0x00, 0x13, 0x37,
-        0x22, // leave value on stack but also put it in locals
-        0x00, 0x00, 0x00, 0x00,
-        0x20, // push local onto stack
-        0x00, 0x00, 0x00, 0x00,
-        0x6A, // add 2 stack values, 0x1337 + 0x1337 = 0x266E
-    };
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addConstant(i32, 0x1337);
+    try builder.addVariable(Instruction.Local_Tee, 0); // put value in locals but also leave it on the stack
+    try builder.addVariable(Instruction.Local_Get, 0); // push the same value back onto the stack
+    try builder.add(Instruction.I32_Add);
 
     var types = [_]Type{.I32};
-    var params = [_]TypedValue{.{.I32 = 0x1337}};
+    var emptyTypes = [_]Type{};
+    var params = [_]TypedValue{};
     var opts = TestOptions{
         .startFunctionParams = &params,
         .functions = &[_]TestFunction{
             .{
                 .exportName = "testFunc",
-                .bytecode = &bytecode,
-                .params = &types,
+                .bytecode = builder.instructions.items,
+                .params = &emptyTypes,
                 .locals = &types,
                 .returns = &types,
             }
@@ -1886,15 +2000,16 @@ test "local_tee" {
 }
 
 test "global_get" {
-    var bytecode = [_]u8{
-        0x23,// get global
-        0x00, 0x00, 0x00, 0x00, // at index 0
-    };
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addVariable(Instruction.Global_Get, 0x0);
+
     var returns = [_]Type{.I32};
     var functions = [_]TestFunction{
         .{
             .exportName = "testFunc",
-            .bytecode = &bytecode,
+            .bytecode = builder.instructions.items,
             .returns = &returns,
         }
     };
@@ -1914,14 +2029,13 @@ test "global_get" {
 }
 
 test "global_set" {
-    var bytecode = [_]u8{
-        0x41,
-        0x00, 0x00, 0x13, 0x37,
-        0x24, // set global
-        0x00, 0x00, 0x00, 0x00, // at index 0
-        0x23, // get global
-        0x00, 0x00, 0x00, 0x00, // at index 0
-    };
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addConstant(i32, 0x1337);
+    try builder.addVariable(Instruction.Global_Set, 0);
+    try builder.addVariable(Instruction.Global_Get, 0);
+
     var returns = [_]Type{.I32};
     var globals = [_]TestGlobal {
         .{
@@ -1933,7 +2047,7 @@ test "global_set" {
     var functions = &[_]TestFunction{
         .{
             .exportName = "testFunc",
-            .bytecode = &bytecode,
+            .bytecode = builder.instructions.items,
             .returns = &returns,
         }
     };
@@ -1958,338 +2072,336 @@ test "global_set" {
 }
 
 test "i32_eqz" {
-    var bytecode1 = [_]u8{
-        0x41, 0x00, 0x00, 0x00, 0x00,
-        0x45,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0);
+    try builder.add(Instruction.I32_Eqz);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x00, 0x01,
-        0x45,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x0);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 1);
+    try builder.add(Instruction.I32_Eqz);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 }
 
 test "i32_eq" {
-    var bytecode1 = [_]u8{
-        0x41, 0x00, 0x00, 0x00, 0x00,
-        0x41, 0x00, 0x00, 0x00, 0x00,
-        0x46,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0);
+    try builder.addConstant(i32, 0);
+    try builder.add(Instruction.I32_Eq);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x80, 0x00, 0x00, 0x00,
-        0x41, 0x00, 0x00, 0x00, 0x00,
-        0x46,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x0);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0);
+    try builder.addConstant(i32, -1);
+    try builder.add(Instruction.I32_Eq);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 }
 
 test "i32_ne" {
-    var bytecode1 = [_]u8{
-        0x41, 0x00, 0x00, 0x00, 0x00,
-        0x41, 0x00, 0x00, 0x00, 0x00,
-        0x47,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x0);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0);
+    try builder.addConstant(i32, 0);
+    try builder.add(Instruction.I32_NE);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x80, 0x00, 0x00, 0x00,
-        0x41, 0x00, 0x00, 0x00, 0x00,
-        0x47,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0);
+    try builder.addConstant(i32, -1);
+    try builder.add(Instruction.I32_NE);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 }
 
 test "i32_lt_s" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x48,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_LT_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x48,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x0);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_LT_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 }
 
-test "i32_lt_u" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x49,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x0);
+test "i32_lt_s" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600); // 0xFFFFFA00 when unsigned
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_LT_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
-        0x49,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_LT_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 }
 
 test "i32_gt_s" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x4A,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x0);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_GT_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4A,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_GT_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 }
 
 test "i32_gt_u" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x4B,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600); // 0xFFFFFA00 when unsigned
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_GT_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600 (when signed)
-        0x4B,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x0);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_GT_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 }
 
 test "i32_le_s" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x4C,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_LE_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4C,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x0);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_LE_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 
-    var bytecode3 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4C,
-    };
-    try testCallFuncU32Return(&bytecode3, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_LE_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 }
 
 test "i32_le_u" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x4D,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x0);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_LE_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4D,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_LE_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode3 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4D,
-    };
-    try testCallFuncU32Return(&bytecode3, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_LE_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 }
 
 test "i32_ge_s" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x4E,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x0);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_GE_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4E,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_GE_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode3 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4E,
-    };
-    try testCallFuncU32Return(&bytecode3, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_GE_S);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 }
 
 test "i32_ge_u" {
-    var bytecode1 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x4F,
-    };
-    try testCallFuncU32Return(&bytecode1, 0x1);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x800);
+    try builder.add(Instruction.I32_GE_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 
-    var bytecode2 = [_]u8{
-        0x41, 0x00, 0x00, 0x08, 0x00, //  0x800
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4F,
-    };
-    try testCallFuncU32Return(&bytecode2, 0x0);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x800);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_GE_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x0);
 
-    var bytecode3 = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x4F,
-    };
-    try testCallFuncU32Return(&bytecode3, 0x1);
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, -0x600);
+    try builder.add(Instruction.I32_GE_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x1);
 }
 
 test "i32_add" {
-    var bytecode = [_]u8{
-        0x41, 0x00, 0x10, 0x00, 0x01,
-        0x41, 0x00, 0x00, 0x02, 0x01,
-        0x6A,
-    };
-    try testCallFuncU32Return(&bytecode, 0x100202);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0x100001);
+    try builder.addConstant(i32, 0x000201);
+    try builder.add(Instruction.I32_Add);
+    try testCallFuncI32Return(builder.instructions.items, 0x100202);
 }
 
 test "i32_sub" {
-    var bytecode = [_]u8{
-        0x41, 0x00, 0x10, 0x00, 0x01,
-        0x41, 0x00, 0x00, 0x02, 0x01,
-        0x6B,
-    };
-    try testCallFuncU32Return(&bytecode, 0xFFE00);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0x100001);
+    try builder.addConstant(i32, 0x000201);
+    try builder.add(Instruction.I32_Sub);
+    try testCallFuncI32Return(builder.instructions.items, 0xFFE00);
 }
 
 test "i32_mul" {
-    var bytecode = [_]u8{
-        0x41, 0x00, 0x00, 0x02, 0x00,
-        0x41, 0x00, 0x00, 0x03, 0x00,
-        0x6C,
-    };
-    try testCallFuncU32Return(&bytecode, 0x60000);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0x200);
+    try builder.addConstant(i32, 0x300);
+    try builder.add(Instruction.I32_Mul);
+    try testCallFuncI32Return(builder.instructions.items, 0x60000);
 }
 
 test "i32_div_s" {
-    var bytecode = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFA, 0x00, // -0x600
-        0x41, 0x00, 0x00, 0x02, 0x00,
-        0x6D,
-    };
-    try testCallFuncU32Return(&bytecode, 0xFFFFFFFD); //-3
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x200);
+    try builder.add(Instruction.I32_Div_S);
+    var expected:i32 = -3;
+    try testCallFuncU32Return(builder.instructions.items, @bitCast(u32, expected));
 }
 
 test "i32_div_u" {
-    var bytecode = [_]u8{
-        0x41, 0x80, 0x00, 0x06, 0x00,
-        0x41, 0x00, 0x00, 0x02, 0x00,
-        0x6E,
-    };
-    try testCallFuncU32Return(&bytecode, 0x400003);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x600); // 0xFFFFFA00 unsigned
+    try builder.addConstant(i32, 0x200);
+    try builder.add(Instruction.I32_Div_U);
+    try testCallFuncU32Return(builder.instructions.items, 0x7FFFFD);
 }
 
 test "i32_rem_s" {
-    var bytecode = [_]u8{
-        0x41, 0xFF, 0xFF, 0xF9, 0x9A, // -0x666
-        0x41, 0x00, 0x00, 0x02, 0x00,
-        0x6F,
-    };
-    try testCallFuncU32Return(&bytecode, 0xFFFFFF9A); // -0x66
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x666);
+    try builder.addConstant(i32, 0x200);
+    try builder.add(Instruction.I32_Rem_S);
+    try testCallFuncI32Return(builder.instructions.items, -0x66);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, -0x600);
+    try builder.addConstant(i32, 0x200);
+    try builder.add(Instruction.I32_Rem_S);
+    try testCallFuncI32Return(builder.instructions.items, 0);
 }
 
 test "i32_rem_u" {
-    var bytecode = [_]u8{
-        0x41, 0x80, 0x00, 0x06, 0x66,
-        0x41, 0x00, 0x00, 0x02, 0x00,
-        0x70,
-    };
-    try testCallFuncU32Return(&bytecode, 0x66);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x666); // 0xFFFFF99A unsigned
+    try builder.addConstant(i32, 0x200);
+    try builder.add(Instruction.I32_Rem_U);
+    try testCallFuncI32Return(builder.instructions.items, 0x19A);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, -0x800);
+    try builder.addConstant(i32, 0x200);
+    try builder.add(Instruction.I32_Rem_U);
+    try testCallFuncI32Return(builder.instructions.items, 0);
 }
 
 test "i32_and" {
-    var bytecode = [_]u8{
-        0x41, 0xFF, 0xFF, 0xFF, 0xFF,
-        0x41, 0x11, 0x22, 0x33, 0x44,
-        0x71,
-    };
-    try testCallFuncU32Return(&bytecode, 0x11223344);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0x0FFFFFFF);
+    try builder.addConstant(i32, 0x01223344);
+    try builder.add(Instruction.I32_And);
+    try testCallFuncI32Return(builder.instructions.items, 0x01223344);
 }
 
 test "i32_or" {
-    var bytecode = [_]u8{
-        0x41, 0xFF, 0x00, 0xFF, 0x00,
-        0x41, 0x11, 0x22, 0x33, 0x44,
-        0x72,
-    };
-    try testCallFuncU32Return(&bytecode, 0xFF22FF44);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0x0F00FF00);
+    try builder.addConstant(i32, 0x01223344);
+    try builder.add(Instruction.I32_Or);
+    try testCallFuncI32Return(builder.instructions.items, 0x0F22FF44);
 }
 
 test "i32_xor" {
-    var bytecode = [_]u8{
-        0x41, 0xF0, 0xF0, 0xF0, 0xF0,
-        0x41, 0x0F, 0x0F, 0xF0, 0xF0,
-        0x73,
-    };
-    try testCallFuncU32Return(&bytecode, 0xFFFF0000);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, 0x0F0F0F0F);
+    try builder.addConstant(i32, 0x70F00F0F);
+    try builder.add(Instruction.I32_Xor);
+    try testCallFuncI32Return(builder.instructions.items, 0x7FFF0000);
 }
 
 test "i32_shl" {
-    var bytecode = [_]u8{
-        0x41, 0x80, 0x01, 0x01, 0x01,
-        0x41, 0x00, 0x00, 0x00, 0x02,
-        0x74,
-    };
-    try testCallFuncU32Return(&bytecode, 0x40404);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x7FFEFEFF); // 0x80010101 unsigned
+    try builder.addConstant(i32, 0x2);
+    try builder.add(Instruction.I32_Shl);
+    try testCallFuncU32Return(builder.instructions.items, 0x40404);
 }
 
 test "i32_shr_s" {
-    var bytecode = [_]u8{
-        0x41, 0x80, 0x01, 0x01, 0x01,
-        0x41, 0x00, 0x00, 0x00, 0x01,
-        0x75,
-    };
-    try testCallFuncU32Return(&bytecode, 0xC0008080);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x7FFEFEFF); // 0x80010101 unsigned
+    try builder.addConstant(i32, 0x1);
+    try builder.add(Instruction.I32_Shr_S);
+    try testCallFuncU32Return(builder.instructions.items, 0xC0008080);
 }
 
 test "i32_shr_u" {
-    var bytecode = [_]u8{
-        0x41, 0x80, 0x01, 0x01, 0x01,
-        0x41, 0x00, 0x00, 0x00, 0x01,
-        0x76,
-    };
-    try testCallFuncU32Return(&bytecode, 0x40008080);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x7FFEFEFF); // 0x80010101 unsigned
+    try builder.addConstant(i32, 0x1);
+    try builder.add(Instruction.I32_Shr_U);
+    try testCallFuncU32Return(builder.instructions.items, 0x40008080);
 }
 
 test "i32_rotl" {
-    var bytecode = [_]u8{
-        0x41, 0x80, 0x01, 0x01, 0x01,
-        0x41, 0x00, 0x00, 0x00, 0x02,
-        0x77,
-    };
-    try testCallFuncU32Return(&bytecode, 0x00040406);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x7FFEFEFF); // 0x80010101 unsigned
+    try builder.addConstant(i32, 0x2);
+    try builder.add(Instruction.I32_Rotl);
+    try testCallFuncU32Return(builder.instructions.items, 0x00040406);
 }
 
 test "i32_rotr" {
-    var bytecode = [_]u8{
-        0x41, 0x80, 0x01, 0x01, 0x01,
-        0x41, 0x00, 0x00, 0x00, 0x02,
-        0x78,
-    };
-    try testCallFuncU32Return(&bytecode, 0x60004040);
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+    try builder.addConstant(i32, -0x7FFEFEFF); // 0x80010101 unsigned
+    try builder.addConstant(i32, 0x2);
+    try builder.add(Instruction.I32_Rotr);
+    try testCallFuncU32Return(builder.instructions.items, 0x60004040);
 }
