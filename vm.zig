@@ -174,9 +174,10 @@ const Stack = struct {
     const Self = @This();
 
     fn init(allocator: *std.mem.Allocator) Self {
-        return Self{
+        var self = Self{
             .stack = std.ArrayList(StackItem).init(allocator),
         };
+        return self;
     }
 
     fn deinit(self: *Self) void {
@@ -494,7 +495,7 @@ const VmState = struct {
             if (magic != 0x0061736D) {
                 return error.InvalidMagicSignature;
             }
-            const version = try reader.readIntBig(u32);
+            const version = try reader.readIntLittle(u32);
             if (version != 1) {
                 return error.UnsupportedWasmVersion;
             }
@@ -502,11 +503,11 @@ const VmState = struct {
 
         while (stream.pos < stream.buffer.len) {
             const section_id: Section = @intToEnum(Section, try reader.readByte());
-            const size_bytes: usize = try reader.readIntBig(u32);
+            const size_bytes: usize = try std.leb.readULEB128(u32, reader);
             switch (section_id) {
                 .FunctionType => {
                     // std.debug.print("parseWasm: section: FunctionType\n", .{});
-                    const num_types = try reader.readIntBig(u32);
+                    const num_types = try std.leb.readULEB128(u32, reader);
                     var types_index:u32 = 0;
                     while (types_index < num_types) {
                         const sentinel = try reader.readByte();
@@ -514,7 +515,7 @@ const VmState = struct {
                             return error.InvalidBytecode;
                         }
 
-                        const num_params = try reader.readIntBig(u32);
+                        const num_params = try std.leb.readULEB128(u32, reader);
 
                         var func = FunctionType{ .numParams = num_params, .types = std.ArrayList(Type).init(allocator) };
                         errdefer func.types.deinit();
@@ -527,7 +528,7 @@ const VmState = struct {
                             try func.types.append(param_type);
                         }
 
-                        const num_returns = try reader.readIntBig(u32);
+                        const num_returns = try std.leb.readULEB128(u32, reader);
                         var returns_left = num_returns;
                         while (returns_left > 0) {
                             returns_left -= 1;
@@ -544,11 +545,11 @@ const VmState = struct {
                 .Function => {
                     // std.debug.print("parseWasm: section: Function\n", .{});
 
-                    const num_funcs = try reader.readIntBig(u32);
+                    const num_funcs = try std.leb.readULEB128(u32, reader);
                     var func_index:u32 = 0;
                     while (func_index < num_funcs) {
                         var func = Function{
-                            .typeIndex = try reader.readIntBig(u32),
+                            .typeIndex = try std.leb.readULEB128(u32, reader),
                             .bytecodeOffset = 0, // we'll fix these up later when we find them in the Code section
                             .locals = std.ArrayList(Type).init(allocator),
                         };
@@ -559,7 +560,7 @@ const VmState = struct {
                     }
                 },
                 .Global => {
-                    const num_globals = try reader.readIntBig(u32);
+                    const num_globals = try std.leb.readULEB128(u32, reader);
 
                     var global_index: u32 = 0;
                     while (global_index < num_globals) {
@@ -593,18 +594,18 @@ const VmState = struct {
                 .Export => {
                     // std.debug.print("parseWasm: section: Export\n", .{});
 
-                    const num_exports = try reader.readIntBig(u32);
+                    const num_exports = try std.leb.readULEB128(u32, reader);
 
                     var export_index:u32 = 0;
                     while (export_index < num_exports) {
-                        const name_length = try reader.readIntBig(u32);
+                        const name_length = try std.leb.readULEB128(u32, reader);
                         var name = std.ArrayList(u8).init(allocator);
                         try name.resize(name_length);
                         errdefer name.deinit();
                         _ = try stream.read(name.items);
 
                         const exportType = @intToEnum(ExportType, try reader.readByte());
-                        const exportIndex = try reader.readIntBig(u32);
+                        const exportIndex = try std.leb.readULEB128(u32, reader);
                         switch (exportType) {
                             .Function => {
                                 if (exportIndex >= vm.functions.items.len) {
@@ -633,14 +634,14 @@ const VmState = struct {
                     var label_offset_stack = std.ArrayList(u32).init(allocator);
                     defer label_offset_stack.deinit();
 
-                    const num_codes = try reader.readIntBig(u32);
+                    const num_codes = try std.leb.readULEB128(u32, reader);
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
                         // std.debug.print(">>> parsing code index {}\n", .{code_index});
-                        const code_size = try reader.readIntBig(u32);
+                        const code_size = try std.leb.readULEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
-                        const num_locals = try reader.readIntBig(u32);
+                        const num_locals = try std.leb.readULEB128(u32, reader);
                         var locals_index: u32 = 0;
                         while (locals_index < num_locals) {
                             locals_index += 1;
@@ -1008,7 +1009,7 @@ const VmState = struct {
                     global.value = try self.stack.popValue();
                 },
                 Instruction.I32_Const => {
-                    var v: i32 = try std.leb.readILEB128(i32, reader);// reader.readIntBig(i32);
+                    var v: i32 = try std.leb.readILEB128(i32, reader);
                     try self.stack.pushI32(v);
                 },
                 Instruction.I32_Eqz => {
@@ -1182,9 +1183,10 @@ const FunctionBuilder = struct {
     instructions: std.ArrayList(u8),
 
     fn init(allocator: *std.mem.Allocator) Self {
-        return Self{
+        var self = Self{
             .instructions = std.ArrayList(u8).init(allocator),
         };
+        return self;
     }
 
     fn deinit(self:*Self) void {
@@ -1198,7 +1200,6 @@ const FunctionBuilder = struct {
 
         var writer = self.instructions.writer();
         try writer.writeByte(@enumToInt(instruction));
-        // return self.addByte(@enumToInt(instruction));
     }
 
     fn addBlock(self: *Self, comptime blocktype: BlockType, param: anytype) !void {
@@ -1356,23 +1357,6 @@ const ModuleBuilder = struct {
     }
 
     fn build(self: *Self) !void {
-        const LocalHelpers = struct{
-            const section_header_bytesize: usize = @sizeOf(u8) + @sizeOf(u32);
-
-            fn WriteU32AtOffset(sectionBytes: []u8, offset:usize, value:u32) !void {
-                std.debug.assert(offset < sectionBytes.len);
-                var stream = std.io.fixedBufferStream(sectionBytes);
-                stream.pos = offset;
-                var writer = stream.writer();
-                try writer.writeIntBig(u32, @intCast(u32, value));
-            }
-
-            fn WriteSectionSize(sectionBytes: []u8) !void {
-
-                try WriteU32AtOffset(sectionBytes, 1, @intCast(u32, sectionBytes.len - section_header_bytesize));
-            }
-        };
-
         self.wasm.clearRetainingCapacity();
 
         // dedupe function types and sort for quick lookup
@@ -1404,7 +1388,7 @@ const ModuleBuilder = struct {
 
         const header = [_]u8{
             0x00, 0x61, 0x73, 0x6D,
-            0x00, 0x00, 0x00, 0x01,
+            0x01, 0x00, 0x00, 0x00,
         };
 
         try self.wasm.appendSlice(&header);
@@ -1413,42 +1397,43 @@ const ModuleBuilder = struct {
         defer sectionBytes.deinit();
         try sectionBytes.ensureCapacity(1024 * 4);
 
+        var scratchBuffer = std.ArrayList(u8).init(self.allocator);
+        defer scratchBuffer.deinit();
+        try scratchBuffer.ensureCapacity(1024);
+
         const sectionsToSerialize = [_]Section{ .FunctionType, .Function, .Global, .Export, .Code };
         for (sectionsToSerialize) |section| {
             sectionBytes.clearRetainingCapacity();
             var writer = sectionBytes.writer();
-            try writer.writeByte(@enumToInt(section));
-            try writer.writeIntBig(u32, 0); // placeholder for size
-
             switch (section) {
                 .FunctionType => {
-                    try writer.writeIntBig(u32, @intCast(u32, functionTypesSorted.items.len));
+                    try std.leb.writeULEB128(writer, @intCast(u32, functionTypesSorted.items.len));
                     for (functionTypesSorted.items) |funcType| {
                         try writer.writeByte(function_type_sentinel_byte);
 
                         var params = funcType.getParams();
                         var returns = funcType.getReturns();
 
-                        try writer.writeIntBig(u32, @intCast(u32, params.len));
+                        try std.leb.writeULEB128(writer,  @intCast(u32, params.len));
                         for (params) |v| {
                             try writer.writeByte(@enumToInt(v));
                         }
-                        try writer.writeIntBig(u32, @intCast(u32, returns.len));
+                        try std.leb.writeULEB128(writer,  @intCast(u32, returns.len));
                         for (returns) |v| {
                             try writer.writeByte(@enumToInt(v));
                         }
                     }
                 },
                 .Function => {
-                    try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
+                    try std.leb.writeULEB128(writer,  @intCast(u32, self.functions.items.len));
                     for (self.functions.items) |*func| {
                         var context = FunctionTypeContext{};
                         var index: ?usize = std.sort.binarySearch(*FunctionType, &func.ftype, functionTypesSorted.items, context, FunctionTypeContext.order);
-                        try writer.writeIntBig(u32, @intCast(u32, index.?));
+                        try std.leb.writeULEB128(writer,  @intCast(u32, index.?));
                     }
                 },
                 .Global => {
-                    try writer.writeIntBig(u32, @intCast(u32, self.globals.items.len));
+                    try std.leb.writeULEB128(writer,  @intCast(u32, self.globals.items.len));
                     for (self.globals.items) |global| {
                         try writer.writeByte(@enumToInt(global.mut));
                         try writer.writeByte(@enumToInt(global.type));
@@ -1456,53 +1441,53 @@ const ModuleBuilder = struct {
                     }
                 },
                 .Export => {
-                    const num_exports_pos = sectionBytes.items.len;
-                    try writer.writeIntBig(u32, 0); // placeholder num exports
-
                     var num_exports:u32 = 0;
-                    for (self.functions.items) |func, i| {
+                    for (self.functions.items) |func| {
                         if (func.exportName.items.len > 0) {
                             num_exports += 1;
+                        }
+                    }
+                    for (self.globals.items) |global| {
+                        if (global.exportName.items.len > 0) {
+                            num_exports += 1;
+                        }
+                    }
 
-                            try writer.writeIntBig(u32, @intCast(u32, func.exportName.items.len));
+                    try std.leb.writeULEB128(writer, @intCast(u32, num_exports));
+
+                    for (self.functions.items) |func, i| {
+                        if (func.exportName.items.len > 0) {
+                            try std.leb.writeULEB128(writer,  @intCast(u32, func.exportName.items.len));
                             _ = try writer.write(func.exportName.items);
                             try writer.writeByte(@enumToInt(ExportType.Function));
-                            try writer.writeIntBig(u32, @intCast(u32, i));
+                            try std.leb.writeULEB128(writer,  @intCast(u32, i));
                         }
                     }
                     for (self.globals.items) |global, i| {
                         if (global.exportName.items.len > 0) {
-                            num_exports += 1;
-
-                            try writer.writeIntBig(u32, @intCast(u32, global.exportName.items.len));
+                            try std.leb.writeULEB128(writer,  @intCast(u32, global.exportName.items.len));
                             _ = try writer.write(global.exportName.items);
                             try writer.writeByte(@enumToInt(ExportType.Global));
-                            try writer.writeIntBig(u32, @intCast(u32, i));
+                            try std.leb.writeULEB128(writer,  @intCast(u32, i));
                         }
                     }
-
-                    try LocalHelpers.WriteU32AtOffset(sectionBytes.items, num_exports_pos, num_exports);
                 },
                 .Code => {
-                    try writer.writeIntBig(u32, @intCast(u32, self.functions.items.len));
+                    try std.leb.writeULEB128(writer,  @intCast(u32, self.functions.items.len));
                     for (self.functions.items) |func| {
-                        const code_size_pos = sectionBytes.items.len;
-                        try writer.writeIntBig(u32, 0); //placeholder code size
+                        var scratchWriter = scratchBuffer.writer();
+                        defer scratchBuffer.clearRetainingCapacity();
 
-                        const code_begin_pos = sectionBytes.items.len;
-
-                        try writer.writeIntBig(u32, @intCast(u32, func.locals.items.len));
+                        try std.leb.writeULEB128(scratchWriter,  @intCast(u32, func.locals.items.len));
                         for (func.locals.items) |local| {
-                            try writer.writeByte(@enumToInt(local));
+                            try scratchWriter.writeByte(@enumToInt(local));
                         }
-                        _ = try writer.write(func.instructions.items);
+                        _ = try scratchWriter.write(func.instructions.items);
                         // TODO should the client supply an end instruction instead?
-                        try writer.writeByte(@enumToInt(Instruction.End));
+                        try scratchWriter.writeByte(@enumToInt(Instruction.End));
 
-                        const code_end_pos = sectionBytes.items.len;
-                        const code_size = @intCast(u32, code_end_pos - code_begin_pos);
-
-                        try LocalHelpers.WriteU32AtOffset(sectionBytes.items, code_size_pos, code_size);
+                        try std.leb.writeULEB128(writer, @intCast(u32, scratchBuffer.items.len));
+                        try sectionBytes.appendSlice(scratchBuffer.items);
                     }
                 },
                 else => { 
@@ -1510,11 +1495,10 @@ const ModuleBuilder = struct {
                 }
             }
 
-            // skip this section if there's nothing in it
-            try LocalHelpers.WriteSectionSize(sectionBytes.items);
-            if (sectionBytes.items.len > LocalHelpers.section_header_bytesize) {
-                try self.wasm.appendSlice(sectionBytes.items);
-            }
+            var wasmWriter = self.wasm.writer();
+            try wasmWriter.writeByte(@enumToInt(section));
+            try std.leb.writeULEB128(wasmWriter, @intCast(u32, sectionBytes.items.len)); // placeholder for size
+            _ = try wasmWriter.write(sectionBytes.items);
         }
     }
 
@@ -1531,7 +1515,7 @@ fn writeTypedValue(value:TypedValue, writer: anytype) !void {
     switch (value) {
         .I32 => |v| {
             try writer.writeByte(@enumToInt(Instruction.I32_Const));
-            try std.leb.writeILEB128(writer, v);
+            try std.leb.writeILEB128(writer, @intCast(i32, v));
         },
         else => unreachable,
         // .I64 => |v| {
@@ -1661,6 +1645,20 @@ fn testCallFuncSimple(bytecode: []const u8) !void {
     try testCallFunc(opts, null);
 }
 
+fn printBytecode(label: []const u8, bytecode: []const u8) void {
+    std.debug.print("\n\n{s}: \n\t", .{label});
+    var tab:u32 = 0;
+    for (bytecode) |byte| {
+        if (tab == 4) {
+            std.debug.print("\n\t", .{});
+            tab = 0;
+        }
+        tab += 1;
+        std.debug.print("0x{X:2} ", .{byte});
+    }
+    std.debug.print("\n", .{});
+}
+
 test "module builder" {
     var builder = ModuleBuilder.init(std.testing.allocator);
     defer builder.deinit();
@@ -1669,74 +1667,109 @@ test "module builder" {
     try builder.addFunc("abcd", &[_]Type{.I64}, &[_]Type{.I32}, &[_]Type{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
     var wasm = try builder.getWasm();
 
+    var expected = std.ArrayList(u8).init(std.testing.allocator);
+    defer expected.deinit();
+    try expected.ensureCapacity(1024);
+
+    {
+        var writer = expected.writer();
+
+        _ = try writer.write(&[_]u8{0x00, 0x61, 0x73, 0x6D});
+        try writer.writeIntLittle(u32, 1);
+        try writer.writeByte(@enumToInt(Section.FunctionType));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x6)); // section size
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num types
+        try writer.writeByte(function_type_sentinel_byte);
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num params
+        try writer.writeByte(@enumToInt(Type.I64));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num returns
+        try writer.writeByte(@enumToInt(Type.I32));
+        try writer.writeByte(@enumToInt(Section.Function));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x2)); // section size
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num functions
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x0)); // index to types
+        try writer.writeByte(@enumToInt(Section.Global));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x7)); // section size
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num globals
+        try writer.writeByte(@enumToInt(GlobalValue.Mut.Immutable));
+        try writer.writeByte(@enumToInt(Type.I32));
+        try writer.writeByte(@enumToInt(Instruction.I32_Const));
+        try std.leb.writeILEB128(writer, @intCast(i32, 0x88));
+        try writer.writeByte(@enumToInt(Instruction.End));
+        try writer.writeByte(@enumToInt(Section.Export));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0xF)); // section size
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x2)); // num exports
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x4)); // size of export name (1)
+        _ = try writer.write("abcd");
+        try writer.writeByte(@enumToInt(ExportType.Function));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x0)); // index of export
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x4)); // size of export name (2)
+        _ = try writer.write("glb1");
+        try writer.writeByte(@enumToInt(ExportType.Global));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x0)); // index of export
+        try writer.writeByte(@enumToInt(Section.Code));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0xA)); // section size
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num codes
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x8)); // code size
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x2)); // num locals
+        try writer.writeByte(@enumToInt(Type.I32));
+        try writer.writeByte(@enumToInt(Type.I64));
+        try writer.writeByte(@enumToInt(Instruction.Noop));
+        try writer.writeByte(@enumToInt(Instruction.Noop));
+        try writer.writeByte(@enumToInt(Instruction.Noop));
+        try writer.writeByte(@enumToInt(Instruction.Noop));
+        try writer.writeByte(@enumToInt(Instruction.End));
+    }
+
     // zig fmt: off
-    const expected = [_]u8{
-        0x00, 0x61, 0x73, 0x6D, // magic
-        0x00, 0x00, 0x00, 0x01, // version
-        @enumToInt(Section.FunctionType),
-        0x00, 0x00, 0x00, 0x0F, // section size
-        0x00, 0x00, 0x00, 0x01, // num types
-        function_type_sentinel_byte,
-        0x00, 0x00, 0x00, 0x01, // num params
-        @enumToInt(Type.I64),
-        0x00, 0x00, 0x00, 0x01, // num returns
-        @enumToInt(Type.I32),
-        @enumToInt(Section.Function),
-        0x00, 0x00, 0x00, 0x08, // section size
-        0x00, 0x00, 0x00, 0x01, // num functions
-        0x00, 0x00, 0x00, 0x00, // index to types
-        @enumToInt(Section.Global),
-        0x00, 0x00, 0x00, 0x0A, // section size
-        0x00, 0x00, 0x00, 0x01, // num globals
-        @enumToInt(GlobalValue.Mut.Immutable),
-        @enumToInt(Type.I32),
-        0x41, 0x88, 0x01, 0x0B, // const i32 instruction and end
-        @enumToInt(Section.Export),
-        0x00, 0x00, 0x00, 0x1E, // section size
-        0x00, 0x00, 0x00, 0x02, // num exports
-        0x00, 0x00, 0x00, 0x04, // size of export name (1)
-        0x61, 0x62, 0x63, 0x64, // "abcd"
-        @enumToInt(ExportType.Function),
-        0x00, 0x00, 0x00, 0x00, // index of export
-        0x00, 0x00, 0x00, 0x04, // size of export name (2)
-        0x67, 0x6C, 0x62, 0x31, // "glb1"
-        @enumToInt(ExportType.Global),
-        0x00, 0x00, 0x00, 0x00, // index of export
-        @enumToInt(Section.Code),
-        0x00, 0x00, 0x00, 0x13, // section size
-        0x00, 0x00, 0x00, 0x01, // num codes
-        0x00, 0x00, 0x00, 0x0B, // code size
-        0x00, 0x00, 0x00, 0x02, // num locals
-        @enumToInt(Type.I32), @enumToInt(Type.I64),     // local array
-        0x01, 0x01, 0x01, 0x01, // bytecode
-        0x0B,                   // function end
-    };
+    // const expected = [_]u8{
+    //     // 0x00, 0x61, 0x73, 0x6D, // magic
+    //     // 0x00, 0x00, 0x00, 0x01, // version
+    //     // @enumToInt(Section.FunctionType),
+    //     // 0x00, 0x00, 0x00, 0x0F, // section size
+    //     // 0x00, 0x00, 0x00, 0x01, // num types
+    //     // function_type_sentinel_byte,
+    //     // 0x00, 0x00, 0x00, 0x01, // num params
+    //     // @enumToInt(Type.I64),
+    //     // 0x00, 0x00, 0x00, 0x01, // num returns
+    //     // @enumToInt(Type.I32),
+    //     // @enumToInt(Section.Function),
+    //     // 0x00, 0x00, 0x00, 0x08, // section size
+    //     // 0x00, 0x00, 0x00, 0x01, // num functions
+    //     // 0x00, 0x00, 0x00, 0x00, // index to types
+    //     // @enumToInt(Section.Global),
+    //     // 0x00, 0x00, 0x00, 0x0A, // section size
+    //     // 0x00, 0x00, 0x00, 0x01, // num globals
+    //     // @enumToInt(GlobalValue.Mut.Immutable),
+    //     // @enumToInt(Type.I32),
+    //     // 0x41, 0x88, 0x01, 0x0B, // const i32 instruction and end
+    //     // @enumToInt(Section.Export),
+    //     // 0x00, 0x00, 0x00, 0x1E, // section size
+    //     // 0x00, 0x00, 0x00, 0x02, // num exports
+    //     // 0x00, 0x00, 0x00, 0x04, // size of export name (1)
+    //     // 0x61, 0x62, 0x63, 0x64, // "abcd"
+    //     // @enumToInt(ExportType.Function),
+    //     // 0x00, 0x00, 0x00, 0x00, // index of export
+    //     // 0x00, 0x00, 0x00, 0x04, // size of export name (2)
+    //     // 0x67, 0x6C, 0x62, 0x31, // "glb1"
+    //     // @enumToInt(ExportType.Global),
+    //     // 0x00, 0x00, 0x00, 0x00, // index of export
+    //     // @enumToInt(Section.Code),
+    //     // 0x00, 0x00, 0x00, 0x13, // section size
+    //     // 0x00, 0x00, 0x00, 0x01, // num codes
+    //     // 0x00, 0x00, 0x00, 0x0B, // code size
+    //     // 0x00, 0x00, 0x00, 0x02, // num locals
+    //     // @enumToInt(Type.I32), @enumToInt(Type.I64),     // local array
+    //     // 0x01, 0x01, 0x01, 0x01, // bytecode
+    //     // 0x0B,                   // function end
+    // };
     // zig fmt: on
 
-    const areEqual = std.mem.eql(u8, wasm, &expected);
+    const areEqual = std.mem.eql(u8, wasm, expected.items);
 
     if (!areEqual) {
-        std.debug.print("\n\nexpected: \n\t", .{});
-        var tab:u32 = 0;
-        for (expected) |byte| {
-            if (tab == 4) {
-                std.debug.print("\n\t", .{});
-                tab = 0;
-            }
-            tab += 1;
-            std.debug.print("0x{X:2} ", .{byte});
-        }
-
-        std.debug.print("\n\nactual: \n\t", .{});
-        tab = 0;
-        for (wasm) |byte| {
-            if (tab == 4) {
-                std.debug.print("\n\t", .{});
-                tab = 0;
-            }
-            tab += 1;
-            std.debug.print("0x{X:2} ", .{byte});
-        }
+        printBytecode("expected", expected.items);
+        printBytecode("actual", wasm);
     }
 
     try std.testing.expect(areEqual);
