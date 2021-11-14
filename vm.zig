@@ -205,7 +205,8 @@ const Stack = struct {
         var item = try self.top();
         switch (item.*) {
             .Value => |v| return v,
-            else => return error.TypeMismatch,
+            .Label => return error.TypeMismatch,
+            .Frame => return error.TypeMismatch,
         }
     }
 
@@ -218,7 +219,8 @@ const Stack = struct {
         var item = try self.pop();
         switch (item) {
             .Value => |v| return v,
-            else => return error.TypeMismatch,
+            .Label => return error.TypeMismatch,
+            .Frame => return error.TypeMismatch,
         }
     }
 
@@ -239,8 +241,9 @@ const Stack = struct {
     fn popLabel(self: *Self) !Label {
         var item = try self.pop();
         var label = switch (item) {
+            .Value => return error.TypeMismatch,
             .Label => |label| label,
-            else => return error.TypeMismatch,
+            .Frame => return error.TypeMismatch,
         };
 
         self.last_label_index = label.last_label_index;
@@ -261,11 +264,11 @@ const Stack = struct {
         var label_index = self.last_label_index;
         while (label_index > 0) {
             switch(self.stack.items[@intCast(usize, label_index)]) {
-                .Label => |label| {
+                .Label => |*label| {
                     const label_id_from_top = (self.next_label_id - 1) - label.id;
-                    std.debug.print("found label_id_from_top: {}\n", .{label_id_from_top});
+                    // std.debug.print("found label_id_from_top: {}\n", .{label_id_from_top});
                     if (label_id_from_top == id) {
-                        return &label;
+                        return label;
                     } else {
                         label_index = label.last_label_index;
                         if (label_index == -1) {
@@ -294,10 +297,11 @@ const Stack = struct {
     fn popFrame(self: *Self) !void {
         var item = try self.pop();
         switch (item) {
-            .Frame => |frame| {
+            .Value => return error.TypeMismatch,
+            .Label => return error.TypeMismatch,
+            .Frame => |*frame| {
                 frame.locals.deinit();
             },
-            else => return error.TypeMismatch,
         }
 
         // have to do a linear search since we don't know what the last index was
@@ -306,7 +310,7 @@ const Stack = struct {
             item_index -= 1;
             switch(self.stack.items[item_index]) {
                 .Value => {},
-                .Label => |label| {
+                .Label => |*label| {
                     self.last_label_index = @intCast(i32, item_index);
                     self.next_label_id = label.id + 1;
                     break;
@@ -659,7 +663,8 @@ const VmState = struct {
 
                         var parsing_code = true;
                         while (parsing_code) {
-                            const instruction = @intToEnum(Instruction, try reader.readByte());
+                            const instruction_byte = try reader.readByte();
+                            const instruction = @intToEnum(Instruction, instruction_byte);
                             // std.debug.print(">>>> {}\n", .{instruction});
 
                             if (doesInstructionExpectEnd(instruction)) {
@@ -672,11 +677,12 @@ const VmState = struct {
                                     parsing_code = false;
 
                                     try vm.function_continuations.putNoClobber(bytecode_begin_offset, continuation);
-                                    std.debug.print("adding function continuation for offset {}: {}\n", .{bytecode_begin_offset, continuation});
+                                    continuation_stack.clearRetainingCapacity();
+                                    // std.debug.print("adding function continuation for offset {}: {}\n", .{bytecode_begin_offset, continuation});
                                 } else {
                                     const instruction_offset: u32 = continuation_stack.orderedRemove(continuation_stack.items.len - 1);
                                     try vm.label_continuations.putNoClobber(instruction_offset, continuation);
-                                    std.debug.print("adding label continuation for offset {}: {}\n", .{instruction_offset, continuation});
+                                    // std.debug.print("adding label continuation for offset {}: {}\n", .{instruction_offset, continuation});
                                 }
                             }
 
@@ -817,7 +823,7 @@ const VmState = struct {
         while (stream.pos < stream.buffer.len) {
             const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
 
-            std.debug.print("found instruction: {}\n", .{instruction});
+            // std.debug.print("found instruction: {}\n", .{instruction});
 
             switch (instruction) {
                 Instruction.Unreachable => {
@@ -846,7 +852,7 @@ const VmState = struct {
                     // id 0 means this is the end of a function, otherwise it's the end of a block
                     const label_ptr:*const Label = self.stack.topLabel();
                     if (label_ptr.id != 0) {
-                        try returns.ensureCapacity(label_ptr.arity);
+                        try returns.ensureTotalCapacity(label_ptr.arity);
                         var returns_index:u32 = 0;
                         while (returns_index < label_ptr.arity) {
                             try returns.append(try self.stack.popValue());
@@ -857,11 +863,12 @@ const VmState = struct {
                         var frame: *CallFrame = try self.stack.findCurrentFrame();
                         const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
 
-                        try returns.ensureCapacity(returnTypes.len);
+                        try returns.ensureTotalCapacity(returnTypes.len);
 
                         for (returnTypes) |valtype| {
                             var value = try self.stack.popValue();
                             if (valtype != std.meta.activeTag(value)) {
+                                std.debug.print("valtype: {}, active: {}\n", .{valtype, std.meta.activeTag(value)});
                                 return error.TypeMismatch;
                             }
 
@@ -875,7 +882,7 @@ const VmState = struct {
 
                         while (returns.items.len > 0) {
                             var item = returns.orderedRemove(returns.items.len - 1);
-                            std.debug.print("push return: {}\n", .{item});
+                            // std.debug.print("push return: {}\n", .{item});
                             try self.stack.pushValue(item);
                         }
 
@@ -895,14 +902,15 @@ const VmState = struct {
                     const label_stack_id = label.id;
                     const continuation = label.continuation;
 
-                    std.debug.print("found label: {}\n", .{label});
+                    // std.debug.print("found label: {}\n", .{label});
 
                     var args = std.ArrayList(TypedValue).init(self.allocator);
                     defer args.deinit();
-                    try args.ensureCapacity(label.arity);
+                    try args.ensureTotalCapacity(label.arity);
 
-                    while (args.items.len < label.arity)
-                    {
+                    // std.debug.print("args.len: {}, label.arity: {}\n", .{args.items.len, label});
+
+                    while (args.items.len < label.arity) {
                         var value = try self.stack.popValue();
                         try args.append(value);
                     }
@@ -930,7 +938,7 @@ const VmState = struct {
                         try self.stack.pushValue(value);
                     }
 
-                    std.debug.print("branching to continuation: {}\n", .{continuation});
+                    // std.debug.print("branching to continuation: {}\n", .{continuation});
                     try stream.seekTo(continuation);
                 },
                 Instruction.Call => {
@@ -945,7 +953,7 @@ const VmState = struct {
 
                     const param_types: []const Type = functype.getParams();
                     const return_types: []const Type = functype.getReturns();
-                    try frame.locals.ensureCapacity(param_types.len);
+                    try frame.locals.ensureTotalCapacity(param_types.len);
 
                     var param_index = param_types.len;
                     while (param_index > 0) {
@@ -1400,7 +1408,7 @@ const ModuleBuilder = struct {
 
         var functionTypesSorted = std.ArrayList(*FunctionType).init(self.allocator);
         defer functionTypesSorted.deinit();
-        try functionTypesSorted.ensureCapacity(functionTypeSet.count());
+        try functionTypesSorted.ensureTotalCapacity(functionTypeSet.count());
         {
             var iter = functionTypeSet.iterator();
             var entry = iter.next();
@@ -1424,11 +1432,11 @@ const ModuleBuilder = struct {
 
         var sectionBytes = std.ArrayList(u8).init(self.allocator);
         defer sectionBytes.deinit();
-        try sectionBytes.ensureCapacity(1024 * 4);
+        try sectionBytes.ensureTotalCapacity(1024 * 4);
 
         var scratchBuffer = std.ArrayList(u8).init(self.allocator);
         defer scratchBuffer.deinit();
-        try scratchBuffer.ensureCapacity(1024);
+        try scratchBuffer.ensureTotalCapacity(1024);
 
         const sectionsToSerialize = [_]Section{ .FunctionType, .Function, .Global, .Export, .Code };
         for (sectionsToSerialize) |section| {
@@ -1700,7 +1708,7 @@ test "module builder" {
 
     var expected = std.ArrayList(u8).init(std.testing.allocator);
     defer expected.deinit();
-    try expected.ensureCapacity(1024);
+    try expected.ensureTotalCapacity(1024);
 
     {
         var writer = expected.writer();
@@ -1854,6 +1862,14 @@ test "branch" {
     try builder.addConstant(i32, 0xBEEF);
     try builder.add(Instruction.End);
     try testCallFuncSimple(builder.instructions.items);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addBranch(Instruction.Branch, 0);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
 }
 
 
