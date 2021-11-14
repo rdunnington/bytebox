@@ -18,6 +18,8 @@ const VMError = error{
     UnknownExport,
     AttemptToSetImmutable,
     MissingCallFrame,
+    LabelMismatch,
+    InvalidFunction,
 };
 
 const Instruction = enum(u8) {
@@ -150,7 +152,7 @@ const BlockTypeValue = union(BlockType) {
 const Label = struct{
     id:u32,
     arity: u32, // the number of args that need to be pushed onto the stack after this label is popped
-    continuation: ?u32,
+    continuation: u32,
     last_label_index: i32,
 };
 
@@ -220,13 +222,8 @@ const Stack = struct {
         }
     }
 
-    fn pushLabel(self:*Self, arity: u32, continuation:?u32) !void {
-        var id:u32 = 0;
-        if (self.last_label_index >= 0) {
-            var last_label: *Label = &self.stack.items[@intCast(usize, self.last_label_index)].Label;
-            id = last_label.id + 1;
-        }
-
+    fn pushLabel(self:*Self, arity: u32, continuation:u32) !void {
+        const id:u32 = self.next_label_id;
         var item = StackItem{.Label = .{
             .id = id,
             .arity = arity,
@@ -236,6 +233,7 @@ const Stack = struct {
         try self.stack.append(item);
 
         self.last_label_index = @intCast(i32, self.stack.items.len) - 1;
+        self.next_label_id += 1;
     }
 
     fn popLabel(self: *Self) !Label {
@@ -246,21 +244,17 @@ const Stack = struct {
         };
 
         self.last_label_index = label.last_label_index;
+        self.next_label_id = 0;
 
         return label;
     }
 
-    fn topLabel(self: *Self) Label {
-        return self.stack.items[@intCast(usize, self.last_label_index)].Label;
+    fn topLabel(self: *Self) *const Label {
+        return &self.stack.items[@intCast(usize, self.last_label_index)].Label;
     }
 
-    fn findLabel(self: *Self, id: u32) !Label {
+    fn findLabel(self: *Self, id: u32) !*const Label {
         if (self.last_label_index < 0) {
-            return error.InvalidLabel;
-        }
-
-        var last_label: *Label = &self.stack.items[@intCast(usize, self.last_label_index)].Label;
-        if (last_label.id < id) {
             return error.InvalidLabel;
         }
 
@@ -268,10 +262,15 @@ const Stack = struct {
         while (label_index > 0) {
             switch(self.stack.items[@intCast(usize, label_index)]) {
                 .Label => |label| {
-                    if (label.id == id) {
-                        return label;
+                    const label_id_from_top = (self.next_label_id - 1) - label.id;
+                    std.debug.print("found label_id_from_top: {}\n", .{label_id_from_top});
+                    if (label_id_from_top == id) {
+                        return &label;
                     } else {
                         label_index = label.last_label_index;
+                        if (label_index == -1) {
+                            return error.InvalidLabel;
+                        }
                     }
                 },
                 else => {
@@ -289,6 +288,7 @@ const Stack = struct {
 
         // frames reset the label index since you can't jump to labels in a different function
         self.last_label_index = -1;
+        self.next_label_id = 0;
     }
 
     fn popFrame(self: *Self) !void {
@@ -306,8 +306,9 @@ const Stack = struct {
             item_index -= 1;
             switch(self.stack.items[item_index]) {
                 .Value => {},
-                .Label => {
+                .Label => |label| {
                     self.last_label_index = @intCast(i32, item_index);
+                    self.next_label_id = label.id + 1;
                     break;
                 },
                 .Frame => {
@@ -349,6 +350,7 @@ const Stack = struct {
 
     stack: std.ArrayList(StackItem),
     last_label_index: i32 = -1,
+    next_label_id: u32 = 0,
 };
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
@@ -447,6 +449,7 @@ const VmState = struct {
     globals: std.ArrayList(GlobalValue),
     exports: Exports,
 
+    function_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     stack: Stack,
 
@@ -481,6 +484,7 @@ const VmState = struct {
                 .memories = std.ArrayList(Export).init(allocator),
                 .globals = std.ArrayList(Export).init(allocator),
             },
+            .function_continuations = std.AutoHashMap(u32, u32).init(allocator),
             .label_continuations = std.AutoHashMap(u32, u32).init(allocator), // map of label offset to continuation offset.
             .stack = Stack.init(allocator),
         };
@@ -631,8 +635,8 @@ const VmState = struct {
                 .Code => {
                     // std.debug.print("parseWasm: section: Code\n", .{});
 
-                    var label_offset_stack = std.ArrayList(u32).init(allocator);
-                    defer label_offset_stack.deinit();
+                    var continuation_stack = std.ArrayList(u32).init(allocator);
+                    defer continuation_stack.deinit();
 
                     const num_codes = try std.leb.readULEB128(u32, reader);
                     var code_index: u32 = 0;
@@ -651,7 +655,7 @@ const VmState = struct {
 
                         const bytecode_begin_offset = @intCast(u32, stream.pos);
                         vm.functions.items[code_index].bytecodeOffset = bytecode_begin_offset;
-                        try label_offset_stack.append(bytecode_begin_offset);
+                        try continuation_stack.append(0); // marks the beginning of the function
 
                         var parsing_code = true;
                         while (parsing_code) {
@@ -659,22 +663,24 @@ const VmState = struct {
                             // std.debug.print(">>>> {}\n", .{instruction});
 
                             if (doesInstructionExpectEnd(instruction)) {
-                                const instruction_offset = @intCast(u32, stream.pos);
-                                try label_offset_stack.append(instruction_offset);
+                                const instruction_offset = @intCast(u32, stream.pos - 1);
+                                try continuation_stack.append(instruction_offset);
                             } else if (instruction == .End) {
-                                const instruction_offset: u32 = label_offset_stack.orderedRemove(label_offset_stack.items.len - 1);
-                                if (label_offset_stack.items.len == 0) {
+                                const continuation = @intCast(u32, stream.pos - 1);
+                                if (continuation_stack.items.len == 1) {
                                     // std.debug.print("found the end\n", .{});
                                     parsing_code = false;
-                                }
 
-                                const continuation = @intCast(u32, stream.pos);
-                                try vm.label_continuations.putNoClobber(instruction_offset, continuation);
+                                    try vm.function_continuations.putNoClobber(bytecode_begin_offset, continuation);
+                                    std.debug.print("adding function continuation for offset {}: {}\n", .{bytecode_begin_offset, continuation});
+                                } else {
+                                    const instruction_offset: u32 = continuation_stack.orderedRemove(continuation_stack.items.len - 1);
+                                    try vm.label_continuations.putNoClobber(instruction_offset, continuation);
+                                    std.debug.print("adding label continuation for offset {}: {}\n", .{instruction_offset, continuation});
+                                }
                             }
 
                             try skipInstruction(instruction, &stream);
-                            // const skip_size = instructionWidth(instruction) - @sizeOf(Instruction);
-                            // try stream.seekBy(skip_size);
                         }
 
                         const code_actual_size = stream.pos - code_begin_pos;
@@ -726,6 +732,7 @@ const VmState = struct {
         self.types.deinit();
         self.functions.deinit();
         self.globals.deinit();
+        self.function_continuations.deinit();
         self.label_continuations.deinit();
         self.stack.deinit();
     }
@@ -754,12 +761,14 @@ const VmState = struct {
                     locals.items[i] = v;
                 }
 
+                var function_continuation = self.function_continuations.get(func.bytecodeOffset) orelse return error.InvalidFunction;
+
                 try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals,});
-                try self.stack.pushLabel(@intCast(u32, returns.len), null);
+                try self.stack.pushLabel(@intCast(u32, returns.len), function_continuation);
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
-                    // std.debug.print("stack size: {}, returns.len: {}\n", .{self.stack.size(), returns.len});
+                    std.debug.print("stack size: {}, returns.len: {}\n", .{self.stack.size(), returns.len});
                     return error.TypeMismatch;
                 }
 
@@ -808,7 +817,7 @@ const VmState = struct {
         while (stream.pos < stream.buffer.len) {
             const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
 
-            // std.debug.print("found instruction: {}\n", .{instruction});
+            std.debug.print("found instruction: {}\n", .{instruction});
 
             switch (instruction) {
                 Instruction.Unreachable => {
@@ -834,18 +843,17 @@ const VmState = struct {
                     var returns = std.ArrayList(TypedValue).init(self.allocator);
                     defer returns.deinit();
 
-                    // first label means this is a function return, otherwise it's a block return
-                    const label:Label = self.stack.topLabel();
-                    if (label.id != 0) {
-                        try returns.ensureCapacity(label.arity);
+                    // id 0 means this is the end of a function, otherwise it's the end of a block
+                    const label_ptr:*const Label = self.stack.topLabel();
+                    if (label_ptr.id != 0) {
+                        try returns.ensureCapacity(label_ptr.arity);
                         var returns_index:u32 = 0;
-                        while (returns_index < label.arity) {
+                        while (returns_index < label_ptr.arity) {
                             try returns.append(try self.stack.popValue());
                             returns_index += 1;
                         }
                         _ = try self.stack.popLabel();
                     } else {
-                        // assume return from function for now. in the future needs to handle returning from other types of blocks
                         var frame: *CallFrame = try self.stack.findCurrentFrame();
                         const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
 
@@ -860,27 +868,34 @@ const VmState = struct {
                             try returns.append(value);
                         }
 
-                        _ = try self.stack.popLabel();
+                        var label = try self.stack.popLabel();
                         try self.stack.popFrame();
+
+                        const is_root_function = (self.stack.size() == 0);
 
                         while (returns.items.len > 0) {
                             var item = returns.orderedRemove(returns.items.len - 1);
+                            std.debug.print("push return: {}\n", .{item});
                             try self.stack.pushValue(item);
                         }
 
-                        if (label.continuation) |return_offset| {
-                            try stream.seekTo(return_offset);
+                        if (is_root_function) {
+                            return;
                         } else {
-                            return; // no return offset means this should have been the first frame in the stack
+                            try stream.seekTo(label.continuation);
                         }
                     }
                 },
                 Instruction.Branch => {
-                    const label_index = @intCast(u32, try self.stack.popI32());
-                    if (label_index == 0) {
-                        return error.InvalidLabel; // TODO maybe support jumping to the end of a function?
+                    const label_id = try std.leb.readULEB128(u32, reader);
+                    const label:*const Label = try self.stack.findLabel(label_id);
+                    if (label.last_label_index == -1) {
+                        return error.LabelMismatch; // TODO maybe support jumping to the end of a function?
                     }
-                    const label:Label = try self.stack.findLabel(label_index);
+                    const label_stack_id = label.id;
+                    const continuation = label.continuation;
+
+                    std.debug.print("found label: {}\n", .{label});
 
                     var args = std.ArrayList(TypedValue).init(self.allocator);
                     defer args.deinit();
@@ -903,7 +918,7 @@ const VmState = struct {
                             },
                             .Label => {
                                 const popped_label:Label = try self.stack.popLabel();
-                                if (popped_label.id == label.id) {
+                                if (popped_label.id == label_stack_id) {
                                     break;
                                 }
                             }
@@ -915,8 +930,8 @@ const VmState = struct {
                         try self.stack.pushValue(value);
                     }
 
-                     // continuation should always be non-null since jumping to 0-index labels is not allowed
-                    try stream.seekTo(label.continuation.?);
+                    std.debug.print("branching to continuation: {}\n", .{continuation});
+                    try stream.seekTo(continuation);
                 },
                 Instruction.Call => {
                     var func_index = try self.stack.popI32();
@@ -942,10 +957,10 @@ const VmState = struct {
                         try frame.locals.append(value);
                     }
 
-                    const return_offset = @intCast(u32, stream.pos);
+                    const continuation = @intCast(u32, stream.pos);
 
                     try self.stack.pushFrame(frame);
-                    try self.stack.pushLabel(@intCast(u32, return_types.len), return_offset);
+                    try self.stack.pushLabel(@intCast(u32, return_types.len), continuation);
                     try stream.seekTo(func.bytecodeOffset);
                 },
                 Instruction.Drop => {
@@ -1223,6 +1238,20 @@ const FunctionBuilder = struct {
         }
     }
 
+    fn addBranch(self: *Self, comptime branch: Instruction, label_index: u32) !void {
+        var writer = self.instructions.writer();
+
+        switch (branch) {
+            .Branch => {
+                try writer.writeByte(@enumToInt(Instruction.Branch));
+                try std.leb.writeULEB128(writer, @intCast(u32, label_index));
+            },
+            else => {
+                unreachable; // pass Branch, Branch_If, or Branch_Table
+            }
+        }
+    }
+
     fn addConstant(self: *Self, comptime T: type, value: T) !void {
         var writer = self.instructions.writer();
         switch (T) {
@@ -1495,10 +1524,12 @@ const ModuleBuilder = struct {
                 }
             }
 
-            var wasmWriter = self.wasm.writer();
-            try wasmWriter.writeByte(@enumToInt(section));
-            try std.leb.writeULEB128(wasmWriter, @intCast(u32, sectionBytes.items.len)); // placeholder for size
-            _ = try wasmWriter.write(sectionBytes.items);
+            if (sectionBytes.items.len > 0) {
+                var wasmWriter = self.wasm.writer();
+                try wasmWriter.writeByte(@enumToInt(section));
+                try std.leb.writeULEB128(wasmWriter, @intCast(u32, sectionBytes.items.len));
+                _ = try wasmWriter.write(sectionBytes.items);
+            }
         }
     }
 
@@ -1721,50 +1752,6 @@ test "module builder" {
         try writer.writeByte(@enumToInt(Instruction.End));
     }
 
-    // zig fmt: off
-    // const expected = [_]u8{
-    //     // 0x00, 0x61, 0x73, 0x6D, // magic
-    //     // 0x00, 0x00, 0x00, 0x01, // version
-    //     // @enumToInt(Section.FunctionType),
-    //     // 0x00, 0x00, 0x00, 0x0F, // section size
-    //     // 0x00, 0x00, 0x00, 0x01, // num types
-    //     // function_type_sentinel_byte,
-    //     // 0x00, 0x00, 0x00, 0x01, // num params
-    //     // @enumToInt(Type.I64),
-    //     // 0x00, 0x00, 0x00, 0x01, // num returns
-    //     // @enumToInt(Type.I32),
-    //     // @enumToInt(Section.Function),
-    //     // 0x00, 0x00, 0x00, 0x08, // section size
-    //     // 0x00, 0x00, 0x00, 0x01, // num functions
-    //     // 0x00, 0x00, 0x00, 0x00, // index to types
-    //     // @enumToInt(Section.Global),
-    //     // 0x00, 0x00, 0x00, 0x0A, // section size
-    //     // 0x00, 0x00, 0x00, 0x01, // num globals
-    //     // @enumToInt(GlobalValue.Mut.Immutable),
-    //     // @enumToInt(Type.I32),
-    //     // 0x41, 0x88, 0x01, 0x0B, // const i32 instruction and end
-    //     // @enumToInt(Section.Export),
-    //     // 0x00, 0x00, 0x00, 0x1E, // section size
-    //     // 0x00, 0x00, 0x00, 0x02, // num exports
-    //     // 0x00, 0x00, 0x00, 0x04, // size of export name (1)
-    //     // 0x61, 0x62, 0x63, 0x64, // "abcd"
-    //     // @enumToInt(ExportType.Function),
-    //     // 0x00, 0x00, 0x00, 0x00, // index of export
-    //     // 0x00, 0x00, 0x00, 0x04, // size of export name (2)
-    //     // 0x67, 0x6C, 0x62, 0x31, // "glb1"
-    //     // @enumToInt(ExportType.Global),
-    //     // 0x00, 0x00, 0x00, 0x00, // index of export
-    //     // @enumToInt(Section.Code),
-    //     // 0x00, 0x00, 0x00, 0x13, // section size
-    //     // 0x00, 0x00, 0x00, 0x01, // num codes
-    //     // 0x00, 0x00, 0x00, 0x0B, // code size
-    //     // 0x00, 0x00, 0x00, 0x02, // num locals
-    //     // @enumToInt(Type.I32), @enumToInt(Type.I64),     // local array
-    //     // 0x01, 0x01, 0x01, 0x01, // bytecode
-    //     // 0x0B,                   // function end
-    // };
-    // zig fmt: on
-
     const areEqual = std.mem.eql(u8, wasm, expected.items);
 
     if (!areEqual) {
@@ -1857,6 +1844,18 @@ test "block valtypes" {
 // test "block typeidx" {
     
 // }
+
+test "branch" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addBlock(BlockType.Void, .{});
+    try builder.addBranch(Instruction.Branch, 0);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try testCallFuncSimple(builder.instructions.items);
+}
+
 
 test "call" {
     var builder0 = FunctionBuilder.init(std.testing.allocator);
