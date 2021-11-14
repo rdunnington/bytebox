@@ -28,6 +28,7 @@ const Instruction = enum(u8) {
     Block = 0x02,
     End = 0x0B,
     Branch = 0x0C,
+    Branch_If = 0x0D,
     Call = 0x10,
     Drop = 0x1A,
     Select = 0x1B,
@@ -80,6 +81,7 @@ fn skipInstruction(instruction:Instruction, stream: *BytecodeBufferStream) !void
             _ = try VmState.readBlockType(stream);
         },
         .Branch => try std.leb.readILEB128(i32, reader),
+        .Branch_If => try std.leb.readILEB128(i32, reader),
         else => {}
     };
 }
@@ -94,6 +96,7 @@ fn isInstructionMultiByte(instruction:Instruction) bool {
         .I32_Const => true,
         .Block => true,
         .Branch => true,
+        .Branch_If => true,
         else => false,
     };
     return v;
@@ -856,12 +859,16 @@ const VmState = struct {
                     const label_ptr:*const Label = self.stack.topLabel();
                     if (label_ptr.id != 0) {
                         try returns.ensureTotalCapacity(label_ptr.arity);
-                        var returns_index:u32 = 0;
-                        while (returns_index < label_ptr.arity) {
+                        while (returns.items.len < label_ptr.arity) {
                             try returns.append(try self.stack.popValue());
-                            returns_index += 1;
                         }
                         _ = try self.stack.popLabel();
+
+                        while (returns.items.len > 0) {
+                            var item = returns.orderedRemove(returns.items.len - 1);
+                            // std.debug.print("push return: {}\n", .{item});
+                            try self.stack.pushValue(item);
+                        }
                     } else {
                         var frame: *CallFrame = try self.stack.findCurrentFrame();
                         const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
@@ -871,7 +878,7 @@ const VmState = struct {
                         for (returnTypes) |valtype| {
                             var value = try self.stack.popValue();
                             if (valtype != std.meta.activeTag(value)) {
-                                std.debug.print("valtype: {}, active: {}\n", .{valtype, std.meta.activeTag(value)});
+                                // std.debug.print("valtype: {}, active: {}\n", .{valtype, std.meta.activeTag(value)});
                                 return error.TypeMismatch;
                             }
 
@@ -898,51 +905,15 @@ const VmState = struct {
                 },
                 Instruction.Branch => {
                     const label_id = try std.leb.readULEB128(u32, reader);
-                    const label:*const Label = try self.stack.findLabel(label_id);
-                    if (label.last_label_index == -1) {
-                        return error.LabelMismatch; // TODO maybe support jumping to the end of a function?
+                    try self.branch(&stream, label_id);
+                },
+                Instruction.Branch_If => {
+                    const label_id = try std.leb.readULEB128(u32, reader);
+                    const v = try self.stack.popI32();
+                    // std.debug.print("branch_if stack value: {}, target id: {}\n", .{v, label_id});
+                    if (v != 0) {
+                        try self.branch(&stream, label_id);
                     }
-                    const label_stack_id = label.id;
-                    const continuation = label.continuation;
-
-                    // std.debug.print("found label: {}\n", .{label});
-
-                    var args = std.ArrayList(TypedValue).init(self.allocator);
-                    defer args.deinit();
-                    try args.ensureTotalCapacity(label.arity);
-
-                    // std.debug.print("args.len: {}, label.arity: {}\n", .{args.items.len, label});
-
-                    while (args.items.len < label.arity) {
-                        var value = try self.stack.popValue();
-                        try args.append(value);
-                    }
-
-                    while (true) {
-                        var topItem = try self.stack.top();
-                        switch (std.meta.activeTag(topItem.*)) {
-                            .Value => {
-                                _ = try self.stack.popValue();
-                            },
-                            .Frame => {
-                                return error.InvalidLabel;
-                            },
-                            .Label => {
-                                const popped_label:Label = try self.stack.popLabel();
-                                if (popped_label.id == label_stack_id) {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    while (args.items.len > 0) {
-                        var value = args.orderedRemove(args.items.len - 1);
-                        try self.stack.pushValue(value);
-                    }
-
-                    // std.debug.print("branching to continuation: {}\n", .{continuation});
-                    try stream.seekTo(continuation);
                 },
                 Instruction.Call => {
                     var func_index = try self.stack.popI32();
@@ -1201,6 +1172,54 @@ const VmState = struct {
             }
         }
     }
+
+    fn branch(self: *Self, stream: *BytecodeBufferStream, label_id: u32) !void {
+        const label:*const Label = try self.stack.findLabel(label_id);
+        if (label.last_label_index == -1) {
+            return error.LabelMismatch; // can't branch to the end of functions - that's the return instruction's job
+        }
+        const label_stack_id = label.id;
+        const continuation = label.continuation;
+
+        // std.debug.print("found label: {}\n", .{label});
+
+        var args = std.ArrayList(TypedValue).init(self.allocator);
+        defer args.deinit();
+        try args.ensureTotalCapacity(label.arity);
+
+        // std.debug.print("args.len: {}, label.arity: {}\n", .{args.items.len, label});
+
+        while (args.items.len < label.arity) {
+            var value = try self.stack.popValue();
+            try args.append(value);
+        }
+
+        while (true) {
+            var topItem = try self.stack.top();
+            switch (std.meta.activeTag(topItem.*)) {
+                .Value => {
+                    _ = try self.stack.popValue();
+                },
+                .Frame => {
+                    return error.InvalidLabel;
+                },
+                .Label => {
+                    const popped_label:Label = try self.stack.popLabel();
+                    if (popped_label.id == label_stack_id) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        while (args.items.len > 0) {
+            var value = args.orderedRemove(args.items.len - 1);
+            try self.stack.pushValue(value);
+        }
+
+        // std.debug.print("branching to continuation: {}\n", .{continuation});
+        try stream.seekTo(continuation);
+    }
 };
 
 const FunctionBuilder = struct {
@@ -1255,6 +1274,10 @@ const FunctionBuilder = struct {
         switch (branch) {
             .Branch => {
                 try writer.writeByte(@enumToInt(Instruction.Branch));
+                try std.leb.writeULEB128(writer, @intCast(u32, label_index));
+            },
+            .Branch_If => {
+                try writer.writeByte(@enumToInt(Instruction.Branch_If));
                 try std.leb.writeULEB128(writer, @intCast(u32, label_index));
             },
             else => {
@@ -1838,7 +1861,7 @@ test "block valtypes" {
     try builder.addBlock(.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.add(.End);
-    try testCallFuncSimple(builder.instructions.items);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
     try builder.addBlock(.Valtype, Type.I32);
@@ -1887,6 +1910,82 @@ test "branch" {
     try builder.addConstant(i32, 0xDEAD);
     try builder.add(Instruction.End);
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addBranch(Instruction.Branch, 1);
+    try builder.add(Instruction.End);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try builder.add(Instruction.Drop);
+    try builder.addConstant(i32, 0xDEAD);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0xDEAD);
+}
+
+test "branch_if" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addBlock(BlockType.Void, .{});
+    try builder.addConstant(i32, 1);
+    try builder.addBranch(Instruction.Branch_If, 0);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try testCallFuncSimple(builder.instructions.items);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0x1);
+    try builder.addBranch(Instruction.Branch_If, 0);
+    try builder.add(Instruction.Drop);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0x0);
+    try builder.addBranch(Instruction.Branch_If, 0);
+    try builder.add(Instruction.Drop);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0xBEEF);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0x1);
+    try builder.addBranch(Instruction.Branch_If, 2);
+    try builder.add(Instruction.End);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try builder.add(Instruction.Drop);
+    try builder.addConstant(i32, 0xDEAD);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0x1);
+    try builder.addBranch(Instruction.Branch_If, 1);
+    try builder.add(Instruction.End);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try builder.add(Instruction.Drop);
+    try builder.addConstant(i32, 0xDEAD);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0xDEAD);
 }
 
 test "call" {
