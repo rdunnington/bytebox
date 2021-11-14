@@ -79,21 +79,24 @@ fn skipInstruction(instruction:Instruction, stream: *BytecodeBufferStream) !void
         .Block => {
             _ = try VmState.readBlockType(stream);
         },
+        .Branch => try std.leb.readILEB128(i32, reader),
         else => {}
     };
 }
 
 fn isInstructionMultiByte(instruction:Instruction) bool {
-    switch (instruction) {
-        .Local_Get => return true,
-        .Local_Set => return true,
-        .Local_Tee => return true,
-        .Global_Get => return true,
-        .Global_Set => return true,
-        .I32_Const => return true,
-        .Block => return true,
-        else => return false,
-    }
+    const v = switch (instruction) {
+        .Local_Get => true,
+        .Local_Set => true,
+        .Local_Tee => true,
+        .Global_Get => true,
+        .Global_Set => true,
+        .I32_Const => true,
+        .Block => true,
+        .Branch => true,
+        else => false,
+    };
+    return v;
 }
 
 fn doesInstructionExpectEnd(instruction:Instruction) bool {
@@ -1870,8 +1873,21 @@ test "branch" {
     try builder.addConstant(i32, 0xBEEF);
     try builder.add(Instruction.End);
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
-}
 
+    builder.instructions.clearRetainingCapacity();
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.addBranch(Instruction.Branch, 2);
+    try builder.add(Instruction.End);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try builder.add(Instruction.Drop);
+    try builder.addConstant(i32, 0xDEAD);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
+}
 
 test "call" {
     var builder0 = FunctionBuilder.init(std.testing.allocator);
