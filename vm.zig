@@ -192,7 +192,7 @@ const Stack = struct {
         self.stack.deinit();
     }
 
-    fn top(self: *Self) !*StackItem {
+    fn top(self: *const Self) !*const StackItem {
         if (self.stack.items.len > 0) {
             return &self.stack.items[self.stack.items.len - 1];
         }
@@ -207,7 +207,7 @@ const Stack = struct {
         return error.OutOfBounds;
     }
 
-    fn topValue(self: *Self) !TypedValue {
+    fn topValue(self: *const Self) !TypedValue {
         var item = try self.top();
         switch (item.*) {
             .Value => |v| return v,
@@ -258,7 +258,7 @@ const Stack = struct {
         return label;
     }
 
-    fn topLabel(self: *Self) *const Label {
+    fn topLabel(self: *const Self) *const Label {
         return &self.stack.items[@intCast(usize, self.last_label_index)].Label;
     }
 
@@ -328,7 +328,7 @@ const Stack = struct {
         }
     }
     
-    fn findCurrentFrame(self: *Self) !*CallFrame {
+    fn findCurrentFrame(self: *const Self) !*const CallFrame {
         var item_index:i32 = @intCast(i32, self.stack.items.len) - 1;
         while (item_index >= 0) {
             var index = @intCast(usize, item_index);
@@ -354,7 +354,7 @@ const Stack = struct {
         try self.pushValue(typed);
     }
 
-    fn size(self: *Self) usize {
+    fn size(self: *const Self) usize {
         return self.stack.items.len;
     }
 
@@ -870,7 +870,7 @@ const VmState = struct {
                             try self.stack.pushValue(item);
                         }
                     } else {
-                        var frame: *CallFrame = try self.stack.findCurrentFrame();
+                        var frame: *const CallFrame = try self.stack.findCurrentFrame();
                         const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
 
                         try returns.ensureTotalCapacity(returnTypes.len);
@@ -899,6 +899,7 @@ const VmState = struct {
                         if (is_root_function) {
                             return;
                         } else {
+                            // std.debug.print("returning from func call...\n", .{});
                             try stream.seekTo(label.continuation);
                         }
                     }
@@ -917,6 +918,7 @@ const VmState = struct {
                 },
                 Instruction.Call => {
                     var func_index = try self.stack.popI32();
+                    // std.debug.print("call function {}\n", .{func_index});
                     const func: *const Function = &self.functions.items[@intCast(usize, func_index)];
                     const functype: *const FunctionType = &self.types.items[func.typeIndex];
 
@@ -969,7 +971,7 @@ const VmState = struct {
                 },
                 Instruction.Local_Get => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
+                    var frame_or_null:?*const CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = frame.locals.items[locals_index];
                         try self.stack.pushValue(v);
@@ -977,7 +979,7 @@ const VmState = struct {
                 },
                 Instruction.Local_Set => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
+                    var frame_or_null:?*const CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.popValue();
                         frame.locals.items[locals_index] = v;
@@ -985,7 +987,7 @@ const VmState = struct {
                 },
                 Instruction.Local_Tee => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame_or_null:?*CallFrame = try self.stack.findCurrentFrame();
+                    var frame_or_null:?*const CallFrame = try self.stack.findCurrentFrame();
                     if (frame_or_null) |frame| {
                         var v:TypedValue = try self.stack.topValue();
                         frame.locals.items[locals_index] = v;
@@ -1677,6 +1679,28 @@ fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
     }
 }
 
+fn testCallFuncI32ParamReturn(bytecode: []const u8, param:i32, expected:i32) !void {
+    var types = [_]Type{.I32};
+    var functions = [_]TestFunction{
+        .{
+            .bytecode = bytecode,
+            .exportName = "testFunc",
+            .params = &types,
+            .locals = &types,
+            .returns = &types,
+        },
+    };
+    var params = [_]TypedValue{
+        .{.I32 = param}
+    };
+    var opts = TestOptions{
+        .startFunctionParams = &params,
+        .functions = &functions,
+    };
+    var expectedReturns = [_]TypedValue{.{.I32 = expected}};
+    try testCallFunc(opts, &expectedReturns);
+}
+
 fn testCallFuncI32Return(bytecode: []const u8, expected:i32) !void {
     var types = [_]Type{.I32};
     var functions = [_]TestFunction{
@@ -2044,9 +2068,35 @@ test "call" {
     try testCallFunc(opts, &expected);
 }
 
-// test "call recursive" {
-//     // todo test when branches start working
-// }
+test "call recursive" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    // factorial
+    // fn f(v:u32) u32 {
+    //     if (v == 1) {
+    //         return 1;
+    //     } else {
+    //         var vv = f(v - 1);
+    //         return v * vv;
+    //     }
+    // }
+
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.addConstant(i32, 1);
+    try builder.add(Instruction.I32_Eq);
+    try builder.addBranch(Instruction.Branch_If, 0); // return v if 
+    try builder.addConstant(i32, 1);
+    try builder.add(Instruction.I32_Sub);
+    try builder.addConstant(i32, 0); // call func at index 0 (recursion)
+    try builder.add(Instruction.Call);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.add(Instruction.I32_Mul);
+    try builder.add(Instruction.End);
+    try testCallFuncI32ParamReturn(builder.instructions.items, 5, 120); // 5! == 120
+}
 
 test "drop" {
     var builder = FunctionBuilder.init(std.testing.allocator);
@@ -2081,24 +2131,7 @@ test "local_get" {
     defer builder.deinit();
 
     try builder.addVariable(Instruction.Local_Get, 0);
-
-    var types = [_]Type{.I32};
-    var params = [_]TypedValue{.{.I32 = 0x1337}};
-    var opts = TestOptions{
-        .startFunctionParams = &params,
-        .functions = &[_]TestFunction{
-            .{
-                .exportName = "testFunc",
-                .bytecode = builder.instructions.items,
-                .params = &types,
-                .locals = &types,
-                .returns = &types,
-            }
-        },
-    };
-    var expected = [_]TypedValue{.{.I32 = 0x1337}};
-
-    try testCallFunc(opts, &expected);
+    try testCallFuncI32ParamReturn(builder.instructions.items, 0x1337, 0x1337);
 }
 
 test "local_set" {
