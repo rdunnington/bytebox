@@ -17,6 +17,7 @@ const VMError = error{
     TypeMismatch,
     UnknownExport,
     AttemptToSetImmutable,
+    MissingLabel,
     MissingCallFrame,
     LabelMismatch,
     InvalidFunction,
@@ -29,6 +30,7 @@ const Instruction = enum(u8) {
     End = 0x0B,
     Branch = 0x0C,
     Branch_If = 0x0D,
+    Return = 0x0F,
     Call = 0x10,
     Drop = 0x1A,
     Select = 0x1B,
@@ -896,10 +898,10 @@ const VmState = struct {
                             try self.stack.pushValue(item);
                         }
 
+                        // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
                         if (is_root_function) {
                             return;
                         } else {
-                            // std.debug.print("returning from func call...\n", .{});
                             try stream.seekTo(label.continuation);
                         }
                     }
@@ -914,6 +916,47 @@ const VmState = struct {
                     // std.debug.print("branch_if stack value: {}, target id: {}\n", .{v, label_id});
                     if (v != 0) {
                         try self.branch(&stream, label_id);
+                    }
+                },
+                Instruction.Return => {
+                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
+                    const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
+
+                    var returns = std.ArrayList(TypedValue).init(self.allocator);
+                    defer returns.deinit();
+                    try returns.ensureTotalCapacity(returnTypes.len);
+
+                    while (returns.items.len < returnTypes.len) {
+                        var value = try self.stack.popValue();
+                        if (std.meta.activeTag(value) != returnTypes[returns.items.len]) {
+                            return error.TypeMismatch;
+                        }
+                        try returns.append(value);
+                    }
+
+                    var last_label:Label = undefined;
+                    while (true) {
+                        var item:*const StackItem = try self.stack.top();
+                        switch (item.*) {
+                            .Value => { _ = try self.stack.popValue(); },
+                            .Label => { last_label = try self.stack.popLabel(); },
+                            .Frame => { _ = try self.stack.popFrame(); break; },
+                        }
+                    }
+
+                    const is_root_function = (self.stack.size() == 0);
+
+                    // std.debug.print("pushing returns: {s}\n", .{returns});
+                    while (returns.items.len > 0) {
+                        var value = returns.orderedRemove(returns.items.len - 1);
+                        try self.stack.pushValue(value);
+                    }
+
+                    // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
+                    if (is_root_function) {
+                        return;
+                    } else {
+                        try stream.seekTo(last_label.continuation);
                     }
                 },
                 Instruction.Call => {
@@ -2012,7 +2055,38 @@ test "branch_if" {
     try testCallFuncI32Return(builder.instructions.items, 0xDEAD);
 }
 
-test "call" {
+test "return" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    // factorial
+    // fn f(v:u32) u32 {
+    //     if (v == 1) {
+    //          return 0x1337;
+    //     } else if (v == 2) {
+    //          return 0xBEEF;
+    //     } else {
+    //          return 0x12345647;
+    //     }
+    // }
+
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.add(Instruction.Return);
+    try builder.add(Instruction.End);
+    try builder.addConstant(i32, 0xDEAD);
+    try builder.add(Instruction.End);
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.End);
+    try builder.addConstant(i32, 0xFACE);
+    try builder.add(Instruction.End);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
+}
+
+test "call and return" {
     var builder0 = FunctionBuilder.init(std.testing.allocator);
     var builder1 = FunctionBuilder.init(std.testing.allocator);
     var builder2 = FunctionBuilder.init(std.testing.allocator);
@@ -2031,10 +2105,12 @@ test "call" {
     try builder1.add(Instruction.I32_Mul); // 0x463 * 2 = 0x8C6
     try builder1.addConstant(i32, 0x02);
     try builder1.add(Instruction.Call);
+    try builder0.add(Instruction.Return);
 
     try builder2.addVariable(Instruction.Local_Get, 0);
     try builder2.addConstant(i32, 0xBEEF);
     try builder2.add(Instruction.I32_Add); // 0x8C6 + 0xBEEF = 0xC7B5
+    try builder2.add(Instruction.Return);
 
     var types = [_]Type{.I32};
     var functions = [_]TestFunction{
