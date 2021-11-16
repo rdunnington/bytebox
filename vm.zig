@@ -27,6 +27,7 @@ const Instruction = enum(u8) {
     Unreachable = 0x00,
     Noop = 0x01,
     Block = 0x02,
+    Loop = 0x03,
     End = 0x0B,
     Branch = 0x0C,
     Branch_If = 0x0D,
@@ -79,9 +80,8 @@ fn skipInstruction(instruction:Instruction, stream: *BytecodeBufferStream) !void
         .Global_Get => try std.leb.readULEB128(u32, reader),
         .Global_Set => try std.leb.readULEB128(u32, reader),
         .I32_Const => try std.leb.readILEB128(i32, reader),
-        .Block => {
-            _ = try VmState.readBlockType(stream);
-        },
+        .Block => try VmState.readBlockType(stream),
+        .Loop => try VmState.readBlockType(stream),
         .Branch => try std.leb.readILEB128(i32, reader),
         .Branch_If => try std.leb.readILEB128(i32, reader),
         else => {}
@@ -97,6 +97,7 @@ fn isInstructionMultiByte(instruction:Instruction) bool {
         .Global_Set => true,
         .I32_Const => true,
         .Block => true,
+        .Loop => true,
         .Branch => true,
         .Branch_If => true,
         else => false,
@@ -105,10 +106,11 @@ fn isInstructionMultiByte(instruction:Instruction) bool {
 }
 
 fn doesInstructionExpectEnd(instruction:Instruction) bool {
-    switch (instruction) {
-        .Block => return true,
-        else => return false,
-    }
+    return switch (instruction) {
+        .Block => true,
+        .Loop => true,
+        else => false,
+    };
 }
 
 const Type = enum(u8) {
@@ -233,6 +235,7 @@ const Stack = struct {
     }
 
     fn pushLabel(self:*Self, arity: u32, continuation:u32) !void {
+        // std.debug.print(">> push label: {}\n", .{self.next_label_id});
         const id:u32 = self.next_label_id;
         var item = StackItem{.Label = .{
             .id = id,
@@ -247,6 +250,7 @@ const Stack = struct {
     }
 
     fn popLabel(self: *Self) !Label {
+        // std.debug.print(">> pop label: {}\n", .{self.next_label_id});
         var item = try self.pop();
         var label = switch (item) {
             .Value => return error.TypeMismatch,
@@ -255,7 +259,7 @@ const Stack = struct {
         };
 
         self.last_label_index = label.last_label_index;
-        self.next_label_id = 0;
+        self.next_label_id = label.id;
 
         return label;
     }
@@ -647,8 +651,13 @@ const VmState = struct {
                 .Code => {
                     // std.debug.print("parseWasm: section: Code\n", .{});
 
-                    var continuation_stack = std.ArrayList(u32).init(allocator);
-                    defer continuation_stack.deinit();
+                    const BlockData = struct {
+                        offset: u32,
+                        next_instruction_offset: u32,
+                        instruction: Instruction,
+                    };
+                    var block_stack = std.ArrayList(BlockData).init(allocator);
+                    defer block_stack.deinit();
 
                     const num_codes = try std.leb.readULEB128(u32, reader);
                     var code_index: u32 = 0;
@@ -667,7 +676,11 @@ const VmState = struct {
 
                         const bytecode_begin_offset = @intCast(u32, stream.pos);
                         vm.functions.items[code_index].bytecodeOffset = bytecode_begin_offset;
-                        try continuation_stack.append(0); // marks the beginning of the function
+                        try block_stack.append(BlockData{
+                            .offset = bytecode_begin_offset, 
+                            .next_instruction_offset = bytecode_begin_offset,
+                            .instruction = .Block,
+                        });
 
                         var parsing_code = true;
                         while (parsing_code) {
@@ -675,26 +688,35 @@ const VmState = struct {
                             const instruction = @intToEnum(Instruction, instruction_byte);
                             // std.debug.print(">>>> {}\n", .{instruction});
 
+                            const instruction_offset = @intCast(u32, stream.pos - 1);
+                            try skipInstruction(instruction, &stream);
+
                             if (doesInstructionExpectEnd(instruction)) {
-                                const instruction_offset = @intCast(u32, stream.pos - 1);
-                                try continuation_stack.append(instruction_offset);
+                                try block_stack.append(BlockData{
+                                    .offset = instruction_offset,
+                                    .next_instruction_offset = @intCast(u32, stream.pos),
+                                    .instruction = instruction,
+                                });
                             } else if (instruction == .End) {
-                                const continuation = @intCast(u32, stream.pos - 1);
-                                if (continuation_stack.items.len == 1) {
+                                const block:BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
+                                if (block_stack.items.len == 0) {
                                     // std.debug.print("found the end\n", .{});
                                     parsing_code = false;
 
-                                    try vm.function_continuations.putNoClobber(bytecode_begin_offset, continuation);
-                                    continuation_stack.clearRetainingCapacity();
-                                    // std.debug.print("adding function continuation for offset {}: {}\n", .{bytecode_begin_offset, continuation});
+                                    try vm.function_continuations.putNoClobber(block.offset, instruction_offset);
+                                    block_stack.clearRetainingCapacity();
+                                    // std.debug.print("adding function continuation for offset {}: {}\n", .{block.offset, instruction_offset});
                                 } else {
-                                    const instruction_offset: u32 = continuation_stack.orderedRemove(continuation_stack.items.len - 1);
-                                    try vm.label_continuations.putNoClobber(instruction_offset, continuation);
-                                    // std.debug.print("adding label continuation for offset {}: {}\n", .{instruction_offset, continuation});
+                                    if (block.instruction == .Loop) {
+                                        try vm.label_continuations.putNoClobber(block.offset, block.offset);
+                                        // std.debug.print("adding loop continuation for offset {}: {}\n", .{block.offset, block.offset});
+                                    } else {
+                                        try vm.label_continuations.putNoClobber(block.offset, instruction_offset);
+                                        // std.debug.print("adding block continuation for offset {}: {}\n", .{block.offset, instruction_offset});
+                                    }
                                 }
                             }
 
-                            try skipInstruction(instruction, &stream);
                         }
 
                         const code_actual_size = stream.pos - code_begin_pos;
@@ -839,19 +861,10 @@ const VmState = struct {
                 },
                 Instruction.Noop => {},
                 Instruction.Block => {
-                    const label_offset = @intCast(u32, stream.pos) - 1;
-
-                    var blocktype = try readBlockType(&stream);
-                    var arity:u32 = switch (blocktype) {
-                        .Void => 0,
-                        .Valtype => 1,
-                        .TypeIndex => |index| @intCast(u32, self.types.items[index].getReturns().len),
-                    };
-
-                    // std.debug.print("blocktype: {}, arity: {}\n\n", .{blocktype, arity});
-
-                    const continuation = self.label_continuations.get(label_offset) orelse return error.InvalidLabel;
-                    try self.stack.pushLabel(arity, continuation);
+                    try self.enterBlock(&stream);
+                },
+                Instruction.Loop => {
+                    try self.enterBlock(&stream);
                 },
                 Instruction.End => {
                     var returns = std.ArrayList(TypedValue).init(self.allocator);
@@ -1014,27 +1027,21 @@ const VmState = struct {
                 },
                 Instruction.Local_Get => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame_or_null:?*const CallFrame = try self.stack.findCurrentFrame();
-                    if (frame_or_null) |frame| {
-                        var v:TypedValue = frame.locals.items[locals_index];
-                        try self.stack.pushValue(v);
-                    }
+                    var frame:*const CallFrame = try self.stack.findCurrentFrame();
+                    var v:TypedValue = frame.locals.items[locals_index];
+                    try self.stack.pushValue(v);
                 },
                 Instruction.Local_Set => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame_or_null:?*const CallFrame = try self.stack.findCurrentFrame();
-                    if (frame_or_null) |frame| {
-                        var v:TypedValue = try self.stack.popValue();
-                        frame.locals.items[locals_index] = v;
-                    }
+                    var frame:*const CallFrame = try self.stack.findCurrentFrame();
+                    var v:TypedValue = try self.stack.popValue();
+                    frame.locals.items[locals_index] = v;
                 },
                 Instruction.Local_Tee => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame_or_null:?*const CallFrame = try self.stack.findCurrentFrame();
-                    if (frame_or_null) |frame| {
-                        var v:TypedValue = try self.stack.topValue();
-                        frame.locals.items[locals_index] = v;
-                    }
+                    var frame:*const CallFrame = try self.stack.findCurrentFrame();
+                    var v:TypedValue = try self.stack.topValue();
+                    frame.locals.items[locals_index] = v;
                 },
                 Instruction.Global_Get => {
                     var global_index = try std.leb.readULEB128(u32, reader);
@@ -1218,7 +1225,24 @@ const VmState = struct {
         }
     }
 
+    fn enterBlock(self: *Self, stream: *BytecodeBufferStream) !void {
+        const label_offset = @intCast(u32, stream.pos) - 1;
+
+        var blocktype = try readBlockType(stream);
+        var arity:u32 = switch (blocktype) {
+            .Void => 0,
+            .Valtype => 1,
+            .TypeIndex => |index| @intCast(u32, self.types.items[index].getReturns().len),
+        };
+
+        // std.debug.print("enterBlock: blocktype {}, arity {}\n", .{blocktype, arity});
+
+        const continuation = self.label_continuations.get(label_offset) orelse return error.InvalidLabel;
+        try self.stack.pushLabel(arity, continuation);
+    }
+
     fn branch(self: *Self, stream: *BytecodeBufferStream, label_id: u32) !void {
+        // std.debug.print("branching to label {}\n", .{label_id});
         const label:*const Label = try self.stack.findLabel(label_id);
         if (label.last_label_index == -1) {
             return error.LabelMismatch; // can't branch to the end of functions - that's the return instruction's job
@@ -1292,9 +1316,15 @@ const FunctionBuilder = struct {
         try writer.writeByte(@enumToInt(instruction));
     }
 
-    fn addBlock(self: *Self, comptime blocktype: BlockType, param: anytype) !void {
+    fn addBlock(self: *Self, comptime instruction: Instruction, comptime blocktype: BlockType, param: anytype) !void {
+        switch (instruction) {
+            .Block => {},
+            .Loop => {},
+            else => unreachable, // instruction must be Block or Loop
+        }
+
         var writer = self.instructions.writer();
-        try writer.writeByte(@enumToInt(Instruction.Block));
+        try writer.writeByte(@enumToInt(instruction));
 
         switch (blocktype) {
             .Void => {
@@ -1904,12 +1934,12 @@ test "block void" {
     var builder = FunctionBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    try builder.addBlock(.Void, .{});
+    try builder.addBlock(.Block, .Void, .{});
     try builder.add(.End);
     try testCallFuncSimple(builder.instructions.items);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Void, .{});
+    try builder.addBlock(.Block, .Void, .{});
     try builder.addConstant(i32, 0x1337);
     try builder.add(.End);
     var didCatchError = false;
@@ -1925,13 +1955,13 @@ test "block valtypes" {
     var builder = FunctionBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    try builder.addBlock(.Valtype, Type.I32);
+    try builder.addBlock(.Block, .Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.add(.End);
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Valtype, Type.I32);
+    try builder.addBlock(.Block, .Valtype, Type.I32);
     try builder.add(.End);
     var didCatchError = false;
     var didCatchCorrectError = false;
@@ -1946,18 +1976,37 @@ test "block valtypes" {
     
 // }
 
+test "loop void" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addBlock(.Block, .Void, .{});
+    try builder.addBlock(.Loop, .Void, .{});
+    try builder.addConstant(i32, 1);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.add(.I32_Add);
+    try builder.addVariable(Instruction.Local_Tee, 0);
+    try builder.addConstant(i32, 10);
+    try builder.add(.I32_NE);
+    try builder.addBranch(Instruction.Branch_If, 0);
+    try builder.add(.End);
+    try builder.add(.End);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try testCallFuncI32ParamReturn(builder.instructions.items, 0, 10);
+}
+
 test "branch" {
     var builder = FunctionBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    try builder.addBlock(BlockType.Void, .{});
+    try builder.addBlock(.Block, BlockType.Void, .{});
     try builder.addBranch(Instruction.Branch, 0);
     try builder.addConstant(i32, 0xBEEF);
     try builder.add(Instruction.End);
     try testCallFuncSimple(builder.instructions.items);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addBranch(Instruction.Branch, 0);
     try builder.addConstant(i32, 0xBEEF);
@@ -1965,9 +2014,9 @@ test "branch" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addBranch(Instruction.Branch, 2);
     try builder.add(Instruction.End);
@@ -1979,9 +2028,9 @@ test "branch" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addBranch(Instruction.Branch, 1);
     try builder.add(Instruction.End);
@@ -1997,7 +2046,7 @@ test "branch_if" {
     var builder = FunctionBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    try builder.addBlock(BlockType.Void, .{});
+    try builder.addBlock(.Block, BlockType.Void, .{});
     try builder.addConstant(i32, 1);
     try builder.addBranch(Instruction.Branch_If, 0);
     try builder.addConstant(i32, 0xBEEF);
@@ -2005,7 +2054,7 @@ test "branch_if" {
     try testCallFuncSimple(builder.instructions.items);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x1);
     try builder.addBranch(Instruction.Branch_If, 0);
@@ -2015,7 +2064,7 @@ test "branch_if" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x0);
     try builder.addBranch(Instruction.Branch_If, 0);
@@ -2025,9 +2074,9 @@ test "branch_if" {
     try testCallFuncI32Return(builder.instructions.items, 0xBEEF);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x1);
     try builder.addBranch(Instruction.Branch_If, 2);
@@ -2040,9 +2089,9 @@ test "branch_if" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x1);
     try builder.addBranch(Instruction.Branch_If, 1);
@@ -2070,10 +2119,10 @@ test "return" {
     //     }
     // }
 
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.add(Instruction.Return);
     try builder.add(Instruction.End);
@@ -2158,7 +2207,7 @@ test "call recursive" {
     //     }
     // }
 
-    try builder.addBlock(BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
     try builder.addVariable(Instruction.Local_Get, 0);
     try builder.addVariable(Instruction.Local_Get, 0);
     try builder.addConstant(i32, 1);
