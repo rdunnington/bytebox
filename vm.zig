@@ -166,7 +166,7 @@ const BlockTypeValue = union(BlockType) {
 
 const Label = struct{
     id:u32,
-    arity: u32, // the number of args that need to be pushed onto the stack after this label is popped
+    blocktype: BlockTypeValue,
     continuation: u32,
     last_label_index: i32,
 };
@@ -239,12 +239,12 @@ const Stack = struct {
         }
     }
 
-    fn pushLabel(self:*Self, arity: u32, continuation:u32) !void {
+    fn pushLabel(self:*Self, blocktype: BlockTypeValue, continuation:u32) !void {
         // std.debug.print(">> push label: {}\n", .{self.next_label_id});
         const id:u32 = self.next_label_id;
         var item = StackItem{.Label = .{
             .id = id,
-            .arity = arity,
+            .blocktype = blocktype,
             .continuation = continuation,
             .last_label_index = self.last_label_index,
         }};
@@ -817,7 +817,7 @@ const VmState = struct {
                 var function_continuation = self.function_continuations.get(func.bytecodeOffset) orelse return error.InvalidFunction;
 
                 try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals,});
-                try self.stack.pushLabel(@intCast(u32, returns.len), function_continuation);
+                try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.typeIndex}, function_continuation);
                 try self.executeWasm(self.bytecode, func.bytecodeOffset);
 
                 if (self.stack.size() != returns.len) {
@@ -868,9 +868,8 @@ const VmState = struct {
         var reader = stream.reader();
 
         while (stream.pos < stream.buffer.len) {
-            // const instruction_offset:u32 = @intCast(u32, stream.pos);
+            const instruction_offset:u32 = @intCast(u32, stream.pos);
             const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
-            const instruction_offset:u32 = @intCast(u32, stream.pos) - 1;
 
             // std.debug.print("found instruction: {}\n", .{instruction});
 
@@ -910,43 +909,18 @@ const VmState = struct {
                     // id 0 means this is the end of a function, otherwise it's the end of a block
                     const label_ptr:*const Label = self.stack.topLabel();
                     if (label_ptr.id != 0) {
-                        try returns.ensureTotalCapacity(label_ptr.arity);
-                        while (returns.items.len < label_ptr.arity) {
-                            try returns.append(try self.stack.popValue());
-                        }
+                        try popValues(&returns, &self.stack, self.getReturnTypesFromBlockType(label_ptr.blocktype));
                         _ = try self.stack.popLabel();
-
-                        while (returns.items.len > 0) {
-                            var item = returns.orderedRemove(returns.items.len - 1);
-                            // std.debug.print("push return: {}\n", .{item});
-                            try self.stack.pushValue(item);
-                        }
+                        try pushValues(returns.items, &self.stack);
                     } else {
                         var frame: *const CallFrame = try self.stack.findCurrentFrame();
                         const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
 
-                        try returns.ensureTotalCapacity(returnTypes.len);
-
-                        for (returnTypes) |valtype| {
-                            var value = try self.stack.popValue();
-                            if (valtype != std.meta.activeTag(value)) {
-                                // std.debug.print("valtype: {}, active: {}\n", .{valtype, std.meta.activeTag(value)});
-                                return error.TypeMismatch;
-                            }
-
-                            try returns.append(value);
-                        }
-
+                        try popValues(&returns, &self.stack, returnTypes);
                         var label = try self.stack.popLabel();
                         try self.stack.popFrame();
-
                         const is_root_function = (self.stack.size() == 0);
-
-                        while (returns.items.len > 0) {
-                            var item = returns.orderedRemove(returns.items.len - 1);
-                            // std.debug.print("push return: {}\n", .{item});
-                            try self.stack.pushValue(item);
-                        }
+                        try pushValues(returns.items, &self.stack);
 
                         // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
                         if (is_root_function) {
@@ -1021,7 +995,6 @@ const VmState = struct {
                     };
 
                     const param_types: []const Type = functype.getParams();
-                    const return_types: []const Type = functype.getReturns();
                     try frame.locals.ensureTotalCapacity(param_types.len);
 
                     var param_index = param_types.len;
@@ -1037,7 +1010,7 @@ const VmState = struct {
                     const continuation = @intCast(u32, stream.pos);
 
                     try self.stack.pushFrame(frame);
-                    try self.stack.pushLabel(@intCast(u32, return_types.len), continuation);
+                    try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.typeIndex}, continuation);
                     try stream.seekTo(func.bytecodeOffset);
                 },
                 Instruction.Drop => {
@@ -1082,7 +1055,6 @@ const VmState = struct {
                 },
                 Instruction.Global_Get => {
                     var global_index = try std.leb.readULEB128(u32, reader);
-                    // std.debug.print("read index: {}\n", .{global_index});
                     var global = &self.globals.items[global_index];
                     try self.stack.pushValue(global.value);
                 },
@@ -1264,16 +1236,9 @@ const VmState = struct {
 
     fn enterBlock(self: *Self, stream: *BytecodeBufferStream, label_offset:u32) !void {
         var blocktype = try readBlockType(stream);
-        var arity:u32 = switch (blocktype) {
-            .Void => 0,
-            .Valtype => 1,
-            .TypeIndex => |index| @intCast(u32, self.types.items[index].getReturns().len),
-        };
-
-        // std.debug.print("enterBlock: blocktype {}, arity {}\n", .{blocktype, arity});
 
         const continuation = self.label_continuations.get(label_offset) orelse return error.InvalidLabel;
-        try self.stack.pushLabel(arity, continuation);
+        try self.stack.pushLabel(blocktype, continuation);
     }
 
     fn branch(self: *Self, stream: *BytecodeBufferStream, label_id: u32) !void {
@@ -1289,14 +1254,8 @@ const VmState = struct {
 
         var args = std.ArrayList(TypedValue).init(self.allocator);
         defer args.deinit();
-        try args.ensureTotalCapacity(label.arity);
 
-        // std.debug.print("args.len: {}, label.arity: {}\n", .{args.items.len, label});
-
-        while (args.items.len < label.arity) {
-            var value = try self.stack.popValue();
-            try args.append(value);
-        }
+        try popValues(&args, &self.stack, self.getReturnTypesFromBlockType(label.blocktype));
 
         while (true) {
             var topItem = try self.stack.top();
@@ -1316,13 +1275,53 @@ const VmState = struct {
             }
         }
 
-        while (args.items.len > 0) {
-            var value = args.orderedRemove(args.items.len - 1);
-            try self.stack.pushValue(value);
-        }
+        try pushValues(args.items, &self.stack);
 
         // std.debug.print("branching to continuation: {}\n", .{continuation});
         try stream.seekTo(continuation);
+    }
+
+    fn getReturnTypesFromBlockType(self: *Self, blocktype: BlockTypeValue) []const Type {
+        const Statics = struct {
+            const empty = [_]Type{};
+            const valtype_i32 = [_]Type{.I32};
+            const valtype_i64 = [_]Type{.I64};
+            const valtype_f32 = [_]Type{.F32};
+            const valtype_f64 = [_]Type{.F64};
+        };
+
+        switch (blocktype) {
+            .Void => return &Statics.empty,
+            .Valtype => |v| {
+                return switch (v) {
+                    .I32 => &Statics.valtype_i32,
+                    .I64 => &Statics.valtype_i64,
+                    .F32 => &Statics.valtype_f32,
+                    .F64 => &Statics.valtype_f64,
+                };
+            },
+            .TypeIndex => |index| return self.types.items[index].getReturns(),
+        }
+    }
+
+    fn popValues(returns: *std.ArrayList(TypedValue), stack: *Stack, types:[]const Type) !void {
+        try returns.ensureTotalCapacity(types.len);
+        while (returns.items.len < types.len) {
+            var item = try stack.popValue();
+            if (types[returns.items.len] != std.meta.activeTag(item)) {
+                return error.TypeMismatch;
+            }
+            try returns.append(item);
+        }
+    }
+
+    fn pushValues(returns: []const TypedValue, stack: *Stack) !void {
+        var index = returns.len;
+        while (index > 0) {
+            index -= 1;
+            var item = returns[index];
+            try stack.pushValue(item);
+        }
     }
 };
 
