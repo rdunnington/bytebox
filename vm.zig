@@ -28,6 +28,8 @@ const Instruction = enum(u8) {
     Noop = 0x01,
     Block = 0x02,
     Loop = 0x03,
+    If = 0x04,
+    Else = 0x05,
     End = 0x0B,
     Branch = 0x0C,
     Branch_If = 0x0D,
@@ -82,6 +84,7 @@ fn skipInstruction(instruction:Instruction, stream: *BytecodeBufferStream) !void
         .I32_Const => try std.leb.readILEB128(i32, reader),
         .Block => try VmState.readBlockType(stream),
         .Loop => try VmState.readBlockType(stream),
+        .If => try VmState.readBlockType(stream),
         .Branch => try std.leb.readILEB128(i32, reader),
         .Branch_If => try std.leb.readILEB128(i32, reader),
         else => {}
@@ -100,6 +103,7 @@ fn isInstructionMultiByte(instruction:Instruction) bool {
         .Loop => true,
         .Branch => true,
         .Branch_If => true,
+        .If => true,
         else => false,
     };
     return v;
@@ -109,6 +113,7 @@ fn doesInstructionExpectEnd(instruction:Instruction) bool {
     return switch (instruction) {
         .Block => true,
         .Loop => true,
+        .If => true,
         else => false,
     };
 }
@@ -467,6 +472,7 @@ const VmState = struct {
 
     function_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
+    if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     stack: Stack,
 
     const BytecodeMemUsage = enum {
@@ -502,6 +508,7 @@ const VmState = struct {
             },
             .function_continuations = std.AutoHashMap(u32, u32).init(allocator),
             .label_continuations = std.AutoHashMap(u32, u32).init(allocator), // map of label offset to continuation offset.
+            .if_to_else_offsets = std.AutoHashMap(u32, u32).init(allocator),
             .stack = Stack.init(allocator),
         };
         errdefer vm.deinit();
@@ -688,31 +695,40 @@ const VmState = struct {
                             const instruction = @intToEnum(Instruction, instruction_byte);
                             // std.debug.print(">>>> {}\n", .{instruction});
 
-                            const instruction_offset = @intCast(u32, stream.pos - 1);
+                            const parsing_offset = @intCast(u32, stream.pos - 1);
                             try skipInstruction(instruction, &stream);
 
                             if (doesInstructionExpectEnd(instruction)) {
                                 try block_stack.append(BlockData{
-                                    .offset = instruction_offset,
+                                    .offset = parsing_offset,
                                     .next_instruction_offset = @intCast(u32, stream.pos),
                                     .instruction = instruction,
                                 });
+                            } else if (instruction == .Else) {
+                                const block:*const BlockData = &block_stack.items[block_stack.items.len - 1];
+                                try vm.if_to_else_offsets.putNoClobber(block.offset, parsing_offset);
                             } else if (instruction == .End) {
                                 const block:BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
                                 if (block_stack.items.len == 0) {
                                     // std.debug.print("found the end\n", .{});
                                     parsing_code = false;
 
-                                    try vm.function_continuations.putNoClobber(block.offset, instruction_offset);
+                                    try vm.function_continuations.putNoClobber(block.offset, parsing_offset);
                                     block_stack.clearRetainingCapacity();
-                                    // std.debug.print("adding function continuation for offset {}: {}\n", .{block.offset, instruction_offset});
+                                    // std.debug.print("adding function continuation for offset {}: {}\n", .{block.offset, parsing_offset});
                                 } else {
                                     if (block.instruction == .Loop) {
                                         try vm.label_continuations.putNoClobber(block.offset, block.offset);
                                         // std.debug.print("adding loop continuation for offset {}: {}\n", .{block.offset, block.offset});
                                     } else {
-                                        try vm.label_continuations.putNoClobber(block.offset, instruction_offset);
-                                        // std.debug.print("adding block continuation for offset {}: {}\n", .{block.offset, instruction_offset});
+                                        try vm.label_continuations.putNoClobber(block.offset, parsing_offset);
+                                        // std.debug.print("adding block continuation for offset {}: {}\n", .{block.offset, parsing_offset});
+
+                                        var else_offset_or_null = vm.if_to_else_offsets.get(block.offset);
+                                        if (else_offset_or_null) |else_offset| {
+                                            try vm.label_continuations.putNoClobber(else_offset, parsing_offset);
+                                            // std.debug.print("adding block continuation for offset {}: {}\n", .{else_offset, parsing_offset});
+                                        }
                                     }
                                 }
                             }
@@ -770,6 +786,7 @@ const VmState = struct {
         self.globals.deinit();
         self.function_continuations.deinit();
         self.label_continuations.deinit();
+        self.if_to_else_offsets.deinit();
         self.stack.deinit();
     }
 
@@ -851,7 +868,9 @@ const VmState = struct {
         var reader = stream.reader();
 
         while (stream.pos < stream.buffer.len) {
+            // const instruction_offset:u32 = @intCast(u32, stream.pos);
             const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
+            const instruction_offset:u32 = @intCast(u32, stream.pos) - 1;
 
             // std.debug.print("found instruction: {}\n", .{instruction});
 
@@ -861,10 +880,28 @@ const VmState = struct {
                 },
                 Instruction.Noop => {},
                 Instruction.Block => {
-                    try self.enterBlock(&stream);
+                    try self.enterBlock(&stream, instruction_offset);
                 },
                 Instruction.Loop => {
-                    try self.enterBlock(&stream);
+                    try self.enterBlock(&stream, instruction_offset);
+                },
+                Instruction.If => {
+                    var condition = try self.stack.popI32();
+                    if (condition != 0) {
+                        try self.enterBlock(&stream, instruction_offset);
+                    } else if (self.if_to_else_offsets.get(instruction_offset)) |else_offset| {
+                         // +1 to skip the else instruction, since it's treated as an End for the If block.
+                        try self.enterBlock(&stream, else_offset);
+                        try stream.seekTo(else_offset + 1);
+                    } else {
+                        const continuation = self.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
+                        try stream.seekTo(continuation);
+                    }
+                },
+                Instruction.Else => {
+                    // getting here means we reached the end of the if instruction chain, so skip to the true end instruction
+                    const end_offset = self.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
+                    try stream.seekTo(end_offset);
                 },
                 Instruction.End => {
                     var returns = std.ArrayList(TypedValue).init(self.allocator);
@@ -1225,9 +1262,7 @@ const VmState = struct {
         }
     }
 
-    fn enterBlock(self: *Self, stream: *BytecodeBufferStream) !void {
-        const label_offset = @intCast(u32, stream.pos) - 1;
-
+    fn enterBlock(self: *Self, stream: *BytecodeBufferStream, label_offset:u32) !void {
         var blocktype = try readBlockType(stream);
         var arity:u32 = switch (blocktype) {
             .Void => 0,
@@ -1320,6 +1355,7 @@ const FunctionBuilder = struct {
         switch (instruction) {
             .Block => {},
             .Loop => {},
+            .If => {},
             else => unreachable, // instruction must be Block or Loop
         }
 
@@ -1976,7 +2012,7 @@ test "block valtypes" {
     
 // }
 
-test "loop void" {
+test "loop" {
     var builder = FunctionBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
@@ -1993,6 +2029,56 @@ test "loop void" {
     try builder.add(.End);
     try builder.addVariable(Instruction.Local_Get, 0);
     try testCallFuncI32ParamReturn(builder.instructions.items, 0, 10);
+}
+
+test "if-else" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.addConstant(i32, 1);
+    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addConstant(i32, 0x1337);
+    try builder.add(.End);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x1337);
+    try builder.addConstant(i32, 0);
+    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addConstant(i32, 0x2);
+    try builder.add(Instruction.I32_Mul);
+    try builder.add(.End);
+    try testCallFuncI32Return(builder.instructions.items, 0x1337);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x1337);
+    try builder.addVariable(Instruction.Local_Set, 0);
+    try builder.addConstant(i32, 1); // take if branch
+    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.addConstant(i32, 0x2);
+    try builder.add(.I32_Mul);
+    try builder.add(.Else);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.addConstant(i32, 0x2);
+    try builder.add(.I32_Add);
+    try builder.add(.End);
+    try testCallFuncI32ParamReturn(builder.instructions.items, 0, 0x266E);
+
+    builder.instructions.clearRetainingCapacity();
+    try builder.addConstant(i32, 0x1337);
+    try builder.addVariable(Instruction.Local_Set, 0);
+    try builder.addConstant(i32, 0); // take else branch
+    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.addConstant(i32, 0x2);
+    try builder.add(.I32_Mul);
+    try builder.add(.Else);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.addConstant(i32, 0x2);
+    try builder.add(.I32_Add);
+    try builder.add(.End);
+    try testCallFuncI32ParamReturn(builder.instructions.items, 0, 0x1339);
 }
 
 test "branch" {
