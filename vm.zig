@@ -8,6 +8,7 @@ const VmParseError = error{
     InvalidExport,
     InvalidGlobalInit,
     InvalidLabel,
+    OneTableAllowed,
 };
 
 const VMError = error{
@@ -465,27 +466,39 @@ const ExportType = enum(u8) {
 
 const Export = struct { name: std.ArrayList(u8), index: u32 };
 
-const Exports = struct {
-    functions: std.ArrayList(Export),
-    tables: std.ArrayList(Export),
-    memories: std.ArrayList(Export),
-    globals: std.ArrayList(Export),
+const Table = struct {
+    refs: std.ArrayList(Val), // should only be reftypes
+    reftype: ValType,
+    min: u32,
+    max: ?u32,
 };
 
 const VmState = struct {
     const Self = @This();
 
+    const Exports = struct {
+        functions: std.ArrayList(Export),
+        tables: std.ArrayList(Export),
+        memories: std.ArrayList(Export),
+        globals: std.ArrayList(Export),
+    };
+
     allocator: *std.mem.Allocator,
     bytecode: []const u8,
     bytecode_mem_usage: std.ArrayList(u8),
+
+    // store
     types: std.ArrayList(FunctionType),
     functions: std.ArrayList(Function),
+    tables: std.ArrayList(Table),
     globals: std.ArrayList(GlobalValue),
     exports: Exports,
 
+    // continuations
     function_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
+
     stack: Stack,
 
     const BytecodeMemUsage = enum {
@@ -512,6 +525,7 @@ const VmState = struct {
             .bytecode_mem_usage = bytecode_mem_usage,
             .types = std.ArrayList(FunctionType).init(allocator),
             .functions = std.ArrayList(Function).init(allocator),
+            .tables = std.ArrayList(Table).init(allocator),
             .globals = std.ArrayList(GlobalValue).init(allocator),
             .exports = Exports{
                 .functions = std.ArrayList(Export).init(allocator),
@@ -597,6 +611,43 @@ const VmState = struct {
                         try vm.functions.append(func);
 
                         func_index += 1;
+                    }
+                },
+                .Table => {
+                    const num_tables = try std.leb.readULEB128(u32, reader);
+                    if (num_tables > 1) {
+                        return error.OneTableAllowed;
+                    }
+
+                    try vm.tables.ensureTotalCapacity(num_tables);
+
+                    var table_index: u32 = 0;
+                    while (table_index < num_tables) {
+                        const reftype = @intToEnum(ValType, try reader.readByte());
+                        switch (reftype) {
+                            .FuncRef => {},
+                            .ExternRef => {},
+                            else => return error.InvalidTableType,
+                        }
+
+                        const has_max = try reader.readByte();
+                        const min = try std.leb.readULEB128(u32, reader);
+                        var max: ?u32 = null;
+
+                        switch (has_max) {
+                            0 => {},
+                            1 => { max = try std.leb.readULEB128(u32, reader); },
+                            else => return error.InvalidTableType,
+                        }
+
+                        try vm.tables.append(Table{
+                            .refs = std.ArrayList(Val).init(allocator),
+                            .reftype = reftype,
+                            .min = min,
+                            .max = max,
+                        });
+
+                        table_index += 1;
                     }
                 },
                 .Global => {
@@ -796,6 +847,7 @@ const VmState = struct {
 
         self.types.deinit();
         self.functions.deinit();
+        self.tables.deinit();
         self.globals.deinit();
         self.function_continuations.deinit();
         self.label_continuations.deinit();
@@ -1709,7 +1761,6 @@ const ModuleBuilder = struct {
                             try scratchWriter.writeByte(@enumToInt(local));
                         }
                         _ = try scratchWriter.write(func.instructions.items);
-                        // TODO should the client supply an end instruction instead?
                         try scratchWriter.writeByte(@enumToInt(Instruction.End));
 
                         try std.leb.writeULEB128(writer, @intCast(u32, scratchBuffer.items.len));
