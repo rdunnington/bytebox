@@ -623,13 +623,6 @@ const VmState = struct {
 
                     var table_index: u32 = 0;
                     while (table_index < num_tables) {
-                        const reftype = @intToEnum(ValType, try reader.readByte());
-                        switch (reftype) {
-                            .FuncRef => {},
-                            .ExternRef => {},
-                            else => return error.InvalidTableType,
-                        }
-
                         const has_max = try reader.readByte();
                         const min = try std.leb.readULEB128(u32, reader);
                         var max: ?u32 = null;
@@ -637,6 +630,13 @@ const VmState = struct {
                         switch (has_max) {
                             0 => {},
                             1 => { max = try std.leb.readULEB128(u32, reader); },
+                            else => return error.InvalidTableType,
+                        }
+
+                        const reftype = @intToEnum(ValType, try reader.readByte());
+                        switch (reftype) {
+                            .FuncRef => {},
+                            .ExternRef => {},
                             else => return error.InvalidTableType,
                         }
 
@@ -825,6 +825,9 @@ const VmState = struct {
         }
         for (self.functions.items) |item| {
             item.locals.deinit();
+        }
+        for (self.tables.items) |item| {
+            item.refs.deinit();
         }
 
         for (self.exports.functions.items) |item| {
@@ -1548,6 +1551,7 @@ const ModuleBuilder = struct {
 
     allocator: *std.mem.Allocator,
     functions: std.ArrayList(WasmFunction),
+    tables: std.ArrayList(Table),
     globals: std.ArrayList(WasmGlobal),
     wasm: std.ArrayList(u8),
     needsRebuild: bool = true,
@@ -1556,6 +1560,7 @@ const ModuleBuilder = struct {
         return Self{
             .allocator = allocator,
             .functions = std.ArrayList(WasmFunction).init(allocator),
+            .tables = std.ArrayList(Table).init(allocator),
             .globals = std.ArrayList(WasmGlobal).init(allocator),
             .wasm = std.ArrayList(u8).init(allocator),
         };
@@ -1569,6 +1574,7 @@ const ModuleBuilder = struct {
             func.instructions.deinit();
         }
         self.functions.deinit();
+        self.tables.deinit();
 
         for (self.globals.items) |*global| {
             global.exportName.deinit();
@@ -1634,6 +1640,19 @@ const ModuleBuilder = struct {
         self.needsRebuild = true;
     }
 
+    fn addTable(self: *Self, reftype: ValType, min: u32, max: ?u32) !void {
+        if (self.tables.items.len > 0) {
+            return error.OneTableAllowed;
+        }
+
+        try self.tables.append(Table{
+            .refs = undefined,
+            .reftype = reftype,
+            .min = min,
+            .max = max,
+        });
+    }
+
     fn build(self: *Self) !void {
         self.wasm.clearRetainingCapacity();
 
@@ -1679,7 +1698,7 @@ const ModuleBuilder = struct {
         defer scratchBuffer.deinit();
         try scratchBuffer.ensureTotalCapacity(1024);
 
-        const sectionsToSerialize = [_]Section{ .FunctionType, .Function, .Global, .Export, .Code };
+        const sectionsToSerialize = [_]Section{ .FunctionType, .Function, .Table, .Global, .Export, .Code };
         for (sectionsToSerialize) |section| {
             sectionBytes.clearRetainingCapacity();
             var writer = sectionBytes.writer();
@@ -1710,8 +1729,26 @@ const ModuleBuilder = struct {
                         try std.leb.writeULEB128(writer,  @intCast(u32, index.?));
                     }
                 },
+                .Table => {
+                    try std.leb.writeULEB128(writer, @intCast(u32, self.tables.items.len));
+                    for (self.tables.items) |table| {
+                    std.debug.print("writing the table section!\n", .{});
+                        if (table.max != null) {
+                            try writer.writeByte(1);
+                        } else {
+                            try writer.writeByte(0);
+                        }
+
+                        try std.leb.writeULEB128(writer, @intCast(u32, table.min));
+                        if (table.max) |max| {
+                            try std.leb.writeULEB128(writer, @intCast(u32, max));
+                        }
+
+                        try writer.writeByte(@enumToInt(table.reftype));
+                    }
+                },
                 .Global => {
-                    try std.leb.writeULEB128(writer,  @intCast(u32, self.globals.items.len));
+                    try std.leb.writeULEB128(writer, @intCast(u32, self.globals.items.len));
                     for (self.globals.items) |global| {
                         try writer.writeByte(@enumToInt(global.mut));
                         try writer.writeByte(@enumToInt(global.type));
@@ -1964,8 +2001,9 @@ test "module builder" {
     var builder = ModuleBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    try builder.addGlobal("glb1", ValType.I32, GlobalValue.Mut.Immutable, GlobalValueInitOptions{.Value = Val{.I32=0x88}});
     try builder.addFunc("abcd", &[_]ValType{.I64}, &[_]ValType{.I32}, &[_]ValType{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
+    try builder.addTable(ValType.FuncRef, 32, 64);
+    try builder.addGlobal("glb1", ValType.I32, GlobalValue.Mut.Immutable, GlobalValueInitOptions{.Value = Val{.I32=0x88}});
     var wasm = try builder.getWasm();
 
     var expected = std.ArrayList(u8).init(std.testing.allocator);
@@ -1989,6 +2027,13 @@ test "module builder" {
         try std.leb.writeULEB128(writer, @intCast(u32, 0x2)); // section size
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num functions
         try std.leb.writeULEB128(writer, @intCast(u32, 0x0)); // index to types
+        try writer.writeByte(@enumToInt(Section.Table));
+        try std.leb.writeULEB128(writer, @intCast(u32, 0x5)); // section size
+        try std.leb.writeULEB128(writer, @intCast(u32, 1)); // num tables
+        try writer.writeByte(1); // has max
+        try std.leb.writeULEB128(writer, @intCast(u32, 32)); // min
+        try std.leb.writeULEB128(writer, @intCast(u32, 64)); // max
+        try writer.writeByte(@enumToInt(ValType.FuncRef));
         try writer.writeByte(@enumToInt(Section.Global));
         try std.leb.writeULEB128(writer, @intCast(u32, 0x7)); // section size
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num globals
