@@ -33,6 +33,7 @@ const Instruction = enum(u8) {
     End = 0x0B,
     Branch = 0x0C,
     Branch_If = 0x0D,
+    Branch_Table = 0x0E,
     Return = 0x0F,
     Call = 0x10,
     Drop = 0x1A,
@@ -87,6 +88,15 @@ fn skipInstruction(instruction:Instruction, stream: *BytecodeBufferStream) !void
         .If => try VmState.readBlockType(stream),
         .Branch => try std.leb.readILEB128(i32, reader),
         .Branch_If => try std.leb.readILEB128(i32, reader),
+        .Branch_Table => {
+            const table_length = try std.leb.readULEB128(u32, reader);
+            var index: u32 = 0;
+            while (index < table_length) {
+                _ = try std.leb.readULEB128(u32, reader);
+                index += 1;
+            }
+            _ = try std.leb.readULEB128(u32, reader);
+        },
         else => {}
     };
 }
@@ -103,6 +113,7 @@ fn isInstructionMultiByte(instruction:Instruction) bool {
         .Loop => true,
         .Branch => true,
         .Branch_If => true,
+        .Branch_Table => true,
         .If => true,
         else => false,
     };
@@ -867,6 +878,8 @@ const VmState = struct {
         try stream.seekTo(offset);
         var reader = stream.reader();
 
+        // TODO use a linear allocator for scratch allocations that gets reset on each loop iteration
+
         while (stream.pos < stream.buffer.len) {
             const instruction_offset:u32 = @intCast(u32, stream.pos);
             const instruction: Instruction = @intToEnum(Instruction, try reader.readByte());
@@ -940,6 +953,26 @@ const VmState = struct {
                     // std.debug.print("branch_if stack value: {}, target id: {}\n", .{v, label_id});
                     if (v != 0) {
                         try self.branch(&stream, label_id);
+                    }
+                },
+                Instruction.Branch_Table => {
+                    var label_ids = std.ArrayList(u32).init(self.allocator);
+                    defer label_ids.deinit();
+
+                    const table_length = try std.leb.readULEB128(u32, reader);
+                    try label_ids.ensureTotalCapacity(table_length);
+
+                    while (label_ids.items.len < table_length) {
+                        const label_id = try std.leb.readULEB128(u32, reader);
+                        try label_ids.append(label_id);
+                    }
+                    const fallback_id = try std.leb.readULEB128(u32, reader);
+
+                    var label_index = @intCast(usize, try self.stack.popI32());
+                    if (label_index < label_ids.items.len) {
+                        try self.branch(&stream, label_ids.items[label_index]);
+                    } else {
+                        try self.branch(&stream, fallback_id);
                     }
                 },
                 Instruction.Return => {
@@ -1305,10 +1338,14 @@ const VmState = struct {
     }
 
     fn popValues(returns: *std.ArrayList(TypedValue), stack: *Stack, types:[]const Type) !void {
+        // std.debug.print("popValues: required: {any} ({})\n", .{types, types.len});
+
         try returns.ensureTotalCapacity(types.len);
         while (returns.items.len < types.len) {
+            // std.debug.print("returns.items.len < types.len: {}, {}\n", .{returns.items.len, types.len});
             var item = try stack.popValue();
             if (types[returns.items.len] != std.meta.activeTag(item)) {
+                // std.debug.print("popValues mismatch: required: {s}, got {}\n", .{types, item});
                 return error.TypeMismatch;
             }
             try returns.append(item);
@@ -1378,17 +1415,29 @@ const FunctionBuilder = struct {
         }
     }
 
-    fn addBranch(self: *Self, comptime branch: Instruction, label_index: u32) !void {
+    fn addBranch(self: *Self, comptime branch: Instruction, label_data: anytype) !void {
         var writer = self.instructions.writer();
 
         switch (branch) {
             .Branch => {
                 try writer.writeByte(@enumToInt(Instruction.Branch));
-                try std.leb.writeULEB128(writer, @intCast(u32, label_index));
+                try std.leb.writeULEB128(writer, @intCast(u32, label_data));
             },
             .Branch_If => {
                 try writer.writeByte(@enumToInt(Instruction.Branch_If));
-                try std.leb.writeULEB128(writer, @intCast(u32, label_index));
+                try std.leb.writeULEB128(writer, @intCast(u32, label_data));
+            },
+            .Branch_Table => {
+                // expects label_data to be a struct {table: []u32, fallback_id:u32}
+                try writer.writeByte(@enumToInt(Instruction.Branch_Table));
+                try std.leb.writeULEB128(writer, @intCast(u32, label_data.table.len));
+                var index: u32 = 0;
+                while (index < label_data.table.len) {
+                    var label_id: u32 = label_data.table[index];
+                    try std.leb.writeULEB128(writer, @intCast(u32, label_id));
+                    index += 1;
+                }
+                try std.leb.writeULEB128(writer, @intCast(u32, label_data.fallback_id));
             },
             else => {
                 unreachable; // pass Branch, Branch_If, or Branch_Table
@@ -2187,6 +2236,35 @@ test "branch_if" {
     try builder.addConstant(i32, 0xDEAD);
     try builder.add(Instruction.End);
     try testCallFuncI32Return(builder.instructions.items, 0xDEAD);
+}
+
+test "branch_table" {
+    var builder = FunctionBuilder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    const branch_table = [_]u32{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1};
+
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addConstant(i32, 0xDEAD);
+    try builder.addVariable(Instruction.Local_Get, 0);
+    try builder.addBranch(Instruction.Branch_Table, .{.table = &branch_table, .fallback_id = 0});
+    try builder.add(Instruction.Return);
+    try builder.add(Instruction.End); // 0
+    try builder.addConstant(i32, 0x1337);
+    try builder.add(Instruction.Return);
+    try builder.add(Instruction.End); // 1
+    try builder.addConstant(i32, 0xBEEF);
+    try builder.add(Instruction.Return);
+    try builder.add(Instruction.End); // 2
+
+    var branch_to_take:i32 = 0;
+    while (branch_to_take <= branch_table.len) { // go beyond the length of the table to test the fallback
+        const expected:i32 = if (@mod(branch_to_take, 2) == 0) 0x1337 else 0xBEEF;
+        try testCallFuncI32ParamReturn(builder.instructions.items, branch_to_take, expected);
+        branch_to_take += 1;
+    }
 }
 
 test "return" {
