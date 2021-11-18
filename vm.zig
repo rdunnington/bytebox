@@ -129,20 +129,22 @@ fn doesInstructionExpectEnd(instruction:Instruction) bool {
     };
 }
 
-const Type = enum(u8) {
+const ValType = enum(u8) {
     I32 = 0x7F,
     I64 = 0x7E,
     F32 = 0x7D,
     F64 = 0x7C,
-    // FuncRef = 0x70,
-    // ExternRef = 0x6F,
+    FuncRef = 0x70,
+    ExternRef = 0x6F,
 };
 
-const TypedValue = union(Type) {
+const Val = union(ValType) {
     I32: i32,
     I64: i64,
     F32: f32,
     F64: f64,
+    FuncRef: u32, // index into VmState.functions
+    ExternRef: void, // TODO
 };
 
 const GlobalValue = struct {
@@ -152,7 +154,7 @@ const GlobalValue = struct {
     };
 
     mut: Mut,
-    value: TypedValue,
+    value: Val,
 };
 
 // others such as null ref, funcref, or an imported global
@@ -160,18 +162,18 @@ const GlobalValueInitTag = enum {
     Value,
 };
 const GlobalValueInitOptions = union(GlobalValueInitTag) {
-    Value: TypedValue,
+    Value: Val,
 };
 
 const BlockType = enum {
     Void,
-    Valtype,
+    ValType,
     TypeIndex,
 };
 
 const BlockTypeValue = union(BlockType) {
     Void: void,
-    Valtype: Type,
+    ValType: ValType,
     TypeIndex: u32,
 };
 
@@ -184,16 +186,16 @@ const Label = struct{
 
 const CallFrame = struct {
     func: *const Function,
-    locals: std.ArrayList(TypedValue),
+    locals: std.ArrayList(Val),
 };
 
 const StackItemType = enum(u8) {
-    Value,
+    Val,
     Label,
     Frame,
 };
 const StackItem = union(StackItemType) {
-    Value: TypedValue,
+    Val: Val,
     Label: Label,
     Frame: CallFrame,
 };
@@ -227,24 +229,24 @@ const Stack = struct {
         return error.OutOfBounds;
     }
 
-    fn topValue(self: *const Self) !TypedValue {
+    fn topValue(self: *const Self) !Val {
         var item = try self.top();
         switch (item.*) {
-            .Value => |v| return v,
+            .Val => |v| return v,
             .Label => return error.TypeMismatch,
             .Frame => return error.TypeMismatch,
         }
     }
 
-    fn pushValue(self: *Self, v: TypedValue) !void {
-        var item = StackItem{.Value = v};
+    fn pushValue(self: *Self, v: Val) !void {
+        var item = StackItem{.Val = v};
         try self.stack.append(item);
     }
 
-    fn popValue(self: *Self) !TypedValue {
+    fn popValue(self: *Self) !Val {
         var item = try self.pop();
         switch (item) {
-            .Value => |v| return v,
+            .Val => |v| return v,
             .Label => return error.TypeMismatch,
             .Frame => return error.TypeMismatch,
         }
@@ -269,7 +271,7 @@ const Stack = struct {
         // std.debug.print(">> pop label: {}\n", .{self.next_label_id});
         var item = try self.pop();
         var label = switch (item) {
-            .Value => return error.TypeMismatch,
+            .Val => return error.TypeMismatch,
             .Label => |label| label,
             .Frame => return error.TypeMismatch,
         };
@@ -325,7 +327,7 @@ const Stack = struct {
     fn popFrame(self: *Self) !void {
         var item = try self.pop();
         switch (item) {
-            .Value => return error.TypeMismatch,
+            .Val => return error.TypeMismatch,
             .Label => return error.TypeMismatch,
             .Frame => |*frame| {
                 frame.locals.deinit();
@@ -337,7 +339,7 @@ const Stack = struct {
         while (item_index > 0) {
             item_index -= 1;
             switch(self.stack.items[item_index]) {
-                .Value => {},
+                .Val => {},
                 .Label => |*label| {
                     self.last_label_index = @intCast(i32, item_index);
                     self.next_label_id = label.id + 1;
@@ -364,15 +366,15 @@ const Stack = struct {
     }
 
     fn popI32(self: *Self) !i32 {
-        var typed: TypedValue = try self.popValue();
-        switch (typed) {
-            Type.I32 => |value| return value,
+        var val: Val = try self.popValue();
+        switch (val) {
+            ValType.I32 => |value| return value,
             else => return error.TypeMismatch,
         }
     }
 
     fn pushI32(self: *Self, v: i32) !void {
-        var typed = TypedValue{ .I32 = v };
+        var typed = Val{ .I32 = v };
         try self.pushValue(typed);
     }
 
@@ -392,13 +394,13 @@ const block_type_void_sentinel_byte: u8 = 0x40;
 const max_global_init_size:usize = 32;
 
 const FunctionType = struct {
-    types: std.ArrayList(Type),
+    types: std.ArrayList(ValType),
     numParams: u32,
 
-    fn getParams(self: *const FunctionType) []const Type {
+    fn getParams(self: *const FunctionType) []const ValType {
         return self.types.items[0..self.numParams];
     }
-    fn getReturns(self: *const FunctionType) []const Type {
+    fn getReturns(self: *const FunctionType) []const ValType {
         return self.types.items[self.numParams..];
     }
 };
@@ -451,7 +453,7 @@ const FunctionTypeContext = struct {
 const Function = struct {
     typeIndex: u32,
     bytecodeOffset: u32,
-    locals: std.ArrayList(Type),
+    locals: std.ArrayList(ValType),
 };
 
 const ExportType = enum(u8) {
@@ -555,14 +557,14 @@ const VmState = struct {
 
                         const num_params = try std.leb.readULEB128(u32, reader);
 
-                        var func = FunctionType{ .numParams = num_params, .types = std.ArrayList(Type).init(allocator) };
+                        var func = FunctionType{ .numParams = num_params, .types = std.ArrayList(ValType).init(allocator) };
                         errdefer func.types.deinit();
 
                         var params_left = num_params;
                         while (params_left > 0) {
                             params_left -= 1;
 
-                            var param_type = @intToEnum(Type, try reader.readByte());
+                            var param_type = @intToEnum(ValType, try reader.readByte());
                             try func.types.append(param_type);
                         }
 
@@ -571,7 +573,7 @@ const VmState = struct {
                         while (returns_left > 0) {
                             returns_left -= 1;
 
-                            var return_type = @intToEnum(Type, try reader.readByte());
+                            var return_type = @intToEnum(ValType, try reader.readByte());
                             try func.types.append(return_type);
                         }
 
@@ -589,7 +591,7 @@ const VmState = struct {
                         var func = Function{
                             .typeIndex = try std.leb.readULEB128(u32, reader),
                             .bytecodeOffset = 0, // we'll fix these up later when we find them in the Code section
-                            .locals = std.ArrayList(Type).init(allocator),
+                            .locals = std.ArrayList(ValType).init(allocator),
                         };
                         errdefer func.locals.deinit();
                         try vm.functions.append(func);
@@ -603,7 +605,7 @@ const VmState = struct {
                     var global_index: u32 = 0;
                     while (global_index < num_globals) {
                         var mut = @intToEnum(GlobalValue.Mut, try reader.readByte());
-                        var valtype = @intToEnum(Type, try reader.readByte());
+                        var valtype = @intToEnum(ValType, try reader.readByte());
 
                         var init = std.ArrayList(u8).init(allocator);
                         defer init.deinit();
@@ -688,7 +690,7 @@ const VmState = struct {
                         var locals_index: u32 = 0;
                         while (locals_index < num_locals) {
                             locals_index += 1;
-                            const local_type = @intToEnum(Type, try reader.readByte());
+                            const local_type = @intToEnum(ValType, try reader.readByte());
                             try vm.functions.items[code_index].locals.append(local_type);
                         }
 
@@ -801,11 +803,11 @@ const VmState = struct {
         self.stack.deinit();
     }
 
-    fn callFunc(self: *Self, name: []const u8, params: []const TypedValue, returns: []TypedValue) !void {
+    fn callFunc(self: *Self, name: []const u8, params: []const Val, returns: []Val) !void {
         for (self.exports.functions.items) |funcExport| {
             if (std.mem.eql(u8, name, funcExport.name.items)) {
                 const func: Function = self.functions.items[funcExport.index];
-                const funcTypeParams: []const Type = self.types.items[func.typeIndex].getParams();
+                const funcTypeParams: []const ValType = self.types.items[func.typeIndex].getParams();
 
                 if (params.len != funcTypeParams.len) {
                     // std.debug.print("params.len: {}, funcTypeParams.len: {}\n", .{params.len, funcTypeParams.len});
@@ -819,7 +821,7 @@ const VmState = struct {
                     }
                 }
 
-                var locals = std.ArrayList(TypedValue).init(self.allocator);
+                var locals = std.ArrayList(Val).init(self.allocator);
                 try locals.resize(func.locals.items.len);
                 for (params) |v, i| {
                     locals.items[i] = v;
@@ -854,7 +856,7 @@ const VmState = struct {
     fn readBlockType(stream: *BytecodeBufferStream) !BlockTypeValue {
         var reader = stream.reader();
         const blocktype = try reader.readByte();
-        const valtype_or_err = std.meta.intToEnum(Type, blocktype);
+        const valtype_or_err = std.meta.intToEnum(ValType, blocktype);
         if (std.meta.isError(valtype_or_err)) {
             if (blocktype == block_type_void_sentinel_byte) {
                 return BlockTypeValue{.Void = {}};
@@ -868,8 +870,8 @@ const VmState = struct {
                 return BlockTypeValue{.TypeIndex = index};
             }
         } else {
-            var valtype:Type = valtype_or_err catch unreachable;
-            return BlockTypeValue{.Valtype = valtype};
+            var valtype:ValType = valtype_or_err catch unreachable;
+            return BlockTypeValue{.ValType = valtype};
         }
     }
 
@@ -916,7 +918,7 @@ const VmState = struct {
                     try stream.seekTo(end_offset);
                 },
                 Instruction.End => {
-                    var returns = std.ArrayList(TypedValue).init(self.allocator);
+                    var returns = std.ArrayList(Val).init(self.allocator);
                     defer returns.deinit();
 
                     // id 0 means this is the end of a function, otherwise it's the end of a block
@@ -927,7 +929,7 @@ const VmState = struct {
                         try pushValues(returns.items, &self.stack);
                     } else {
                         var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                        const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
+                        const returnTypes: []const ValType = self.types.items[frame.func.typeIndex].getReturns();
 
                         try popValues(&returns, &self.stack, returnTypes);
                         var label = try self.stack.popLabel();
@@ -977,9 +979,9 @@ const VmState = struct {
                 },
                 Instruction.Return => {
                     var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                    const returnTypes: []const Type = self.types.items[frame.func.typeIndex].getReturns();
+                    const returnTypes: []const ValType = self.types.items[frame.func.typeIndex].getReturns();
 
-                    var returns = std.ArrayList(TypedValue).init(self.allocator);
+                    var returns = std.ArrayList(Val).init(self.allocator);
                     defer returns.deinit();
                     try returns.ensureTotalCapacity(returnTypes.len);
 
@@ -995,7 +997,7 @@ const VmState = struct {
                     while (true) {
                         var item:*const StackItem = try self.stack.top();
                         switch (item.*) {
-                            .Value => { _ = try self.stack.popValue(); },
+                            .Val => { _ = try self.stack.popValue(); },
                             .Label => { last_label = try self.stack.popLabel(); },
                             .Frame => { _ = try self.stack.popFrame(); break; },
                         }
@@ -1024,10 +1026,10 @@ const VmState = struct {
 
                     var frame = CallFrame{
                         .func =  func,
-                        .locals = std.ArrayList(TypedValue).init(self.allocator),
+                        .locals = std.ArrayList(Val).init(self.allocator),
                     };
 
-                    const param_types: []const Type = functype.getParams();
+                    const param_types: []const ValType = functype.getParams();
                     try frame.locals.ensureTotalCapacity(param_types.len);
 
                     var param_index = param_types.len;
@@ -1055,7 +1057,7 @@ const VmState = struct {
                     var v1 = try self.stack.popValue();
 
                     if (builtin.mode == .Debug) {
-                        if (std.meta.activeTag(boolean) != Type.I32) {
+                        if (std.meta.activeTag(boolean) != ValType.I32) {
                             return error.TypeMismatch;
                         } else if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
                             return error.TypeMismatch;
@@ -1071,19 +1073,19 @@ const VmState = struct {
                 Instruction.Local_Get => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
                     var frame:*const CallFrame = try self.stack.findCurrentFrame();
-                    var v:TypedValue = frame.locals.items[locals_index];
+                    var v:Val = frame.locals.items[locals_index];
                     try self.stack.pushValue(v);
                 },
                 Instruction.Local_Set => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
                     var frame:*const CallFrame = try self.stack.findCurrentFrame();
-                    var v:TypedValue = try self.stack.popValue();
+                    var v:Val = try self.stack.popValue();
                     frame.locals.items[locals_index] = v;
                 },
                 Instruction.Local_Tee => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
                     var frame:*const CallFrame = try self.stack.findCurrentFrame();
-                    var v:TypedValue = try self.stack.topValue();
+                    var v:Val = try self.stack.topValue();
                     frame.locals.items[locals_index] = v;
                 },
                 Instruction.Global_Get => {
@@ -1285,7 +1287,7 @@ const VmState = struct {
 
         // std.debug.print("found label: {}\n", .{label});
 
-        var args = std.ArrayList(TypedValue).init(self.allocator);
+        var args = std.ArrayList(Val).init(self.allocator);
         defer args.deinit();
 
         try popValues(&args, &self.stack, self.getReturnTypesFromBlockType(label.blocktype));
@@ -1293,7 +1295,7 @@ const VmState = struct {
         while (true) {
             var topItem = try self.stack.top();
             switch (std.meta.activeTag(topItem.*)) {
-                .Value => {
+                .Val => {
                     _ = try self.stack.popValue();
                 },
                 .Frame => {
@@ -1314,30 +1316,32 @@ const VmState = struct {
         try stream.seekTo(continuation);
     }
 
-    fn getReturnTypesFromBlockType(self: *Self, blocktype: BlockTypeValue) []const Type {
+    fn getReturnTypesFromBlockType(self: *Self, blocktype: BlockTypeValue) []const ValType {
         const Statics = struct {
-            const empty = [_]Type{};
-            const valtype_i32 = [_]Type{.I32};
-            const valtype_i64 = [_]Type{.I64};
-            const valtype_f32 = [_]Type{.F32};
-            const valtype_f64 = [_]Type{.F64};
+            const empty = [_]ValType{};
+            const valtype_i32 = [_]ValType{.I32};
+            const valtype_i64 = [_]ValType{.I64};
+            const valtype_f32 = [_]ValType{.F32};
+            const valtype_f64 = [_]ValType{.F64};
+            const reftype_funcref = [_]ValType{.FuncRef};
+            const reftype_externref = [_]ValType{.ExternRef};
         };
 
         switch (blocktype) {
             .Void => return &Statics.empty,
-            .Valtype => |v| {
-                return switch (v) {
-                    .I32 => &Statics.valtype_i32,
-                    .I64 => &Statics.valtype_i64,
-                    .F32 => &Statics.valtype_f32,
-                    .F64 => &Statics.valtype_f64,
-                };
+            .ValType => |v| return switch (v) {
+                .I32 => &Statics.valtype_i32,
+                .I64 => &Statics.valtype_i64,
+                .F32 => &Statics.valtype_f32,
+                .F64 => &Statics.valtype_f64,
+                .FuncRef => &Statics.reftype_funcref,
+                .ExternRef => &Statics.reftype_externref,
             },
             .TypeIndex => |index| return self.types.items[index].getReturns(),
         }
     }
 
-    fn popValues(returns: *std.ArrayList(TypedValue), stack: *Stack, types:[]const Type) !void {
+    fn popValues(returns: *std.ArrayList(Val), stack: *Stack, types:[]const ValType) !void {
         // std.debug.print("popValues: required: {any} ({})\n", .{types, types.len});
 
         try returns.ensureTotalCapacity(types.len);
@@ -1352,7 +1356,7 @@ const VmState = struct {
         }
     }
 
-    fn pushValues(returns: []const TypedValue, stack: *Stack) !void {
+    fn pushValues(returns: []const Val, stack: *Stack) !void {
         var index = returns.len;
         while (index > 0) {
             index -= 1;
@@ -1402,9 +1406,9 @@ const FunctionBuilder = struct {
             .Void => {
                 try writer.writeByte(block_type_void_sentinel_byte);
             },
-            .Valtype => {
-                if (@TypeOf(param) != Type) {
-                    unreachable; // When adding a Valtype block, you must specify which Type it is.
+            .ValType => {
+                if (@TypeOf(param) != ValType) {
+                    unreachable; // When adding a Val block, you must specify which ValType it is.
                 }
                 try writer.writeByte(@enumToInt(param));
             },
@@ -1479,13 +1483,13 @@ const ModuleBuilder = struct {
     const WasmFunction = struct {
         exportName: std.ArrayList(u8),
         ftype: FunctionType,
-        locals: std.ArrayList(Type),
+        locals: std.ArrayList(ValType),
         instructions: std.ArrayList(u8),
     };
 
     const WasmGlobal = struct {
         exportName: std.ArrayList(u8),
-        type: Type,
+        type: ValType,
         mut: GlobalValue.Mut,
         initInstructions: std.ArrayList(u8),
     };
@@ -1523,14 +1527,14 @@ const ModuleBuilder = struct {
         self.wasm.deinit();
     }
 
-    fn addFunc(self: *Self, exportName: ?[]const u8, params: []const Type, returns: []const Type, locals: []const Type, instructions: []const u8) !void {
+    fn addFunc(self: *Self, exportName: ?[]const u8, params: []const ValType, returns: []const ValType, locals: []const ValType, instructions: []const u8) !void {
         var f = WasmFunction{
             .exportName = std.ArrayList(u8).init(self.allocator),
             .ftype = FunctionType{
-                .types = std.ArrayList(Type).init(self.allocator),
+                .types = std.ArrayList(ValType).init(self.allocator),
                 .numParams = @intCast(u32, params.len),
             },
-            .locals = std.ArrayList(Type).init(self.allocator),
+            .locals = std.ArrayList(ValType).init(self.allocator),
             .instructions = std.ArrayList(u8).init(self.allocator),
         };
         errdefer f.exportName.deinit();
@@ -1551,7 +1555,7 @@ const ModuleBuilder = struct {
         self.needsRebuild = true;
     }
 
-    fn addGlobal(self: *Self, exportName: ?[]const u8, valtype: Type, mut: GlobalValue.Mut, initOpts:GlobalValueInitOptions) !void {
+    fn addGlobal(self: *Self, exportName: ?[]const u8, valtype: ValType, mut: GlobalValue.Mut, initOpts:GlobalValueInitOptions) !void {
         var g = WasmGlobal{
             .exportName = std.ArrayList(u8).init(self.allocator),
             .type = valtype,
@@ -1735,7 +1739,7 @@ const ModuleBuilder = struct {
     }
 };
 
-fn writeTypedValue(value:TypedValue, writer: anytype) !void {
+fn writeTypedValue(value:Val, writer: anytype) !void {
     switch (value) {
         .I32 => |v| {
             try writer.writeByte(@enumToInt(Instruction.I32_Const));
@@ -1763,33 +1767,33 @@ fn writeTypedValue(value:TypedValue, writer: anytype) !void {
 const TestFunction = struct{
     bytecode: []const u8,
     exportName: ?[]const u8 = null,
-    params: ?[]Type = null,
-    locals: ?[]Type = null,
-    returns: ?[]Type = null,
+    params: ?[]ValType = null,
+    locals: ?[]ValType = null,
+    returns: ?[]ValType = null,
 };
 
 const TestGlobal = struct {
     exportName: ?[]const u8,
-    initValue: TypedValue,
+    initValue: Val,
     mut: GlobalValue.Mut,
 };
 
 const TestOptions = struct {
     startFunctionIndex:u32 = 0,
-    startFunctionParams: ?[]TypedValue = null,
+    startFunctionParams: ?[]Val = null,
     functions: [] const TestFunction,
     globals: ?[]const TestGlobal = null,
 };
 
-fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
+fn testCallFunc(options:TestOptions, expectedReturns:?[]Val) !void {
     var builder = ModuleBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
     for (options.functions) |func|
     {
-        const params = func.params orelse &[_]Type{};
-        const locals = func.locals orelse &[_]Type{};
-        const returns = func.returns orelse &[_]Type{};
+        const params = func.params orelse &[_]ValType{};
+        const locals = func.locals orelse &[_]ValType{};
+        const returns = func.returns orelse &[_]ValType{};
 
         try builder.addFunc(func.exportName, params, returns, locals, func.bytecode);
     }
@@ -1809,9 +1813,9 @@ fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
     var vm = try VmState.parseWasm(wasm, .UseExisting, std.testing.allocator);
     defer vm.deinit();
 
-    const params = options.startFunctionParams orelse &[_]TypedValue{};
+    const params = options.startFunctionParams orelse &[_]Val{};
 
-    var returns = std.ArrayList(TypedValue).init(std.testing.allocator);
+    var returns = std.ArrayList(Val).init(std.testing.allocator);
     defer returns.deinit();
 
     if (expectedReturns) |expected| {
@@ -1824,7 +1828,7 @@ fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
     if (expectedReturns) |expected|
     {
         for (expected) |expectedValue, i| {
-            if (std.meta.activeTag(expectedValue) == Type.I32) {
+            if (std.meta.activeTag(expectedValue) == ValType.I32) {
                 var result_u32 = @bitCast(u32, returns.items[i].I32);
                 var expected_u32 = @bitCast(u32, expectedValue.I32);
                 if (result_u32 != expected_u32) {
@@ -1837,7 +1841,7 @@ fn testCallFunc(options:TestOptions, expectedReturns:?[]TypedValue) !void {
 }
 
 fn testCallFuncI32ParamReturn(bytecode: []const u8, param:i32, expected:i32) !void {
-    var types = [_]Type{.I32};
+    var types = [_]ValType{.I32};
     var functions = [_]TestFunction{
         .{
             .bytecode = bytecode,
@@ -1847,19 +1851,19 @@ fn testCallFuncI32ParamReturn(bytecode: []const u8, param:i32, expected:i32) !vo
             .returns = &types,
         },
     };
-    var params = [_]TypedValue{
+    var params = [_]Val{
         .{.I32 = param}
     };
     var opts = TestOptions{
         .startFunctionParams = &params,
         .functions = &functions,
     };
-    var expectedReturns = [_]TypedValue{.{.I32 = expected}};
+    var expectedReturns = [_]Val{.{.I32 = expected}};
     try testCallFunc(opts, &expectedReturns);
 }
 
 fn testCallFuncI32Return(bytecode: []const u8, expected:i32) !void {
-    var types = [_]Type{.I32};
+    var types = [_]ValType{.I32};
     var functions = [_]TestFunction{
         .{
             .bytecode = bytecode,
@@ -1870,7 +1874,7 @@ fn testCallFuncI32Return(bytecode: []const u8, expected:i32) !void {
     var opts = TestOptions{
         .functions = &functions,
     };
-    var expectedReturns = [_]TypedValue{.{.I32 = expected}};
+    var expectedReturns = [_]Val{.{.I32 = expected}};
     try testCallFunc(opts, &expectedReturns);
 }
 
@@ -1909,8 +1913,8 @@ test "module builder" {
     var builder = ModuleBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    try builder.addGlobal("glb1", Type.I32, GlobalValue.Mut.Immutable, GlobalValueInitOptions{.Value = TypedValue{.I32=0x88}});
-    try builder.addFunc("abcd", &[_]Type{.I64}, &[_]Type{.I32}, &[_]Type{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
+    try builder.addGlobal("glb1", ValType.I32, GlobalValue.Mut.Immutable, GlobalValueInitOptions{.Value = Val{.I32=0x88}});
+    try builder.addFunc("abcd", &[_]ValType{.I64}, &[_]ValType{.I32}, &[_]ValType{ .I32, .I64 }, &[_]u8{ 0x01, 0x01, 0x01, 0x01 });
     var wasm = try builder.getWasm();
 
     var expected = std.ArrayList(u8).init(std.testing.allocator);
@@ -1927,9 +1931,9 @@ test "module builder" {
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num types
         try writer.writeByte(function_type_sentinel_byte);
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num params
-        try writer.writeByte(@enumToInt(Type.I64));
+        try writer.writeByte(@enumToInt(ValType.I64));
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num returns
-        try writer.writeByte(@enumToInt(Type.I32));
+        try writer.writeByte(@enumToInt(ValType.I32));
         try writer.writeByte(@enumToInt(Section.Function));
         try std.leb.writeULEB128(writer, @intCast(u32, 0x2)); // section size
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num functions
@@ -1938,7 +1942,7 @@ test "module builder" {
         try std.leb.writeULEB128(writer, @intCast(u32, 0x7)); // section size
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num globals
         try writer.writeByte(@enumToInt(GlobalValue.Mut.Immutable));
-        try writer.writeByte(@enumToInt(Type.I32));
+        try writer.writeByte(@enumToInt(ValType.I32));
         try writer.writeByte(@enumToInt(Instruction.I32_Const));
         try std.leb.writeILEB128(writer, @intCast(i32, 0x88));
         try writer.writeByte(@enumToInt(Instruction.End));
@@ -1958,8 +1962,8 @@ test "module builder" {
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num codes
         try std.leb.writeULEB128(writer, @intCast(u32, 0x8)); // code size
         try std.leb.writeULEB128(writer, @intCast(u32, 0x2)); // num locals
-        try writer.writeByte(@enumToInt(Type.I32));
-        try writer.writeByte(@enumToInt(Type.I64));
+        try writer.writeByte(@enumToInt(ValType.I32));
+        try writer.writeByte(@enumToInt(ValType.I64));
         try writer.writeByte(@enumToInt(Instruction.Noop));
         try writer.writeByte(@enumToInt(Instruction.Noop));
         try writer.writeByte(@enumToInt(Instruction.Noop));
@@ -2039,13 +2043,13 @@ test "block valtypes" {
     var builder = FunctionBuilder.init(std.testing.allocator);
     defer builder.deinit();
 
-    try builder.addBlock(.Block, .Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.add(.End);
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, .Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.add(.End);
     var didCatchError = false;
     var didCatchCorrectError = false;
@@ -2084,7 +2088,7 @@ test "if-else" {
     defer builder.deinit();
 
     try builder.addConstant(i32, 1);
-    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addBlock(.If, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.add(.End);
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
@@ -2092,7 +2096,7 @@ test "if-else" {
     builder.instructions.clearRetainingCapacity();
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0);
-    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addBlock(.If, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x2);
     try builder.add(Instruction.I32_Mul);
     try builder.add(.End);
@@ -2102,7 +2106,7 @@ test "if-else" {
     try builder.addConstant(i32, 0x1337);
     try builder.addVariable(Instruction.Local_Set, 0);
     try builder.addConstant(i32, 1); // take if branch
-    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addBlock(.If, BlockType.ValType, ValType.I32);
     try builder.addVariable(Instruction.Local_Get, 0);
     try builder.addConstant(i32, 0x2);
     try builder.add(.I32_Mul);
@@ -2117,7 +2121,7 @@ test "if-else" {
     try builder.addConstant(i32, 0x1337);
     try builder.addVariable(Instruction.Local_Set, 0);
     try builder.addConstant(i32, 0); // take else branch
-    try builder.addBlock(.If, .Valtype, Type.I32);
+    try builder.addBlock(.If, BlockType.ValType, ValType.I32);
     try builder.addVariable(Instruction.Local_Get, 0);
     try builder.addConstant(i32, 0x2);
     try builder.add(.I32_Mul);
@@ -2140,7 +2144,7 @@ test "branch" {
     try testCallFuncSimple(builder.instructions.items);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addBranch(Instruction.Branch, 0);
     try builder.addConstant(i32, 0xBEEF);
@@ -2148,9 +2152,9 @@ test "branch" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addBranch(Instruction.Branch, 2);
     try builder.add(Instruction.End);
@@ -2162,9 +2166,9 @@ test "branch" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addBranch(Instruction.Branch, 1);
     try builder.add(Instruction.End);
@@ -2188,7 +2192,7 @@ test "branch_if" {
     try testCallFuncSimple(builder.instructions.items);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x1);
     try builder.addBranch(Instruction.Branch_If, 0);
@@ -2198,7 +2202,7 @@ test "branch_if" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x0);
     try builder.addBranch(Instruction.Branch_If, 0);
@@ -2208,9 +2212,9 @@ test "branch_if" {
     try testCallFuncI32Return(builder.instructions.items, 0xBEEF);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x1);
     try builder.addBranch(Instruction.Branch_If, 2);
@@ -2223,9 +2227,9 @@ test "branch_if" {
     try testCallFuncI32Return(builder.instructions.items, 0x1337);
 
     builder.instructions.clearRetainingCapacity();
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.addConstant(i32, 0x1);
     try builder.addBranch(Instruction.Branch_If, 1);
@@ -2244,9 +2248,9 @@ test "branch_table" {
 
     const branch_table = [_]u32{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1};
 
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0xDEAD);
     try builder.addVariable(Instruction.Local_Get, 0);
     try builder.addBranch(Instruction.Branch_Table, .{.table = &branch_table, .fallback_id = 0});
@@ -2282,10 +2286,10 @@ test "return" {
     //     }
     // }
 
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addConstant(i32, 0x1337);
     try builder.add(Instruction.Return);
     try builder.add(Instruction.End);
@@ -2324,7 +2328,7 @@ test "call and return" {
     try builder2.add(Instruction.I32_Add); // 0x8C6 + 0xBEEF = 0xC7B5
     try builder2.add(Instruction.Return);
 
-    var types = [_]Type{.I32};
+    var types = [_]ValType{.I32};
     var functions = [_]TestFunction{
         .{
             .exportName = "testFunc",
@@ -2346,12 +2350,12 @@ test "call and return" {
             .returns = &types,
         },
     };
-    var params = [_]TypedValue{.{.I32 = 0x42}};
+    var params = [_]Val{.{.I32 = 0x42}};
     var opts = TestOptions{
         .functions = &functions,
         .startFunctionParams = &params,
     };
-    var expected = [_]TypedValue{.{.I32 = 0xC7B5}};
+    var expected = [_]Val{.{.I32 = 0xC7B5}};
 
     try testCallFunc(opts, &expected);
 }
@@ -2370,7 +2374,7 @@ test "call recursive" {
     //     }
     // }
 
-    try builder.addBlock(.Block, BlockType.Valtype, Type.I32);
+    try builder.addBlock(.Block, BlockType.ValType, ValType.I32);
     try builder.addVariable(Instruction.Local_Get, 0);
     try builder.addVariable(Instruction.Local_Get, 0);
     try builder.addConstant(i32, 1);
@@ -2434,9 +2438,9 @@ test "local_set" {
     try builder.addVariable(Instruction.Local_Set, 0);
     try builder.addVariable(Instruction.Local_Get, 0); // push local value onto stack, should be 1337 since it was the first pushed
 
-    var types = [_]Type{.I32};
-    var emptyTypes = [_]Type{};
-    var params = [_]TypedValue{};
+    var types = [_]ValType{.I32};
+    var emptyTypes = [_]ValType{};
+    var params = [_]Val{};
     var opts = TestOptions{
         .startFunctionParams = &params,
         .functions = &[_]TestFunction{
@@ -2449,7 +2453,7 @@ test "local_set" {
             }
         },
     };
-    var expected = [_]TypedValue{.{.I32 = 0x1337}};
+    var expected = [_]Val{.{.I32 = 0x1337}};
 
     try testCallFunc(opts, &expected);
 }
@@ -2463,9 +2467,9 @@ test "local_tee" {
     try builder.addVariable(Instruction.Local_Get, 0); // push the same value back onto the stack
     try builder.add(Instruction.I32_Add);
 
-    var types = [_]Type{.I32};
-    var emptyTypes = [_]Type{};
-    var params = [_]TypedValue{};
+    var types = [_]ValType{.I32};
+    var emptyTypes = [_]ValType{};
+    var params = [_]Val{};
     var opts = TestOptions{
         .startFunctionParams = &params,
         .functions = &[_]TestFunction{
@@ -2478,7 +2482,7 @@ test "local_tee" {
             }
         },
     };
-    var expected = [_]TypedValue{.{.I32 = 0x266E}};
+    var expected = [_]Val{.{.I32 = 0x266E}};
 
     try testCallFunc(opts, &expected);
 }
@@ -2489,7 +2493,7 @@ test "global_get" {
 
     try builder.addVariable(Instruction.Global_Get, 0x0);
 
-    var returns = [_]Type{.I32};
+    var returns = [_]ValType{.I32};
     var functions = [_]TestFunction{
         .{
             .exportName = "testFunc",
@@ -2500,7 +2504,7 @@ test "global_get" {
     var globals = [_]TestGlobal {
         .{
             .exportName = "abcd",
-            .initValue = TypedValue{.I32 = 0x1337},
+            .initValue = Val{.I32 = 0x1337},
             .mut = GlobalValue.Mut.Immutable,
         },
     };
@@ -2508,7 +2512,7 @@ test "global_get" {
         .functions = &functions,
         .globals = &globals,
     };
-    var expected = [_]TypedValue{.{.I32 = 0x1337}};
+    var expected = [_]Val{.{.I32 = 0x1337}};
     try testCallFunc(options, &expected);
 }
 
@@ -2520,11 +2524,11 @@ test "global_set" {
     try builder.addVariable(Instruction.Global_Set, 0);
     try builder.addVariable(Instruction.Global_Get, 0);
 
-    var returns = [_]Type{.I32};
+    var returns = [_]ValType{.I32};
     var globals = [_]TestGlobal {
         .{
             .exportName = null,
-            .initValue = TypedValue{.I32 = 0x0},
+            .initValue = Val{.I32 = 0x0},
             .mut = GlobalValue.Mut.Mutable,
         },
     };
@@ -2539,7 +2543,7 @@ test "global_set" {
         .functions = functions,
         .globals = &globals,
     };
-    var expected = [_]TypedValue{.{.I32 = 0x1337}};
+    var expected = [_]Val{.{.I32 = 0x1337}};
 
     try testCallFunc(options, &expected);
 
