@@ -8,7 +8,10 @@ const VmParseError = error{
     InvalidExport,
     InvalidGlobalInit,
     InvalidLabel,
+    InvalidConstantExpression,
+    InvalidElement,
     OneTableAllowed,
+    TableMaxExceeded,
 };
 
 const VMError = error{
@@ -137,6 +140,14 @@ const ValType = enum(u8) {
     F64 = 0x7C,
     FuncRef = 0x70,
     ExternRef = 0x6F,
+
+    fn isRefType(valtype:ValType) bool {
+        return switch (valtype) {
+            .FuncRef => true,
+            .ExternRef => true,
+            else => false,
+        };
+    }
 };
 
 const Val = union(ValType) {
@@ -390,9 +401,9 @@ const Stack = struct {
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
 
-const function_type_sentinel_byte: u8 = 0x60;
-const block_type_void_sentinel_byte: u8 = 0x40;
-const max_global_init_size:usize = 32;
+const k_function_type_sentinel_byte: u8 = 0x60;
+const k_block_type_void_sentinel_byte: u8 = 0x40;
+const k_max_constant_expression_size:usize = 32;
 
 const FunctionType = struct {
     types: std.ArrayList(ValType),
@@ -471,6 +482,23 @@ const Table = struct {
     reftype: ValType,
     min: u32,
     max: ?u32,
+
+    fn ensureMinSize(self:*Table, size:usize) !void {
+        if (self.max) |max| {
+            if (size > max) {
+                return error.TableMaxExceeded;
+            }
+        }
+
+        if (self.refs.items.len < size) {
+            try self.refs.resize(size);
+        }
+    }
+};
+
+const Element = struct {
+    refs: std.ArrayList(Val), // should only be reftypes
+    reftype: ValType,
 };
 
 const VmState = struct {
@@ -491,6 +519,7 @@ const VmState = struct {
     types: std.ArrayList(FunctionType),
     functions: std.ArrayList(Function),
     tables: std.ArrayList(Table),
+    elements: std.ArrayList(Element),
     globals: std.ArrayList(GlobalValue),
     exports: Exports,
 
@@ -526,6 +555,7 @@ const VmState = struct {
             .types = std.ArrayList(FunctionType).init(allocator),
             .functions = std.ArrayList(Function).init(allocator),
             .tables = std.ArrayList(Table).init(allocator),
+            .elements = std.ArrayList(Element).init(allocator),
             .globals = std.ArrayList(GlobalValue).init(allocator),
             .exports = Exports{
                 .functions = std.ArrayList(Export).init(allocator),
@@ -565,7 +595,7 @@ const VmState = struct {
                     var types_index:u32 = 0;
                     while (types_index < num_types) {
                         const sentinel = try reader.readByte();
-                        if (sentinel != function_type_sentinel_byte) {
+                        if (sentinel != k_function_type_sentinel_byte) {
                             return error.InvalidBytecode;
                         }
 
@@ -633,16 +663,14 @@ const VmState = struct {
                             else => return error.InvalidTableType,
                         }
 
-                        const reftype = @intToEnum(ValType, try reader.readByte());
-                        switch (reftype) {
-                            .FuncRef => {},
-                            .ExternRef => {},
-                            else => return error.InvalidTableType,
+                        const valtype = @intToEnum(ValType, try reader.readByte());
+                        if (valtype.isRefType() == false) {
+                            return error.InvalidTableType;
                         }
 
                         try vm.tables.append(Table{
                             .refs = std.ArrayList(Val).init(allocator),
-                            .reftype = reftype,
+                            .reftype = valtype,
                             .min = min,
                             .max = max,
                         });
@@ -660,19 +688,10 @@ const VmState = struct {
 
                         var init = std.ArrayList(u8).init(allocator);
                         defer init.deinit();
-                        try reader.readUntilDelimiterArrayList(&init, @enumToInt(Instruction.End), max_global_init_size);
+                        try reader.readUntilDelimiterArrayList(&init, @enumToInt(Instruction.End), k_max_constant_expression_size);
 
-                        // TODO validate init instructions are a constant expression
                         // TODO validate global references are for imports only
-                        try vm.executeWasm(init.items, 0);
-                        if (vm.stack.size() != 1) {
-                            return error.InvalidGlobalInit;
-                        }
-                        var value = try vm.stack.popValue();
-
-                        if (std.meta.activeTag(value) != valtype) {
-                            return error.InvalidGlobalInit;
-                        }
+                        var value = try vm.evalConstantExpression(init.items, valtype);
 
                         try vm.globals.append(GlobalValue{
                             .value = value,
@@ -718,7 +737,176 @@ const VmState = struct {
                         export_index += 1;
                     }
                 },
+                //.Start
+                .Element => {
+                    var expr = std.ArrayList(u8).init(allocator);
+                    defer expr.deinit();
 
+                    const num_segments = try std.leb.readULEB128(u32, reader);
+
+                    var segment_index:u32 = 0;
+                    while (segment_index < num_segments) : (segment_index += 1) {
+                        var flags = try reader.readByte();
+
+                        while (true) {
+                            expr.clearRetainingCapacity();
+
+                            switch (flags) {
+                                0x00 => {
+                                    try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                    const table_offset_i32 = try vm.evalConstantExpression(bytecode, ValType.I32);
+                                    const table_offset = @intCast(u32, table_offset_i32.I32);
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+
+                                    var table:*Table = &vm.tables.items[0];
+                                    try table.ensureMinSize(table_offset + num_elems);
+
+                                    var elem_index:u32 = 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        const func_index = try std.leb.readULEB128(u32, reader);
+                                        table.refs.items[table_offset + elem_index] = Val{.FuncRef = func_index};
+                                    }
+                                },
+                                0x01 => {
+                                    const valtype = @intToEnum(ValType, try reader.readByte());
+
+                                    if (valtype.isRefType() == false) {
+                                        return error.InvalidElement;
+                                    }
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+
+                                    var elem = Element{
+                                        .refs = std.ArrayList(Val).init(allocator),
+                                        .reftype = valtype,
+                                    };
+                                    errdefer elem.refs.deinit();
+                                    try elem.refs.ensureTotalCapacity(num_elems);
+
+                                    var elem_index:u32 = 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        const val = try readRefType(valtype, reader);
+                                        try elem.refs.append(val);
+                                    }
+                                    try vm.elements.append(elem);
+                                },
+                                0x02 => {
+                                    const table_index = try std.leb.readULEB128(u32, reader);
+
+                                    try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                    const table_offset_i32 = try vm.evalConstantExpression(bytecode, ValType.I32);
+                                    const table_offset = @intCast(u32, table_offset_i32.I32);
+
+                                    const valtype = @intToEnum(ValType, try reader.readByte());
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+
+                                    var table:*Table = &vm.tables.items[table_index];
+                                    try table.ensureMinSize(table_offset + num_elems);
+
+                                    var elem_index: u32= 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        table.refs.items[table_offset + elem_index] = try readRefType(valtype, reader);
+                                    }
+                                },
+                                0x03 => {
+                                    _ = @intToEnum(ValType, try reader.readByte());
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+                                    var elem_index: u32 = 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        // _ = try std.leb.readULEB128(u32, reader); // func_index forward decl?
+                                        // TODO figure out what to do with this
+                                    }
+                                },
+                                0x04 => {
+                                    try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                    const table_offset_i32 = try vm.evalConstantExpression(bytecode, ValType.I32);
+                                    const table_offset = @intCast(u32, table_offset_i32.I32);
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+
+                                    var table:*Table = &vm.tables.items[0];
+                                    try table.ensureMinSize(table_offset + num_elems);
+
+                                    var elem_index: u32 = 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        expr.clearRetainingCapacity();
+                                        try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                        const func_ref = try vm.evalConstantExpression(bytecode, ValType.FuncRef);
+                                        table.refs.items[table_offset + elem_index] = func_ref;
+                                    }
+                                },
+                                0x05 => {
+                                    const valtype = @intToEnum(ValType, try reader.readByte());
+
+                                    if (valtype.isRefType() == false) {
+                                        return error.InvalidElement;
+                                    }
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+
+                                    var elem = Element{
+                                        .refs = std.ArrayList(Val).init(allocator),
+                                        .reftype = valtype,
+                                    };
+                                    errdefer elem.refs.deinit();
+                                    try elem.refs.ensureTotalCapacity(num_elems);
+
+                                    var elem_index:u32 = 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        expr.clearRetainingCapacity();
+                                        try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                        const func_ref = try vm.evalConstantExpression(bytecode, ValType.FuncRef);
+                                        try elem.refs.append(func_ref);
+                                    }
+                                    try vm.elements.append(elem);
+                                },
+                                0x06 => {
+                                    const table_index = try std.leb.readULEB128(u32, reader);
+
+                                    try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                    const table_offset_i32 = try vm.evalConstantExpression(bytecode, ValType.I32);
+                                    const table_offset = @intCast(u32, table_offset_i32.I32);
+
+                                    const valtype = @intToEnum(ValType, try reader.readByte());
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+
+                                    var table:*Table = &vm.tables.items[table_index];
+                                    try table.ensureMinSize(table_offset + num_elems);
+
+                                    if (valtype != table.reftype) {
+                                        return error.TypeMismatch;
+                                    }
+
+                                    var elem_index: u32 = 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        expr.clearRetainingCapacity();
+                                        try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                        const func_ref = try vm.evalConstantExpression(bytecode, ValType.FuncRef);
+                                        table.refs.items[table_offset + elem_index] = func_ref;
+                                    }
+                                },
+                                0x07 => {
+                                    _ = @intToEnum(ValType, try reader.readByte());
+
+                                    const num_elems = try std.leb.readULEB128(u32, reader);
+                                    var elem_index: u32 = 0;
+                                    while (elem_index < num_elems) : (elem_index += 1) {
+                                        expr.clearRetainingCapacity();
+                                        try reader.readUntilDelimiterArrayList(&expr, @enumToInt(Instruction.End), k_max_constant_expression_size);
+                                        // const func_index = try vm.evalConstantExpression(bytecode, ValType.I32);
+                                        // _ = try std.leb.readULEB128(u32, reader); // func_index forward decl?
+                                        // TODO figure out what to do with this
+                                    }
+                                },
+                                else => unreachable,
+                            }
+                        }
+                    }
+                },
                 .Code => {
                     // std.debug.print("parseWasm: section: Code\n", .{});
 
@@ -829,6 +1017,9 @@ const VmState = struct {
         for (self.tables.items) |item| {
             item.refs.deinit();
         }
+        for (self.elements.items) |item| {
+            item.refs.deinit();
+        }
 
         for (self.exports.functions.items) |item| {
             item.name.deinit();
@@ -913,7 +1104,7 @@ const VmState = struct {
         const blocktype = try reader.readByte();
         const valtype_or_err = std.meta.intToEnum(ValType, blocktype);
         if (std.meta.isError(valtype_or_err)) {
-            if (blocktype == block_type_void_sentinel_byte) {
+            if (blocktype == k_block_type_void_sentinel_byte) {
                 return BlockTypeValue{.Void = {}};
             } else {
                 stream.pos -= 1;
@@ -928,6 +1119,34 @@ const VmState = struct {
             var valtype:ValType = valtype_or_err catch unreachable;
             return BlockTypeValue{.ValType = valtype};
         }
+    }
+
+    fn readRefType(valtype: ValType, reader:anytype) !Val {
+        switch (valtype) {
+            .FuncRef => {
+                const func_index = try std.leb.readULEB128(u32, reader);
+                return Val{.FuncRef = func_index};
+            },
+            .ExternRef => {
+                unreachable; // TODO
+            },
+            else => unreachable,
+        }
+    }
+
+    fn evalConstantExpression(self:*Self, bytecode:[]const u8, expectedType:ValType) !Val {
+        // TODO validate instructions are a constant expression
+        try self.executeWasm(bytecode, 0);
+        if (self.stack.size() != 1) {
+            return error.InvalidConstantExpression;
+        }
+        var value = try self.stack.popValue();
+
+        if (std.meta.activeTag(value) != expectedType) {
+            return error.TypeMismatch;
+        }
+
+        return value;
     }
 
     fn executeWasm(self: *Self, bytecode: []const u8, offset: u32) !void {
@@ -1459,7 +1678,7 @@ const FunctionBuilder = struct {
 
         switch (blocktype) {
             .Void => {
-                try writer.writeByte(block_type_void_sentinel_byte);
+                try writer.writeByte(k_block_type_void_sentinel_byte);
             },
             .ValType => {
                 if (@TypeOf(param) != ValType) {
@@ -1644,6 +1863,9 @@ const ModuleBuilder = struct {
         if (self.tables.items.len > 0) {
             return error.OneTableAllowed;
         }
+        if (reftype.isRefType() == false) {
+            return error.TypeMismatch;
+        }
 
         try self.tables.append(Table{
             .refs = undefined,
@@ -1706,7 +1928,7 @@ const ModuleBuilder = struct {
                 .FunctionType => {
                     try std.leb.writeULEB128(writer, @intCast(u32, functionTypesSorted.items.len));
                     for (functionTypesSorted.items) |funcType| {
-                        try writer.writeByte(function_type_sentinel_byte);
+                        try writer.writeByte(k_function_type_sentinel_byte);
 
                         var params = funcType.getParams();
                         var returns = funcType.getReturns();
@@ -1732,7 +1954,6 @@ const ModuleBuilder = struct {
                 .Table => {
                     try std.leb.writeULEB128(writer, @intCast(u32, self.tables.items.len));
                     for (self.tables.items) |table| {
-                    std.debug.print("writing the table section!\n", .{});
                         if (table.max != null) {
                             try writer.writeByte(1);
                         } else {
@@ -2018,7 +2239,7 @@ test "module builder" {
         try writer.writeByte(@enumToInt(Section.FunctionType));
         try std.leb.writeULEB128(writer, @intCast(u32, 0x6)); // section size
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num types
-        try writer.writeByte(function_type_sentinel_byte);
+        try writer.writeByte(k_function_type_sentinel_byte);
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num params
         try writer.writeByte(@enumToInt(ValType.I64));
         try std.leb.writeULEB128(writer, @intCast(u32, 0x1)); // num returns
