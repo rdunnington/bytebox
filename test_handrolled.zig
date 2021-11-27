@@ -1,8 +1,10 @@
-
-
-
-
-
+// others such as null ref, funcref, or an imported global
+// const GlobalValueInitTag = enum {
+//     Value,
+// };
+// const GlobalValueInitOptions = union(GlobalValueInitTag) {
+//     Value: Val,
+// };
 // const FunctionBuilder = struct {
 //     const Self = @This();
 

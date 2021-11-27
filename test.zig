@@ -123,29 +123,30 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
 }
 
 fn run(suite_path:[]const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_commands.deinit();
 
-    var commands: std.ArrayList(Command) = try parseCommands(suite_path, &arena.allocator);
+    var commands: std.ArrayList(Command) = try parseCommands(suite_path, &arena_commands.allocator);
 
     const suite_dir = std.fs.path.dirname(suite_path).?;
 
     for (commands.items) |*command| {
-        var arena_vm = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena_vm.deinit();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
 
         var cwd = std.fs.cwd();
         var module_name = command.getModule();
-        var module_path = try std.fs.path.join(&arena_vm.allocator, &[_][]const u8{suite_dir, module_name});
+        var module_path = try std.fs.path.join(&arena.allocator, &[_][]const u8{suite_dir, module_name});
         std.debug.print("module_path: {s}\n", .{module_path});
-        var module_data = try cwd.readFileAlloc(&arena_vm.allocator, module_path, 1024 * 1024 * 8);
+        var module_data = try cwd.readFileAlloc(&arena.allocator, module_path, 1024 * 1024 * 8);
         // wasm.printBytecode("module data", module_data);
-        var module = try wasm.VmState.parseWasm(module_data, .UseExisting, &arena_vm.allocator);
+        var module_def = try wasm.ModuleDefinition.init(module_data, &arena.allocator);
+        var module_inst = try wasm.ModuleInstance.init(&module_def, &arena.allocator);
 
         switch (command.*) {
             .AssertReturn => |c| {
                 var returns: [8]Val = undefined;
-                try module.callFunc(c.field, c.args.items, returns[0..c.expected.items.len]);
+                try module_inst.invoke(c.field, c.args.items, returns[0..c.expected.items.len]);
                 for (returns) |r, i| {
                     try std.testing.expect(std.meta.eql(r, c.expected.items[i]));
                 }
@@ -158,6 +159,6 @@ fn run(suite_path:[]const u8) !void {
     }
 }
 
-// test "br" {
-//     try run("test/wasm/br/br.json");
-// }
+test "br" {
+    try run("test/wasm/br/br.json");
+}

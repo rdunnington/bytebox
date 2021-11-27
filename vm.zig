@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ModuleLoadError = error{
+const ModuleDecodeError = error{
     UnsupportedWasmVersion,
     InvalidMagicSignature,
     InvalidValType,
@@ -123,7 +123,7 @@ const ValType = enum(u8) {
             0x7C => .F64,
             0x70 => .FuncRef,
             0x6F => .ExternRef,
-            else => .InvalidValType,
+            else => ModuleDecodeError.InvalidValType,
         };
     }
 
@@ -134,6 +134,10 @@ const ValType = enum(u8) {
             else => false,
         };
     }
+
+    fn count() comptime_int {
+        return @typeInfo(ValType).Enum.fields.len;
+    }
 };
 
 pub const Val = union(ValType) {
@@ -143,29 +147,6 @@ pub const Val = union(ValType) {
     F64: f64,
     FuncRef: u32, // index into VmState.functions
     ExternRef: void, // TODO
-};
-
-const GlobalMut = enum(u8) {
-    Mutable,
-    Immutable,
-};
-
-const GlobalDefinition = struct {
-    mut: GlobalMut,
-    expr: ConstantExpression,
-};
-
-const GlobalInstance = struct {
-    mut: GlobalMut,
-    value: Val,
-};
-
-// others such as null ref, funcref, or an imported global
-const GlobalValueInitTag = enum {
-    Value,
-};
-const GlobalValueInitOptions = union(GlobalValueInitTag) {
-    Value: Val,
 };
 
 const BlockType = enum {
@@ -419,6 +400,32 @@ const k_function_type_sentinel_byte: u8 = 0x60;
 const k_block_type_void_sentinel_byte: u8 = 0x40;
 const k_max_constant_expression_size:usize = 32;
 
+const ConstantExpression = struct {
+    value: Val,
+
+    fn readEncoded(reader:anytype) !ConstantExpression {
+        const opcode = @intToEnum(Opcode, try reader.readByte());
+        const val = switch (opcode) {
+            .I32_Const => Val{.I32 = try std.leb.readILEB128(i32, reader)},
+            // TODO handle i64, f32, f64, ref.null, ref.func, global.get
+            else => unreachable,
+        };
+
+        const end = @intToEnum(Opcode, try reader.readByte());
+        if (end != .End) {
+            return ModuleDecodeError.InvalidConstantExpression;
+        }
+
+        return ConstantExpression {
+            .value = val,
+        };
+    }
+};
+
+const ImportDefinition = struct {
+    index: u32,
+};
+
 const FunctionTypeDefinition = struct {
     types: std.ArrayList(ValType),
     num_params: u32,
@@ -479,12 +486,15 @@ const FunctionTypeContext = struct {
 const FunctionDefinition = struct {
     type_index: u32,
     offset_into_encoded_bytecode: u32,
-    locals: [std.enums.directEnumArrayLen(ValType, 0)]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{}),
+    locals: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{}),
     size: u32,
 };
 
 const FunctionInstance = struct {
-    definition_index: u32,
+    func_def_index: u32,
+    type_def_index: u32,
+    offset_into_encoded_bytecode: u32,
+    locals: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{}),
 };
 
 const ExportType = enum(u8) {
@@ -496,26 +506,20 @@ const ExportType = enum(u8) {
 
 const ExportDefinition = struct { name: std.ArrayList(u8), index: u32 };
 
-const ConstantExpression = struct {
+const GlobalMut = enum(u8) {
+    Mutable,
+    Immutable,
+};
+
+const GlobalDefinition = struct {
+    valtype: ValType,
+    mut: GlobalMut,
+    expr: ConstantExpression,
+};
+
+const GlobalInstance = struct {
+    mut: GlobalMut,
     value: Val,
-
-    fn readEncoded(reader:anytype) !ConstantExpression {
-        const opcode = @intToEnum(Opcode, try reader.readByte());
-        const val = switch (opcode) {
-            .I32_Const => Val{.I32 = try std.leb.readILEB128(i32, reader)},
-            // TODO handle i64, f32, f64, ref.null, ref.func, global.get
-            else => unreachable,
-        };
-
-        const end = @intToEnum(Opcode, try reader.readByte());
-        if (end != .End) {
-            return .InvalidConstantExpression;
-        }
-
-        return ConstantExpression {
-            .value = val,
-        };
-    }
 };
 
 const TableDefinition = struct {
@@ -578,6 +582,13 @@ const DataInstance = struct {
 };
 
 pub const ModuleDefinition = struct {
+    const Imports = struct {
+        functions: std.ArrayList(ImportDefinition),
+        tables: std.ArrayList(ImportDefinition),
+        memories: std.ArrayList(ImportDefinition),
+        globals: std.ArrayList(ImportDefinition),
+    };
+
     const Exports = struct {
         functions: std.ArrayList(ExportDefinition),
         tables: std.ArrayList(ExportDefinition),
@@ -589,6 +600,8 @@ pub const ModuleDefinition = struct {
 
     bytecode: std.ArrayList(u8),
 
+    types: std.ArrayList(FunctionTypeDefinition),
+    imports: Imports,
     functions: std.ArrayList(FunctionDefinition),
     globals: std.ArrayList(GlobalDefinition),
     tables: std.ArrayList(TableDefinition),
@@ -599,10 +612,19 @@ pub const ModuleDefinition = struct {
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
 
-    pub fn initAndDecode(wasm: []const u8, allocator: *std.mem.Allocator) ModuleLoadError!ModuleDefinition {
+    pub fn init(wasm: []const u8, allocator: *std.mem.Allocator) !ModuleDefinition {
         var module = ModuleDefinition{
+            .allocator = allocator,
+
             .bytecode = std.ArrayList(u8).init(allocator),
 
+            .types = std.ArrayList(FunctionTypeDefinition).init(allocator),
+            .imports = Imports{
+                .functions = std.ArrayList(ImportDefinition).init(allocator),
+                .tables = std.ArrayList(ImportDefinition).init(allocator),
+                .memories = std.ArrayList(ImportDefinition).init(allocator),
+                .globals = std.ArrayList(ImportDefinition).init(allocator),
+            },
             .functions = std.ArrayList(FunctionDefinition).init(allocator),
             .globals = std.ArrayList(GlobalDefinition).init(allocator),
             .tables = std.ArrayList(TableDefinition).init(allocator),
@@ -664,7 +686,8 @@ pub const ModuleDefinition = struct {
 
         try module.bytecode.appendSlice(wasm);
 
-        var stream = std.io.fixedBufferStream(module.bytecode.items);
+        const bytecode:[]const u8 = module.bytecode.items;
+        var stream = std.io.fixedBufferStream(bytecode);
         var reader = stream.reader();
 
         // wasm header
@@ -704,7 +727,7 @@ pub const ModuleDefinition = struct {
                         while (params_left > 0) {
                             params_left -= 1;
 
-                            var param_type = ValType.readEncoded(&reader);
+                            var param_type = try ValType.readEncoded(&reader);
                             try func.types.append(param_type);
                         }
 
@@ -713,7 +736,7 @@ pub const ModuleDefinition = struct {
                         while (returns_left > 0) {
                             returns_left -= 1;
 
-                            var return_type = ValType.readEncoded(&reader);
+                            var return_type = try ValType.readEncoded(&reader);
                             try func.types.append(return_type);
                         }
 
@@ -746,7 +769,7 @@ pub const ModuleDefinition = struct {
 
                     var table_index: u32 = 0;
                     while (table_index < num_tables) : (table_index += 1) {
-                        const valtype = ValType.readEncoded(&reader);
+                        const valtype = try ValType.readEncoded(&reader);
                         if (valtype.isRefType() == false) {
 
                             return error.InvalidTableType;
@@ -763,7 +786,7 @@ pub const ModuleDefinition = struct {
                         }
 
                         try module.tables.append(TableDefinition{
-                            .refs = std.ArrayList(Val).init(allocator),
+                            // .refs = std.ArrayList(Val).init(allocator),
                             .reftype = valtype,
                             .min = min,
                             .max = max,
@@ -775,11 +798,11 @@ pub const ModuleDefinition = struct {
 
                     var global_index: u32 = 0;
                     while (global_index < num_globals) : (global_index += 1) {
-                        var valtype = ValType.readEncoded(&reader);
+                        var valtype = try ValType.readEncoded(&reader);
                         var mut = @intToEnum(GlobalMut, try reader.readByte());
 
                         // TODO validate global references are for imports only
-                        const expr = ConstantExpression.readEncoded(&reader);
+                        const expr = try ConstantExpression.readEncoded(&reader);
 
                         try module.globals.append(GlobalDefinition{
                             .valtype = valtype,
@@ -828,21 +851,21 @@ pub const ModuleDefinition = struct {
                 //.Start
                 .Element => {
                     const ElementHelpers = struct {
-                        fn readElemsVal(elems: *std.ArrayList(Val), valtype: ValType, _reader: anytype) void {
+                        fn readElemsVal(elems: *std.ArrayList(Val), valtype: ValType, _reader: anytype) !void {
                             const num_elems = try std.leb.readULEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
-                            var elem_index = 0;
+                            var elem_index:u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
                                 try elems.append(try DecodeHelpers.readRefType(valtype, _reader));
                             }
                         }
 
-                        fn readElemsExpr(elems: *std.ArrayList(Val), _reader: anytype) void {
+                        fn readElemsExpr(elems: *std.ArrayList(ConstantExpression), _reader: anytype) !void {
                             const num_elems = try std.leb.readULEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
-                            var elem_index = 0;
+                            var elem_index:u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
                                 var expr = try ConstantExpression.readEncoded(_reader);
                                 try elems.append(expr);
@@ -870,44 +893,44 @@ pub const ModuleDefinition = struct {
 
                             switch (flags) {
                                 0x00 => {
-                                    def.offset = ConstantExpression.readEncoded(&reader);
-                                    ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                    def.offset = try ConstantExpression.readEncoded(&reader);
+                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                                 },
                                 0x01 => {
                                     def.mode = .Passive;
-                                    def.reftype = ValType.readEncoded(&reader);
-                                    ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                    def.reftype = try ValType.readEncoded(&reader);
+                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                                 },
                                 0x02 => {
                                     def.table_index = try std.leb.readULEB128(u32, reader);
                                     def.offset = try ConstantExpression.readEncoded(&reader);
-                                    def.reftype = ValType.readEncoded(&reader);
-                                    ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                    def.reftype = try ValType.readEncoded(&reader);
+                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                                 },
                                 0x03 => {
                                     def.mode = .Declarative;
-                                    def.reftype = ValType.readEncoded(&reader);
-                                    ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                    def.reftype = try ValType.readEncoded(&reader);
+                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                                 },
                                 0x04 => {
-                                    def.offset = ConstantExpression.readEncoded(&reader);
-                                    ElementHelpers.readElemsExpr(&def.elems_value, &reader);
+                                    def.offset = try ConstantExpression.readEncoded(&reader);
+                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                                 },
                                 0x05 => {
                                     def.mode = .Passive;
-                                    def.reftype = ValType.readEncoded(&reader);
-                                    ElementHelpers.readElemsExpr(&def.elems_value, &reader);
+                                    def.reftype = try ValType.readEncoded(&reader);
+                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                                 },
                                 0x06 => {
                                     def.table_index = try std.leb.readULEB128(u32, reader);
                                     def.offset = try ConstantExpression.readEncoded(&reader);
-                                    def.reftype = ValType.readEncoded(&reader);
-                                    ElementHelpers.readElemsExpr(&def.elems_value, &reader);
+                                    def.reftype = try ValType.readEncoded(&reader);
+                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                                 },
                                 0x07 => {
                                     def.mode = .Declarative;
-                                    def.reftype = ValType.readEncoded(&reader);
-                                    ElementHelpers.readElemsExpr(&def.elems_value, &reader);
+                                    def.reftype = try ValType.readEncoded(&reader);
+                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                                 },
                                 else => unreachable,
                             }
@@ -933,7 +956,7 @@ pub const ModuleDefinition = struct {
                         const code_begin_pos = stream.pos;
 
                         var def = &module.functions.items[code_index];
-                        def.offset_into_encoded_bytecode = code_begin_pos;
+                        def.offset_into_encoded_bytecode = @intCast(u32, code_begin_pos);
                         def.size = code_size;
 
                         const num_locals = try std.leb.readULEB128(u32, reader);
@@ -941,13 +964,13 @@ pub const ModuleDefinition = struct {
                         while (locals_index < num_locals) {
                             locals_index += 1;
                             const n = try std.leb.readULEB128(u32, reader);
-                            const local_type = ValType.readEncoded(&reader);
+                            const local_type = try ValType.readEncoded(&reader);
                             def.locals[@enumToInt(local_type)] = n;
                             // try vm.functions.items[code_index].locals.append(local_type);
                         }
 
                         const bytecode_begin_offset = @intCast(u32, stream.pos);
-                        module.functions.items[code_index].bytecode_offset = bytecode_begin_offset;
+                        module.functions.items[code_index].offset_into_encoded_bytecode = bytecode_begin_offset;
                         try block_stack.append(BlockData{
                             .offset = bytecode_begin_offset, 
                             .next_instruction_offset = bytecode_begin_offset,
@@ -1016,11 +1039,18 @@ pub const ModuleDefinition = struct {
                 },
             }
         }
+
+        return module;
     }
 
     pub fn deinit(self: *ModuleDefinition) void {
         self.bytecode.deinit();
 
+        self.types.deinit();
+        self.imports.functions.deinit();
+        self.imports.tables.deinit();
+        self.imports.memories.deinit();
+        self.imports.globals.deinit();
         self.functions.deinit();
         self.globals.deinit();
         self.tables.deinit();
@@ -1047,7 +1077,7 @@ pub const Store = struct {
     module_def: *const ModuleDefinition, // temp
 
     fn init(module_def: *const ModuleDefinition, allocator: *std.mem.Allocator) !Store {
-        return Store{
+        var store = Store{
             .functions = std.ArrayList(FunctionInstance).init(allocator),
             .tables = std.ArrayList(TableInstance).init(allocator),
             .memories = std.ArrayList(MemoryInstance).init(allocator),
@@ -1057,6 +1087,22 @@ pub const Store = struct {
 
             .module_def = module_def,
         };
+
+        // for (module_def.imports)
+
+        for (module_def.functions.items) |func, i| {
+            var f = FunctionInstance{
+                .func_def_index = @intCast(u32, i),
+                .type_def_index = func.type_index,
+                .offset_into_encoded_bytecode = func.offset_into_encoded_bytecode,
+                .locals = func.locals,
+            };
+            try store.functions.append(f);
+        }
+
+        // TODO instantiate all the store items
+
+        return store;
     }
 
     fn deinit(self:*Store) void {
@@ -1066,25 +1112,74 @@ pub const Store = struct {
 };
 
 pub const ModuleInstance = struct {
+    allocator: *std.mem.Allocator,
     stack: Stack,
     store: Store,
-    module: ModuleInstance,
     module_def: *const ModuleDefinition,
 
-    pub fn instantiate(module_def: *const ModuleDefinition, allocator: *std.mem.Allocator) !ModuleInstance {
+    pub fn init(module_def: *const ModuleDefinition, allocator: *std.mem.Allocator) !ModuleInstance {
         return ModuleInstance{
+            .allocator = allocator,
             .stack = Stack.init(allocator),
-            .store = Store.init(module_def, allocator),
-            .module = ModuleInstance.init(module_def, allocator),
+            .store = try Store.init(module_def, allocator),
             .module_def = module_def,
         };
-
-        // 
     }
 
     pub fn deinit(self: *ModuleInstance) void {
         self.stack.deinit();
         self.store.deinit();
+    }
+
+    pub fn invoke(self: *ModuleInstance, func_name:[]const u8, params: []const Val, returns: []Val) !void {
+        for (self.module_def.exports.functions.items) |func_export| {
+            if (std.mem.eql(u8, func_name, func_export.name.items)) {
+                const func: FunctionInstance = self.store.functions.items[func_export.index + self.module_def.imports.functions.items.len];
+                const func_type_params: []const ValType = self.module_def.types.items[func.type_def_index].getParams();
+
+                if (params.len != func_type_params.len) {
+                    // std.debug.print("params.len: {}, func_type_params.len: {}\n", .{params.len, func_type_params.len});
+                    // std.debug.print("params: {s}, func_type_params: {s}\n", .{params, func_type_params});
+                    return error.TypeMismatch;
+                }
+
+                for (params) |param, i| {
+                    if (std.meta.activeTag(param) != func_type_params[i]) {
+                        return error.TypeMismatch;
+                    }
+                }
+
+                var locals = std.ArrayList(Val).init(self.allocator); // gets deinited when popFrame() is called
+                try locals.resize(func.locals.len);
+                for (params) |v, i| {
+                    locals.items[i] = v;
+                }
+
+                // TODO move function continuation data into FunctionDefinition
+                var function_continuation = self.module_def.function_continuations.get(func.offset_into_encoded_bytecode) orelse return error.InvalidFunction;
+
+                try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals,});
+                try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.type_def_index}, function_continuation);
+                try self.executeWasm(self.module_def.bytecode.items, func.offset_into_encoded_bytecode);
+
+                if (self.stack.size() != returns.len) {
+                    std.debug.print("stack size: {}, returns.len: {}\n", .{self.stack.size(), returns.len});
+                    return error.TypeMismatch;
+                }
+
+                if (returns.len > 0) {
+                    var index: i32 = @intCast(i32, returns.len - 1);
+                    while (index >= 0) {
+                        // std.debug.print("stack size: {}, index: {}\n", .{self.stack.size(), index});
+                        returns[@intCast(usize, index)] = try self.stack.popValue();
+                        index -= 1;
+                    }
+                }
+                return;
+            }
+        }
+
+        return error.UnknownExport;
     }
 
     fn executeWasm(self: *ModuleInstance, bytecode: []const u8, offset: u32) !void {
@@ -1115,18 +1210,18 @@ pub const ModuleInstance = struct {
                     var condition = try self.stack.popI32();
                     if (condition != 0) {
                         try self.enterBlock(&stream, instruction_offset);
-                    } else if (self.if_to_else_offsets.get(instruction_offset)) |else_offset| {
+                    } else if (self.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| {
                          // +1 to skip the else opcode, since it's treated as an End for the If block.
                         try self.enterBlock(&stream, else_offset);
                         try stream.seekTo(else_offset + 1);
                     } else {
-                        const continuation = self.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
+                        const continuation = self.module_def.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
                         try stream.seekTo(continuation);
                     }
                 },
                 Opcode.Else => {
                     // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
-                    const end_offset = self.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
+                    const end_offset = self.module_def.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
                     try stream.seekTo(end_offset);
                 },
                 Opcode.End => {
@@ -1141,7 +1236,7 @@ pub const ModuleInstance = struct {
                         try pushValues(returns.items, &self.stack);
                     } else {
                         var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                        const returnTypes: []const ValType = self.types.items[frame.func.type_index].getReturns();
+                        const returnTypes: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
 
                         try popValues(&returns, &self.stack, returnTypes);
                         var label = try self.stack.popLabel();
@@ -1191,7 +1286,7 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Return => {
                     var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                    const returnTypes: []const ValType = self.types.items[frame.func.type_index].getReturns();
+                    const returnTypes: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
 
                     var returns = std.ArrayList(Val).init(self.allocator);
                     defer returns.deinit();
@@ -1233,8 +1328,8 @@ pub const ModuleInstance = struct {
                 Opcode.Call => {
                     var func_index = try self.stack.popI32();
                     // std.debug.print("call function {}\n", .{func_index});
-                    const func: *const FunctionDefinition = &self.functions.items[@intCast(usize, func_index)];
-                    const functype: *const FunctionTypeDefinition = &self.types.items[func.type_index];
+                    const func: *const FunctionInstance = &self.store.functions.items[@intCast(usize, func_index)];
+                    const functype: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
 
                     var frame = CallFrame{
                         .func =  func,
@@ -1257,8 +1352,8 @@ pub const ModuleInstance = struct {
                     const continuation = @intCast(u32, stream.pos);
 
                     try self.stack.pushFrame(frame);
-                    try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.type_index}, continuation);
-                    try stream.seekTo(func.bytecode_offset);
+                    try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.type_def_index}, continuation);
+                    try stream.seekTo(func.offset_into_encoded_bytecode);
                 },
                 Opcode.Drop => {
                     _ = try self.stack.popValue();
@@ -1302,12 +1397,12 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Global_Get => {
                     var global_index = try std.leb.readULEB128(u32, reader);
-                    var global = &self.globals.items[global_index];
+                    var global = &self.store.globals.items[global_index];
                     try self.stack.pushValue(global.value);
                 },
                 Opcode.Global_Set => {
                     var global_index = try std.leb.readULEB128(u32, reader);
-                    var global = &self.globals.items[global_index];
+                    var global = &self.store.globals.items[global_index];
                     if (global.mut == GlobalMut.Immutable) {
                         return error.AttemptToSetImmutable;
                     }
@@ -1484,7 +1579,7 @@ pub const ModuleInstance = struct {
     fn enterBlock(self: *ModuleInstance, stream: *BytecodeBufferStream, label_offset:u32) !void {
         var blocktype = try readBlockType(stream);
 
-        const continuation = self.label_continuations.get(label_offset) orelse return error.InvalidLabel;
+        const continuation = self.module_def.label_continuations.get(label_offset) orelse return error.InvalidLabel;
         try self.stack.pushLabel(blocktype, continuation);
     }
 
@@ -1549,7 +1644,7 @@ pub const ModuleInstance = struct {
                 .FuncRef => &Statics.reftype_funcref,
                 .ExternRef => &Statics.reftype_externref,
             },
-            .TypeIndex => |index| return self.types.items[index].getReturns(),
+            .TypeIndex => |index| return self.module_def.types.items[index].getReturns(),
         }
     }
 
