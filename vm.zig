@@ -1527,7 +1527,8 @@ pub const ModuleInstance = struct {
                 Opcode.I32_Rem_S => {
                     var v2: i32 = try self.stack.popI32();
                     var v1: i32 = try self.stack.popI32();
-                    var value = @rem(v1, v2);
+                    var denom = try std.math.absInt(v2);
+                    var value = try std.math.rem(i32, v1, denom);
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Rem_U => {
@@ -1557,22 +1558,22 @@ pub const ModuleInstance = struct {
                 Opcode.I32_Shl => {
                     var shift_unsafe: i32 = try self.stack.popI32();
                     var int: i32 = try self.stack.popI32();
-                    var shift = @intCast(u5, shift_unsafe);
-                    var value = int << shift;
+                    var shift: i32 = try std.math.mod(i32, shift_unsafe, 32);
+                    var value = std.math.shl(i32, int, shift);
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Shr_S => {
                     var shift_unsafe: i32 = try self.stack.popI32();
                     var int: i32 = try self.stack.popI32();
-                    var shift = @intCast(u5, shift_unsafe);
-                    var value = int >> shift;
+                    var shift = try std.math.mod(i32, shift_unsafe, 32);
+                    var value = std.math.shr(i32, int, shift);
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Shr_U => {
-                    var shift_unsafe: i32 = try self.stack.popI32();
+                    var shift_unsafe: u32 = @bitCast(u32, try self.stack.popI32());
                     var int: u32 = @bitCast(u32, try self.stack.popI32());
-                    var shift = @intCast(u5, shift_unsafe);
-                    var value = @bitCast(i32, int >> shift);
+                    var shift = try std.math.mod(u32, shift_unsafe, 32);
+                    var value = @bitCast(i32, std.math.shr(u32, int, shift));
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Rotl => {

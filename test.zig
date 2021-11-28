@@ -17,7 +17,8 @@ const CommandAssertReturn = struct {
     module: []const u8,
     field: []const u8,
     args: std.ArrayList(Val),
-    expected: std.ArrayList(Val),
+    expected_returns: ?std.ArrayList(Val),
+    expected_error: ?anyerror,
 };
 
 const CommandAssertInvalid = struct {
@@ -66,6 +67,16 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     unreachable;
 }
 
+fn error_from_text(text: []const u8) anyerror {
+    if (strcmp("integer divide by zero", text)) {
+        return error.DivisionByZero;
+    } else if (strcmp("integer overflow", text)) {
+        return error.Overflow;
+    }
+
+    unreachable;
+}
+
 fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.ArrayList(Command) {
     // print("json_path: {s}\n", .{json_path});
     var json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
@@ -86,10 +97,8 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
         } else if (strcmp("assert_return", json_command_type.String)) {
             const json_action = json_command.Object.get("action").?;
             const json_field = json_action.Object.get("field").?;
+
             const json_args_or_null = json_action.Object.get("args");
-
-            const json_expected_or_null = json_command.Object.get("expected");
-
             var args = std.ArrayList(Val).init(allocator);
             if (json_args_or_null) |json_args| {
                 for (json_args.Array.items) |item| {
@@ -97,11 +106,20 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
                 }
             }
 
-            var expected = std.ArrayList(Val).init(allocator);
+            var expected_returns_or_null: ?std.ArrayList(Val) = null;
+            const json_expected_or_null = json_command.Object.get("expected");
             if (json_expected_or_null) |json_expected| {
+                var expected_returns = std.ArrayList(Val).init(allocator);
                 for (json_expected.Array.items) |item| {
-                    try expected.append(try parseVal(item.Object));
+                    try expected_returns.append(try parseVal(item.Object));
                 }
+                expected_returns_or_null = expected_returns;
+            }
+
+            var expected_error: ?anyerror = null;
+            const json_text_or_null = json_command.Object.get("text");
+            if (json_text_or_null) |text| {
+                expected_error = error_from_text(text.String);
             }
 
             var command = Command{
@@ -109,7 +127,8 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
                     .module = fallback_module,
                     .field = try std.mem.dupe(allocator, u8, json_field.String),
                     .args = args,
-                    .expected = expected,
+                    .expected_returns = expected_returns_or_null,
+                    .expected_error = expected_error,
                 }
             };
             try commands.append(command);
@@ -163,16 +182,26 @@ fn run(suite_path:[]const u8) !void {
             .AssertReturn => |c| {
                 print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
 
+                const num_expected_returns = if (c.expected_returns) |returns| returns.items.len else 0;
                 var returns_placeholder: [8]Val = undefined;
-                var returns = returns_placeholder[0..c.expected.items.len];
+                var returns = returns_placeholder[0..num_expected_returns];
                 module_inst.invoke(c.field, c.args.items, returns) catch |e| {
-                    print("\tFail with error: {}\n", .{e});
-                };
-                for (returns) |r, i| {
-                    if (std.meta.eql(r, c.expected.items[i]) == false) {
-                        print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{i, returns.len, c.expected.items[i], r});
+                    if (c.expected_error) |expected| {
+                        if (expected != e) {
+                            print("Fail with error. Expected {}, Actual: {}\n", .{expected, e});
+                        }
+                    } else {
+                        print("\tFail with error: {}\n", .{e});
                     }
-                    // try std.testing.expect(std.meta.eql(r, c.expected.items[i]));
+                };
+
+                if (c.expected_returns) |expected| {
+                    for (returns) |r, i| {
+                        if (std.meta.eql(r, expected.items[i]) == false) {
+                            print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{i+1, returns.len, expected.items[i], r});
+                        }
+                        // try std.testing.expect(std.meta.eql(r, c.expected.items[i]));
+                    }
                 }
             },
             .AssertInvalid => {
