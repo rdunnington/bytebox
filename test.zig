@@ -144,8 +144,10 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
             };
             try commands.append(command);
         } else if (strcmp("assert_trap", json_command_type.String)) {
+            print("Skipping assert_trap test...\n", .{});
             // TODO
         } else if (strcmp("assert_malformed", json_command_type.String)) {
+            print("Skipping assert_malformed test...\n", .{});
             // TODO
         } else {
             unreachable;
@@ -166,12 +168,19 @@ fn run(suite_path:[]const u8) !void {
     const suite_dir = std.fs.path.dirname(suite_path).?;
 
     for (commands.items) |*command| {
+
+        if (std.meta.activeTag(command.*) == .AssertInvalid) {
+            continue;
+        }
+
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
         var cwd = std.fs.cwd();
         var module_name = command.getModule();
         var module_path = try std.fs.path.join(&arena.allocator, &[_][]const u8{suite_dir, module_name});
+
+        // print("module_path: {s}\n", .{module_path});
 
         var module_data = try cwd.readFileAlloc(&arena.allocator, module_path, 1024 * 1024 * 8);
         // wasm.printBytecode("module data", module_data);
@@ -180,17 +189,17 @@ fn run(suite_path:[]const u8) !void {
 
         switch (command.*) {
             .AssertReturn => |c| {
-                print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
-
                 const num_expected_returns = if (c.expected_returns) |returns| returns.items.len else 0;
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..num_expected_returns];
                 module_inst.invoke(c.field, c.args.items, returns) catch |e| {
                     if (c.expected_error) |expected| {
                         if (expected != e) {
+                            print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
                             print("Fail with error. Expected {}, Actual: {}\n", .{expected, e});
                         }
                     } else {
+                        print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
                         print("\tFail with error: {}\n", .{e});
                     }
                 };
@@ -198,6 +207,7 @@ fn run(suite_path:[]const u8) !void {
                 if (c.expected_returns) |expected| {
                     for (returns) |r, i| {
                         if (std.meta.eql(r, expected.items[i]) == false) {
+                            print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
                             print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{i+1, returns.len, expected.items[i], r});
                         }
                         // try std.testing.expect(std.meta.eql(r, c.expected.items[i]));

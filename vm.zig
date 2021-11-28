@@ -41,6 +41,7 @@ const Opcode = enum(u8) {
     Branch_Table = 0x0E,
     Return = 0x0F,
     Call = 0x10,
+    Call_Indirect = 0x11,
     Drop = 0x1A,
     Select = 0x1B,
     Local_Get = 0x20,
@@ -121,8 +122,8 @@ const ValType = enum(u8) {
     FuncRef,
     ExternRef,
 
-    fn readEncoded(reader:anytype) !ValType {
-        return switch (try reader.readByte()) {
+    fn bytecodeToValtype(byte:u8) !ValType {
+        return switch (byte) {
             0x7F => .I32,
             0x7E => .I64,
             0x7D => .F32,
@@ -131,6 +132,10 @@ const ValType = enum(u8) {
             0x6F => .ExternRef,
             else => ModuleDecodeError.InvalidValType,
         };
+    }
+
+    fn readEncoded(reader:anytype) !ValType {
+        return try bytecodeToValtype(try reader.readByte());
     }
 
     fn isRefType(valtype:ValType) bool {
@@ -380,7 +385,7 @@ const Stack = struct {
 fn readBlockType(stream: *BytecodeBufferStream) !BlockTypeValue {
     var reader = stream.reader();
     const blocktype = try reader.readByte();
-    const valtype_or_err = std.meta.intToEnum(ValType, blocktype);
+    const valtype_or_err = ValType.bytecodeToValtype(blocktype);
     if (std.meta.isError(valtype_or_err)) {
         if (blocktype == k_block_type_void_sentinel_byte) {
             return BlockTypeValue{.Void = {}};
@@ -410,7 +415,10 @@ const ConstantExpression = struct {
     value: Val,
 
     fn readEncoded(reader:anytype) !ConstantExpression {
-        const opcode = @intToEnum(Opcode, try reader.readByte());
+        const opcode_value = try reader.readByte();
+        std.debug.print("opcode_value: 0x{X}\n", .{opcode_value});
+        // const opcode = @intToEnum(Opcode, try reader.readByte());
+        const opcode = @intToEnum(Opcode, opcode_value);
         const val = switch (opcode) {
             .I32_Const => Val{.I32 = try std.leb.readILEB128(i32, reader)},
             // TODO handle i64, f32, f64, ref.null, ref.func, global.get
@@ -663,6 +671,7 @@ pub const ModuleDefinition = struct {
             }
 
             fn skipOpcodeImmediates(opcode:Opcode, stream: *BytecodeBufferStream) !void {
+                // std.debug.print("skipping opcode: {}\n", .{opcode});
                 var reader = stream.reader();
                 _ = switch (opcode) {
                     .Local_Get => try std.leb.readULEB128(u32, reader),
@@ -684,6 +693,10 @@ pub const ModuleDefinition = struct {
                             index += 1;
                         }
                         _ = try std.leb.readULEB128(u32, reader);
+                    },
+                    .Call_Indirect => {
+                        _ = try std.leb.readULEB128(u32, reader); // type index
+                        _ = try std.leb.readULEB128(u32, reader); // table index
                     },
                     else => {}
                 };
@@ -885,64 +898,62 @@ pub const ModuleDefinition = struct {
                     while (segment_index < num_segments) : (segment_index += 1) {
                         var flags = try reader.readByte();
 
-                        while (true) {
-                            var def = ElementDefinition{
-                                .mode = ElementMode.Active,
-                                .reftype = ValType.FuncRef,
-                                .table_index = 0,
-                                .offset = null,
-                                .elems_value = std.ArrayList(Val).init(allocator),
-                                .elems_expr = std.ArrayList(ConstantExpression).init(allocator),
-                            };
-                            errdefer def.elems_value.deinit();
-                            errdefer def.elems_expr.deinit();
+                        var def = ElementDefinition{
+                            .mode = ElementMode.Active,
+                            .reftype = ValType.FuncRef,
+                            .table_index = 0,
+                            .offset = null,
+                            .elems_value = std.ArrayList(Val).init(allocator),
+                            .elems_expr = std.ArrayList(ConstantExpression).init(allocator),
+                        };
+                        errdefer def.elems_value.deinit();
+                        errdefer def.elems_expr.deinit();
 
-                            switch (flags) {
-                                0x00 => {
-                                    def.offset = try ConstantExpression.readEncoded(&reader);
-                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
-                                },
-                                0x01 => {
-                                    def.mode = .Passive;
-                                    def.reftype = try ValType.readEncoded(&reader);
-                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
-                                },
-                                0x02 => {
-                                    def.table_index = try std.leb.readULEB128(u32, reader);
-                                    def.offset = try ConstantExpression.readEncoded(&reader);
-                                    def.reftype = try ValType.readEncoded(&reader);
-                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
-                                },
-                                0x03 => {
-                                    def.mode = .Declarative;
-                                    def.reftype = try ValType.readEncoded(&reader);
-                                    try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
-                                },
-                                0x04 => {
-                                    def.offset = try ConstantExpression.readEncoded(&reader);
-                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
-                                },
-                                0x05 => {
-                                    def.mode = .Passive;
-                                    def.reftype = try ValType.readEncoded(&reader);
-                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
-                                },
-                                0x06 => {
-                                    def.table_index = try std.leb.readULEB128(u32, reader);
-                                    def.offset = try ConstantExpression.readEncoded(&reader);
-                                    def.reftype = try ValType.readEncoded(&reader);
-                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
-                                },
-                                0x07 => {
-                                    def.mode = .Declarative;
-                                    def.reftype = try ValType.readEncoded(&reader);
-                                    try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
-                                },
-                                else => unreachable,
-                            }
-
-                            try module.elements.append(def);
+                        switch (flags) {
+                            0x00 => {
+                                def.offset = try ConstantExpression.readEncoded(&reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                            },
+                            0x01 => {
+                                def.mode = .Passive;
+                                def.reftype = try ValType.readEncoded(&reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                            },
+                            0x02 => {
+                                def.table_index = try std.leb.readULEB128(u32, reader);
+                                def.offset = try ConstantExpression.readEncoded(&reader);
+                                def.reftype = try ValType.readEncoded(&reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                            },
+                            0x03 => {
+                                def.mode = .Declarative;
+                                def.reftype = try ValType.readEncoded(&reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                            },
+                            0x04 => {
+                                def.offset = try ConstantExpression.readEncoded(&reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                            },
+                            0x05 => {
+                                def.mode = .Passive;
+                                def.reftype = try ValType.readEncoded(&reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                            },
+                            0x06 => {
+                                def.table_index = try std.leb.readULEB128(u32, reader);
+                                def.offset = try ConstantExpression.readEncoded(&reader);
+                                def.reftype = try ValType.readEncoded(&reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                            },
+                            0x07 => {
+                                def.mode = .Declarative;
+                                def.reftype = try ValType.readEncoded(&reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                            },
+                            else => unreachable,
                         }
+
+                        try module.elements.append(def);
                     }
                 },
                 .Code => {
@@ -1362,6 +1373,8 @@ pub const ModuleInstance = struct {
                     try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.type_def_index}, continuation);
                     try stream.seekTo(func.offset_into_encoded_bytecode);
                 },
+                Opcode.Call_Indirect => {
+                },
                 Opcode.Drop => {
                     _ = try self.stack.popValue();
                 },
@@ -1485,13 +1498,19 @@ pub const ModuleInstance = struct {
                     try self.stack.pushI32(result);
                 },
                 Opcode.I32_Clz => {
-
+                    var v: i32 = try self.stack.popI32();
+                    var num_zeroes = @clz(i32, v);
+                    try self.stack.pushI32(num_zeroes);
                 },
                 Opcode.I32_Ctz => {
-
+                    var v: i32 = try self.stack.popI32();
+                    var num_zeroes = @ctz(i32, v);
+                    try self.stack.pushI32(num_zeroes);
                 },
                 Opcode.I32_Popcnt => {
-
+                    var v: i32 = try self.stack.popI32();
+                    var num_bits_set = @popCount(i32, v);
+                    try self.stack.pushI32(num_bits_set);
                 },
                 Opcode.I32_Add => {
                     var v2: i32 = try self.stack.popI32();
@@ -1589,10 +1608,16 @@ pub const ModuleInstance = struct {
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Extend8_S => {
-
+                    var v = try self.stack.popI32();
+                    var v_i8 = @truncate(i8, v);
+                    var v_extended:i32 = v_i8;
+                    try self.stack.pushI32(v_extended);
                 },
                 Opcode.I32_Extend16_S => {
-
+                    var v = try self.stack.popI32();
+                    var v_i16 = @truncate(i16, v);
+                    var v_extended:i32 = v_i16;
+                    try self.stack.pushI32(v_extended);
                 },
             }
         }
