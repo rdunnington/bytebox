@@ -60,6 +60,9 @@ const Opcode = enum(u8) {
     I32_LE_U = 0x4D,
     I32_GE_S = 0x4E,
     I32_GE_U = 0x4F,
+    I32_Clz = 0x67,
+    I32_Ctz = 0x68,
+    I32_Popcnt = 0x69,
     I32_Add = 0x6A,
     I32_Sub = 0x6B,
     I32_Mul = 0x6C,
@@ -75,6 +78,9 @@ const Opcode = enum(u8) {
     I32_Shr_U = 0x76,
     I32_Rotl = 0x77,
     I32_Rotr = 0x78,
+
+    I32_Extend8_S = 0xC0,
+    I32_Extend16_S = 0xC1,
 
     // fn hasImmediates(opcode:Opcode) bool {
     //     const v = switch (opcode) {
@@ -980,6 +986,7 @@ pub const ModuleDefinition = struct {
                         var parsing_code = true;
                         while (parsing_code) {
                             const instruction_byte = try reader.readByte();
+                            // std.debug.print(">>>> 0x{X}\n", .{instruction_byte});
                             const opcode = @intToEnum(Opcode, instruction_byte);
                             // std.debug.print(">>>> {}\n", .{opcode});
 
@@ -1477,22 +1484,31 @@ pub const ModuleInstance = struct {
                     var result: i32 = if (v1 >= v2) 1 else 0;
                     try self.stack.pushI32(result);
                 },
+                Opcode.I32_Clz => {
+
+                },
+                Opcode.I32_Ctz => {
+
+                },
+                Opcode.I32_Popcnt => {
+
+                },
                 Opcode.I32_Add => {
                     var v2: i32 = try self.stack.popI32();
                     var v1: i32 = try self.stack.popI32();
-                    var result = v1 + v2;
+                    var result = v1 +% v2;
                     try self.stack.pushI32(result);
                 },
                 Opcode.I32_Sub => {
                     var v2: i32 = try self.stack.popI32();
                     var v1: i32 = try self.stack.popI32();
-                    var result = v1 - v2;
+                    var result = v1 -% v2;
                     try self.stack.pushI32(result);
                 },
                 Opcode.I32_Mul => {
                     var v2: i32 = try self.stack.popI32();
                     var v1: i32 = try self.stack.popI32();
-                    var value = v1 * v2;
+                    var value = v1 *% v2;
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Div_S => {
@@ -1571,7 +1587,12 @@ pub const ModuleInstance = struct {
                     var value = @bitCast(i32, std.math.rotr(u32, int, rot));
                     try self.stack.pushI32(value);
                 },
-                // else => return error.UnknownInstruction,
+                Opcode.I32_Extend8_S => {
+
+                },
+                Opcode.I32_Extend16_S => {
+
+                },
             }
         }
     }

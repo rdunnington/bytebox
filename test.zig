@@ -2,6 +2,11 @@ const std = @import("std");
 const testing = std.testing;
 const wasm = @import("vm.zig");
 const Val = wasm.Val;
+const print = std.debug.print;
+
+const TestSuiteError = error{
+    Fail,
+};
 
 const CommandType = enum {
     AssertReturn,
@@ -42,7 +47,8 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     const json_value = obj.get("value").?;
 
     if (strcmp("i32", json_type.String)) {
-        const int = try std.fmt.parseInt(i32, json_value.String, 10);
+        // print("parse i32: {s}\n", .{json_value.String});
+        const int = std.fmt.parseInt(i32, json_value.String, 10) catch @bitCast(i32, try std.fmt.parseInt(u32, json_value.String, 10));
         return Val{.I32 = int};
     } else if (strcmp("i64", json_type.String)) {
         const int = try std.fmt.parseInt(i64, json_value.String, 10);
@@ -53,12 +59,15 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     } else if (strcmp("f64", json_type.String)) {
         const float = try std.fmt.parseFloat(f64, json_value.String);
         return Val{.F64 = float};
+    } else {
+        print("Failed to parse value of type '{s}' with value '{s}'\n", .{json_type.String, json_value.String});
     }
 
     unreachable;
 }
 
 fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.ArrayList(Command) {
+    // print("json_path: {s}\n", .{json_path});
     var json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
     var parser = std.json.Parser.init(allocator, false);
     var tree = try parser.parse(json_data);
@@ -78,7 +87,8 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
             const json_action = json_command.Object.get("action").?;
             const json_field = json_action.Object.get("field").?;
             const json_args_or_null = json_action.Object.get("args");
-            const json_expected_or_null = json_action.Object.get("expected");
+
+            const json_expected_or_null = json_command.Object.get("expected");
 
             var args = std.ArrayList(Val).init(allocator);
             if (json_args_or_null) |json_args| {
@@ -114,6 +124,10 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
+        } else if (strcmp("assert_trap", json_command_type.String)) {
+            // TODO
+        } else if (strcmp("assert_malformed", json_command_type.String)) {
+            // TODO
         } else {
             unreachable;
         }
@@ -123,6 +137,8 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
 }
 
 fn run(suite_path:[]const u8) !void {
+    var did_fail_any_test:bool = false;
+
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_commands.deinit();
 
@@ -137,7 +153,7 @@ fn run(suite_path:[]const u8) !void {
         var cwd = std.fs.cwd();
         var module_name = command.getModule();
         var module_path = try std.fs.path.join(&arena.allocator, &[_][]const u8{suite_dir, module_name});
-        std.debug.print("module_path: {s}\n", .{module_path});
+
         var module_data = try cwd.readFileAlloc(&arena.allocator, module_path, 1024 * 1024 * 8);
         // wasm.printBytecode("module data", module_data);
         var module_def = try wasm.ModuleDefinition.init(module_data, &arena.allocator);
@@ -145,10 +161,18 @@ fn run(suite_path:[]const u8) !void {
 
         switch (command.*) {
             .AssertReturn => |c| {
-                var returns: [8]Val = undefined;
-                try module_inst.invoke(c.field, c.args.items, returns[0..c.expected.items.len]);
+                print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
+
+                var returns_placeholder: [8]Val = undefined;
+                var returns = returns_placeholder[0..c.expected.items.len];
+                module_inst.invoke(c.field, c.args.items, returns) catch |e| {
+                    print("\tFail with error: {}\n", .{e});
+                };
                 for (returns) |r, i| {
-                    try std.testing.expect(std.meta.eql(r, c.expected.items[i]));
+                    if (std.meta.eql(r, c.expected.items[i]) == false) {
+                        print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{i, returns.len, c.expected.items[i], r});
+                    }
+                    // try std.testing.expect(std.meta.eql(r, c.expected.items[i]));
                 }
             },
             .AssertInvalid => {
@@ -157,8 +181,12 @@ fn run(suite_path:[]const u8) !void {
             },
         }
     }
+
+    if (did_fail_any_test) {
+        return TestSuiteError.Fail;
+    }
 }
 
-test "br" {
-    try run("test/wasm/br/br.json");
+test "i32" {
+    try run("test/wasm/i32/i32.json");
 }
