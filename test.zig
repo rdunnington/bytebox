@@ -133,16 +133,18 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
             };
             try commands.append(command);
         } else if (strcmp("assert_invalid", json_command_type.String)) {
-            const json_filename = json_command.Object.get("filename").?;
-            const json_expected = json_command.Object.get("text").?;
+            // TODO
+            // const json_filename = json_command.Object.get("filename").?;
+            // const json_expected = json_command.Object.get("text").?;
 
-            var command = Command{
-                .AssertInvalid = CommandAssertInvalid {
-                    .module = try std.mem.dupe(allocator, u8, json_filename.String),
-                    .expected = try std.mem.dupe(allocator, u8, json_expected.String),
-                },
-            };
-            try commands.append(command);
+            // var command = Command{
+            //     .AssertInvalid = CommandAssertInvalid {
+            //         .module = try std.mem.dupe(allocator, u8, json_filename.String),
+            //         .expected = try std.mem.dupe(allocator, u8, json_expected.String),
+            //     },
+            // };
+            // try commands.append(command);
+            print("Skipping assert_invalid test...\n", .{});
         } else if (strcmp("assert_trap", json_command_type.String)) {
             print("Skipping assert_trap test...\n", .{});
             // TODO
@@ -157,7 +159,7 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
     return commands;
 }
 
-fn run(suite_path:[]const u8) !void {
+fn run(suite_path:[]const u8, test_filter_or_null: ?[]const u8) !void {
     var did_fail_any_test:bool = false;
 
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -168,11 +170,6 @@ fn run(suite_path:[]const u8) !void {
     const suite_dir = std.fs.path.dirname(suite_path).?;
 
     for (commands.items) |*command| {
-
-        if (std.meta.activeTag(command.*) == .AssertInvalid) {
-            continue;
-        }
-
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
@@ -189,28 +186,41 @@ fn run(suite_path:[]const u8) !void {
 
         switch (command.*) {
             .AssertReturn => |c| {
+                if (test_filter_or_null) |filter| {
+                    if (strcmp(filter, c.field) == false) {
+                        // print("AssertReturn: skipping {s}:{s}\n", .{module_path, c.field});
+                        continue;
+                    }
+                }
+
                 const num_expected_returns = if (c.expected_returns) |returns| returns.items.len else 0;
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..num_expected_returns];
+
+                // try module_inst.invoke(c.field, c.args.items, returns);
+                var invoke_succeeded = true;
                 module_inst.invoke(c.field, c.args.items, returns) catch |e| {
                     if (c.expected_error) |expected| {
                         if (expected != e) {
                             print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
                             print("Fail with error. Expected {}, Actual: {}\n", .{expected, e});
+                            invoke_succeeded = false;
                         }
                     } else {
                         print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
                         print("\tFail with error: {}\n", .{e});
+                        invoke_succeeded = false;
                     }
                 };
 
-                if (c.expected_returns) |expected| {
-                    for (returns) |r, i| {
-                        if (std.meta.eql(r, expected.items[i]) == false) {
-                            print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
-                            print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{i+1, returns.len, expected.items[i], r});
+                if (invoke_succeeded) {
+                    if (c.expected_returns) |expected| {
+                        for (returns) |r, i| {
+                            if (std.meta.eql(r, expected.items[i]) == false) {
+                                print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
+                                print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{i+1, returns.len, expected.items[i], r});
+                            }
                         }
-                        // try std.testing.expect(std.meta.eql(r, c.expected.items[i]));
                     }
                 }
             },
@@ -226,6 +236,48 @@ fn run(suite_path:[]const u8) !void {
     }
 }
 
-test "i32" {
-    try run("test/wasm/i32/i32.json");
+pub fn main() !void {
+    var allocator = std.testing.allocator;
+
+    var args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var suite_filter_or_null: ?[]const u8 = null;
+    var test_filter_or_null: ?[]const u8 = null;
+
+    var args_index: u32 = 1; // skip program name
+    while (args_index < args.len) : (args_index += 1) {
+        var arg = args[args_index];
+        if (strcmp("--suite", arg)) {
+            args_index += 1;
+            suite_filter_or_null = args[args_index];
+            print("found suite filter: {s}\n", .{suite_filter_or_null.?});
+        } else if (strcmp("--test", arg)) {
+            args_index += 1;
+            test_filter_or_null = args[args_index];
+            print("found test filter: {s}\n", .{test_filter_or_null.?});
+        }
+    }
+
+    const all_suites = [_][] const u8 {
+        "nop",
+        "i32",
+    };
+
+    for (all_suites) |suite| {
+        print("Running test suite: {s}\n", .{suite});
+        if (suite_filter_or_null) |filter| {
+            if (strcmp(filter, suite) == false) {
+                continue;
+            }
+        }
+
+        var suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{"test", "wasm", suite, suite});
+        defer allocator.free(suite_path_no_extension);
+
+        var suite_path = try std.mem.join(allocator, "", &[_][]const u8{suite_path_no_extension, ".json"});
+        defer allocator.free(suite_path);
+
+        try run(suite_path, test_filter_or_null);
+    }
 }
