@@ -49,6 +49,16 @@ const Opcode = enum(u8) {
     Local_Tee = 0x22,
     Global_Get = 0x23,
     Global_Set = 0x24,
+    I32_Load = 0x28,
+    I32_Load8_S = 0x2C,
+    I32_Load8_U = 0x2D,
+    I32_Load16_S = 0x2E,
+    I32_Load16_U = 0x2F,
+    I32_Store = 0x36,
+    I32_Store8 = 0x3A,
+    I32_Store16 = 0x3B,
+    Memory_Size = 0x3F,
+    Memory_Grow = 0x40,
     I32_Const = 0x41,
     I32_Eqz = 0x45,
     I32_Eq = 0x46,
@@ -130,11 +140,13 @@ const ValType = enum(u8) {
             0x7C => .F64,
             0x70 => .FuncRef,
             0x6F => .ExternRef,
-            else => ModuleDecodeError.InvalidValType,
+            else => {
+                return ModuleDecodeError.InvalidValType;
+            }
         };
     }
 
-    fn readEncoded(reader:anytype) !ValType {
+    fn decode(reader:anytype) !ValType {
         return try bytecodeToValtype(try reader.readByte());
     }
 
@@ -409,14 +421,13 @@ const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory
 
 const k_function_type_sentinel_byte: u8 = 0x60;
 const k_block_type_void_sentinel_byte: u8 = 0x40;
-const k_max_constant_expression_size:usize = 32;
 
 const ConstantExpression = struct {
     value: Val,
 
-    fn readEncoded(reader:anytype) !ConstantExpression {
+    fn decode(reader:anytype) !ConstantExpression {
         const opcode_value = try reader.readByte();
-        std.debug.print("opcode_value: 0x{X}\n", .{opcode_value});
+        // std.debug.print("opcode_value: 0x{X}\n", .{opcode_value});
         // const opcode = @intToEnum(Opcode, try reader.readByte());
         const opcode = @intToEnum(Opcode, opcode_value);
         const val = switch (opcode) {
@@ -432,6 +443,28 @@ const ConstantExpression = struct {
 
         return ConstantExpression {
             .value = val,
+        };
+    }
+};
+
+const Limits = struct{
+    min: u32,
+    max: ?u32,
+
+    fn decode(reader:anytype) !Limits {
+        const has_max = try reader.readByte();
+        const min = try std.leb.readULEB128(u32, reader);
+        var max: ?u32 = null;
+
+        switch (has_max) {
+            0 => {},
+            1 => { max = try std.leb.readULEB128(u32, reader); },
+            else => return error.InvalidTableType,
+        }
+
+        return Limits{
+            .min = min,
+            .max = max,
         };
     }
 };
@@ -538,8 +571,7 @@ const GlobalInstance = struct {
 
 const TableDefinition = struct {
     reftype: ValType,
-    min: u32,
-    max: ?u32,
+    limits: Limits,
 };
 
 const TableInstance = struct {
@@ -547,7 +579,7 @@ const TableInstance = struct {
     definition_index: u32, // index into Module.tables
 
     fn ensureMinSize(self:*TableInstance, size:usize) !void {
-        if (self.max) |max| {
+        if (self.limits.max) |max| {
             if (size > max) {
                 return error.TableMaxExceeded;
             }
@@ -560,7 +592,7 @@ const TableInstance = struct {
 };
 
 const MemoryDefinition = struct {
-
+    limits: Limits,
 };
 
 const MemoryInstance = struct {
@@ -619,6 +651,7 @@ pub const ModuleDefinition = struct {
     functions: std.ArrayList(FunctionDefinition),
     globals: std.ArrayList(GlobalDefinition),
     tables: std.ArrayList(TableDefinition),
+    memories: std.ArrayList(MemoryDefinition),
     elements: std.ArrayList(ElementDefinition),
     exports: Exports,
 
@@ -642,6 +675,7 @@ pub const ModuleDefinition = struct {
             .functions = std.ArrayList(FunctionDefinition).init(allocator),
             .globals = std.ArrayList(GlobalDefinition).init(allocator),
             .tables = std.ArrayList(TableDefinition).init(allocator),
+            .memories = std.ArrayList(MemoryDefinition).init(allocator),
             .elements = std.ArrayList(ElementDefinition).init(allocator),
             .exports = Exports {
                 .functions = std.ArrayList(ExportDefinition).init(allocator),
@@ -698,6 +732,30 @@ pub const ModuleDefinition = struct {
                         _ = try std.leb.readULEB128(u32, reader); // type index
                         _ = try std.leb.readULEB128(u32, reader); // table index
                     },
+                    .I32_Load => {
+                        _ = try std.leb.readULEB128(u32, reader); // memarg
+                    },
+                    .I32_Load8_S => {
+                        _ = try std.leb.readULEB128(u32, reader);
+                    },
+                    .I32_Load8_U => {
+                        _ = try std.leb.readULEB128(u32, reader);
+                    },
+                    .I32_Load16_S => {
+                        _ = try std.leb.readULEB128(u32, reader);
+                    },
+                    .I32_Load16_U => {
+                        _ = try std.leb.readULEB128(u32, reader);
+                    },
+                    .I32_Store => {
+                        _ = try std.leb.readULEB128(u32, reader);
+                    },
+                    .I32_Store8 => {
+                        _ = try std.leb.readULEB128(u32, reader);
+                    },
+                    .I32_Store16 => {
+                        _ = try std.leb.readULEB128(u32, reader);
+                    },
                     else => {}
                 };
             }
@@ -730,6 +788,9 @@ pub const ModuleDefinition = struct {
             switch (section_id) {
                 .FunctionType => {
                     const num_types = try std.leb.readULEB128(u32, reader);
+
+                    try module.types.ensureTotalCapacity(num_types);
+
                     var types_index:u32 = 0;
                     while (types_index < num_types) : (types_index += 1) {
                         const sentinel = try reader.readByte();
@@ -746,7 +807,7 @@ pub const ModuleDefinition = struct {
                         while (params_left > 0) {
                             params_left -= 1;
 
-                            var param_type = try ValType.readEncoded(&reader);
+                            var param_type = try ValType.decode(&reader);
                             try func.types.append(param_type);
                         }
 
@@ -755,7 +816,7 @@ pub const ModuleDefinition = struct {
                         while (returns_left > 0) {
                             returns_left -= 1;
 
-                            var return_type = try ValType.readEncoded(&reader);
+                            var return_type = try ValType.decode(&reader);
                             try func.types.append(return_type);
                         }
 
@@ -764,6 +825,9 @@ pub const ModuleDefinition = struct {
                 },
                 .Function => {
                     const num_funcs = try std.leb.readULEB128(u32, reader);
+
+                    try module.functions.ensureTotalCapacity(num_funcs);
+
                     var func_index:u32 = 0;
                     while (func_index < num_funcs) : (func_index += 1) {
 
@@ -788,40 +852,46 @@ pub const ModuleDefinition = struct {
 
                     var table_index: u32 = 0;
                     while (table_index < num_tables) : (table_index += 1) {
-                        const valtype = try ValType.readEncoded(&reader);
+                        const valtype = try ValType.decode(&reader);
                         if (valtype.isRefType() == false) {
 
                             return error.InvalidTableType;
                         }
 
-                        const has_max = try reader.readByte();
-                        const min = try std.leb.readULEB128(u32, reader);
-                        var max: ?u32 = null;
-
-                        switch (has_max) {
-                            0 => {},
-                            1 => { max = try std.leb.readULEB128(u32, reader); },
-                            else => return error.InvalidTableType,
-                        }
+                        const limits = try Limits.decode(&reader);
 
                         try module.tables.append(TableDefinition{
                             // .refs = std.ArrayList(Val).init(allocator),
                             .reftype = valtype,
-                            .min = min,
-                            .max = max,
+                            .limits = limits,
                         });
+                    }
+                },
+                .Memory => {
+                    const num_memories = try std.leb.readULEB128(u32, reader);
+
+                    try module.memories.ensureTotalCapacity(num_memories);
+
+                    var memory_index: u32 = 0;
+                    while (memory_index < num_memories) : (memory_index += 1) {
+                        var def = MemoryDefinition{
+                            .limits = try Limits.decode(&reader),
+                        };
+                        try module.memories.append(def);
                     }
                 },
                 .Global => {
                     const num_globals = try std.leb.readULEB128(u32, reader);
 
+                    try module.globals.ensureTotalCapacity(num_globals);
+
                     var global_index: u32 = 0;
                     while (global_index < num_globals) : (global_index += 1) {
-                        var valtype = try ValType.readEncoded(&reader);
+                        var valtype = try ValType.decode(&reader);
                         var mut = @intToEnum(GlobalMut, try reader.readByte());
 
                         // TODO validate global references are for imports only
-                        const expr = try ConstantExpression.readEncoded(&reader);
+                        const expr = try ConstantExpression.decode(&reader);
 
                         try module.globals.append(GlobalDefinition{
                             .valtype = valtype,
@@ -842,24 +912,30 @@ pub const ModuleDefinition = struct {
                         _ = try stream.read(name.items);
 
                         const exportType = @intToEnum(ExportType, try reader.readByte());
-                        const exportIndex = try std.leb.readULEB128(u32, reader);
-                        const def = ExportDefinition{ .name = name, .index = exportIndex };
+                        const item_index = try std.leb.readULEB128(u32, reader);
+                        const def = ExportDefinition{ .name = name, .index = item_index };
 
                         switch (exportType) {
                             .Function => {
-                                if (exportIndex >= module.functions.items.len) {
+                                if (item_index >= module.functions.items.len) {
                                     return error.InvalidExport;
                                 }
                                 try module.exports.functions.append(def);
                             },
                             .Table => {
-                                unreachable; // TODO
+                                if (item_index >= module.tables.items.len) {
+                                    return error.InvalidExport;
+                                }
+                                try module.exports.tables.append(def);
                             },
                             .Memory => {
-                                unreachable; // TODO
+                                if (item_index >= module.memories.items.len) {
+                                    return error.InvalidExport;
+                                }
+                                try module.exports.memories.append(def);
                             },
                             .Global => {
-                                if (exportIndex >= module.globals.items.len) {
+                                if (item_index >= module.globals.items.len) {
                                     return error.InvalidExport;
                                 }
                                 try module.exports.globals.append(def);
@@ -886,13 +962,15 @@ pub const ModuleDefinition = struct {
 
                             var elem_index:u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
-                                var expr = try ConstantExpression.readEncoded(_reader);
+                                var expr = try ConstantExpression.decode(_reader);
                                 try elems.append(expr);
                             }
                         }                                
                     };
 
                     const num_segments = try std.leb.readULEB128(u32, reader);
+
+                    try module.elements.ensureTotalCapacity(num_segments);
 
                     var segment_index:u32 = 0;
                     while (segment_index < num_segments) : (segment_index += 1) {
@@ -911,43 +989,43 @@ pub const ModuleDefinition = struct {
 
                         switch (flags) {
                             0x00 => {
-                                def.offset = try ConstantExpression.readEncoded(&reader);
+                                def.offset = try ConstantExpression.decode(&reader);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                             },
                             0x01 => {
                                 def.mode = .Passive;
-                                def.reftype = try ValType.readEncoded(&reader);
+                                def.reftype = try ValType.decode(&reader);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                             },
                             0x02 => {
                                 def.table_index = try std.leb.readULEB128(u32, reader);
-                                def.offset = try ConstantExpression.readEncoded(&reader);
-                                def.reftype = try ValType.readEncoded(&reader);
+                                def.offset = try ConstantExpression.decode(&reader);
+                                def.reftype = try ValType.decode(&reader);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                             },
                             0x03 => {
                                 def.mode = .Declarative;
-                                def.reftype = try ValType.readEncoded(&reader);
+                                def.reftype = try ValType.decode(&reader);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
                             },
                             0x04 => {
-                                def.offset = try ConstantExpression.readEncoded(&reader);
+                                def.offset = try ConstantExpression.decode(&reader);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                             },
                             0x05 => {
                                 def.mode = .Passive;
-                                def.reftype = try ValType.readEncoded(&reader);
+                                def.reftype = try ValType.decode(&reader);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                             },
                             0x06 => {
                                 def.table_index = try std.leb.readULEB128(u32, reader);
-                                def.offset = try ConstantExpression.readEncoded(&reader);
-                                def.reftype = try ValType.readEncoded(&reader);
+                                def.offset = try ConstantExpression.decode(&reader);
+                                def.reftype = try ValType.decode(&reader);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                             },
                             0x07 => {
                                 def.mode = .Declarative;
-                                def.reftype = try ValType.readEncoded(&reader);
+                                def.reftype = try ValType.decode(&reader);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
                             },
                             else => unreachable,
@@ -981,7 +1059,7 @@ pub const ModuleDefinition = struct {
                         while (locals_index < num_locals) {
                             locals_index += 1;
                             const n = try std.leb.readULEB128(u32, reader);
-                            const local_type = try ValType.readEncoded(&reader);
+                            const local_type = try ValType.decode(&reader);
                             def.locals[@enumToInt(local_type)] = n;
                             // try vm.functions.items[code_index].locals.append(local_type);
                         }
@@ -1072,6 +1150,7 @@ pub const ModuleDefinition = struct {
         self.functions.deinit();
         self.globals.deinit();
         self.tables.deinit();
+        self.memories.deinit();
         self.elements.deinit();
         self.exports.functions.deinit();
         self.exports.tables.deinit();
@@ -1344,8 +1423,7 @@ pub const ModuleInstance = struct {
                     }
                 },
                 Opcode.Call => {
-                    var func_index = try self.stack.popI32();
-                    // std.debug.print("call function {}\n", .{func_index});
+                    const func_index = try std.leb.readULEB128(u32, reader);
                     const func: *const FunctionInstance = &self.store.functions.items[@intCast(usize, func_index)];
                     const functype: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
 
@@ -1427,6 +1505,36 @@ pub const ModuleInstance = struct {
                         return error.AttemptToSetImmutable;
                     }
                     global.value = try self.stack.popValue();
+                },
+                Opcode.I32_Load => {
+
+                },
+                Opcode.I32_Load8_S => {
+
+                },
+                Opcode.I32_Load8_U => {
+
+                },
+                Opcode.I32_Load16_S => {
+
+                },
+                Opcode.I32_Load16_U => {
+
+                },
+                Opcode.I32_Store => {
+
+                },
+                Opcode.I32_Store8 => {
+
+                },
+                Opcode.I32_Store16 => {
+
+                },
+                Opcode.Memory_Size => {
+
+                },
+                Opcode.Memory_Grow => {
+
                 },
                 Opcode.I32_Const => {
                     var v: i32 = try std.leb.readILEB128(i32, reader);
