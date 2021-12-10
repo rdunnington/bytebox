@@ -445,6 +445,10 @@ const ConstantExpression = struct {
             .value = val,
         };
     }
+
+    fn resolve(self:ConstantExpression) !Val {
+        return self.value;
+    }
 };
 
 const Limits = struct{
@@ -538,7 +542,6 @@ const FunctionDefinition = struct {
 };
 
 const FunctionInstance = struct {
-    func_def_index: u32,
     type_def_index: u32,
     offset_into_encoded_bytecode: u32,
     locals: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{}),
@@ -576,7 +579,8 @@ const TableDefinition = struct {
 
 const TableInstance = struct {
     refs: std.ArrayList(Val), // should only be reftypes
-    definition_index: u32, // index into Module.tables
+    reftype: ValType,
+    limits: Limits,
 
     fn ensureMinSize(self:*TableInstance, size:usize) !void {
         if (self.limits.max) |max| {
@@ -596,7 +600,7 @@ const MemoryDefinition = struct {
 };
 
 const MemoryInstance = struct {
-
+    limits: Limits,
 };
 
 const ElementMode = enum {
@@ -654,6 +658,7 @@ pub const ModuleDefinition = struct {
     memories: std.ArrayList(MemoryDefinition),
     elements: std.ArrayList(ElementDefinition),
     exports: Exports,
+    datas: std.ArrayList(DataDefinition),
 
     function_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
@@ -683,6 +688,7 @@ pub const ModuleDefinition = struct {
                 .memories = std.ArrayList(ExportDefinition).init(allocator),
                 .globals = std.ArrayList(ExportDefinition).init(allocator),
             },
+            .datas = std.ArrayList(DataDefinition).init(allocator),
 
             .function_continuations = std.AutoHashMap(u32, u32).init(allocator),
             .label_continuations = std.AutoHashMap(u32, u32).init(allocator),
@@ -1156,11 +1162,41 @@ pub const ModuleDefinition = struct {
         self.exports.tables.deinit();
         self.exports.memories.deinit();
         self.exports.globals.deinit();
+        self.datas.deinit();
 
         self.function_continuations.deinit();
         self.label_continuations.deinit();
         self.if_to_else_offsets.deinit();
     }
+};
+
+pub const FunctionImport = struct {
+    name: []const u8,
+    // TODO
+};
+
+pub const TableImport = struct {
+    name: []const u8,
+};
+
+pub const MemoryImport = struct {
+    name: []const u8,
+};
+
+pub const GlobalImport = struct {
+    name: []const u8,
+};
+
+pub const ModuleImports = struct {
+    name: []const u8,
+    functions: std.ArrayList(FunctionImport),
+    tables: std.ArrayList(FunctionImport),
+    memories: std.ArrayList(FunctionImport),
+    globals: std.ArrayList(GlobalImport),
+};
+
+pub const PackageImports = struct {
+    imports: std.ArrayList(ModuleImports),
 };
 
 pub const Store = struct {
@@ -1173,7 +1209,7 @@ pub const Store = struct {
 
     module_def: *const ModuleDefinition, // temp
 
-    fn init(module_def: *const ModuleDefinition, allocator: *std.mem.Allocator) !Store {
+    fn init(module_def: *const ModuleDefinition, _: *PackageImports, allocator: *std.mem.Allocator) !Store {
         var store = Store{
             .functions = std.ArrayList(FunctionInstance).init(allocator),
             .tables = std.ArrayList(TableInstance).init(allocator),
@@ -1184,26 +1220,94 @@ pub const Store = struct {
 
             .module_def = module_def,
         };
+        errdefer store.deinit();
 
-        // for (module_def.imports)
-
-        for (module_def.functions.items) |func, i| {
+        try store.functions.ensureTotalCapacity(module_def.imports.functions.items.len + module_def.functions.items.len);
+        for (module_def.imports.functions.items) |_| {
             var f = FunctionInstance{
-                .func_def_index = @intCast(u32, i),
-                .type_def_index = func.type_index,
-                .offset_into_encoded_bytecode = func.offset_into_encoded_bytecode,
-                .locals = func.locals,
+                .type_def_index = 0,
+                .offset_into_encoded_bytecode = 0,
+            };
+            try store.functions.append(f);
+        }
+        for (module_def.functions.items) |*def_func| {
+            var f = FunctionInstance{
+                .type_def_index = def_func.type_index,
+                .offset_into_encoded_bytecode = def_func.offset_into_encoded_bytecode,
+                .locals = def_func.locals,
             };
             try store.functions.append(f);
         }
 
-        // TODO instantiate all the store items
+        try store.tables.ensureTotalCapacity(module_def.imports.tables.items.len + module_def.tables.items.len);
+        for (module_def.imports.tables.items) |_| {
+            // stub
+            var t = TableInstance{
+                .refs = std.ArrayList(Val).init(allocator),
+                .reftype = ValType.FuncRef,
+                .limits = Limits{
+                    .min = 0,
+                    .max = null,
+                },
+            };
+            try store.tables.append(t);
+        }
+        for (module_def.tables.items) |*def_table| {
+            var t = TableInstance{
+                .refs = std.ArrayList(Val).init(allocator),
+                .reftype = def_table.reftype,
+                .limits = def_table.limits,
+            };
+            try t.refs.ensureTotalCapacity(def_table.limits.min);
+            try store.tables.append(t);
+        }
+
+        try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
+        for (module_def.imports.memories.items) |_| {
+            var m = MemoryInstance{
+                .limits = Limits{
+                    .min = 0,
+                    .max = null,
+                }
+            };
+            try store.memories.append(m);
+        }
+        for (module_def.memories.items) |memory| {
+            var m = MemoryInstance{
+                .limits = memory.limits,
+            };
+            try store.memories.append(m);
+        }
+
+        try store.globals.ensureTotalCapacity(module_def.imports.globals.items.len + module_def.globals.items.len);
+        for (module_def.imports.globals.items) |_| {
+            var g = GlobalInstance{
+                .mut = GlobalMut.Immutable,
+                .value = Val{.I32 = 0,}
+            };
+            try store.globals.append(g);
+        }
+        for (module_def.globals.items) |global| {
+            var g = GlobalInstance{
+                .mut = global.mut,
+                .value = try global.expr.resolve(),
+            };
+            try store.globals.append(g);
+        }
+
+        try store.datas.ensureTotalCapacity(module_def.datas.items.len);
+        for (module_def.datas.items) |_| {
+        }
 
         return store;
     }
 
     fn deinit(self:*Store) void {
         self.functions.deinit();
+
+        for (self.tables.items) |*t| {
+            t.refs.deinit();
+        }
         self.tables.deinit();
     }
 };
@@ -1214,11 +1318,11 @@ pub const ModuleInstance = struct {
     store: Store,
     module_def: *const ModuleDefinition,
 
-    pub fn init(module_def: *const ModuleDefinition, allocator: *std.mem.Allocator) !ModuleInstance {
+    pub fn init(module_def: *const ModuleDefinition, imports: *PackageImports, allocator: *std.mem.Allocator) !ModuleInstance {
         return ModuleInstance{
             .allocator = allocator,
             .stack = Stack.init(allocator),
-            .store = try Store.init(module_def, allocator),
+            .store = try Store.init(module_def, imports, allocator),
             .module_def = module_def,
         };
     }

@@ -146,10 +146,10 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
             // try commands.append(command);
             print("Skipping assert_invalid test...\n", .{});
         } else if (strcmp("assert_trap", json_command_type.String)) {
-            print("Skipping assert_trap test...\n", .{});
+            // print("Skipping assert_trap test...\n", .{});
             // TODO
         } else if (strcmp("assert_malformed", json_command_type.String)) {
-            print("Skipping assert_malformed test...\n", .{});
+            // print("Skipping assert_malformed test...\n", .{});
             // TODO
         } else {
             unreachable;
@@ -179,10 +179,15 @@ fn run(suite_path:[]const u8, test_filter_or_null: ?[]const u8) !void {
 
         // print("module_path: {s}\n", .{module_path});
 
+        var imports = wasm.PackageImports{
+            .imports = std.ArrayList(wasm.ModuleImports).init(&arena.allocator),
+        };
+        defer imports.imports.deinit();
+
         var module_data = try cwd.readFileAlloc(&arena.allocator, module_path, 1024 * 1024 * 8);
         // wasm.printBytecode("module data", module_data);
         var module_def = try wasm.ModuleDefinition.init(module_data, &arena.allocator);
-        var module_inst = try wasm.ModuleInstance.init(&module_def, &arena.allocator);
+        var module_inst = try wasm.ModuleInstance.init(&module_def, &imports, &arena.allocator);
 
         switch (command.*) {
             .AssertReturn => |c| {
