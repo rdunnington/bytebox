@@ -4,6 +4,14 @@ const wasm = @import("vm.zig");
 const Val = wasm.Val;
 const print = std.debug.print;
 
+var verbose_logging = false;
+
+fn log_verbose(comptime msg: []const u8, params: anytype) void {
+    if (verbose_logging) {
+        print(msg, params);
+    }
+}
+
 const TestSuiteError = error{
     Fail,
 };
@@ -30,7 +38,7 @@ const Command = union(CommandType) {
     AssertReturn: CommandAssertReturn,
     AssertInvalid: CommandAssertInvalid,
 
-    fn getModule(self:@This()) []const u8 {
+    fn getModule(self: @This()) []const u8 {
         return switch (self) {
             .AssertReturn => |c| c.module,
             .AssertInvalid => |c| c.module,
@@ -38,8 +46,7 @@ const Command = union(CommandType) {
     }
 };
 
-
-fn strcmp(a:[]const u8, b:[]const u8) bool {
+fn strcmp(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
@@ -50,18 +57,18 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     if (strcmp("i32", json_type.String)) {
         // print("parse i32: {s}\n", .{json_value.String});
         const int = std.fmt.parseInt(i32, json_value.String, 10) catch @bitCast(i32, try std.fmt.parseInt(u32, json_value.String, 10));
-        return Val{.I32 = int};
+        return Val{ .I32 = int };
     } else if (strcmp("i64", json_type.String)) {
         const int = try std.fmt.parseInt(i64, json_value.String, 10);
-        return Val{.I64 = int};
+        return Val{ .I64 = int };
     } else if (strcmp("f32", json_type.String)) {
         const float = try std.fmt.parseFloat(f32, json_value.String);
-        return Val{.F32 = float};
+        return Val{ .F32 = float };
     } else if (strcmp("f64", json_type.String)) {
         const float = try std.fmt.parseFloat(f64, json_value.String);
-        return Val{.F64 = float};
+        return Val{ .F64 = float };
     } else {
-        print("Failed to parse value of type '{s}' with value '{s}'\n", .{json_type.String, json_value.String});
+        print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
     }
 
     unreachable;
@@ -77,7 +84,7 @@ fn error_from_text(text: []const u8) anyerror {
     unreachable;
 }
 
-fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.ArrayList(Command) {
+fn parseCommands(json_path: []const u8, allocator: *std.mem.Allocator) !std.ArrayList(Command) {
     // print("json_path: {s}\n", .{json_path});
     var json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
     var parser = std.json.Parser.init(allocator, false);
@@ -122,15 +129,13 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
                 expected_error = error_from_text(text.String);
             }
 
-            var command = Command{
-                .AssertReturn = CommandAssertReturn{
-                    .module = fallback_module,
-                    .field = try std.mem.dupe(allocator, u8, json_field.String),
-                    .args = args,
-                    .expected_returns = expected_returns_or_null,
-                    .expected_error = expected_error,
-                }
-            };
+            var command = Command{ .AssertReturn = CommandAssertReturn{
+                .module = fallback_module,
+                .field = try std.mem.dupe(allocator, u8, json_field.String),
+                .args = args,
+                .expected_returns = expected_returns_or_null,
+                .expected_error = expected_error,
+            } };
             try commands.append(command);
         } else if (strcmp("assert_invalid", json_command_type.String)) {
             // TODO
@@ -144,12 +149,12 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
             //     },
             // };
             // try commands.append(command);
-            print("Skipping assert_invalid test...\n", .{});
+            // log_verbose("Skipping assert_invalid test...\n", .{});
         } else if (strcmp("assert_trap", json_command_type.String)) {
-            // print("Skipping assert_trap test...\n", .{});
+            log_verbose("Skipping assert_trap test...\n", .{});
             // TODO
         } else if (strcmp("assert_malformed", json_command_type.String)) {
-            // print("Skipping assert_malformed test...\n", .{});
+            log_verbose("Skipping assert_malformed test...\n", .{});
             // TODO
         } else {
             unreachable;
@@ -159,8 +164,8 @@ fn parseCommands(json_path:[]const u8, allocator: *std.mem.Allocator) !std.Array
     return commands;
 }
 
-fn run(suite_path:[]const u8, test_filter_or_null: ?[]const u8) !void {
-    var did_fail_any_test:bool = false;
+fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
+    var did_fail_any_test: bool = false;
 
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_commands.deinit();
@@ -175,7 +180,7 @@ fn run(suite_path:[]const u8, test_filter_or_null: ?[]const u8) !void {
 
         var cwd = std.fs.cwd();
         var module_name = command.getModule();
-        var module_path = try std.fs.path.join(&arena.allocator, &[_][]const u8{suite_dir, module_name});
+        var module_path = try std.fs.path.join(&arena.allocator, &[_][]const u8{ suite_dir, module_name });
 
         // print("module_path: {s}\n", .{module_path});
 
@@ -193,7 +198,7 @@ fn run(suite_path:[]const u8, test_filter_or_null: ?[]const u8) !void {
             .AssertReturn => |c| {
                 if (test_filter_or_null) |filter| {
                     if (strcmp(filter, c.field) == false) {
-                        // print("AssertReturn: skipping {s}:{s}\n", .{module_path, c.field});
+                        log_verbose("AssertReturn: skipping {s}:{s}\n", .{ module_path, c.field });
                         continue;
                     }
                 }
@@ -207,12 +212,12 @@ fn run(suite_path:[]const u8, test_filter_or_null: ?[]const u8) !void {
                 module_inst.invoke(c.field, c.args.items, returns) catch |e| {
                     if (c.expected_error) |expected| {
                         if (expected != e) {
-                            print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
-                            print("Fail with error. Expected {}, Actual: {}\n", .{expected, e});
+                            print("AssertReturn: {s}:{s}({s})\n", .{ module_path, c.field, c.args.items });
+                            print("Fail with error. Expected {}, Actual: {}\n", .{ expected, e });
                             invoke_succeeded = false;
                         }
                     } else {
-                        print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
+                        print("AssertReturn: {s}:{s}({s})\n", .{ module_path, c.field, c.args.items });
                         print("\tFail with error: {}\n", .{e});
                         invoke_succeeded = false;
                     }
@@ -222,11 +227,16 @@ fn run(suite_path:[]const u8, test_filter_or_null: ?[]const u8) !void {
                     if (c.expected_returns) |expected| {
                         for (returns) |r, i| {
                             if (std.meta.eql(r, expected.items[i]) == false) {
-                                print("AssertReturn: {s}:{s}({s})\n", .{module_path, c.field, c.args.items});
-                                print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{i+1, returns.len, expected.items[i], r});
+                                print("AssertReturn: {s}:{s}({s})\n", .{ module_path, c.field, c.args.items });
+                                print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
+                                invoke_succeeded = false;
                             }
                         }
                     }
+                }
+
+                if (invoke_succeeded) {
+                    log_verbose("AssertReturn: {s}:{s}({s})\n\tSuccess!\n", .{ module_path, c.field, c.args.items });
                 }
             },
             .AssertInvalid => {
@@ -261,26 +271,30 @@ pub fn main() !void {
             args_index += 1;
             test_filter_or_null = args[args_index];
             print("found test filter: {s}\n", .{test_filter_or_null.?});
+        } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
+            verbose_logging = true;
+            print("verbose logging: on\n", .{});
         }
     }
 
-    const all_suites = [_][] const u8 {
+    const all_suites = [_][]const u8{
         "nop",
         "i32",
     };
 
     for (all_suites) |suite| {
-        print("Running test suite: {s}\n", .{suite});
         if (suite_filter_or_null) |filter| {
             if (strcmp(filter, suite) == false) {
                 continue;
             }
         }
 
-        var suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{"test", "wasm", suite, suite});
+        log_verbose("Running test suite: {s}\n", .{suite});
+
+        var suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite, suite });
         defer allocator.free(suite_path_no_extension);
 
-        var suite_path = try std.mem.join(allocator, "", &[_][]const u8{suite_path_no_extension, ".json"});
+        var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
         try run(suite_path, test_filter_or_null);
