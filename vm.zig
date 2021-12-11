@@ -112,7 +112,7 @@ const Opcode = enum(u8) {
     //     return v;
     // }
 
-    fn expectsEnd(opcode:Opcode) bool {
+    fn expectsEnd(opcode: Opcode) bool {
         return switch (opcode) {
             .Block => true,
             .Loop => true,
@@ -132,7 +132,7 @@ const ValType = enum(u8) {
     FuncRef,
     ExternRef,
 
-    fn bytecodeToValtype(byte:u8) !ValType {
+    fn bytecodeToValtype(byte: u8) !ValType {
         return switch (byte) {
             0x7F => .I32,
             0x7E => .I64,
@@ -142,15 +142,15 @@ const ValType = enum(u8) {
             0x6F => .ExternRef,
             else => {
                 return ModuleDecodeError.InvalidValType;
-            }
+            },
         };
     }
 
-    fn decode(reader:anytype) !ValType {
+    fn decode(reader: anytype) !ValType {
         return try bytecodeToValtype(try reader.readByte());
     }
 
-    fn isRefType(valtype:ValType) bool {
+    fn isRefType(valtype: ValType) bool {
         return switch (valtype) {
             .FuncRef => true,
             .ExternRef => true,
@@ -184,8 +184,8 @@ const BlockTypeValue = union(BlockType) {
     TypeIndex: u32,
 };
 
-const Label = struct{
-    id:u32,
+const Label = struct {
+    id: u32,
     blocktype: BlockTypeValue,
     continuation: u32,
     last_label_index: i32,
@@ -246,12 +246,15 @@ const Stack = struct {
     }
 
     fn pushValue(self: *Self, v: Val) !void {
-        var item = StackItem{.Val = v};
+        var item = StackItem{ .Val = v };
         try self.stack.append(item);
+
+        // std.debug.print("\tpush value: {}\n", .{v});
     }
 
     fn popValue(self: *Self) !Val {
         var item = try self.pop();
+        // std.debug.print("\tpop value: {}\n", .{item});
         switch (item) {
             .Val => |v| return v,
             .Label => return error.TypeMismatch,
@@ -259,15 +262,15 @@ const Stack = struct {
         }
     }
 
-    fn pushLabel(self:*Self, blocktype: BlockTypeValue, continuation:u32) !void {
+    fn pushLabel(self: *Self, blocktype: BlockTypeValue, continuation: u32) !void {
         // std.debug.print(">> push label: {}\n", .{self.next_label_id});
-        const id:u32 = self.next_label_id;
-        var item = StackItem{.Label = .{
+        const id: u32 = self.next_label_id;
+        var item = StackItem{ .Label = .{
             .id = id,
             .blocktype = blocktype,
             .continuation = continuation,
             .last_label_index = self.last_label_index,
-        }};
+        } };
         try self.stack.append(item);
 
         self.last_label_index = @intCast(i32, self.stack.items.len) - 1;
@@ -300,7 +303,7 @@ const Stack = struct {
 
         var label_index = self.last_label_index;
         while (label_index > 0) {
-            switch(self.stack.items[@intCast(usize, label_index)]) {
+            switch (self.stack.items[@intCast(usize, label_index)]) {
                 .Label => |*label| {
                     const label_id_from_top = (self.next_label_id - 1) - label.id;
                     // std.debug.print("found label_id_from_top: {}\n", .{label_id_from_top});
@@ -323,7 +326,7 @@ const Stack = struct {
     }
 
     fn pushFrame(self: *Self, frame: CallFrame) !void {
-        var item = StackItem{.Frame = frame};
+        var item = StackItem{ .Frame = frame };
         try self.stack.append(item);
 
         // frames reset the label index since you can't jump to labels in a different function
@@ -345,7 +348,7 @@ const Stack = struct {
         var item_index = self.stack.items.len;
         while (item_index > 0) {
             item_index -= 1;
-            switch(self.stack.items[item_index]) {
+            switch (self.stack.items[item_index]) {
                 .Val => {},
                 .Label => |*label| {
                     self.last_label_index = @intCast(i32, item_index);
@@ -358,9 +361,9 @@ const Stack = struct {
             }
         }
     }
-    
+
     fn findCurrentFrame(self: *const Self) !*const CallFrame {
-        var item_index:i32 = @intCast(i32, self.stack.items.len) - 1;
+        var item_index: i32 = @intCast(i32, self.stack.items.len) - 1;
         while (item_index >= 0) {
             var index = @intCast(usize, item_index);
             if (std.meta.activeTag(self.stack.items[index]) == .Frame) {
@@ -400,19 +403,19 @@ fn readBlockType(stream: *BytecodeBufferStream) !BlockTypeValue {
     const valtype_or_err = ValType.bytecodeToValtype(blocktype);
     if (std.meta.isError(valtype_or_err)) {
         if (blocktype == k_block_type_void_sentinel_byte) {
-            return BlockTypeValue{.Void = {}};
+            return BlockTypeValue{ .Void = {} };
         } else {
             stream.pos -= 1;
             var index_33bit = try std.leb.readILEB128(i33, reader);
             if (index_33bit < 0) {
                 return error.InvalidBytecode;
             }
-            var index:u32 = @intCast(u32, index_33bit);
-            return BlockTypeValue{.TypeIndex = index};
+            var index: u32 = @intCast(u32, index_33bit);
+            return BlockTypeValue{ .TypeIndex = index };
         }
     } else {
-        var valtype:ValType = valtype_or_err catch unreachable;
-        return BlockTypeValue{.ValType = valtype};
+        var valtype: ValType = valtype_or_err catch unreachable;
+        return BlockTypeValue{ .ValType = valtype };
     }
 }
 
@@ -425,13 +428,13 @@ const k_block_type_void_sentinel_byte: u8 = 0x40;
 const ConstantExpression = struct {
     value: Val,
 
-    fn decode(reader:anytype) !ConstantExpression {
+    fn decode(reader: anytype) !ConstantExpression {
         const opcode_value = try reader.readByte();
         // std.debug.print("opcode_value: 0x{X}\n", .{opcode_value});
         // const opcode = @intToEnum(Opcode, try reader.readByte());
         const opcode = @intToEnum(Opcode, opcode_value);
         const val = switch (opcode) {
-            .I32_Const => Val{.I32 = try std.leb.readILEB128(i32, reader)},
+            .I32_Const => Val{ .I32 = try std.leb.readILEB128(i32, reader) },
             // TODO handle i64, f32, f64, ref.null, ref.func, global.get
             else => unreachable,
         };
@@ -441,28 +444,30 @@ const ConstantExpression = struct {
             return ModuleDecodeError.InvalidConstantExpression;
         }
 
-        return ConstantExpression {
+        return ConstantExpression{
             .value = val,
         };
     }
 
-    fn resolve(self:ConstantExpression) !Val {
+    fn resolve(self: ConstantExpression) !Val {
         return self.value;
     }
 };
 
-const Limits = struct{
+const Limits = struct {
     min: u32,
     max: ?u32,
 
-    fn decode(reader:anytype) !Limits {
+    fn decode(reader: anytype) !Limits {
         const has_max = try reader.readByte();
         const min = try std.leb.readULEB128(u32, reader);
         var max: ?u32 = null;
 
         switch (has_max) {
             0 => {},
-            1 => { max = try std.leb.readULEB128(u32, reader); },
+            1 => {
+                max = try std.leb.readULEB128(u32, reader);
+            },
             else => return error.InvalidTableType,
         }
 
@@ -582,7 +587,7 @@ const TableInstance = struct {
     reftype: ValType,
     limits: Limits,
 
-    fn ensureMinSize(self:*TableInstance, size:usize) !void {
+    fn ensureMinSize(self: *TableInstance, size: usize) !void {
         if (self.limits.max) |max| {
             if (size > max) {
                 return error.TableMaxExceeded;
@@ -609,7 +614,7 @@ const ElementMode = enum {
     Declarative,
 };
 
-const ElementDefinition = struct{
+const ElementDefinition = struct {
     mode: ElementMode,
     reftype: ValType,
     table_index: u32,
@@ -623,13 +628,9 @@ const ElementInstance = struct {
     refs: std.ArrayList(Val),
 };
 
-const DataDefinition = struct {
+const DataDefinition = struct {};
 
-};
-
-const DataInstance = struct {
-
-};
+const DataInstance = struct {};
 
 pub const ModuleDefinition = struct {
     const Imports = struct {
@@ -682,7 +683,7 @@ pub const ModuleDefinition = struct {
             .tables = std.ArrayList(TableDefinition).init(allocator),
             .memories = std.ArrayList(MemoryDefinition).init(allocator),
             .elements = std.ArrayList(ElementDefinition).init(allocator),
-            .exports = Exports {
+            .exports = Exports{
                 .functions = std.ArrayList(ExportDefinition).init(allocator),
                 .tables = std.ArrayList(ExportDefinition).init(allocator),
                 .memories = std.ArrayList(ExportDefinition).init(allocator),
@@ -697,11 +698,11 @@ pub const ModuleDefinition = struct {
         errdefer module.deinit();
 
         const DecodeHelpers = struct {
-            fn readRefType(valtype: ValType, reader:anytype) !Val {
+            fn readRefType(valtype: ValType, reader: anytype) !Val {
                 switch (valtype) {
                     .FuncRef => {
                         const func_index = try std.leb.readULEB128(u32, reader);
-                        return Val{.FuncRef = func_index};
+                        return Val{ .FuncRef = func_index };
                     },
                     .ExternRef => {
                         unreachable; // TODO
@@ -710,7 +711,7 @@ pub const ModuleDefinition = struct {
                 }
             }
 
-            fn skipOpcodeImmediates(opcode:Opcode, stream: *BytecodeBufferStream) !void {
+            fn skipOpcodeImmediates(opcode: Opcode, stream: *BytecodeBufferStream) !void {
                 // std.debug.print("skipping opcode: {}\n", .{opcode});
                 var reader = stream.reader();
                 _ = switch (opcode) {
@@ -762,14 +763,14 @@ pub const ModuleDefinition = struct {
                     .I32_Store16 => {
                         _ = try std.leb.readULEB128(u32, reader);
                     },
-                    else => {}
+                    else => {},
                 };
             }
         };
 
         try module.bytecode.appendSlice(wasm);
 
-        const bytecode:[]const u8 = module.bytecode.items;
+        const bytecode: []const u8 = module.bytecode.items;
         var stream = std.io.fixedBufferStream(bytecode);
         var reader = stream.reader();
 
@@ -797,7 +798,7 @@ pub const ModuleDefinition = struct {
 
                     try module.types.ensureTotalCapacity(num_types);
 
-                    var types_index:u32 = 0;
+                    var types_index: u32 = 0;
                     while (types_index < num_types) : (types_index += 1) {
                         const sentinel = try reader.readByte();
                         if (sentinel != k_function_type_sentinel_byte) {
@@ -834,13 +835,12 @@ pub const ModuleDefinition = struct {
 
                     try module.functions.ensureTotalCapacity(num_funcs);
 
-                    var func_index:u32 = 0;
+                    var func_index: u32 = 0;
                     while (func_index < num_funcs) : (func_index += 1) {
-
                         var func = FunctionDefinition{
                             .type_index = try std.leb.readULEB128(u32, reader),
 
-                             // we'll fix these up later when we find them in the Code section
+                            // we'll fix these up later when we find them in the Code section
                             .offset_into_encoded_bytecode = 0,
                             .size = 0,
                         };
@@ -860,7 +860,6 @@ pub const ModuleDefinition = struct {
                     while (table_index < num_tables) : (table_index += 1) {
                         const valtype = try ValType.decode(&reader);
                         if (valtype.isRefType() == false) {
-
                             return error.InvalidTableType;
                         }
 
@@ -909,7 +908,7 @@ pub const ModuleDefinition = struct {
                 .Export => {
                     const num_exports = try std.leb.readULEB128(u32, reader);
 
-                    var export_index:u32 = 0;
+                    var export_index: u32 = 0;
                     while (export_index < num_exports) : (export_index += 1) {
                         const name_length = try std.leb.readULEB128(u32, reader);
                         var name = std.ArrayList(u8).init(allocator);
@@ -956,7 +955,7 @@ pub const ModuleDefinition = struct {
                             const num_elems = try std.leb.readULEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
-                            var elem_index:u32 = 0;
+                            var elem_index: u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
                                 try elems.append(try DecodeHelpers.readRefType(valtype, _reader));
                             }
@@ -966,19 +965,19 @@ pub const ModuleDefinition = struct {
                             const num_elems = try std.leb.readULEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
-                            var elem_index:u32 = 0;
+                            var elem_index: u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
                                 var expr = try ConstantExpression.decode(_reader);
                                 try elems.append(expr);
                             }
-                        }                                
+                        }
                     };
 
                     const num_segments = try std.leb.readULEB128(u32, reader);
 
                     try module.elements.ensureTotalCapacity(num_segments);
 
-                    var segment_index:u32 = 0;
+                    var segment_index: u32 = 0;
                     while (segment_index < num_segments) : (segment_index += 1) {
                         var flags = try reader.readByte();
 
@@ -1073,7 +1072,7 @@ pub const ModuleDefinition = struct {
                         const bytecode_begin_offset = @intCast(u32, stream.pos);
                         module.functions.items[code_index].offset_into_encoded_bytecode = bytecode_begin_offset;
                         try block_stack.append(BlockData{
-                            .offset = bytecode_begin_offset, 
+                            .offset = bytecode_begin_offset,
                             .next_instruction_offset = bytecode_begin_offset,
                             .opcode = .Block,
                         });
@@ -1095,10 +1094,10 @@ pub const ModuleDefinition = struct {
                                     .opcode = opcode,
                                 });
                             } else if (opcode == .Else) {
-                                const block:*const BlockData = &block_stack.items[block_stack.items.len - 1];
+                                const block: *const BlockData = &block_stack.items[block_stack.items.len - 1];
                                 try module.if_to_else_offsets.putNoClobber(block.offset, parsing_offset);
                             } else if (opcode == .End) {
-                                const block:BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
+                                const block: BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
                                 if (block_stack.items.len == 0) {
                                     // std.debug.print("found the end\n", .{});
                                     parsing_code = false;
@@ -1122,7 +1121,6 @@ pub const ModuleDefinition = struct {
                                     }
                                 }
                             }
-
                         }
 
                         const code_actual_size = stream.pos - code_begin_pos;
@@ -1264,12 +1262,10 @@ pub const Store = struct {
 
         try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
         for (module_def.imports.memories.items) |_| {
-            var m = MemoryInstance{
-                .limits = Limits{
-                    .min = 0,
-                    .max = null,
-                }
-            };
+            var m = MemoryInstance{ .limits = Limits{
+                .min = 0,
+                .max = null,
+            } };
             try store.memories.append(m);
         }
         for (module_def.memories.items) |memory| {
@@ -1281,10 +1277,9 @@ pub const Store = struct {
 
         try store.globals.ensureTotalCapacity(module_def.imports.globals.items.len + module_def.globals.items.len);
         for (module_def.imports.globals.items) |_| {
-            var g = GlobalInstance{
-                .mut = GlobalMut.Immutable,
-                .value = Val{.I32 = 0,}
-            };
+            var g = GlobalInstance{ .mut = GlobalMut.Immutable, .value = Val{
+                .I32 = 0,
+            } };
             try store.globals.append(g);
         }
         for (module_def.globals.items) |global| {
@@ -1296,13 +1291,12 @@ pub const Store = struct {
         }
 
         try store.datas.ensureTotalCapacity(module_def.datas.items.len);
-        for (module_def.datas.items) |_| {
-        }
+        for (module_def.datas.items) |_| {}
 
         return store;
     }
 
-    fn deinit(self:*Store) void {
+    fn deinit(self: *Store) void {
         self.functions.deinit();
 
         for (self.tables.items) |*t| {
@@ -1332,7 +1326,7 @@ pub const ModuleInstance = struct {
         self.store.deinit();
     }
 
-    pub fn invoke(self: *ModuleInstance, func_name:[]const u8, params: []const Val, returns: []Val) !void {
+    pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) !void {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name.items)) {
                 const func: FunctionInstance = self.store.functions.items[func_export.index + self.module_def.imports.functions.items.len];
@@ -1359,12 +1353,15 @@ pub const ModuleInstance = struct {
                 // TODO move function continuation data into FunctionDefinition
                 var function_continuation = self.module_def.function_continuations.get(func.offset_into_encoded_bytecode) orelse return error.InvalidFunction;
 
-                try self.stack.pushFrame(CallFrame{.func = &func, .locals = locals,});
-                try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.type_def_index}, function_continuation);
+                try self.stack.pushFrame(CallFrame{
+                    .func = &func,
+                    .locals = locals,
+                });
+                try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
                 try self.executeWasm(self.module_def.bytecode.items, func.offset_into_encoded_bytecode);
 
                 if (self.stack.size() != returns.len) {
-                    std.debug.print("stack size: {}, returns.len: {}\n", .{self.stack.size(), returns.len});
+                    std.debug.print("stack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
                     return error.TypeMismatch;
                 }
 
@@ -1391,10 +1388,10 @@ pub const ModuleInstance = struct {
         // TODO use a linear allocator for scratch allocations that gets reset on each loop iteration
 
         while (stream.pos < stream.buffer.len) {
-            const instruction_offset:u32 = @intCast(u32, stream.pos);
+            const instruction_offset: u32 = @intCast(u32, stream.pos);
             const opcode = @intToEnum(Opcode, try reader.readByte());
 
-            // std.debug.print("found opcode: {} (pos {})\n", .{opcode, stream.pos});
+            // std.debug.print("found opcode: {} (pos {})\n", .{ opcode, stream.pos });
 
             switch (opcode) {
                 Opcode.Unreachable => {
@@ -1412,7 +1409,7 @@ pub const ModuleInstance = struct {
                     if (condition != 0) {
                         try self.enterBlock(&stream, instruction_offset);
                     } else if (self.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| {
-                         // +1 to skip the else opcode, since it's treated as an End for the If block.
+                        // +1 to skip the else opcode, since it's treated as an End for the If block.
                         try self.enterBlock(&stream, else_offset);
                         try stream.seekTo(else_offset + 1);
                     } else {
@@ -1430,7 +1427,7 @@ pub const ModuleInstance = struct {
                     defer returns.deinit();
 
                     // id 0 means this is the end of a function, otherwise it's the end of a block
-                    const label_ptr:*const Label = self.stack.topLabel();
+                    const label_ptr: *const Label = self.stack.topLabel();
                     if (label_ptr.id != 0) {
                         try popValues(&returns, &self.stack, self.getReturnTypesFromBlockType(label_ptr.blocktype));
                         _ = try self.stack.popLabel();
@@ -1501,13 +1498,20 @@ pub const ModuleInstance = struct {
                         try returns.append(value);
                     }
 
-                    var last_label:Label = undefined;
+                    var last_label: Label = undefined;
                     while (true) {
-                        var item:*const StackItem = try self.stack.top();
+                        var item: *const StackItem = try self.stack.top();
                         switch (item.*) {
-                            .Val => { _ = try self.stack.popValue(); },
-                            .Label => { last_label = try self.stack.popLabel(); },
-                            .Frame => { _ = try self.stack.popFrame(); break; },
+                            .Val => {
+                                _ = try self.stack.popValue();
+                            },
+                            .Label => {
+                                last_label = try self.stack.popLabel();
+                            },
+                            .Frame => {
+                                _ = try self.stack.popFrame();
+                                break;
+                            },
                         }
                     }
 
@@ -1532,12 +1536,12 @@ pub const ModuleInstance = struct {
                     const functype: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
 
                     var frame = CallFrame{
-                        .func =  func,
+                        .func = func,
                         .locals = std.ArrayList(Val).init(self.allocator),
                     };
 
                     const param_types: []const ValType = functype.getParams();
-                    try frame.locals.ensureTotalCapacity(param_types.len);
+                    try frame.locals.resize(param_types.len);
 
                     var param_index = param_types.len;
                     while (param_index > 0) {
@@ -1546,17 +1550,16 @@ pub const ModuleInstance = struct {
                         if (std.meta.activeTag(value) != param_types[param_index]) {
                             return error.TypeMismatch;
                         }
-                        try frame.locals.append(value);
+                        frame.locals.items[param_index] = value;
                     }
 
                     const continuation = @intCast(u32, stream.pos);
 
                     try self.stack.pushFrame(frame);
-                    try self.stack.pushLabel(BlockTypeValue{.TypeIndex = func.type_def_index}, continuation);
+                    try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
                     try stream.seekTo(func.offset_into_encoded_bytecode);
                 },
-                Opcode.Call_Indirect => {
-                },
+                Opcode.Call_Indirect => {},
                 Opcode.Drop => {
                     _ = try self.stack.popValue();
                 },
@@ -1581,20 +1584,20 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Local_Get => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame:*const CallFrame = try self.stack.findCurrentFrame();
-                    var v:Val = frame.locals.items[locals_index];
+                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
+                    var v: Val = frame.locals.items[locals_index];
                     try self.stack.pushValue(v);
                 },
                 Opcode.Local_Set => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame:*const CallFrame = try self.stack.findCurrentFrame();
-                    var v:Val = try self.stack.popValue();
+                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
+                    var v: Val = try self.stack.popValue();
                     frame.locals.items[locals_index] = v;
                 },
                 Opcode.Local_Tee => {
                     var locals_index = try std.leb.readULEB128(u32, reader);
-                    var frame:*const CallFrame = try self.stack.findCurrentFrame();
-                    var v:Val = try self.stack.topValue();
+                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
+                    var v: Val = try self.stack.topValue();
                     frame.locals.items[locals_index] = v;
                 },
                 Opcode.Global_Get => {
@@ -1610,36 +1613,16 @@ pub const ModuleInstance = struct {
                     }
                     global.value = try self.stack.popValue();
                 },
-                Opcode.I32_Load => {
-
-                },
-                Opcode.I32_Load8_S => {
-
-                },
-                Opcode.I32_Load8_U => {
-
-                },
-                Opcode.I32_Load16_S => {
-
-                },
-                Opcode.I32_Load16_U => {
-
-                },
-                Opcode.I32_Store => {
-
-                },
-                Opcode.I32_Store8 => {
-
-                },
-                Opcode.I32_Store16 => {
-
-                },
-                Opcode.Memory_Size => {
-
-                },
-                Opcode.Memory_Grow => {
-
-                },
+                Opcode.I32_Load => {},
+                Opcode.I32_Load8_S => {},
+                Opcode.I32_Load8_U => {},
+                Opcode.I32_Load16_S => {},
+                Opcode.I32_Load16_U => {},
+                Opcode.I32_Store => {},
+                Opcode.I32_Store8 => {},
+                Opcode.I32_Store16 => {},
+                Opcode.Memory_Size => {},
+                Opcode.Memory_Grow => {},
                 Opcode.I32_Const => {
                     var v: i32 = try std.leb.readILEB128(i32, reader);
                     try self.stack.pushI32(v);
@@ -1822,20 +1805,20 @@ pub const ModuleInstance = struct {
                 Opcode.I32_Extend8_S => {
                     var v = try self.stack.popI32();
                     var v_i8 = @truncate(i8, v);
-                    var v_extended:i32 = v_i8;
+                    var v_extended: i32 = v_i8;
                     try self.stack.pushI32(v_extended);
                 },
                 Opcode.I32_Extend16_S => {
                     var v = try self.stack.popI32();
                     var v_i16 = @truncate(i16, v);
-                    var v_extended:i32 = v_i16;
+                    var v_extended: i32 = v_i16;
                     try self.stack.pushI32(v_extended);
                 },
             }
         }
     }
 
-    fn enterBlock(self: *ModuleInstance, stream: *BytecodeBufferStream, label_offset:u32) !void {
+    fn enterBlock(self: *ModuleInstance, stream: *BytecodeBufferStream, label_offset: u32) !void {
         var blocktype = try readBlockType(stream);
 
         const continuation = self.module_def.label_continuations.get(label_offset) orelse return error.InvalidLabel;
@@ -1844,7 +1827,7 @@ pub const ModuleInstance = struct {
 
     fn branch(self: *ModuleInstance, stream: *BytecodeBufferStream, label_id: u32) !void {
         // std.debug.print("branching to label {}\n", .{label_id});
-        const label:*const Label = try self.stack.findLabel(label_id);
+        const label: *const Label = try self.stack.findLabel(label_id);
         if (label.last_label_index == -1) {
             return error.LabelMismatch; // can't branch to the end of functions - that's the return opcode's job
         }
@@ -1868,11 +1851,11 @@ pub const ModuleInstance = struct {
                     return error.InvalidLabel;
                 },
                 .Label => {
-                    const popped_label:Label = try self.stack.popLabel();
+                    const popped_label: Label = try self.stack.popLabel();
                     if (popped_label.id == label_stack_id) {
                         break;
                     }
-                }
+                },
             }
         }
 
@@ -1907,7 +1890,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn popValues(returns: *std.ArrayList(Val), stack: *Stack, types:[]const ValType) !void {
+    fn popValues(returns: *std.ArrayList(Val), stack: *Stack, types: []const ValType) !void {
         // std.debug.print("popValues: required: {any} ({})\n", .{types, types.len});
 
         try returns.ensureTotalCapacity(types.len);
