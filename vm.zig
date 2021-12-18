@@ -13,9 +13,12 @@ const ModuleDecodeError = error{
     InvalidElement,
     OneTableAllowed,
     TableMaxExceeded,
+    OneMemoryAllowed,
+    MemoryMaxPagesExceeded,
+    MemoryInvalidMaxLimit,
 };
 
-const VMError = error{
+const InterpreterError = error{
     Unreachable,
     IncompleteInstruction,
     UnknownInstruction,
@@ -26,6 +29,8 @@ const VMError = error{
     MissingCallFrame,
     LabelMismatch,
     InvalidFunction,
+    MemoryMaxReached,
+    MemoryInvalidIndex,
 };
 
 const Opcode = enum(u8) {
@@ -210,7 +215,7 @@ const StackItem = union(StackItemType) {
 const Stack = struct {
     const Self = @This();
 
-    fn init(allocator: *std.mem.Allocator) Self {
+    fn init(allocator: std.mem.Allocator) Self {
         var self = Self{
             .stack = std.ArrayList(StackItem).init(allocator),
         };
@@ -605,7 +610,67 @@ const MemoryDefinition = struct {
 };
 
 const MemoryInstance = struct {
+    const k_page_size: usize = 64 * 1024;
+    const k_max_pages: usize = std.math.powi(usize, 2, 16) catch unreachable;
+
     limits: Limits,
+    mem: []u8,
+
+    fn init(limits: Limits) MemoryInstance {
+        comptime {
+            std.debug.assert(builtin.os.tag == .windows);
+        }
+
+        const max_pages = if (limits.max) |max| max else k_max_pages;
+
+        const w = std.os.windows;
+        const addr = w.VirtualAlloc(
+            null,
+            max_pages * k_page_size,
+            w.MEM_RESERVE,
+            w.PAGE_READWRITE,
+        ) catch unreachable;
+
+        var mem: []u8 = @ptrCast([*]u8, addr)[0..0];
+
+        var instance = MemoryInstance{
+            .limits = Limits{ .min = 0, .max = @intCast(u32, max_pages) },
+            .mem = mem,
+        };
+
+        return instance;
+    }
+
+    fn deinit(self: *MemoryInstance) void {
+        const w = std.os.windows;
+        w.VirtualFree(@ptrCast(*c_void, self.mem.ptr), 0, w.MEM_RELEASE);
+    }
+
+    fn size(self: *MemoryInstance) usize {
+        return self.mem.len / k_page_size;
+    }
+
+    fn grow(self: *MemoryInstance, num_pages: usize) bool {
+        const total_pages = self.limits.min + num_pages;
+        const max_pages = if (self.limits.max) |max| max else k_max_pages;
+
+        if (total_pages > max_pages) {
+            return false;
+        }
+
+        const w = std.os.windows;
+        _ = w.VirtualAlloc(
+            @ptrCast(*c_void, self.mem.ptr),
+            (self.limits.min + num_pages) * k_page_size,
+            w.MEM_COMMIT,
+            w.PAGE_READWRITE,
+        ) catch return false;
+
+        self.limits.min = @intCast(u32, total_pages);
+        self.mem = self.mem.ptr[0..total_pages * k_page_size];
+
+        return true;
+    }
 };
 
 const ElementMode = enum {
@@ -647,7 +712,7 @@ pub const ModuleDefinition = struct {
         globals: std.ArrayList(ExportDefinition),
     };
 
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
 
     bytecode: std.ArrayList(u8),
 
@@ -665,7 +730,7 @@ pub const ModuleDefinition = struct {
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
 
-    pub fn init(wasm: []const u8, allocator: *std.mem.Allocator) !ModuleDefinition {
+    pub fn init(wasm: []const u8, allocator: std.mem.Allocator) !ModuleDefinition {
         var module = ModuleDefinition{
             .allocator = allocator,
 
@@ -875,12 +940,26 @@ pub const ModuleDefinition = struct {
                 .Memory => {
                     const num_memories = try std.leb.readULEB128(u32, reader);
 
+                    if (num_memories > 1) {
+                        return ModuleDecodeError.OneMemoryAllowed;
+                    }
+
                     try module.memories.ensureTotalCapacity(num_memories);
 
                     var memory_index: u32 = 0;
                     while (memory_index < num_memories) : (memory_index += 1) {
+                        var limits = try Limits.decode(&reader);
+                        if (limits.max) |max| {
+                            if (max < limits.min) {
+                                return ModuleDecodeError.MemoryInvalidMaxLimit;
+                            }
+                            if (max > MemoryInstance.k_max_pages) {
+                                return ModuleDecodeError.MemoryMaxPagesExceeded;
+                            }
+                        }
+
                         var def = MemoryDefinition{
-                            .limits = try Limits.decode(&reader),
+                            .limits = limits,
                         };
                         try module.memories.append(def);
                     }
@@ -1207,7 +1286,7 @@ pub const Store = struct {
 
     module_def: *const ModuleDefinition, // temp
 
-    fn init(module_def: *const ModuleDefinition, _: *PackageImports, allocator: *std.mem.Allocator) !Store {
+    fn init(module_def: *const ModuleDefinition, _: *PackageImports, allocator: std.mem.Allocator) !Store {
         var store = Store{
             .functions = std.ArrayList(FunctionInstance).init(allocator),
             .tables = std.ArrayList(TableInstance).init(allocator),
@@ -1262,16 +1341,19 @@ pub const Store = struct {
 
         try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
         for (module_def.imports.memories.items) |_| {
-            var m = MemoryInstance{ .limits = Limits{
+            var m = MemoryInstance.init(Limits{
                 .min = 0,
                 .max = null,
-            } };
+            });
             try store.memories.append(m);
         }
         for (module_def.memories.items) |memory| {
-            var m = MemoryInstance{
-                .limits = memory.limits,
-            };
+            var m = MemoryInstance.init(memory.limits);
+            if (memory.limits.min > 0) {
+                if (m.grow(memory.limits.min) == false) {
+                    return error.OutOfMemory;
+                }
+            }
             try store.memories.append(m);
         }
 
@@ -1299,20 +1381,29 @@ pub const Store = struct {
     fn deinit(self: *Store) void {
         self.functions.deinit();
 
-        for (self.tables.items) |*t| {
-            t.refs.deinit();
+        for (self.tables.items) |*item| {
+            item.refs.deinit();
         }
         self.tables.deinit();
+
+        for (self.memories.items) |*item| {
+            item.deinit();
+        }
+        self.memories.deinit();
+
+        self.globals.deinit();
+        self.elements.deinit();
+        self.datas.deinit();
     }
 };
 
 pub const ModuleInstance = struct {
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     stack: Stack,
     store: Store,
     module_def: *const ModuleDefinition,
 
-    pub fn init(module_def: *const ModuleDefinition, imports: *PackageImports, allocator: *std.mem.Allocator) !ModuleInstance {
+    pub fn init(module_def: *const ModuleDefinition, imports: *PackageImports, allocator: std.mem.Allocator) !ModuleInstance {
         return ModuleInstance{
             .allocator = allocator,
             .stack = Stack.init(allocator),
@@ -1559,7 +1650,10 @@ pub const ModuleInstance = struct {
                     try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
                     try stream.seekTo(func.offset_into_encoded_bytecode);
                 },
-                Opcode.Call_Indirect => {},
+                Opcode.Call_Indirect => {
+                    // var type_index = try std.leb.readULEB128(u32, reader);
+                    // var table_index = try std.leb.readULEB128(u32, reader);                    
+                },
                 Opcode.Drop => {
                     _ = try self.stack.popValue();
                 },
@@ -1621,8 +1715,45 @@ pub const ModuleInstance = struct {
                 Opcode.I32_Store => {},
                 Opcode.I32_Store8 => {},
                 Opcode.I32_Store16 => {},
-                Opcode.Memory_Size => {},
-                Opcode.Memory_Grow => {},
+                Opcode.Memory_Size => {
+                    var immediate = try reader.readByte();
+                    if (immediate != 0x00) {
+                        return ModuleDecodeError.InvalidBytecode;
+                    }
+
+                    const memory_index:usize = 0;
+
+                    if (self.store.memories.items.len <= memory_index) {
+                        return InterpreterError.MemoryInvalidIndex;
+                    }
+
+                    const num_pages: i32 = @intCast(i32, self.store.memories.items[memory_index].limits.min);
+
+                    try self.stack.pushI32(num_pages);
+                },
+                Opcode.Memory_Grow => {
+                    var immediate = try reader.readByte();
+                    if (immediate != 0x00) {
+                        return ModuleDecodeError.InvalidBytecode;
+                    }
+                    
+                    const memory_index: usize = 0;
+
+                    if (self.store.memories.items.len <= memory_index) {
+                        return InterpreterError.MemoryInvalidIndex;
+                    }
+
+                    var memory_instance: *MemoryInstance = &self.store.memories.items[memory_index];
+
+                    const old_num_pages: i32 = @intCast(i32, memory_instance.limits.min);
+                    const num_pages: i32 = try self.stack.popI32();
+
+                    if (num_pages >= 0 and memory_instance.grow(@intCast(usize, num_pages))) {
+                        try self.stack.pushI32(old_num_pages);
+                    } else {
+                        try self.stack.pushI32(-1);
+                    }
+                },
                 Opcode.I32_Const => {
                     var v: i32 = try std.leb.readILEB128(i32, reader);
                     try self.stack.pushI32(v);

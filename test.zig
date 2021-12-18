@@ -84,7 +84,7 @@ fn error_from_text(text: []const u8) anyerror {
     unreachable;
 }
 
-fn parseCommands(json_path: []const u8, allocator: *std.mem.Allocator) !std.ArrayList(Command) {
+fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.ArrayList(Command) {
     // print("json_path: {s}\n", .{json_path});
     var json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
     var parser = std.json.Parser.init(allocator, false);
@@ -100,7 +100,7 @@ fn parseCommands(json_path: []const u8, allocator: *std.mem.Allocator) !std.Arra
 
         if (strcmp("module", json_command_type.String)) {
             var fallback = json_command.Object.get("filename").?;
-            fallback_module = try std.mem.dupe(allocator, u8, fallback.String);
+            fallback_module = try allocator.dupe(u8, fallback.String);
         } else if (strcmp("assert_return", json_command_type.String)) {
             const json_action = json_command.Object.get("action").?;
             const json_field = json_action.Object.get("field").?;
@@ -131,7 +131,7 @@ fn parseCommands(json_path: []const u8, allocator: *std.mem.Allocator) !std.Arra
 
             var command = Command{ .AssertReturn = CommandAssertReturn{
                 .module = fallback_module,
-                .field = try std.mem.dupe(allocator, u8, json_field.String),
+                .field = try allocator.dupe(u8, json_field.String),
                 .args = args,
                 .expected_returns = expected_returns_or_null,
                 .expected_error = expected_error,
@@ -164,41 +164,60 @@ fn parseCommands(json_path: []const u8, allocator: *std.mem.Allocator) !std.Arra
     return commands;
 }
 
+const Module = struct {
+    def: wasm.ModuleDefinition,
+    inst: wasm.ModuleInstance,
+};
+
 fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
     var did_fail_any_test: bool = false;
 
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_commands.deinit();
 
-    var commands: std.ArrayList(Command) = try parseCommands(suite_path, &arena_commands.allocator);
+    var commands: std.ArrayList(Command) = try parseCommands(suite_path, arena_commands.child_allocator);
 
     const suite_dir = std.fs.path.dirname(suite_path).?;
+
+    var name_to_module = std.StringHashMap(Module).init(std.testing.allocator);
+    defer name_to_module.deinit();
 
     for (commands.items) |*command| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        var cwd = std.fs.cwd();
         var module_name = command.getModule();
-        var module_path = try std.fs.path.join(&arena.allocator, &[_][]const u8{ suite_dir, module_name });
+        var module_or_null: ?*Module = name_to_module.getPtr(module_name);
+
+        if (module_or_null == null) {
+            var module_path = try std.fs.path.join(arena_commands.child_allocator, &[_][]const u8{ suite_dir, module_name });
+            var cwd = std.fs.cwd();
+            var module_data = try cwd.readFileAlloc(arena_commands.child_allocator, module_path, 1024 * 1024 * 8);
+            // wasm.printBytecode("module data", module_data);
+
+            var imports = wasm.PackageImports{
+                .imports = std.ArrayList(wasm.ModuleImports).init(arena_commands.child_allocator),
+            };
+            defer imports.imports.deinit();
+
+            var def = try wasm.ModuleDefinition.init(module_data, arena_commands.child_allocator);
+            var inst = try wasm.ModuleInstance.init(&def, &imports, arena_commands.child_allocator);
+
+            var module = Module{
+                .def = def,
+                .inst = inst,
+            };
+            var entry = try name_to_module.getOrPutValue(module_name, module);
+            module_or_null = entry.value_ptr;
+        }
 
         // print("module_path: {s}\n", .{module_path});
-
-        var imports = wasm.PackageImports{
-            .imports = std.ArrayList(wasm.ModuleImports).init(&arena.allocator),
-        };
-        defer imports.imports.deinit();
-
-        var module_data = try cwd.readFileAlloc(&arena.allocator, module_path, 1024 * 1024 * 8);
-        // wasm.printBytecode("module data", module_data);
-        var module_def = try wasm.ModuleDefinition.init(module_data, &arena.allocator);
-        var module_inst = try wasm.ModuleInstance.init(&module_def, &imports, &arena.allocator);
 
         switch (command.*) {
             .AssertReturn => |c| {
                 if (test_filter_or_null) |filter| {
                     if (strcmp(filter, c.field) == false) {
-                        log_verbose("AssertReturn: skipping {s}:{s}\n", .{ module_path, c.field });
+                        log_verbose("AssertReturn: skipping {s}:{s}\n", .{ module_name, c.field });
                         continue;
                     }
                 }
@@ -207,17 +226,18 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..num_expected_returns];
 
-                // try module_inst.invoke(c.field, c.args.items, returns);
                 var invoke_succeeded = true;
-                module_inst.invoke(c.field, c.args.items, returns) catch |e| {
+                var module = module_or_null.?;
+                // try module.inst.invoke(c.field, c.args.items, returns);
+                module.inst.invoke(c.field, c.args.items, returns) catch |e| {
                     if (c.expected_error) |expected| {
                         if (expected != e) {
-                            print("AssertReturn: {s}:{s}({s})\n", .{ module_path, c.field, c.args.items });
+                            print("AssertReturn: {s}:{s}({s})\n", .{ module_name, c.field, c.args.items });
                             print("Fail with error. Expected {}, Actual: {}\n", .{ expected, e });
                             invoke_succeeded = false;
                         }
                     } else {
-                        print("AssertReturn: {s}:{s}({s})\n", .{ module_path, c.field, c.args.items });
+                        print("AssertReturn: {s}:{s}({s})\n", .{ module_name, c.field, c.args.items });
                         print("\tFail with error: {}\n", .{e});
                         invoke_succeeded = false;
                     }
@@ -227,7 +247,7 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
                     if (c.expected_returns) |expected| {
                         for (returns) |r, i| {
                             if (std.meta.eql(r, expected.items[i]) == false) {
-                                print("AssertReturn: {s}:{s}({s})\n", .{ module_path, c.field, c.args.items });
+                                print("AssertReturn: {s}:{s}({s})\n", .{ module_name, c.field, c.args.items });
                                 print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
                                 invoke_succeeded = false;
                             }
@@ -236,7 +256,7 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
                 }
 
                 if (invoke_succeeded) {
-                    log_verbose("AssertReturn: {s}:{s}({s})\n\tSuccess!\n", .{ module_path, c.field, c.args.items });
+                    log_verbose("AssertReturn: {s}:{s}({s})\n\tSuccess!\n", .{ module_name, c.field, c.args.items });
                 }
             },
             .AssertInvalid => {
