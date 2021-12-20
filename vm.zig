@@ -35,6 +35,7 @@ const InterpreterError = error{
     MemoryInvalidIndex,
     Trap,
     UnknownFunction,
+    UnknownMemory,
 };
 
 const Opcode = enum(u8) {
@@ -783,6 +784,18 @@ const DataDefinition = struct {};
 
 const DataInstance = struct {};
 
+const MemArg = struct {
+    alignment: u32,
+    offset: u32,
+
+    fn decode(reader: anytype) !MemArg {
+        return MemArg{
+            .alignment = try std.leb.readULEB128(u32, reader),
+            .offset = try std.leb.readULEB128(u32, reader),
+        };
+    }
+};
+
 pub const ModuleDefinition = struct {
     const Imports = struct {
         functions: std.ArrayList(ImportDefinition),
@@ -891,28 +904,28 @@ pub const ModuleDefinition = struct {
                         _ = try std.leb.readULEB128(u32, reader); // table index
                     },
                     .I32_Load => {
-                        _ = try std.leb.readULEB128(u32, reader); // memarg
+                        _ = try MemArg.decode(&reader);
                     },
                     .I32_Load8_S => {
-                        _ = try std.leb.readULEB128(u32, reader);
+                        _ = try MemArg.decode(&reader);
                     },
                     .I32_Load8_U => {
-                        _ = try std.leb.readULEB128(u32, reader);
+                        _ = try MemArg.decode(&reader);
                     },
                     .I32_Load16_S => {
-                        _ = try std.leb.readULEB128(u32, reader);
+                        _ = try MemArg.decode(&reader);
                     },
                     .I32_Load16_U => {
-                        _ = try std.leb.readULEB128(u32, reader);
+                        _ = try MemArg.decode(&reader);
                     },
                     .I32_Store => {
-                        _ = try std.leb.readULEB128(u32, reader);
+                        _ = try MemArg.decode(&reader);
                     },
                     .I32_Store8 => {
-                        _ = try std.leb.readULEB128(u32, reader);
+                        _ = try MemArg.decode(&reader);
                     },
                     .I32_Store16 => {
-                        _ = try std.leb.readULEB128(u32, reader);
+                        _ = try MemArg.decode(&reader);
                     },
                     else => {},
                 };
@@ -1586,9 +1599,9 @@ pub const ModuleInstance = struct {
         return error.UnknownExport;
     }
 
-    fn executeWasm(self: *ModuleInstance, bytecode: []const u8, offset: u32) !void {
+    fn executeWasm(self: *ModuleInstance, bytecode: []const u8, bytrecode_offset: u32) !void {
         var stream = std.io.fixedBufferStream(bytecode);
-        try stream.seekTo(offset);
+        try stream.seekTo(bytrecode_offset);
         var reader = stream.reader();
 
         // TODO use a linear allocator for scratch allocations that gets reset on each loop iteration
@@ -1836,12 +1849,48 @@ pub const ModuleInstance = struct {
                     }
                     global.value = try self.stack.popValue();
                 },
-                Opcode.I32_Load => {},
+                Opcode.I32_Load => {
+                    if (self.store.memories.items.len == 0) {
+                        return error.UnknownMemory;
+                    }
+
+                    const memory: *const MemoryInstance = &self.store.memories.items[0];
+                    const arg = try MemArg.decode(reader);
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    const offset: u32 = arg.offset + @intCast(u32, offset_from_stack);
+
+                    if (memory.mem.len <= offset) {
+                        try trap();
+                    }
+
+                    const mem = memory.mem[offset .. offset + 4];
+
+                    const value = std.mem.readIntSliceLittle(i32, mem);
+                    try self.stack.pushI32(value);
+                },
                 Opcode.I32_Load8_S => {},
                 Opcode.I32_Load8_U => {},
                 Opcode.I32_Load16_S => {},
                 Opcode.I32_Load16_U => {},
-                Opcode.I32_Store => {},
+                Opcode.I32_Store => {
+                    if (self.store.memories.items.len == 0) {
+                        return error.UnknownMemory;
+                    }
+
+                    const memory: *const MemoryInstance = &self.store.memories.items[0];
+                    const arg = try MemArg.decode(reader);
+                    const value: i32 = try self.stack.popI32();
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    const offset: u32 = arg.offset + @intCast(u32, offset_from_stack);
+
+                    if (memory.mem.len <= offset) {
+                        try trap();
+                    }
+
+                    const mem = memory.mem[offset .. offset + 4];
+
+                    std.mem.writeIntSliceLittle(i32, mem, value);
+                },
                 Opcode.I32_Store8 => {},
                 Opcode.I32_Store16 => {},
                 Opcode.Memory_Size => {
