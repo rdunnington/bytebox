@@ -1,41 +1,43 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ModuleDecodeError = error{
-    UnsupportedWasmVersion,
-    InvalidMagicSignature,
-    InvalidValType,
-    InvalidBytecode,
-    InvalidExport,
-    InvalidGlobalInit,
-    InvalidLabel,
-    InvalidConstantExpression,
-    InvalidElement,
-    OneTableAllowed,
-    TableMaxExceeded,
-    OneMemoryAllowed,
-    MemoryMaxPagesExceeded,
-    MemoryInvalidMaxLimit,
-    UnknownTable,
-    UnknownType,
+const AssertError = error{
+    AssertUnsupportedWasmVersion,
+    AssertInvalidMagicSignature,
+    AssertInvalidValType,
+    AssertInvalidBytecode,
+    AssertInvalidExport,
+    AssertInvalidGlobalInit,
+    AssertInvalidLabel,
+    AssertInvalidConstantExpression,
+    AssertInvalidElement,
+    AssertOneTableAllowed,
+    AssertTableMaxExceeded,
+    AssertOneMemoryAllowed,
+    AssertMemoryMaxPagesExceeded,
+    AssertMemoryInvalidMaxLimit,
+    AssertUnknownTable,
+    AssertUnknownType,
+    AssertUnreachable,
+    AssertIncompleteInstruction,
+    AssertUnknownInstruction,
+    AssertTypeMismatch,
+    AssertUnknownExport,
+    AssertAttemptToSetImmutable,
+    AssertMissingLabel,
+    AssertMissingCallFrame,
+    AssertLabelMismatch,
+    AssertInvalidFunction,
+    AssertMemoryMaxReached,
+    AssertMemoryInvalidIndex,
+    AssertUnknownFunction,
+    AssertUnknownMemory,
 };
 
-const InterpreterError = error{
-    Unreachable,
-    IncompleteInstruction,
-    UnknownInstruction,
-    TypeMismatch,
-    UnknownExport,
-    AttemptToSetImmutable,
-    MissingLabel,
-    MissingCallFrame,
-    LabelMismatch,
-    InvalidFunction,
-    MemoryMaxReached,
-    MemoryInvalidIndex,
-    Trap,
-    UnknownFunction,
-    UnknownMemory,
+const TrapError = error{
+    TrapDivisionByZero,
+    TrapIntegerOverflow,
+    TrapUnknown,
 };
 
 const Opcode = enum(u8) {
@@ -151,7 +153,7 @@ const ValType = enum(u8) {
             0x70 => .FuncRef,
             0x6F => .ExternRef,
             else => {
-                return ModuleDecodeError.InvalidValType;
+                return error.AssertInvalidValType;
             },
         };
     }
@@ -200,7 +202,7 @@ pub const Val = union(ValType) {
             else => unreachable,
         }
 
-        return error.TypeMismatch;
+        return error.AssertTypeMismatch;
     }
 
     fn isRefType(v: Val) bool {
@@ -288,8 +290,8 @@ const Stack = struct {
         var item = try self.top();
         switch (item.*) {
             .Val => |v| return v,
-            .Label => return error.TypeMismatch,
-            .Frame => return error.TypeMismatch,
+            .Label => return error.AssertTypeMismatch,
+            .Frame => return error.AssertTypeMismatch,
         }
     }
 
@@ -305,8 +307,8 @@ const Stack = struct {
         // std.debug.print("\tpop value: {}\n", .{item});
         switch (item) {
             .Val => |v| return v,
-            .Label => return error.TypeMismatch,
-            .Frame => return error.TypeMismatch,
+            .Label => return error.AssertTypeMismatch,
+            .Frame => return error.AssertTypeMismatch,
         }
     }
 
@@ -329,9 +331,9 @@ const Stack = struct {
         // std.debug.print(">> pop label: {}\n", .{self.next_label_id});
         var item = try self.pop();
         var label = switch (item) {
-            .Val => return error.TypeMismatch,
+            .Val => return error.AssertTypeMismatch,
             .Label => |label| label,
-            .Frame => return error.TypeMismatch,
+            .Frame => return error.AssertTypeMismatch,
         };
 
         self.last_label_index = label.last_label_index;
@@ -346,7 +348,7 @@ const Stack = struct {
 
     fn findLabel(self: *Self, id: u32) !*const Label {
         if (self.last_label_index < 0) {
-            return error.InvalidLabel;
+            return error.AssertInvalidLabel;
         }
 
         var label_index = self.last_label_index;
@@ -360,7 +362,7 @@ const Stack = struct {
                     } else {
                         label_index = label.last_label_index;
                         if (label_index == -1) {
-                            return error.InvalidLabel;
+                            return error.AssertInvalidLabel;
                         }
                     }
                 },
@@ -385,8 +387,8 @@ const Stack = struct {
     fn popFrame(self: *Self) !void {
         var item = try self.pop();
         switch (item) {
-            .Val => return error.TypeMismatch,
-            .Label => return error.TypeMismatch,
+            .Val => return error.AssertTypeMismatch,
+            .Label => return error.AssertTypeMismatch,
             .Frame => |*frame| {
                 frame.locals.deinit();
             },
@@ -420,14 +422,14 @@ const Stack = struct {
             item_index -= 1;
         }
 
-        return error.MissingCallFrame;
+        return error.AssertMissingCallFrame;
     }
 
     fn popI32(self: *Self) !i32 {
         var val: Val = try self.popValue();
         switch (val) {
             ValType.I32 => |value| return value,
-            else => return error.TypeMismatch,
+            else => return error.AssertTypeMismatch,
         }
     }
 
@@ -456,7 +458,7 @@ fn readBlockType(stream: *BytecodeBufferStream) !BlockTypeValue {
             stream.pos -= 1;
             var index_33bit = try std.leb.readILEB128(i33, reader);
             if (index_33bit < 0) {
-                return error.InvalidBytecode;
+                return error.AssertInvalidBytecode;
             }
             var index: u32 = @intCast(u32, index_33bit);
             return BlockTypeValue{ .TypeIndex = index };
@@ -489,7 +491,7 @@ const ConstantExpression = struct {
 
         const end = @intToEnum(Opcode, try reader.readByte());
         if (end != .End) {
-            return ModuleDecodeError.InvalidConstantExpression;
+            return error.AssertInvalidConstantExpression;
         }
 
         return ConstantExpression{
@@ -642,7 +644,7 @@ const TableInstance = struct {
     fn ensureMinSize(table: *TableInstance, size: usize) !void {
         if (table.limits.max) |max| {
             if (size > max) {
-                return error.TableMaxExceeded;
+                return error.AssertTableMaxExceeded;
             }
         }
 
@@ -684,7 +686,7 @@ const TableInstance = struct {
         while (index < elem_range.len) : (index += 1) {
             var val: Val = try elem_range[index].resolve();
             if (std.meta.activeTag(val) != table.reftype) {
-                return InterpreterError.TypeMismatch;
+                return error.AssertTypeMismatch;
             }
 
             table_range[index] = val;
@@ -942,11 +944,11 @@ pub const ModuleDefinition = struct {
         {
             const magic = try reader.readIntBig(u32);
             if (magic != 0x0061736D) {
-                return error.InvalidMagicSignature;
+                return error.AssertInvalidMagicSignature;
             }
             const version = try reader.readIntLittle(u32);
             if (version != 1) {
-                return error.UnsupportedWasmVersion;
+                return error.AssertUnsupportedWasmVersion;
             }
         }
 
@@ -966,7 +968,7 @@ pub const ModuleDefinition = struct {
                     while (types_index < num_types) : (types_index += 1) {
                         const sentinel = try reader.readByte();
                         if (sentinel != k_function_type_sentinel_byte) {
-                            return error.InvalidBytecode;
+                            return error.AssertInvalidBytecode;
                         }
 
                         const num_params = try std.leb.readULEB128(u32, reader);
@@ -1015,7 +1017,7 @@ pub const ModuleDefinition = struct {
                 .Table => {
                     const num_tables = try std.leb.readULEB128(u32, reader);
                     if (num_tables > 1) {
-                        return error.OneTableAllowed;
+                        return error.AssertOneTableAllowed;
                     }
 
                     try module.tables.ensureTotalCapacity(num_tables);
@@ -1040,7 +1042,7 @@ pub const ModuleDefinition = struct {
                     const num_memories = try std.leb.readULEB128(u32, reader);
 
                     if (num_memories > 1) {
-                        return ModuleDecodeError.OneMemoryAllowed;
+                        return error.AssertOneMemoryAllowed;
                     }
 
                     try module.memories.ensureTotalCapacity(num_memories);
@@ -1050,10 +1052,10 @@ pub const ModuleDefinition = struct {
                         var limits = try Limits.decode(&reader);
                         if (limits.max) |max| {
                             if (max < limits.min) {
-                                return ModuleDecodeError.MemoryInvalidMaxLimit;
+                                return error.AssertMemoryInvalidMaxLimit;
                             }
                             if (max > MemoryInstance.k_max_pages) {
-                                return ModuleDecodeError.MemoryMaxPagesExceeded;
+                                return error.AssertMemoryMaxPagesExceeded;
                             }
                         }
 
@@ -1101,25 +1103,25 @@ pub const ModuleDefinition = struct {
                         switch (exportType) {
                             .Function => {
                                 if (item_index >= module.functions.items.len) {
-                                    return error.InvalidExport;
+                                    return error.AssertInvalidExport;
                                 }
                                 try module.exports.functions.append(def);
                             },
                             .Table => {
                                 if (item_index >= module.tables.items.len) {
-                                    return error.InvalidExport;
+                                    return error.AssertInvalidExport;
                                 }
                                 try module.exports.tables.append(def);
                             },
                             .Memory => {
                                 if (item_index >= module.memories.items.len) {
-                                    return error.InvalidExport;
+                                    return error.AssertInvalidExport;
                                 }
                                 try module.exports.memories.append(def);
                             },
                             .Global => {
                                 if (item_index >= module.globals.items.len) {
-                                    return error.InvalidExport;
+                                    return error.AssertInvalidExport;
                                 }
                                 try module.exports.globals.append(def);
                             },
@@ -1305,7 +1307,7 @@ pub const ModuleDefinition = struct {
                         if (code_actual_size != code_size) {
                             // std.debug.print("expected code_size: {}, code_actual_size: {}\n", .{code_size, code_actual_size});
                             // std.debug.print("stream.pos: {}, code_begin_pos: {}, code_begin_pos + code_size: {}\n", .{stream.pos, code_begin_pos, code_begin_pos + code_size});
-                            return error.InvalidBytecode;
+                            return error.AssertInvalidBytecode;
                         }
 
                         code_index += 1;
@@ -1474,7 +1476,7 @@ pub const Store = struct {
         // iterate over elements and init the ones needed
         for (module_def.elements.items) |*def_elem| {
             if (store.tables.items.len <= def_elem.table_index) {
-                return error.UnknownTable;
+                return error.AssertUnknownTable;
             }
 
             var table: *TableInstance = &store.tables.items[def_elem.table_index];
@@ -1554,12 +1556,12 @@ pub const ModuleInstance = struct {
                 if (params.len != func_type_params.len) {
                     // std.debug.print("params.len: {}, func_type_params.len: {}\n", .{params.len, func_type_params.len});
                     // std.debug.print("params: {s}, func_type_params: {s}\n", .{params, func_type_params});
-                    return error.TypeMismatch;
+                    return error.AssertTypeMismatch;
                 }
 
                 for (params) |param, i| {
                     if (std.meta.activeTag(param) != func_type_params[i]) {
-                        return error.TypeMismatch;
+                        return error.AssertTypeMismatch;
                     }
                 }
 
@@ -1570,7 +1572,7 @@ pub const ModuleInstance = struct {
                 }
 
                 // TODO move function continuation data into FunctionDefinition
-                var function_continuation = self.module_def.function_continuations.get(func.offset_into_encoded_bytecode) orelse return error.InvalidFunction;
+                var function_continuation = self.module_def.function_continuations.get(func.offset_into_encoded_bytecode) orelse return error.AssertInvalidFunction;
 
                 try self.stack.pushFrame(CallFrame{
                     .func = &func,
@@ -1581,7 +1583,7 @@ pub const ModuleInstance = struct {
 
                 if (self.stack.size() != returns.len) {
                     std.debug.print("stack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
-                    return error.TypeMismatch;
+                    return error.AssertTypeMismatch;
                 }
 
                 if (returns.len > 0) {
@@ -1596,7 +1598,7 @@ pub const ModuleInstance = struct {
             }
         }
 
-        return error.UnknownExport;
+        return error.AssertUnknownExport;
     }
 
     fn executeWasm(self: *ModuleInstance, bytecode: []const u8, bytrecode_offset: u32) !void {
@@ -1614,7 +1616,7 @@ pub const ModuleInstance = struct {
 
             switch (opcode) {
                 Opcode.Unreachable => {
-                    return error.Unreachable;
+                    return error.AssertUnreachable;
                 },
                 Opcode.Noop => {},
                 Opcode.Block => {
@@ -1632,13 +1634,13 @@ pub const ModuleInstance = struct {
                         try self.enterBlock(&stream, else_offset);
                         try stream.seekTo(else_offset + 1);
                     } else {
-                        const continuation = self.module_def.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
+                        const continuation = self.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
                         try stream.seekTo(continuation);
                     }
                 },
                 Opcode.Else => {
                     // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
-                    const end_offset = self.module_def.label_continuations.get(instruction_offset) orelse return error.InvalidLabel;
+                    const end_offset = self.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
                     try stream.seekTo(end_offset);
                 },
                 Opcode.End => {
@@ -1712,7 +1714,7 @@ pub const ModuleInstance = struct {
                     while (returns.items.len < returnTypes.len) {
                         var value = try self.stack.popValue();
                         if (std.meta.activeTag(value) != returnTypes[returns.items.len]) {
-                            return error.TypeMismatch;
+                            return error.AssertTypeMismatch;
                         }
                         try returns.append(value);
                     }
@@ -1752,7 +1754,7 @@ pub const ModuleInstance = struct {
                 Opcode.Call => {
                     const func_index = try std.leb.readULEB128(u32, reader);
                     if (self.store.functions.items.len <= func_index) {
-                        return InterpreterError.UnknownFunction;
+                        return error.AssertUnknownFunction;
                     }
 
                     const func: *const FunctionInstance = &self.store.functions.items[@intCast(usize, func_index)];
@@ -1763,10 +1765,10 @@ pub const ModuleInstance = struct {
                     var table_index = try std.leb.readULEB128(u32, reader);
 
                     if (self.module_def.types.items.len <= type_index) {
-                        return ModuleDecodeError.UnknownType;
+                        return error.AssertUnknownType;
                     }
                     if (self.store.tables.items.len <= table_index) {
-                        return ModuleDecodeError.UnknownTable;
+                        return error.AssertUnknownTable;
                     }
 
                     var table: *TableInstance = &self.store.tables.items[table_index];
@@ -1774,24 +1776,24 @@ pub const ModuleInstance = struct {
                     const ref_index = try self.stack.popI32();
                     if (table.refs.items.len <= ref_index or ref_index < 0) {
                         std.debug.print("trap1\n", .{});
-                        try trap();
+                        return error.TrapUnknown;
                     }
 
                     const ref: Val = table.refs.items[@intCast(usize, ref_index)];
                     if (ref.isNull()) {
                         std.debug.print("trap2\n", .{});
-                        try trap();
+                        return error.TrapUnknown;
                     }
 
                     const func_index = ref.FuncRef;
                     if (self.store.functions.items.len <= func_index) {
-                        return InterpreterError.UnknownFunction;
+                        return error.AssertUnknownFunction;
                     }
 
                     const func: *const FunctionInstance = &self.store.functions.items[func_index];
                     if (func.type_def_index != type_index) {
                         std.debug.print("trap3\n", .{});
-                        try trap();
+                        return error.TrapUnknown;
                     }
 
                     try self.call(func, &stream);
@@ -1806,9 +1808,9 @@ pub const ModuleInstance = struct {
 
                     if (builtin.mode == .Debug) {
                         if (std.meta.activeTag(boolean) != ValType.I32) {
-                            return error.TypeMismatch;
+                            return error.AssertTypeMismatch;
                         } else if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
-                            return error.TypeMismatch;
+                            return error.AssertTypeMismatch;
                         }
                     }
 
@@ -1845,13 +1847,13 @@ pub const ModuleInstance = struct {
                     var global_index = try std.leb.readULEB128(u32, reader);
                     var global = &self.store.globals.items[global_index];
                     if (global.mut == GlobalMut.Immutable) {
-                        return error.AttemptToSetImmutable;
+                        return error.AssertAttemptToSetImmutable;
                     }
                     global.value = try self.stack.popValue();
                 },
                 Opcode.I32_Load => {
                     if (self.store.memories.items.len == 0) {
-                        return error.UnknownMemory;
+                        return error.AssertUnknownMemory;
                     }
 
                     const memory: *const MemoryInstance = &self.store.memories.items[0];
@@ -1860,7 +1862,7 @@ pub const ModuleInstance = struct {
                     const offset: u32 = arg.offset + @intCast(u32, offset_from_stack);
 
                     if (memory.mem.len <= offset) {
-                        try trap();
+                        return error.TrapUnknown;
                     }
 
                     const mem = memory.mem[offset .. offset + 4];
@@ -1874,7 +1876,7 @@ pub const ModuleInstance = struct {
                 Opcode.I32_Load16_U => {},
                 Opcode.I32_Store => {
                     if (self.store.memories.items.len == 0) {
-                        return error.UnknownMemory;
+                        return error.AssertUnknownMemory;
                     }
 
                     const memory: *const MemoryInstance = &self.store.memories.items[0];
@@ -1884,7 +1886,7 @@ pub const ModuleInstance = struct {
                     const offset: u32 = arg.offset + @intCast(u32, offset_from_stack);
 
                     if (memory.mem.len <= offset) {
-                        try trap();
+                        return error.TrapUnknown;
                     }
 
                     const mem = memory.mem[offset .. offset + 4];
@@ -1896,13 +1898,13 @@ pub const ModuleInstance = struct {
                 Opcode.Memory_Size => {
                     var immediate = try reader.readByte();
                     if (immediate != 0x00) {
-                        return ModuleDecodeError.InvalidBytecode;
+                        return error.AssertInvalidBytecode;
                     }
 
                     const memory_index: usize = 0;
 
                     if (self.store.memories.items.len <= memory_index) {
-                        return InterpreterError.MemoryInvalidIndex;
+                        return error.AssertMemoryInvalidIndex;
                     }
 
                     const num_pages: i32 = @intCast(i32, self.store.memories.items[memory_index].limits.min);
@@ -1912,13 +1914,13 @@ pub const ModuleInstance = struct {
                 Opcode.Memory_Grow => {
                     var immediate = try reader.readByte();
                     if (immediate != 0x00) {
-                        return ModuleDecodeError.InvalidBytecode;
+                        return error.AssertInvalidBytecode;
                     }
 
                     const memory_index: usize = 0;
 
                     if (self.store.memories.items.len <= memory_index) {
-                        return InterpreterError.MemoryInvalidIndex;
+                        return error.AssertMemoryInvalidIndex;
                     }
 
                     var memory_instance: *MemoryInstance = &self.store.memories.items[memory_index];
@@ -2037,13 +2039,29 @@ pub const ModuleInstance = struct {
                 Opcode.I32_Div_S => {
                     var v2: i32 = try self.stack.popI32();
                     var v1: i32 = try self.stack.popI32();
-                    var value = try std.math.divTrunc(i32, v1, v2);
+                    var value = std.math.divTrunc(i32, v1, v2) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapDivisionByZero;
+                        } else if (e == error.Overflow) {
+                            return error.TrapIntegerOverflow;
+                        } else {
+                            return e;
+                        }
+                    };
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Div_U => {
                     var v2: u32 = @bitCast(u32, try self.stack.popI32());
                     var v1: u32 = @bitCast(u32, try self.stack.popI32());
-                    var value_unsigned = try std.math.divFloor(u32, v1, v2);
+                    var value_unsigned = std.math.divFloor(u32, v1, v2) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapDivisionByZero;
+                        } else if (e == error.Overflow) {
+                            return error.TrapIntegerOverflow;
+                        } else {
+                            return e;
+                        }
+                    };
                     var value = @bitCast(i32, value_unsigned);
                     try self.stack.pushI32(value);
                 },
@@ -2051,13 +2069,26 @@ pub const ModuleInstance = struct {
                     var v2: i32 = try self.stack.popI32();
                     var v1: i32 = try self.stack.popI32();
                     var denom = try std.math.absInt(v2);
-                    var value = try std.math.rem(i32, v1, denom);
+                    var value = std.math.rem(i32, v1, denom) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapDivisionByZero;
+                        } else {
+                            return e;
+                        }
+                    };
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_Rem_U => {
                     var v2: u32 = @bitCast(u32, try self.stack.popI32());
                     var v1: u32 = @bitCast(u32, try self.stack.popI32());
-                    var value = @bitCast(i32, v1 % v2);
+                    var value_unsigned = std.math.rem(u32, v1, v2) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapDivisionByZero;
+                        } else {
+                            return e;
+                        }
+                    };
+                    var value = @bitCast(i32, value_unsigned);
                     try self.stack.pushI32(value);
                 },
                 Opcode.I32_And => {
@@ -2143,7 +2174,7 @@ pub const ModuleInstance = struct {
             param_index -= 1;
             var value = try self.stack.popValue();
             if (std.meta.activeTag(value) != param_types[param_index]) {
-                return error.TypeMismatch;
+                return error.AssertTypeMismatch;
             }
             frame.locals.items[param_index] = value;
         }
@@ -2158,7 +2189,7 @@ pub const ModuleInstance = struct {
     fn enterBlock(self: *ModuleInstance, stream: *BytecodeBufferStream, label_offset: u32) !void {
         var blocktype = try readBlockType(stream);
 
-        const continuation = self.module_def.label_continuations.get(label_offset) orelse return error.InvalidLabel;
+        const continuation = self.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
         try self.stack.pushLabel(blocktype, continuation);
     }
 
@@ -2166,7 +2197,7 @@ pub const ModuleInstance = struct {
         // std.debug.print("branching to label {}\n", .{label_id});
         const label: *const Label = try self.stack.findLabel(label_id);
         if (label.last_label_index == -1) {
-            return error.LabelMismatch; // can't branch to the end of functions - that's the return opcode's job
+            return error.AssertLabelMismatch; // can't branch to the end of functions - that's the return opcode's job
         }
         const label_stack_id = label.id;
         const continuation = label.continuation;
@@ -2185,7 +2216,7 @@ pub const ModuleInstance = struct {
                     _ = try self.stack.popValue();
                 },
                 .Frame => {
-                    return error.InvalidLabel;
+                    return error.AssertInvalidLabel;
                 },
                 .Label => {
                     const popped_label: Label = try self.stack.popLabel();
@@ -2236,7 +2267,7 @@ pub const ModuleInstance = struct {
             var item = try stack.popValue();
             if (types[returns.items.len] != std.meta.activeTag(item)) {
                 // std.debug.print("popValues mismatch: required: {s}, got {}\n", .{types, item});
-                return error.TypeMismatch;
+                return error.AssertTypeMismatch;
             }
             try returns.append(item);
         }
@@ -2249,9 +2280,5 @@ pub const ModuleInstance = struct {
             var item = returns[index];
             try stack.pushValue(item);
         }
-    }
-
-    fn trap() !void {
-        return InterpreterError.Trap;
     }
 };
