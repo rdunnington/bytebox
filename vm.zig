@@ -38,6 +38,7 @@ const TrapError = error{
     TrapDivisionByZero,
     TrapIntegerOverflow,
     TrapUnknown,
+    TrapIndirectCallTypeMismatch,
 };
 
 const Opcode = enum(u8) {
@@ -1775,13 +1776,11 @@ pub const ModuleInstance = struct {
 
                     const ref_index = try self.stack.popI32();
                     if (table.refs.items.len <= ref_index or ref_index < 0) {
-                        std.debug.print("trap1\n", .{});
                         return error.TrapUnknown;
                     }
 
                     const ref: Val = table.refs.items[@intCast(usize, ref_index)];
                     if (ref.isNull()) {
-                        std.debug.print("trap2\n", .{});
                         return error.TrapUnknown;
                     }
 
@@ -1792,8 +1791,7 @@ pub const ModuleInstance = struct {
 
                     const func: *const FunctionInstance = &self.store.functions.items[func_index];
                     if (func.type_def_index != type_index) {
-                        std.debug.print("trap3\n", .{});
-                        return error.TrapUnknown;
+                        return error.TrapIndirectCallTypeMismatch;
                     }
 
                     try self.call(func, &stream);
