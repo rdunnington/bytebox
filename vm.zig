@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const AssertError = error{
+pub const AssertError = error{
     AssertUnsupportedWasmVersion,
     AssertInvalidMagicSignature,
     AssertInvalidValType,
@@ -34,8 +34,8 @@ const AssertError = error{
     AssertUnknownMemory,
 };
 
-const TrapError = error{
-    TrapDivisionByZero,
+pub const TrapError = error{
+    TrapIntegerDivisionByZero,
     TrapIntegerOverflow,
     TrapUnknown,
     TrapIndirectCallTypeMismatch,
@@ -2039,7 +2039,7 @@ pub const ModuleInstance = struct {
                     var v1: i32 = try self.stack.popI32();
                     var value = std.math.divTrunc(i32, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
-                            return error.TrapDivisionByZero;
+                            return error.TrapIntegerDivisionByZero;
                         } else if (e == error.Overflow) {
                             return error.TrapIntegerOverflow;
                         } else {
@@ -2053,7 +2053,7 @@ pub const ModuleInstance = struct {
                     var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var value_unsigned = std.math.divFloor(u32, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
-                            return error.TrapDivisionByZero;
+                            return error.TrapIntegerDivisionByZero;
                         } else if (e == error.Overflow) {
                             return error.TrapIntegerOverflow;
                         } else {
@@ -2069,7 +2069,7 @@ pub const ModuleInstance = struct {
                     var denom = try std.math.absInt(v2);
                     var value = std.math.rem(i32, v1, denom) catch |e| {
                         if (e == error.DivisionByZero) {
-                            return error.TrapDivisionByZero;
+                            return error.TrapIntegerDivisionByZero;
                         } else {
                             return e;
                         }
@@ -2081,7 +2081,7 @@ pub const ModuleInstance = struct {
                     var v1: u32 = @bitCast(u32, try self.stack.popI32());
                     var value_unsigned = std.math.rem(u32, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
-                            return error.TrapDivisionByZero;
+                            return error.TrapIntegerDivisionByZero;
                         } else {
                             return e;
                         }
