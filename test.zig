@@ -4,10 +4,10 @@ const wasm = @import("vm.zig");
 const Val = wasm.Val;
 const print = std.debug.print;
 
-var verbose_logging = false;
+var g_verbose_logging = false;
 
 fn log_verbose(comptime msg: []const u8, params: anytype) void {
-    if (verbose_logging) {
+    if (g_verbose_logging) {
         print(msg, params);
     }
 }
@@ -18,30 +18,57 @@ const TestSuiteError = error{
 
 const CommandType = enum {
     AssertReturn,
-    AssertInvalid,
+    AssertTrap,
 };
 
-const CommandAssertReturn = struct {
+const Invocation = struct {
     module: []const u8,
     field: []const u8,
     args: std.ArrayList(Val),
-    expected_returns: ?std.ArrayList(Val),
-    expected_error: ?anyerror,
+
+    fn parse(json_action: *std.json.Value, fallback_module: []const u8, allocator: std.mem.Allocator) !Invocation {
+        const json_field = json_action.Object.getPtr("field").?;
+
+        const json_args_or_null = json_action.Object.getPtr("args");
+        var args = std.ArrayList(Val).init(allocator);
+        if (json_args_or_null) |json_args| {
+            for (json_args.Array.items) |item| {
+                var val: Val = try parseVal(item.Object);
+                try args.append(val);
+            }
+        }
+
+        return Invocation{
+            .module = fallback_module,
+            .field = try allocator.dupe(u8, json_field.String),
+            .args = args,
+        };
+    }
 };
 
-const CommandAssertInvalid = struct {
-    module: []const u8,
-    expected: []const u8,
+const CommandAssertReturn = struct {
+    invocation: Invocation,
+    expected_returns: ?std.ArrayList(Val),
 };
+
+const CommandAssertTrap = struct {
+    invocation: Invocation,
+    expected_error: []const u8,
+};
+
+// const CommandAssertInvalid = struct {
+//     invocation: Invocation,
+//     expected_error: []const u8,
+// };
 
 const Command = union(CommandType) {
     AssertReturn: CommandAssertReturn,
-    AssertInvalid: CommandAssertInvalid,
+    AssertTrap: CommandAssertTrap,
 
     fn getModule(self: @This()) []const u8 {
         return switch (self) {
-            .AssertReturn => |c| c.module,
-            .AssertInvalid => |c| c.module,
+            .AssertReturn => |c| c.invocation.module,
+            .AssertTrap => |c| c.invocation.module,
         };
     }
 };
@@ -74,14 +101,15 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     unreachable;
 }
 
-fn error_from_text(text: []const u8) anyerror {
-    if (strcmp("integer divide by zero", text)) {
-        return error.DivisionByZero;
-    } else if (strcmp("integer overflow", text)) {
-        return error.Overflow;
-    }
-
-    unreachable;
+fn error_to_text(err: anyerror) []const u8 {
+    return switch (err) {
+        wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
+        wasm.TrapError.TrapIntegerOverflow => "integer overflow",
+        else => {
+            std.debug.print("error_to_text unknown err: {}\n", .{err});
+            unreachable;
+        },
+    };
 }
 
 fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.ArrayList(Command) {
@@ -94,27 +122,20 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
     var commands = std.ArrayList(Command).init(allocator);
 
-    const json_commands = tree.root.Object.get("commands").?;
+    const json_commands = tree.root.Object.getPtr("commands").?;
     for (json_commands.Array.items) |json_command| {
-        const json_command_type = json_command.Object.get("type").?;
+        const json_command_type = json_command.Object.getPtr("type").?;
 
         if (strcmp("module", json_command_type.String)) {
-            var fallback = json_command.Object.get("filename").?;
+            var fallback = json_command.Object.getPtr("filename").?;
             fallback_module = try allocator.dupe(u8, fallback.String);
         } else if (strcmp("assert_return", json_command_type.String)) {
-            const json_action = json_command.Object.get("action").?;
-            const json_field = json_action.Object.get("field").?;
+            const json_action = json_command.Object.getPtr("action").?;
 
-            const json_args_or_null = json_action.Object.get("args");
-            var args = std.ArrayList(Val).init(allocator);
-            if (json_args_or_null) |json_args| {
-                for (json_args.Array.items) |item| {
-                    try args.append(try parseVal(item.Object));
-                }
-            }
+            var invocation = try Invocation.parse(json_action, fallback_module, allocator);
 
             var expected_returns_or_null: ?std.ArrayList(Val) = null;
-            const json_expected_or_null = json_command.Object.get("expected");
+            const json_expected_or_null = json_command.Object.getPtr("expected");
             if (json_expected_or_null) |json_expected| {
                 var expected_returns = std.ArrayList(Val).init(allocator);
                 for (json_expected.Array.items) |item| {
@@ -123,24 +144,32 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 expected_returns_or_null = expected_returns;
             }
 
-            var expected_error: ?anyerror = null;
-            const json_text_or_null = json_command.Object.get("text");
-            if (json_text_or_null) |text| {
-                expected_error = error_from_text(text.String);
-            }
-
             var command = Command{ .AssertReturn = CommandAssertReturn{
-                .module = fallback_module,
-                .field = try allocator.dupe(u8, json_field.String),
-                .args = args,
+                .invocation = invocation,
                 .expected_returns = expected_returns_or_null,
-                .expected_error = expected_error,
+            } };
+            try commands.append(command);
+        } else if (strcmp("assert_trap", json_command_type.String)) {
+            const json_action = json_command.Object.getPtr("action").?;
+
+            var invocation = try Invocation.parse(json_action, fallback_module, allocator);
+
+            const json_text = json_command.Object.getPtr("text").?;
+
+            var command = Command{ .AssertTrap = CommandAssertTrap{
+                .invocation = invocation,
+                .expected_error = try allocator.dupe(u8, json_text.String),
             } };
             try commands.append(command);
         } else if (strcmp("assert_invalid", json_command_type.String)) {
-            // TODO
             // const json_filename = json_command.Object.get("filename").?;
             // const json_expected = json_command.Object.get("text").?;
+
+            // var expected_error: ?anyerror = null;
+            // const json_text_or_null = json_command.Object.get("text");
+            // if (json_text_or_null) |text| {
+            //     expected_error = error_from_text(text.String);
+            // }
 
             // var command = Command{
             //     .AssertInvalid = CommandAssertInvalid {
@@ -149,13 +178,9 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             //     },
             // };
             // try commands.append(command);
-            // log_verbose("Skipping assert_invalid test...\n", .{});
-        } else if (strcmp("assert_trap", json_command_type.String)) {
-            log_verbose("Skipping assert_trap test...\n", .{});
-            // TODO
+            log_verbose("Skipping assert_invalid test...\n", .{});
         } else if (strcmp("assert_malformed", json_command_type.String)) {
-            log_verbose("Skipping assert_malformed test...\n", .{});
-            // TODO
+            // we will never test these since we aren't going to generate wasm from a wast
         } else {
             unreachable;
         }
@@ -169,7 +194,7 @@ const Module = struct {
     inst: wasm.ModuleInstance,
 };
 
-fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
+fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_or_null: ?[]const u8) !void {
     var did_fail_any_test: bool = false;
 
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -211,13 +236,21 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
             module_or_null = entry.value_ptr;
         }
 
+        var module = module_or_null.?;
+
         // print("module_path: {s}\n", .{module_path});
 
         switch (command.*) {
             .AssertReturn => |c| {
+                if (command_filter_or_null) |filter| {
+                    if (strcmp("assert_return", filter) == false) {
+                        continue;
+                    }
+                }
+
                 if (test_filter_or_null) |filter| {
-                    if (strcmp(filter, c.field) == false) {
-                        log_verbose("AssertReturn: skipping {s}:{s}\n", .{ module_name, c.field });
+                    if (strcmp(filter, c.invocation.field) == false) {
+                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module_name, c.invocation.field });
                         continue;
                     }
                 }
@@ -227,42 +260,67 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8) !void {
                 var returns = returns_placeholder[0..num_expected_returns];
 
                 var invoke_succeeded = true;
-                var module = module_or_null.?;
                 // try module.inst.invoke(c.field, c.args.items, returns);
-                module.inst.invoke(c.field, c.args.items, returns) catch |e| {
-                    if (c.expected_error) |expected| {
-                        if (expected != e) {
-                            print("AssertReturn: {s}:{s}({s})\n", .{ module_name, c.field, c.args.items });
-                            print("Fail with error. Expected {}, Actual: {}\n", .{ expected, e });
-                            invoke_succeeded = false;
-                        }
-                    } else {
-                        print("AssertReturn: {s}:{s}({s})\n", .{ module_name, c.field, c.args.items });
-                        print("\tFail with error: {}\n", .{e});
-                        invoke_succeeded = false;
-                    }
+                module.inst.invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
+                    print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    print("\tFail with error: {}\n", .{e});
+                    invoke_succeeded = false;
                 };
 
                 if (invoke_succeeded) {
                     if (c.expected_returns) |expected| {
                         for (returns) |r, i| {
                             if (std.meta.eql(r, expected.items[i]) == false) {
-                                print("AssertReturn: {s}:{s}({s})\n", .{ module_name, c.field, c.args.items });
+                                print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
                                 print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
                                 invoke_succeeded = false;
                             }
                         }
                     }
+
+                    log_verbose("assert_return: {s}:{s}({s})\n\tSuccess!\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                }
+            },
+            .AssertTrap => |c| {
+                if (command_filter_or_null) |filter| {
+                    if (strcmp("assert_trap", filter) == false) {
+                        continue;
+                    }
                 }
 
-                if (invoke_succeeded) {
-                    log_verbose("AssertReturn: {s}:{s}({s})\n\tSuccess!\n", .{ module_name, c.field, c.args.items });
+                var returns_placeholder: [8]Val = undefined;
+                var returns = returns_placeholder[0..];
+
+                var invoke_failed = false;
+                var invoke_failed_with_correct_trap = false;
+                var trap_string: ?[]const u8 = null;
+                module.inst.invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
+                    invoke_failed = true;
+
+                    trap_string = error_to_text(e);
+
+                    if (strcmp(trap_string.?, c.expected_error)) {
+                        invoke_failed_with_correct_trap = true;
+                    }
+                };
+
+                if (invoke_failed and invoke_failed_with_correct_trap) {
+                    log_verbose("assert_trap: {s}:{s}({s})\n\tSuccess!\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                } else {
+                    print("assert_trap: {s}:{s}({s}):\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    if (invoke_failed_with_correct_trap == false) {
+                        print("\tInvoke trapped, but got error {s} instead of expected {s}:\n", .{ trap_string.?, c.expected_error });
+                    } else {
+                        print("\tInvoke succeeded instead of trapping on expected {s}:\n", .{c.expected_error});
+                    }
                 }
+
+                // print("skipping trap\n", .{});
             },
-            .AssertInvalid => {
-                // var returns: [8]Val = undefined;
-                // try module.callFunc(c.field, c.args.items, &returns[0..c.expected.items.len]);
-            },
+            // .AssertInvalid => {
+            //     // var returns: [8]Val = undefined;
+            //     // try module.callFunc(c.field, c.args.items, &returns[0..c.expected.items.len]);
+            // },
         }
     }
 
@@ -279,6 +337,7 @@ pub fn main() !void {
 
     var suite_filter_or_null: ?[]const u8 = null;
     var test_filter_or_null: ?[]const u8 = null;
+    var command_filter_or_null: ?[]const u8 = null;
 
     var args_index: u32 = 1; // skip program name
     while (args_index < args.len) : (args_index += 1) {
@@ -291,8 +350,12 @@ pub fn main() !void {
             args_index += 1;
             test_filter_or_null = args[args_index];
             print("found test filter: {s}\n", .{test_filter_or_null.?});
+        } else if (strcmp("--command", arg)) {
+            args_index += 1;
+            command_filter_or_null = args[args_index];
+            print("found command filter: {s}\n", .{command_filter_or_null.?});
         } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
-            verbose_logging = true;
+            g_verbose_logging = true;
             print("verbose logging: on\n", .{});
         }
     }
@@ -317,6 +380,6 @@ pub fn main() !void {
         var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
-        try run(suite_path, test_filter_or_null);
+        try run(suite_path, test_filter_or_null, command_filter_or_null);
     }
 }
