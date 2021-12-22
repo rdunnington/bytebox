@@ -73,6 +73,7 @@ const Opcode = enum(u8) {
     Memory_Size = 0x3F,
     Memory_Grow = 0x40,
     I32_Const = 0x41,
+    I64_Const = 0x42,
     I32_Eqz = 0x45,
     I32_Eq = 0x46,
     I32_NE = 0x47,
@@ -84,6 +85,17 @@ const Opcode = enum(u8) {
     I32_LE_U = 0x4D,
     I32_GE_S = 0x4E,
     I32_GE_U = 0x4F,
+    I64_Eqz = 0x50,
+    I64_Eq = 0x51,
+    I64_NE = 0x52,
+    I64_LT_S = 0x53,
+    I64_LT_U = 0x54,
+    I64_GT_S = 0x55,
+    I64_GT_U = 0x56,
+    I64_LE_S = 0x57,
+    I64_LE_U = 0x58,
+    I64_GE_S = 0x59,
+    I64_GE_U = 0x5A,
     I32_Clz = 0x67,
     I32_Ctz = 0x68,
     I32_Popcnt = 0x69,
@@ -102,9 +114,29 @@ const Opcode = enum(u8) {
     I32_Shr_U = 0x76,
     I32_Rotl = 0x77,
     I32_Rotr = 0x78,
-
+    I64_Clz = 0x79,
+    I64_Ctz = 0x7A,
+    I64_Popcnt = 0x7B,
+    I64_Add = 0x7C,
+    I64_Sub = 0x7D,
+    I64_Mul = 0x7E,
+    I64_Div_S = 0x7F,
+    I64_Div_U = 0x80,
+    I64_Rem_S = 0x81,
+    I64_Rem_U = 0x82,
+    I64_And = 0x83,
+    I64_Or = 0x84,
+    I64_Xor = 0x85,
+    I64_Shl = 0x86,
+    I64_Shr_S = 0x87,
+    I64_Shr_U = 0x88,
+    I64_Rotl = 0x89,
+    I64_Rotr = 0x8A,
     I32_Extend8_S = 0xC0,
     I32_Extend16_S = 0xC1,
+    I64_Extend8_S = 0xC2,
+    I64_Extend16_S = 0xC3,
+    I64_Extend32_S = 0xC4,
 
     fn expectsEnd(opcode: Opcode) bool {
         return switch (opcode) {
@@ -413,8 +445,21 @@ const Stack = struct {
         }
     }
 
+    fn popI64(self: *Self) !i64 {
+        var val: Val = try self.popValue();
+        switch (val) {
+            ValType.I64 => |value| return value,
+            else => return error.AssertTypeMismatch,
+        }
+    }
+
     fn pushI32(self: *Self, v: i32) !void {
         var typed = Val{ .I32 = v };
+        try self.pushValue(typed);
+    }
+
+    fn pushI64(self: *Self, v: i64) !void {
+        var typed = Val{ .I64 = v };
         try self.pushValue(typed);
     }
 
@@ -442,7 +487,8 @@ const ConstantExpression = struct {
         const opcode = @intToEnum(Opcode, opcode_value);
         const val = switch (opcode) {
             .I32_Const => Val{ .I32 = try std.leb.readILEB128(i32, reader) },
-            // TODO handle i64, f32, f64, ref.null, ref.func, global.get
+            .I64_Const => Val{ .I64 = try std.leb.readULEB128(i64, reader) },
+            // TODO handle f32, f64, ref.null, ref.func, global.get
             else => unreachable,
         };
 
@@ -808,6 +854,7 @@ const Instruction = struct {
         };
 
         var byte = try reader.readByte();
+        // std.debug.print(">>> opcode byte: {}\n", .{byte});
         var opcode = @intToEnum(Opcode, byte);
         var immediate: u32 = k_invalid_immediate;
 
@@ -830,6 +877,20 @@ const Instruction = struct {
             .I32_Const => {
                 var value = try std.leb.readILEB128(i32, reader);
                 immediate = @bitCast(u32, value);
+            },
+            .I64_Const => {
+                var value: i64 = try std.leb.readILEB128(i64, reader);
+
+                for (module.code.i64_const.items) |*item, i| {
+                    if (value == item.*) {
+                        immediate = @intCast(u32, i);
+                    }
+                }
+
+                if (immediate == k_invalid_immediate) {
+                    immediate = @intCast(u32, module.code.i64_const.items.len);
+                    try module.code.i64_const.append(value);
+                }
             },
             .Block => {
                 immediate = try Helpers.decodeBlockType(reader, module);
@@ -965,6 +1026,7 @@ pub const ModuleDefinition = struct {
         block_type_values: std.ArrayList(BlockTypeValue),
         call_indirect: std.ArrayList(CallIndirectImmediates),
         branch_table: std.ArrayList(BranchTableImmediates),
+        i64_const: std.ArrayList(i64),
     };
 
     const Imports = struct {
@@ -1007,6 +1069,7 @@ pub const ModuleDefinition = struct {
                 .block_type_values = std.ArrayList(BlockTypeValue).init(allocator),
                 .call_indirect = std.ArrayList(CallIndirectImmediates).init(allocator),
                 .branch_table = std.ArrayList(BranchTableImmediates).init(allocator),
+                .i64_const = std.ArrayList(i64).init(allocator),
             },
             .types = std.ArrayList(FunctionTypeDefinition).init(allocator),
             .imports = Imports{
@@ -1438,6 +1501,7 @@ pub const ModuleDefinition = struct {
         for (self.code.branch_table.items) |*item| {
             item.label_ids.deinit();
         }
+        self.code.i64_const.deinit();
         self.code.branch_table.deinit();
 
         self.types.deinit();
@@ -2036,6 +2100,10 @@ pub const ModuleInstance = struct {
                     var v: i32 = @bitCast(i32, instruction.immediate);
                     try self.stack.pushI32(v);
                 },
+                Opcode.I64_Const => {
+                    var v: i64 = self.module_def.code.i64_const.items[instruction.immediate];
+                    try self.stack.pushI64(v);
+                },
                 Opcode.I32_Eqz => {
                     var v1: i32 = try self.stack.popI32();
                     var result: i32 = if (v1 == 0) 1 else 0;
@@ -2098,6 +2166,71 @@ pub const ModuleInstance = struct {
                 Opcode.I32_GE_U => {
                     var v2: u32 = @bitCast(u32, try self.stack.popI32());
                     var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var result: i32 = if (v1 >= v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_Eqz => {
+                    var v1: i64 = try self.stack.popI64();
+                    var result: i32 = if (v1 == 0) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_Eq => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result: i32 = if (v1 == v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_NE => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result: i32 = if (v1 != v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_LT_S => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result: i32 = if (v1 < v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_LT_U => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var result: i32 = if (v1 < v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_GT_S => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result: i32 = if (v1 > v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_GT_U => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var result: i32 = if (v1 > v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_LE_S => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result: i32 = if (v1 <= v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_LE_U => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var result: i32 = if (v1 <= v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_GE_S => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result: i32 = if (v1 >= v2) 1 else 0;
+                    try self.stack.pushI32(result);
+                },
+                Opcode.I64_GE_U => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
                     var result: i32 = if (v1 >= v2) 1 else 0;
                     try self.stack.pushI32(result);
                 },
@@ -2240,17 +2373,174 @@ pub const ModuleInstance = struct {
                     var value = @bitCast(i32, std.math.rotr(u32, int, rot));
                     try self.stack.pushI32(value);
                 },
+                Opcode.I64_Clz => {
+                    var v: i64 = try self.stack.popI64();
+                    var num_zeroes = @clz(i64, v);
+                    try self.stack.pushI64(num_zeroes);
+                },
+                Opcode.I64_Ctz => {
+                    var v: i64 = try self.stack.popI64();
+                    var num_zeroes = @ctz(i64, v);
+                    try self.stack.pushI64(num_zeroes);
+                },
+                Opcode.I64_Popcnt => {
+                    var v: i64 = try self.stack.popI64();
+                    var num_bits_set = @popCount(i64, v);
+                    try self.stack.pushI64(num_bits_set);
+                },
+                Opcode.I64_Add => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result = v1 +% v2;
+                    try self.stack.pushI64(result);
+                },
+                Opcode.I64_Sub => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var result = v1 -% v2;
+                    try self.stack.pushI64(result);
+                },
+                Opcode.I64_Mul => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var value = v1 *% v2;
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Div_S => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var value = std.math.divTrunc(i64, v1, v2) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapIntegerDivisionByZero;
+                        } else if (e == error.Overflow) {
+                            return error.TrapIntegerOverflow;
+                        } else {
+                            return e;
+                        }
+                    };
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Div_U => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var value_unsigned = std.math.divFloor(u64, v1, v2) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapIntegerDivisionByZero;
+                        } else if (e == error.Overflow) {
+                            return error.TrapIntegerOverflow;
+                        } else {
+                            return e;
+                        }
+                    };
+                    var value = @bitCast(i64, value_unsigned);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Rem_S => {
+                    var v2: i64 = try self.stack.popI64();
+                    var v1: i64 = try self.stack.popI64();
+                    var denom = try std.math.absInt(v2);
+                    var value = std.math.rem(i64, v1, denom) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapIntegerDivisionByZero;
+                        } else {
+                            return e;
+                        }
+                    };
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Rem_U => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var value_unsigned = std.math.rem(u64, v1, v2) catch |e| {
+                        if (e == error.DivisionByZero) {
+                            return error.TrapIntegerDivisionByZero;
+                        } else {
+                            return e;
+                        }
+                    };
+                    var value = @bitCast(i64, value_unsigned);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_And => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var value = @bitCast(i64, v1 & v2);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Or => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var value = @bitCast(i64, v1 | v2);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Xor => {
+                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var value = @bitCast(i64, v1 ^ v2);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Shl => {
+                    var shift_unsafe: i64 = try self.stack.popI64();
+                    var int: i64 = try self.stack.popI64();
+                    var shift: i64 = try std.math.mod(i64, shift_unsafe, 64);
+                    var value = std.math.shl(i64, int, shift);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Shr_S => {
+                    var shift_unsafe: i64 = try self.stack.popI64();
+                    var int: i64 = try self.stack.popI64();
+                    var shift = try std.math.mod(i64, shift_unsafe, 64);
+                    var value = std.math.shr(i64, int, shift);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Shr_U => {
+                    var shift_unsafe: u64 = @bitCast(u64, try self.stack.popI64());
+                    var int: u64 = @bitCast(u64, try self.stack.popI64());
+                    var shift = try std.math.mod(u64, shift_unsafe, 64);
+                    var value = @bitCast(i64, std.math.shr(u64, int, shift));
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Rotl => {
+                    var rot: u64 = @bitCast(u64, try self.stack.popI64());
+                    var int: u64 = @bitCast(u64, try self.stack.popI64());
+                    var value = @bitCast(i64, std.math.rotl(u64, int, rot));
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Rotr => {
+                    var rot: u64 = @bitCast(u64, try self.stack.popI64());
+                    var int: u64 = @bitCast(u64, try self.stack.popI64());
+                    var value = @bitCast(i64, std.math.rotr(u64, int, rot));
+                    try self.stack.pushI64(value);
+                },
                 Opcode.I32_Extend8_S => {
                     var v = try self.stack.popI32();
-                    var v_i8 = @truncate(i8, v);
-                    var v_extended: i32 = v_i8;
+                    var v_truncated = @truncate(i8, v);
+                    var v_extended: i32 = v_truncated;
                     try self.stack.pushI32(v_extended);
                 },
                 Opcode.I32_Extend16_S => {
                     var v = try self.stack.popI32();
-                    var v_i16 = @truncate(i16, v);
-                    var v_extended: i32 = v_i16;
+                    var v_truncated = @truncate(i16, v);
+                    var v_extended: i32 = v_truncated;
                     try self.stack.pushI32(v_extended);
+                },
+                Opcode.I64_Extend8_S => {
+                    var v = try self.stack.popI64();
+                    var v_truncated = @truncate(i8, v);
+                    var v_extended: i64 = v_truncated;
+                    try self.stack.pushI64(v_extended);
+                },
+                Opcode.I64_Extend16_S => {
+                    var v = try self.stack.popI64();
+                    var v_truncated = @truncate(i16, v);
+                    var v_extended: i64 = v_truncated;
+                    try self.stack.pushI64(v_extended);
+                },
+                Opcode.I64_Extend32_S => {
+                    var v = try self.stack.popI64();
+                    var v_truncated = @truncate(i32, v);
+                    var v_extended: i64 = v_truncated;
+                    try self.stack.pushI64(v_extended);
                 },
             }
 

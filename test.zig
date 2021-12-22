@@ -86,7 +86,7 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
         const int = std.fmt.parseInt(i32, json_value.String, 10) catch @bitCast(i32, try std.fmt.parseInt(u32, json_value.String, 10));
         return Val{ .I32 = int };
     } else if (strcmp("i64", json_type.String)) {
-        const int = try std.fmt.parseInt(i64, json_value.String, 10);
+        const int = std.fmt.parseInt(i64, json_value.String, 10) catch @bitCast(i64, try std.fmt.parseInt(u64, json_value.String, 10));
         return Val{ .I64 = int };
     } else if (strcmp("f32", json_type.String)) {
         const float = try std.fmt.parseFloat(f32, json_value.String);
@@ -363,6 +363,7 @@ pub fn main() !void {
     const all_suites = [_][]const u8{
         "nop",
         "i32",
+        "i64",
     };
 
     for (all_suites) |suite| {
