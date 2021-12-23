@@ -104,6 +104,12 @@ const Opcode = enum(u8) {
     F32_GT = 0x5E,
     F32_LE = 0x5F,
     F32_GE = 0x60,
+    F64_EQ = 0x61,
+    F64_NE = 0x62,
+    F64_LT = 0x63,
+    F64_GT = 0x64,
+    F64_LE = 0x65,
+    F64_GE = 0x66,
     I32_Clz = 0x67,
     I32_Ctz = 0x68,
     I32_Popcnt = 0x69,
@@ -154,6 +160,20 @@ const Opcode = enum(u8) {
     F32_Min = 0x96,
     F32_Max = 0x97,
     F32_Copysign = 0x98,
+    F64_Abs = 0x99,
+    F64_Neg = 0x9A,
+    F64_Ceil = 0x9B,
+    F64_Floor = 0x9C,
+    F64_Trunc = 0x9D,
+    F64_Nearest = 0x9E,
+    F64_Sqrt = 0x9F,
+    F64_Add = 0xA0,
+    F64_Sub = 0xA1,
+    F64_Mul = 0xA2,
+    F64_Div = 0xA3,
+    F64_Min = 0xA4,
+    F64_Max = 0xA5,
+    F64_Copysign = 0xA6,
     I32_Extend8_S = 0xC0,
     I32_Extend16_S = 0xC1,
     I64_Extend8_S = 0xC2,
@@ -2364,6 +2384,42 @@ pub const ModuleInstance = struct {
                     var value: i32 = if (v1 >= v2) 1 else 0;
                     try self.stack.pushI32(value);
                 },
+                Opcode.F64_EQ => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value: i32 = if (v1 == v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F64_NE => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value: i32 = if (v1 != v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F64_LT => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value: i32 = if (v1 < v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F64_GT => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value: i32 = if (v1 > v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F64_LE => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value: i32 = if (v1 <= v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F64_GE => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value: i32 = if (v1 >= v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
                 Opcode.I32_Clz => {
                     var v: i32 = try self.stack.popI32();
                     var num_zeroes = @clz(i32, v);
@@ -2717,6 +2773,82 @@ pub const ModuleInstance = struct {
                     var v1 = try self.stack.popF32();
                     var value = std.math.copysign(f32, v1, v2);
                     try self.stack.pushF32(value);
+                },
+                Opcode.F64_Abs => {
+                    var f = try self.stack.popF64();
+                    var value = std.math.fabs(f);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Neg => {
+                    var f = try self.stack.popF64();
+                    try self.stack.pushF64(-f);
+                },
+                Opcode.F64_Ceil => {
+                    var f = try self.stack.popF64();
+                    var value = @ceil(f);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Floor => {
+                    var f = try self.stack.popF64();
+                    var value = @floor(f);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Trunc => {
+                    var f = try self.stack.popF64();
+                    var value = @trunc(f);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Nearest => {
+                    var f = try self.stack.popF64();
+                    var value: f64 = @trunc(f);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Sqrt => {
+                    var f = try self.stack.popF64();
+                    var value = std.math.sqrt(f);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Add => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value = v1 + v2;
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Sub => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value = v1 - v2;
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Mul => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value = v1 * v2;
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Div => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value = v1 / v2;
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Min => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Max => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.F64_Copysign => {
+                    var v2 = try self.stack.popF64();
+                    var v1 = try self.stack.popF64();
+                    var value = std.math.copysign(f64, v1, v2);
+                    try self.stack.pushF64(value);
                 },
                 Opcode.I32_Extend8_S => {
                     var v = try self.stack.popI32();

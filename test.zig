@@ -391,6 +391,9 @@ pub fn main() !void {
         "f32",
         "f32_bitwise",
         "f32_cmp",
+        "f64",
+        "f64_bitwise",
+        "f64_cmp",
     };
 
     for (all_suites) |suite| {
