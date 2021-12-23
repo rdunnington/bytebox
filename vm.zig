@@ -74,6 +74,8 @@ const Opcode = enum(u8) {
     Memory_Grow = 0x40,
     I32_Const = 0x41,
     I64_Const = 0x42,
+    F32_Const = 0x43,
+    F64_Const = 0x44,
     I32_Eqz = 0x45,
     I32_Eq = 0x46,
     I32_NE = 0x47,
@@ -96,6 +98,12 @@ const Opcode = enum(u8) {
     I64_LE_U = 0x58,
     I64_GE_S = 0x59,
     I64_GE_U = 0x5A,
+    F32_EQ = 0x5B,
+    F32_NE = 0x5C,
+    F32_LT = 0x5D,
+    F32_GT = 0x5E,
+    F32_LE = 0x5F,
+    F32_GE = 0x60,
     I32_Clz = 0x67,
     I32_Ctz = 0x68,
     I32_Popcnt = 0x69,
@@ -132,6 +140,20 @@ const Opcode = enum(u8) {
     I64_Shr_U = 0x88,
     I64_Rotl = 0x89,
     I64_Rotr = 0x8A,
+    F32_Abs = 0x8B,
+    F32_Neg = 0x8C,
+    F32_Ceil = 0x8D,
+    F32_Floor = 0x8E,
+    F32_Trunc = 0x8F,
+    F32_Nearest = 0x90,
+    F32_Sqrt = 0x91,
+    F32_Add = 0x92,
+    F32_Sub = 0x93,
+    F32_Mul = 0x94,
+    F32_Div = 0x95,
+    F32_Min = 0x96,
+    F32_Max = 0x97,
+    F32_Copysign = 0x98,
     I32_Extend8_S = 0xC0,
     I32_Extend16_S = 0xC1,
     I64_Extend8_S = 0xC2,
@@ -453,6 +475,22 @@ const Stack = struct {
         }
     }
 
+    fn popF32(self: *Self) !f32 {
+        var val: Val = try self.popValue();
+        switch (val) {
+            ValType.F32 => |value| return value,
+            else => return error.AssertTypeMismatch,
+        }
+    }
+
+    fn popF64(self: *Self) !f64 {
+        var val: Val = try self.popValue();
+        switch (val) {
+            ValType.F64 => |value| return value,
+            else => return error.AssertTypeMismatch,
+        }
+    }
+
     fn pushI32(self: *Self, v: i32) !void {
         var typed = Val{ .I32 = v };
         try self.pushValue(typed);
@@ -460,6 +498,16 @@ const Stack = struct {
 
     fn pushI64(self: *Self, v: i64) !void {
         var typed = Val{ .I64 = v };
+        try self.pushValue(typed);
+    }
+
+    fn pushF32(self: *Self, v: f32) !void {
+        var typed = Val{ .F32 = v };
+        try self.pushValue(typed);
+    }
+
+    fn pushF64(self: *Self, v: f64) !void {
+        var typed = Val{ .F64 = v };
         try self.pushValue(typed);
     }
 
@@ -478,6 +526,14 @@ const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory
 const k_function_type_sentinel_byte: u8 = 0x60;
 const k_block_type_void_sentinel_byte: u8 = 0x40;
 
+fn readFloat(comptime T: type, reader: anytype) !T {
+    return switch (T) {
+        f32 => @bitCast(f32, try reader.readIntLittle(u32)),
+        f64 => @bitCast(f64, try reader.readIntLittle(u64)),
+        else => unreachable,
+    };
+}
+
 const ConstantExpression = struct {
     value: Val,
 
@@ -488,7 +544,9 @@ const ConstantExpression = struct {
         const val = switch (opcode) {
             .I32_Const => Val{ .I32 = try std.leb.readILEB128(i32, reader) },
             .I64_Const => Val{ .I64 = try std.leb.readULEB128(i64, reader) },
-            // TODO handle f32, f64, ref.null, ref.func, global.get
+            .F32_Const => Val{ .F32 = try readFloat(f32, reader) },
+            .F64_Const => Val{ .F64 = try readFloat(f64, reader) },
+            // TODO handle f64, ref.null, ref.func, global.get
             else => unreachable,
         };
 
@@ -879,10 +937,10 @@ const Instruction = struct {
                 immediate = @bitCast(u32, value);
             },
             .I64_Const => {
-                var value: i64 = try std.leb.readILEB128(i64, reader);
+                var value = try std.leb.readILEB128(i64, reader);
 
-                for (module.code.i64_const.items) |*item, i| {
-                    if (value == item.*) {
+                for (module.code.i64_const.items) |item, i| {
+                    if (value == item) {
                         immediate = @intCast(u32, i);
                     }
                 }
@@ -890,6 +948,25 @@ const Instruction = struct {
                 if (immediate == k_invalid_immediate) {
                     immediate = @intCast(u32, module.code.i64_const.items.len);
                     try module.code.i64_const.append(value);
+                }
+            },
+            .F32_Const => {
+                var value = try readFloat(f32, reader);
+                immediate = @bitCast(u32, value);
+            },
+            .F64_Const => {
+                var value = try readFloat(f64, reader);
+
+                for (module.code.f64_const.items) |item, i| {
+                    if (value == item) {
+                        immediate = @intCast(u32, i);
+                        break;
+                    }
+                }
+
+                if (immediate == k_invalid_immediate) {
+                    immediate = @intCast(u32, module.code.f64_const.items.len);
+                    try module.code.f64_const.append(value);
                 }
             },
             .Block => {
@@ -1027,6 +1104,7 @@ pub const ModuleDefinition = struct {
         call_indirect: std.ArrayList(CallIndirectImmediates),
         branch_table: std.ArrayList(BranchTableImmediates),
         i64_const: std.ArrayList(i64),
+        f64_const: std.ArrayList(f64),
     };
 
     const Imports = struct {
@@ -1070,6 +1148,7 @@ pub const ModuleDefinition = struct {
                 .call_indirect = std.ArrayList(CallIndirectImmediates).init(allocator),
                 .branch_table = std.ArrayList(BranchTableImmediates).init(allocator),
                 .i64_const = std.ArrayList(i64).init(allocator),
+                .f64_const = std.ArrayList(f64).init(allocator),
             },
             .types = std.ArrayList(FunctionTypeDefinition).init(allocator),
             .imports = Imports{
@@ -1502,6 +1581,7 @@ pub const ModuleDefinition = struct {
             item.label_ids.deinit();
         }
         self.code.i64_const.deinit();
+        self.code.f64_const.deinit();
         self.code.branch_table.deinit();
 
         self.types.deinit();
@@ -1787,6 +1867,16 @@ pub const ModuleInstance = struct {
                 }
                 return error.OutOfBounds;
             }
+
+            fn propagateNanWithOp(op: anytype, v1: anytype, v2: @TypeOf(v1)) @TypeOf(v1) {
+                if (std.math.isNan(v1)) {
+                    return v1;
+                } else if (std.math.isNan(v2)) {
+                    return v2;
+                } else {
+                    return op(v1, v2);
+                }
+            }
         };
 
         var instruction_offset: u32 = root_offset;
@@ -1974,19 +2064,15 @@ pub const ModuleInstance = struct {
                     _ = try self.stack.popValue();
                 },
                 Opcode.Select => {
-                    var boolean = try self.stack.popValue();
+                    var boolean = try self.stack.popI32();
                     var v2 = try self.stack.popValue();
                     var v1 = try self.stack.popValue();
 
-                    if (builtin.mode == .Debug) {
-                        if (std.meta.activeTag(boolean) != ValType.I32) {
-                            return error.AssertTypeMismatch;
-                        } else if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
-                            return error.AssertTypeMismatch;
-                        }
+                    if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
+                        return error.AssertTypeMismatch;
                     }
 
-                    if (boolean.I32 != 0) {
+                    if (boolean != 0) {
                         try self.stack.pushValue(v1);
                     } else {
                         try self.stack.pushValue(v2);
@@ -2103,6 +2189,14 @@ pub const ModuleInstance = struct {
                 Opcode.I64_Const => {
                     var v: i64 = self.module_def.code.i64_const.items[instruction.immediate];
                     try self.stack.pushI64(v);
+                },
+                Opcode.F32_Const => {
+                    var v: f32 = @bitCast(f32, instruction.immediate);
+                    try self.stack.pushF32(v);
+                },
+                Opcode.F64_Const => {
+                    var v: f64 = self.module_def.code.f64_const.items[instruction.immediate];
+                    try self.stack.pushF64(v);
                 },
                 Opcode.I32_Eqz => {
                     var v1: i32 = try self.stack.popI32();
@@ -2233,6 +2327,42 @@ pub const ModuleInstance = struct {
                     var v1: u64 = @bitCast(u64, try self.stack.popI64());
                     var result: i32 = if (v1 >= v2) 1 else 0;
                     try self.stack.pushI32(result);
+                },
+                Opcode.F32_EQ => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value: i32 = if (v1 == v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F32_NE => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value: i32 = if (v1 != v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F32_LT => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value: i32 = if (v1 < v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F32_GT => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value: i32 = if (v1 > v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F32_LE => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value: i32 = if (v1 <= v2) 1 else 0;
+                    try self.stack.pushI32(value);
+                },
+                Opcode.F32_GE => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value: i32 = if (v1 >= v2) 1 else 0;
+                    try self.stack.pushI32(value);
                 },
                 Opcode.I32_Clz => {
                     var v: i32 = try self.stack.popI32();
@@ -2511,6 +2641,82 @@ pub const ModuleInstance = struct {
                     var int: u64 = @bitCast(u64, try self.stack.popI64());
                     var value = @bitCast(i64, std.math.rotr(u64, int, rot));
                     try self.stack.pushI64(value);
+                },
+                Opcode.F32_Abs => {
+                    var f = try self.stack.popF32();
+                    var value = std.math.fabs(f);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Neg => {
+                    var f = try self.stack.popF32();
+                    try self.stack.pushF32(-f);
+                },
+                Opcode.F32_Ceil => {
+                    var f = try self.stack.popF32();
+                    var value = @ceil(f);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Floor => {
+                    var f = try self.stack.popF32();
+                    var value = @floor(f);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Trunc => {
+                    var f = try self.stack.popF32();
+                    var value = @trunc(f);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Nearest => {
+                    var f = try self.stack.popF32();
+                    var value: f32 = @trunc(f);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Sqrt => {
+                    var f = try self.stack.popF32();
+                    var value = std.math.sqrt(f);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Add => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value = v1 + v2;
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Sub => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value = v1 - v2;
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Mul => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value = v1 * v2;
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Div => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value = v1 / v2;
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Min => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Max => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F32_Copysign => {
+                    var v2 = try self.stack.popF32();
+                    var v1 = try self.stack.popF32();
+                    var value = std.math.copysign(f32, v1, v2);
+                    try self.stack.pushF32(value);
                 },
                 Opcode.I32_Extend8_S => {
                     var v = try self.stack.popI32();

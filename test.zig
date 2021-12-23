@@ -82,17 +82,28 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     const json_value = obj.get("value").?;
 
     if (strcmp("i32", json_type.String)) {
-        // print("parse i32: {s}\n", .{json_value.String});
         const int = std.fmt.parseInt(i32, json_value.String, 10) catch @bitCast(i32, try std.fmt.parseInt(u32, json_value.String, 10));
         return Val{ .I32 = int };
     } else if (strcmp("i64", json_type.String)) {
         const int = std.fmt.parseInt(i64, json_value.String, 10) catch @bitCast(i64, try std.fmt.parseInt(u64, json_value.String, 10));
         return Val{ .I64 = int };
     } else if (strcmp("f32", json_type.String)) {
-        const float = try std.fmt.parseFloat(f32, json_value.String);
+        var float: f32 = undefined;
+        if (std.mem.startsWith(u8, json_value.String, "nan:")) {
+            float = std.math.nan_f32; // don't differentiate between arithmetic/canonical nan
+        } else {
+            const int = try std.fmt.parseInt(u32, json_value.String, 10);
+            float = @bitCast(f32, int);
+        }
         return Val{ .F32 = float };
     } else if (strcmp("f64", json_type.String)) {
-        const float = try std.fmt.parseFloat(f64, json_value.String);
+        var float: f64 = undefined;
+        if (std.mem.startsWith(u8, json_value.String, "nan:")) {
+            float = std.math.nan_f64; // don't differentiate between arithmetic/canonical nan
+        } else {
+            const int = try std.fmt.parseInt(u64, json_value.String, 10);
+            float = @bitCast(f64, int);
+        }
         return Val{ .F64 = float };
     } else {
         print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
@@ -270,7 +281,20 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                 if (invoke_succeeded) {
                     if (c.expected_returns) |expected| {
                         for (returns) |r, i| {
-                            if (std.meta.eql(r, expected.items[i]) == false) {
+                            var pass = false;
+
+                            if (std.meta.activeTag(expected.items[i]) == .F32 and std.math.isNan(expected.items[i].F32)) {
+                                pass = std.meta.activeTag(r) == .F32 and std.math.isNan(r.F32);
+                            } else if (std.meta.activeTag(expected.items[i]) == .F64 and std.math.isNan(expected.items[i].F64)) {
+                                pass = std.meta.activeTag(r) == .F64 and std.math.isNan(r.F64);
+                            } else {
+                                pass = std.meta.eql(r, expected.items[i]);
+                                if (!pass) {
+                                    std.debug.print(">>>>>>>>>>>> fail. expected: {e:0.16}, actual: {e:0.16}\n", .{ expected.items[i].F32, r.F32 });
+                                }
+                            }
+
+                            if (pass == false) {
                                 print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
                                 print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
                                 invoke_succeeded = false;
@@ -364,6 +388,9 @@ pub fn main() !void {
         "nop",
         "i32",
         "i64",
+        "f32",
+        "f32_bitwise",
+        "f32_cmp",
     };
 
     for (all_suites) |suite| {
