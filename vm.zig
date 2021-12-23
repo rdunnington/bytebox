@@ -1109,7 +1109,10 @@ const Instruction = struct {
             .immediate = immediate,
         };
 
-        try module.code.instructions.append(inst);
+        switch (inst.opcode) {
+            .Noop => {}, // no need to emit noops since they don't do anything
+            else => try module.code.instructions.append(inst),
+        }
 
         return inst;
     }
@@ -1913,7 +1916,9 @@ pub const ModuleInstance = struct {
                 Opcode.Unreachable => {
                     return error.TrapUnreachable;
                 },
-                Opcode.Noop => {},
+                Opcode.Noop => {
+                    unreachable;
+                }, // should have been stripped in the decoding phase
                 Opcode.Block => {
                     try self.enterBlock(instruction, instruction_offset);
                 },
