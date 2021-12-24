@@ -39,6 +39,7 @@ pub const TrapError = error{
     TrapIntegerOverflow,
     TrapIndirectCallTypeMismatch,
     TrapInvalidIntegerConversion,
+    TrapOutOfBoundsMemoryAccess,
     TrapUnknown,
 };
 
@@ -64,13 +65,28 @@ const Opcode = enum(u16) {
     Global_Get = 0x23,
     Global_Set = 0x24,
     I32_Load = 0x28,
+    I64_Load = 0x29,
+    F32_Load = 0x2A,
+    F64_Load = 0x2B,
     I32_Load8_S = 0x2C,
     I32_Load8_U = 0x2D,
     I32_Load16_S = 0x2E,
     I32_Load16_U = 0x2F,
+    I64_Load8_S = 0x30,
+    I64_Load8_U = 0x31,
+    I64_Load16_S = 0x32,
+    I64_Load16_U = 0x33,
+    I64_Load32_S = 0x34,
+    I64_Load32_U = 0x35,
     I32_Store = 0x36,
+    I64_Store = 0x37,
+    F32_Store = 0x38,
+    F64_Store = 0x39,
     I32_Store8 = 0x3A,
     I32_Store16 = 0x3B,
+    I64_Store8 = 0x3C,
+    I64_Store16 = 0x3D,
+    I64_Store32 = 0x3E,
     Memory_Size = 0x3F,
     Memory_Grow = 0x40,
     I32_Const = 0x41,
@@ -1106,6 +1122,18 @@ const Instruction = struct {
                 var memarg = try MemArg.decode(&reader);
                 immediate = memarg.offset;
             },
+            .I64_Load => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .F32_Load => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .F64_Load => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
             .I32_Load8_S => {
                 var memarg = try MemArg.decode(&reader);
                 immediate = memarg.offset;
@@ -1122,7 +1150,43 @@ const Instruction = struct {
                 var memarg = try MemArg.decode(&reader);
                 immediate = memarg.offset;
             },
+            .I64_Load8_S => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Load8_U => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Load16_S => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Load16_U => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Load32_S => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Load32_U => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
             .I32_Store => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Store => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .F32_Store => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .F64_Store => {
                 var memarg = try MemArg.decode(&reader);
                 immediate = memarg.offset;
             },
@@ -1131,6 +1195,18 @@ const Instruction = struct {
                 immediate = memarg.offset;
             },
             .I32_Store16 => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Store8 => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Store16 => {
+                var memarg = try MemArg.decode(&reader);
+                immediate = memarg.offset;
+            },
+            .I64_Store32 => {
                 var memarg = try MemArg.decode(&reader);
                 immediate = memarg.offset;
             },
@@ -2012,6 +2088,32 @@ pub const ModuleInstance = struct {
                 }
                 return @floatToInt(T, truncated);
             }
+
+            fn loadFromMem(comptime T: type, memories: []const MemoryInstance, offset_from_memarg: u32, offset_from_stack: i32) !T {
+                if (memories.len == 0) {
+                    return error.AssertUnknownMemory;
+                }
+
+                const memory: *const MemoryInstance = &memories[0];
+                const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
+
+                if (memory.mem.len <= offset) {
+                    return error.TrapOutOfBoundsMemoryAccess;
+                }
+
+                const mem = memory.mem[offset .. offset + 4];
+
+                const readType = switch (std.meta.bitCount(T)) {
+                    8 => u8,
+                    16 => u16,
+                    32 => u32,
+                    64 => u64,
+                    else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
+                };
+
+                const value = std.mem.readIntSliceLittle(readType, mem);
+                return @bitCast(T, value);
+            }
         };
 
         var instruction_offset: u32 = root_offset;
@@ -2247,28 +2349,75 @@ pub const ModuleInstance = struct {
                     global.value = try self.stack.popValue();
                 },
                 Opcode.I32_Load => {
-                    if (self.store.memories.items.len == 0) {
-                        return error.AssertUnknownMemory;
-                    }
-
-                    const memory: *const MemoryInstance = &self.store.memories.items[0];
-                    const memarg_offset: u32 = instruction.immediate;
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    const offset: u32 = memarg_offset + @intCast(u32, offset_from_stack);
-
-                    if (memory.mem.len <= offset) {
-                        return error.TrapUnknown;
-                    }
-
-                    const mem = memory.mem[offset .. offset + 4];
-
-                    const value = std.mem.readIntSliceLittle(i32, mem);
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value = try Helpers.loadFromMem(i32, self.store.memories.items, instruction.immediate, offset_from_stack);
                     try self.stack.pushI32(value);
                 },
-                Opcode.I32_Load8_S => {},
-                Opcode.I32_Load8_U => {},
-                Opcode.I32_Load16_S => {},
-                Opcode.I32_Load16_U => {},
+                Opcode.I64_Load => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value = try Helpers.loadFromMem(i64, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.F32_Load => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value = try Helpers.loadFromMem(f32, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushF32(value);
+                },
+                Opcode.F64_Load => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value = try Helpers.loadFromMem(f64, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushF64(value);
+                },
+                Opcode.I32_Load8_S => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: i32 = try Helpers.loadFromMem(i8, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI32(value);
+                },
+                Opcode.I32_Load8_U => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: u32 = try Helpers.loadFromMem(u8, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI32(@bitCast(i32, value));
+                },
+                Opcode.I32_Load16_S => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: i32 = try Helpers.loadFromMem(i16, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI32(value);
+                },
+                Opcode.I32_Load16_U => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: u32 = try Helpers.loadFromMem(u16, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI32(@bitCast(i32, value));
+                },
+                Opcode.I64_Load8_S => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: i64 = try Helpers.loadFromMem(i8, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Load8_U => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: u64 = try Helpers.loadFromMem(u8, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI64(@bitCast(i64, value));
+                },
+                Opcode.I64_Load16_S => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: i64 = try Helpers.loadFromMem(i16, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Load16_U => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: u64 = try Helpers.loadFromMem(u16, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI64(@bitCast(i64, value));
+                },
+                Opcode.I64_Load32_S => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: i64 = try Helpers.loadFromMem(i32, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI64(value);
+                },
+                Opcode.I64_Load32_U => {
+                    var offset_from_stack: i32 = try self.stack.popI32();
+                    var value: u64 = try Helpers.loadFromMem(u32, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    try self.stack.pushI64(@bitCast(i64, value));
+                },
                 Opcode.I32_Store => {
                     if (self.store.memories.items.len == 0) {
                         return error.AssertUnknownMemory;
@@ -2288,8 +2437,14 @@ pub const ModuleInstance = struct {
 
                     std.mem.writeIntSliceLittle(i32, mem, value);
                 },
+                Opcode.I64_Store => {},
+                Opcode.F32_Store => {},
+                Opcode.F64_Store => {},
                 Opcode.I32_Store8 => {},
                 Opcode.I32_Store16 => {},
+                Opcode.I64_Store8 => {},
+                Opcode.I64_Store16 => {},
+                Opcode.I64_Store32 => {},
                 Opcode.Memory_Size => {
                     const memory_index: usize = 0;
 

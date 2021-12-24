@@ -117,7 +117,9 @@ fn error_to_text(err: anyerror) []const u8 {
         wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
         wasm.TrapError.TrapIntegerOverflow => "integer overflow",
         wasm.TrapError.TrapInvalidIntegerConversion => "invalid conversion to integer",
+        wasm.TrapError.TrapOutOfBoundsMemoryAccess => "out of bounds memory access",
         wasm.AssertError.AssertTypeMismatch => "type mismatch",
+        wasm.AssertError.AssertUnknownMemory => "unknown memory",
         else => {
             std.debug.print("error_to_text unknown err: {}\n", .{err});
             unreachable;
@@ -397,6 +399,7 @@ pub fn main() !void {
         "f64_bitwise",
         "f64_cmp",
         "conversions",
+        "traps",
     };
 
     for (all_suites) |suite| {
