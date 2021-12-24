@@ -116,6 +116,8 @@ fn error_to_text(err: anyerror) []const u8 {
     return switch (err) {
         wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
         wasm.TrapError.TrapIntegerOverflow => "integer overflow",
+        wasm.TrapError.TrapInvalidIntegerConversion => "invalid conversion to integer",
+        wasm.AssertError.AssertTypeMismatch => "type mismatch",
         else => {
             std.debug.print("error_to_text unknown err: {}\n", .{err});
             unreachable;
@@ -290,7 +292,7 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                             } else {
                                 pass = std.meta.eql(r, expected.items[i]);
                                 if (!pass) {
-                                    std.debug.print(">>>>>>>>>>>> fail. expected: {e:0.16}, actual: {e:0.16}\n", .{ expected.items[i].F32, r.F32 });
+                                    // std.debug.print(">>>>>>>>>>>> fail. expected: {e:0.16}, actual: {e:0.16}\n", .{ expected.items[i].F32, r.F32 });
                                 }
                             }
 
@@ -333,7 +335,7 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                 } else {
                     print("assert_trap: {s}:{s}({s}):\n", .{ module_name, c.invocation.field, c.invocation.args.items });
                     if (invoke_failed_with_correct_trap == false) {
-                        print("\tInvoke trapped, but got error {s} instead of expected {s}:\n", .{ trap_string.?, c.expected_error });
+                        print("\tInvoke trapped, but got error '{s}'' instead of expected '{s}':\n", .{ trap_string.?, c.expected_error });
                     } else {
                         print("\tInvoke succeeded instead of trapping on expected {s}:\n", .{c.expected_error});
                     }
@@ -394,6 +396,7 @@ pub fn main() !void {
         "f64",
         "f64_bitwise",
         "f64_cmp",
+        "conversions",
     };
 
     for (all_suites) |suite| {

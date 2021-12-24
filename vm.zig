@@ -38,10 +38,11 @@ pub const TrapError = error{
     TrapIntegerDivisionByZero,
     TrapIntegerOverflow,
     TrapIndirectCallTypeMismatch,
+    TrapInvalidIntegerConversion,
     TrapUnknown,
 };
 
-const Opcode = enum(u8) {
+const Opcode = enum(u16) {
     Unreachable = 0x00,
     Noop = 0x01,
     Block = 0x02,
@@ -174,11 +175,44 @@ const Opcode = enum(u8) {
     F64_Min = 0xA4,
     F64_Max = 0xA5,
     F64_Copysign = 0xA6,
+    I32_Wrap_I64 = 0xA7,
+    I32_Trunc_F32_S = 0xA8,
+    I32_Trunc_F32_U = 0xA9,
+    I32_Trunc_F64_S = 0xAA,
+    I32_Trunc_F64_U = 0xAB,
+    I64_Extend_I32_S = 0xAC,
+    I64_Extend_I32_U = 0xAD,
+    I64_Trunc_F32_S = 0xAE,
+    I64_Trunc_F32_U = 0xAF,
+    I64_Trunc_F64_S = 0xB0,
+    I64_Trunc_F64_U = 0xB1,
+    F32_Convert_I32_S = 0xB2,
+    F32_Convert_I32_U = 0xB3,
+    F32_Convert_I64_S = 0xB4,
+    F32_Convert_I64_U = 0xB5,
+    F32_Demote_F64 = 0xB6,
+    F64_Convert_I32_S = 0xB7,
+    F64_Convert_I32_U = 0xB8,
+    F64_Convert_I64_S = 0xB9,
+    F64_Convert_I64_U = 0xBA,
+    F64_Promote_F32 = 0xBB,
+    I32_Reinterpret_F32 = 0xBC,
+    I64_Reinterpret_F64 = 0xBD,
+    F32_Reinterpret_I32 = 0xBE,
+    F64_Reinterpret_I64 = 0xBF,
     I32_Extend8_S = 0xC0,
     I32_Extend16_S = 0xC1,
     I64_Extend8_S = 0xC2,
     I64_Extend16_S = 0xC3,
     I64_Extend32_S = 0xC4,
+    I32_Trunc_Sat_F32_S = 0xFC00,
+    I32_Trunc_Sat_F32_U = 0xFC01,
+    I32_Trunc_Sat_F64_S = 0xFC02,
+    I32_Trunc_Sat_F64_U = 0xFC03,
+    I64_Trunc_Sat_F32_S = 0xFC04,
+    I64_Trunc_Sat_F32_U = 0xFC05,
+    I64_Trunc_Sat_F64_S = 0xFC06,
+    I64_Trunc_Sat_F64_U = 0xFC07,
 
     fn expectsEnd(opcode: Opcode) bool {
         return switch (opcode) {
@@ -932,8 +966,19 @@ const Instruction = struct {
         };
 
         var byte = try reader.readByte();
-        // std.debug.print(">>> opcode byte: {}\n", .{byte});
-        var opcode = @intToEnum(Opcode, byte);
+        var opcode: Opcode = undefined;
+        if (byte == 0xFC) {
+            var byte2 = try reader.readByte();
+            var extended: u16 = byte;
+            extended = extended << 8;
+            extended |= byte2;
+
+            // std.debug.print(">>>>>> opcode extended_byte: 0x{X}\n", .{extended});
+            opcode = @intToEnum(Opcode, extended);
+        } else {
+            // std.debug.print(">>>>>> opcode byte: 0x{X}\n", .{byte});
+            opcode = @intToEnum(Opcode, byte);
+        }
         var immediate: u32 = k_invalid_immediate;
 
         switch (opcode) {
@@ -1539,7 +1584,6 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
                             const instruction = try Instruction.decode(reader, &module);
-                            // std.debug.print(">>>> {}\n", .{instruction.opcode});
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
@@ -1899,6 +1943,74 @@ pub const ModuleInstance = struct {
                 } else {
                     return op(v1, v2);
                 }
+            }
+
+            fn truncateTo(comptime T: type, value: anytype) !T {
+                switch (T) {
+                    i32 => {},
+                    u32 => {},
+                    i64 => {},
+                    u64 => {},
+                    else => @compileError("Only i32 and i64 are supported outputs."),
+                }
+                switch (@TypeOf(value)) {
+                    f32 => {},
+                    f64 => {},
+                    else => @compileError("Only f32 and f64 are supported inputs."),
+                }
+
+                var truncated = @trunc(value);
+
+                if (std.math.isNan(truncated)) {
+                    return error.TrapInvalidIntegerConversion;
+                } else if (truncated < std.math.minInt(T)) {
+                    return error.TrapIntegerOverflow;
+                } else {
+                    if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
+                        if (truncated > std.math.maxInt(T)) {
+                            return error.TrapIntegerOverflow;
+                        }
+                    } else {
+                        if (truncated >= std.math.maxInt(T)) {
+                            return error.TrapIntegerOverflow;
+                        }
+                    }
+                }
+                return @floatToInt(T, truncated);
+            }
+
+            fn saturatedTruncateTo(comptime T: type, value: anytype) T {
+                switch (T) {
+                    i32 => {},
+                    u32 => {},
+                    i64 => {},
+                    u64 => {},
+                    else => @compileError("Only i32 and i64 are supported outputs."),
+                }
+                switch (@TypeOf(value)) {
+                    f32 => {},
+                    f64 => {},
+                    else => @compileError("Only f32 and f64 are supported inputs."),
+                }
+
+                var truncated = @trunc(value);
+
+                if (std.math.isNan(truncated)) {
+                    return 0;
+                } else if (truncated < std.math.minInt(T)) {
+                    return std.math.minInt(T);
+                } else {
+                    if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
+                        if (truncated > std.math.maxInt(T)) {
+                            return std.math.maxInt(T);
+                        }
+                    } else {
+                        if (truncated >= std.math.maxInt(T)) {
+                            return std.math.maxInt(T);
+                        }
+                    }
+                }
+                return @floatToInt(T, truncated);
             }
         };
 
@@ -2855,6 +2967,117 @@ pub const ModuleInstance = struct {
                     var value = std.math.copysign(f64, v1, v2);
                     try self.stack.pushF64(value);
                 },
+                Opcode.I32_Wrap_I64 => {
+                    var v = try self.stack.popI64();
+                    var mod = @truncate(i32, v);
+                    try self.stack.pushI32(mod);
+                },
+                Opcode.I32_Trunc_F32_S => {
+                    var v = try self.stack.popF32();
+                    var int = try Helpers.truncateTo(i32, v);
+                    try self.stack.pushI32(int);
+                },
+                Opcode.I32_Trunc_F32_U => {
+                    var v = try self.stack.popF32();
+                    var int = try Helpers.truncateTo(u32, v);
+                    try self.stack.pushI32(@bitCast(i32, int));
+                },
+                Opcode.I32_Trunc_F64_S => {
+                    var v = try self.stack.popF64();
+                    var int = try Helpers.truncateTo(i32, v);
+                    try self.stack.pushI32(int);
+                },
+                Opcode.I32_Trunc_F64_U => {
+                    var v = try self.stack.popF64();
+                    var int = try Helpers.truncateTo(u32, v);
+                    try self.stack.pushI32(@bitCast(i32, int));
+                },
+                Opcode.I64_Extend_I32_S => {
+                    var v32 = try self.stack.popI32();
+                    var v64: i64 = v32;
+                    try self.stack.pushI64(v64);
+                },
+                Opcode.I64_Extend_I32_U => {
+                    var v32 = try self.stack.popI32();
+                    var v64: u64 = @bitCast(u32, v32);
+                    try self.stack.pushI64(@bitCast(i64, v64));
+                },
+                Opcode.I64_Trunc_F32_S => {
+                    var v = try self.stack.popF32();
+                    var int = try Helpers.truncateTo(i64, v);
+                    try self.stack.pushI64(int);
+                },
+                Opcode.I64_Trunc_F32_U => {
+                    var v = try self.stack.popF32();
+                    var int = try Helpers.truncateTo(u64, v);
+                    try self.stack.pushI64(@bitCast(i64, int));
+                },
+                Opcode.I64_Trunc_F64_S => {
+                    var v = try self.stack.popF64();
+                    var int = try Helpers.truncateTo(i64, v);
+                    try self.stack.pushI64(int);
+                },
+                Opcode.I64_Trunc_F64_U => {
+                    var v = try self.stack.popF64();
+                    var int = try Helpers.truncateTo(u64, v);
+                    try self.stack.pushI64(@bitCast(i64, int));
+                },
+                Opcode.F32_Convert_I32_S => {
+                    var v = try self.stack.popI32();
+                    try self.stack.pushF32(@intToFloat(f32, v));
+                },
+                Opcode.F32_Convert_I32_U => {
+                    var v = @bitCast(u32, try self.stack.popI32());
+                    try self.stack.pushF32(@intToFloat(f32, v));
+                },
+                Opcode.F32_Convert_I64_S => {
+                    var v = try self.stack.popI64();
+                    try self.stack.pushF32(@intToFloat(f32, v));
+                },
+                Opcode.F32_Convert_I64_U => {
+                    var v = @bitCast(u64, try self.stack.popI64());
+                    try self.stack.pushF32(@intToFloat(f32, v));
+                },
+                Opcode.F32_Demote_F64 => {
+                    var v = try self.stack.popF64();
+                    try self.stack.pushF32(@floatCast(f32, v));
+                },
+                Opcode.F64_Convert_I32_S => {
+                    var v = try self.stack.popI32();
+                    try self.stack.pushF64(@intToFloat(f64, v));
+                },
+                Opcode.F64_Convert_I32_U => {
+                    var v = @bitCast(u32, try self.stack.popI32());
+                    try self.stack.pushF64(@intToFloat(f64, v));
+                },
+                Opcode.F64_Convert_I64_S => {
+                    var v = try self.stack.popI64();
+                    try self.stack.pushF64(@intToFloat(f64, v));
+                },
+                Opcode.F64_Convert_I64_U => {
+                    var v = @bitCast(u64, try self.stack.popI64());
+                    try self.stack.pushF64(@intToFloat(f64, v));
+                },
+                Opcode.F64_Promote_F32 => {
+                    var v = try self.stack.popF32();
+                    try self.stack.pushF64(@floatCast(f64, v));
+                },
+                Opcode.I32_Reinterpret_F32 => {
+                    var v = try self.stack.popF32();
+                    try self.stack.pushI32(@bitCast(i32, v));
+                },
+                Opcode.I64_Reinterpret_F64 => {
+                    var v = try self.stack.popF64();
+                    try self.stack.pushI64(@bitCast(i64, v));
+                },
+                Opcode.F32_Reinterpret_I32 => {
+                    var v = try self.stack.popI32();
+                    try self.stack.pushF32(@bitCast(f32, v));
+                },
+                Opcode.F64_Reinterpret_I64 => {
+                    var v = try self.stack.popI64();
+                    try self.stack.pushF64(@bitCast(f64, v));
+                },
                 Opcode.I32_Extend8_S => {
                     var v = try self.stack.popI32();
                     var v_truncated = @truncate(i8, v);
@@ -2884,6 +3107,46 @@ pub const ModuleInstance = struct {
                     var v_truncated = @truncate(i32, v);
                     var v_extended: i64 = v_truncated;
                     try self.stack.pushI64(v_extended);
+                },
+                Opcode.I32_Trunc_Sat_F32_S => {
+                    var v = try self.stack.popF32();
+                    var int = Helpers.saturatedTruncateTo(i32, v);
+                    try self.stack.pushI32(int);
+                },
+                Opcode.I32_Trunc_Sat_F32_U => {
+                    var v = try self.stack.popF32();
+                    var int = Helpers.saturatedTruncateTo(u32, v);
+                    try self.stack.pushI32(@bitCast(i32, int));
+                },
+                Opcode.I32_Trunc_Sat_F64_S => {
+                    var v = try self.stack.popF64();
+                    var int = Helpers.saturatedTruncateTo(i32, v);
+                    try self.stack.pushI32(int);
+                },
+                Opcode.I32_Trunc_Sat_F64_U => {
+                    var v = try self.stack.popF64();
+                    var int = Helpers.saturatedTruncateTo(u32, v);
+                    try self.stack.pushI32(@bitCast(i32, int));
+                },
+                Opcode.I64_Trunc_Sat_F32_S => {
+                    var v = try self.stack.popF32();
+                    var int = Helpers.saturatedTruncateTo(i64, v);
+                    try self.stack.pushI64(int);
+                },
+                Opcode.I64_Trunc_Sat_F32_U => {
+                    var v = try self.stack.popF32();
+                    var int = Helpers.saturatedTruncateTo(u64, v);
+                    try self.stack.pushI64(@bitCast(i64, int));
+                },
+                Opcode.I64_Trunc_Sat_F64_S => {
+                    var v = try self.stack.popF64();
+                    var int = Helpers.saturatedTruncateTo(i64, v);
+                    try self.stack.pushI64(int);
+                },
+                Opcode.I64_Trunc_Sat_F64_U => {
+                    var v = try self.stack.popF64();
+                    var int = Helpers.saturatedTruncateTo(u64, v);
+                    try self.stack.pushI64(@bitCast(i64, int));
                 },
             }
 
