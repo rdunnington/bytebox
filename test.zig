@@ -389,16 +389,17 @@ pub fn main() !void {
     }
 
     const all_suites = [_][]const u8{
-        "nop",
-        "i32",
-        "i64",
+        "conversions",
         "f32",
         "f32_bitwise",
         "f32_cmp",
         "f64",
         "f64_bitwise",
         "f64_cmp",
-        "conversions",
+        "i32",
+        "i64",
+        "nop",
+        "store",
         "traps",
     };
 

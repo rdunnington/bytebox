@@ -2101,9 +2101,8 @@ pub const ModuleInstance = struct {
                     return error.TrapOutOfBoundsMemoryAccess;
                 }
 
-                const mem = memory.mem[offset .. offset + 4];
-
-                const readType = switch (std.meta.bitCount(T)) {
+                const bit_count = std.meta.bitCount(T);
+                const read_type = switch (bit_count) {
                     8 => u8,
                     16 => u16,
                     32 => u32,
@@ -2111,8 +2110,35 @@ pub const ModuleInstance = struct {
                     else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
                 };
 
-                const value = std.mem.readIntSliceLittle(readType, mem);
+                const mem = memory.mem[offset .. offset + bit_count];
+                const value = std.mem.readIntSliceLittle(read_type, mem);
                 return @bitCast(T, value);
+            }
+
+            fn storeInMem(value: anytype, memories: []const MemoryInstance, offset_from_memarg: u32, offset_from_stack: i32) !void {
+                if (memories.len == 0) {
+                    return error.AssertUnknownMemory;
+                }
+
+                const memory: *const MemoryInstance = &memories[0];
+                const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
+
+                if (memory.mem.len <= offset) {
+                    return error.TrapOutOfBoundsMemoryAccess;
+                }
+
+                const bit_count = std.meta.bitCount(@TypeOf(value));
+                const write_type = switch (bit_count) {
+                    8 => u8,
+                    16 => u16,
+                    32 => u32,
+                    64 => u64,
+                    else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
+                };
+                const write_value = @bitCast(write_type, value);
+
+                const mem = memory.mem[offset .. offset + bit_count];
+                std.mem.writeIntSliceLittle(write_type, mem, write_value);
             }
         };
 
@@ -2419,32 +2445,50 @@ pub const ModuleInstance = struct {
                     try self.stack.pushI64(@bitCast(i64, value));
                 },
                 Opcode.I32_Store => {
-                    if (self.store.memories.items.len == 0) {
-                        return error.AssertUnknownMemory;
-                    }
-
-                    const memory: *const MemoryInstance = &self.store.memories.items[0];
-                    const memarg_offset: u32 = instruction.immediate;
                     const value: i32 = try self.stack.popI32();
                     const offset_from_stack: i32 = try self.stack.popI32();
-                    const offset: u32 = memarg_offset + @intCast(u32, offset_from_stack);
-
-                    if (memory.mem.len <= offset) {
-                        return error.TrapUnknown;
-                    }
-
-                    const mem = memory.mem[offset .. offset + 4];
-
-                    std.mem.writeIntSliceLittle(i32, mem, value);
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
                 },
-                Opcode.I64_Store => {},
-                Opcode.F32_Store => {},
-                Opcode.F64_Store => {},
-                Opcode.I32_Store8 => {},
-                Opcode.I32_Store16 => {},
-                Opcode.I64_Store8 => {},
-                Opcode.I64_Store16 => {},
-                Opcode.I64_Store32 => {},
+                Opcode.I64_Store => {
+                    const value: i64 = try self.stack.popI64();
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
+                Opcode.F32_Store => {
+                    const value: f32 = try self.stack.popF32();
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
+                Opcode.F64_Store => {
+                    const value: f64 = try self.stack.popF64();
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
+                Opcode.I32_Store8 => {
+                    const value: i8 = @truncate(i8, try self.stack.popI32());
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
+                Opcode.I32_Store16 => {
+                    const value: i16 = @truncate(i16, try self.stack.popI32());
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
+                Opcode.I64_Store8 => {
+                    const value: i8 = @truncate(i8, try self.stack.popI64());
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
+                Opcode.I64_Store16 => {
+                    const value: i16 = @truncate(i16, try self.stack.popI64());
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
+                Opcode.I64_Store32 => {
+                    const value: i32 = @truncate(i32, try self.stack.popI64());
+                    const offset_from_stack: i32 = try self.stack.popI32();
+                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                },
                 Opcode.Memory_Size => {
                     const memory_index: usize = 0;
 
