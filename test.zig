@@ -274,10 +274,14 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..num_expected_returns];
 
+                log_verbose("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+
                 var invoke_succeeded = true;
                 // try module.inst.invoke(c.field, c.args.items, returns);
                 module.inst.invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
-                    print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    if (!g_verbose_logging) {
+                        print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    }
                     print("\tFail with error: {}\n", .{e});
                     invoke_succeeded = false;
                 };
@@ -299,14 +303,16 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                             }
 
                             if (pass == false) {
-                                print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                                if (!g_verbose_logging) {
+                                    print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                                }
                                 print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
                                 invoke_succeeded = false;
                             }
                         }
                     }
 
-                    log_verbose("assert_return: {s}:{s}({s})\n\tSuccess!\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    log_verbose("\tSuccess!\n", .{});
                 }
             },
             .AssertTrap => |c| {
@@ -398,6 +404,7 @@ pub fn main() !void {
         "f64_cmp",
         "i32",
         "i64",
+        "memory",
         "nop",
         "store",
         "traps",

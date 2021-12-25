@@ -13,7 +13,7 @@ pub const AssertError = error{
     AssertInvalidElement,
     AssertOneTableAllowed,
     AssertTableMaxExceeded,
-    AssertOneMemoryAllowed,
+    AssertMultipleMemories,
     AssertMemoryMaxPagesExceeded,
     AssertMemoryInvalidMaxLimit,
     AssertUnknownTable,
@@ -29,6 +29,7 @@ pub const AssertError = error{
     AssertInvalidFunction,
     AssertMemoryMaxReached,
     AssertMemoryInvalidIndex,
+    AssertInvalidData,
     AssertUnknownFunction,
     AssertUnknownMemory,
 };
@@ -294,8 +295,14 @@ pub const Val = union(ValType) {
             i32 => if (std.meta.activeTag(val) == .I32) {
                 return val.I32;
             },
+            u32 => if (std.meta.activeTag(val) == .I32) {
+                return @bitCast(u32, val.I32);
+            },
             i64 => if (std.meta.activeTag(val) == .I64) {
                 return val.I64;
+            },
+            u64 => if (std.meta.activeTag(val) == .I64) {
+                return @bitCast(u64, val.I64);
             },
             f32 => if (std.meta.activeTag(val) == .F32) {
                 return val.F64;
@@ -835,13 +842,14 @@ const MemoryInstance = struct {
 
     limits: Limits,
     mem: []u8,
+    base_addr: std.os.windows.PVOID,
 
     fn init(limits: Limits) MemoryInstance {
         comptime {
             std.debug.assert(builtin.os.tag == .windows);
         }
 
-        const max_pages = if (limits.max) |max| max else k_max_pages;
+        const max_pages = if (limits.max) |max| std.math.max(1, max) else k_max_pages;
 
         const w = std.os.windows;
         const addr = w.VirtualAlloc(
@@ -850,12 +858,12 @@ const MemoryInstance = struct {
             w.MEM_RESERVE,
             w.PAGE_READWRITE,
         ) catch unreachable;
-
-        var mem: []u8 = @ptrCast([*]u8, addr)[0..0];
+        var mem = @ptrCast([*]u8, addr)[0..0];
 
         var instance = MemoryInstance{
             .limits = Limits{ .min = 0, .max = @intCast(u32, max_pages) },
             .mem = mem,
+            .base_addr = addr,
         };
 
         return instance;
@@ -880,16 +888,27 @@ const MemoryInstance = struct {
 
         const w = std.os.windows;
         _ = w.VirtualAlloc(
-            @ptrCast(*c_void, self.mem.ptr),
+            self.base_addr,
+            // @ptrCast(?*c_void, self.mem.ptr),
             (self.limits.min + num_pages) * k_page_size,
             w.MEM_COMMIT,
             w.PAGE_READWRITE,
-        ) catch return false;
+        ) catch unreachable;
 
         self.limits.min = @intCast(u32, total_pages);
-        self.mem = self.mem.ptr[0 .. total_pages * k_page_size];
+        self.mem = @ptrCast([*]u8, self.base_addr)[0 .. total_pages * k_page_size];
 
         return true;
+    }
+
+    fn ensureMinSize(self: *MemoryInstance, size_bytes: usize) void {
+        if (self.limits.min * k_page_size < size_bytes) {
+            var num_min_pages = std.math.divCeil(usize, size_bytes, k_page_size) catch unreachable;
+            var needed_pages = num_min_pages - self.limits.min;
+            if (self.grow(needed_pages) == false) {
+                unreachable;
+            }
+        }
     }
 };
 
@@ -900,22 +919,70 @@ const ElementMode = enum {
 };
 
 const ElementDefinition = struct {
+    table_index: u32,
     mode: ElementMode,
     reftype: ValType,
-    table_index: u32,
     offset: ?ConstantExpression,
     elems_value: std.ArrayList(Val),
     elems_expr: std.ArrayList(ConstantExpression),
 };
 
 const ElementInstance = struct {
-    reftype: ValType,
     refs: std.ArrayList(Val),
+    reftype: ValType,
 };
 
-const DataDefinition = struct {};
+const DataMode = enum {
+    Active,
+    Passive,
+};
 
-const DataInstance = struct {};
+const DataDefinition = struct {
+    bytes: std.ArrayList(u8),
+    memory_index: ?u32,
+    offset: ?ConstantExpression,
+    mode: DataMode,
+
+    fn decode(reader: anytype, allocator: std.mem.Allocator) !DataDefinition {
+        var data_type = try reader.readByte();
+        if (data_type & ~@as(u8, 0b111) != 0) { // data_type may only be 0, 1, or 2
+            return error.AssertInvalidData;
+        }
+
+        var memory_index: ?u32 = null;
+        if (data_type == 0x00) {
+            memory_index = 0;
+        } else if (data_type == 0x02) {
+            memory_index = try std.leb.readULEB128(u32, reader);
+        }
+
+        var mode = DataMode.Passive;
+        var offset: ?ConstantExpression = null;
+        if (data_type == 0x00 or data_type == 0x02) {
+            mode = DataMode.Active;
+            offset = try ConstantExpression.decode(reader);
+        }
+
+        var num_bytes = try std.leb.readULEB128(u32, reader);
+        var bytes = std.ArrayList(u8).init(allocator);
+        try bytes.resize(num_bytes);
+        var num_read = try reader.read(bytes.items);
+        if (num_read != num_bytes) {
+            return error.AssertInvalidData;
+        }
+
+        return DataDefinition{
+            .bytes = bytes,
+            .memory_index = memory_index,
+            .offset = offset,
+            .mode = mode,
+        };
+    }
+};
+
+const DataInstance = struct {
+    def_index: usize,
+};
 
 const MemArg = struct {
     alignment: u32,
@@ -1277,6 +1344,7 @@ pub const ModuleDefinition = struct {
     memories: std.ArrayList(MemoryDefinition),
     elements: std.ArrayList(ElementDefinition),
     exports: Exports,
+    data_count: ?u32 = null,
     datas: std.ArrayList(DataDefinition),
 
     function_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
@@ -1443,7 +1511,7 @@ pub const ModuleDefinition = struct {
                     const num_memories = try std.leb.readULEB128(u32, reader);
 
                     if (num_memories > 1) {
-                        return error.AssertOneMemoryAllowed;
+                        return error.AssertMultipleMemories;
                     }
 
                     try module.memories.ensureTotalCapacity(num_memories);
@@ -1706,6 +1774,18 @@ pub const ModuleDefinition = struct {
                         code_index += 1;
                     }
                 },
+                .Data => {
+                    const num_datas = try std.leb.readULEB128(u32, reader);
+                    var data_index: u32 = 0;
+                    while (data_index < num_datas) : (data_index += 1) {
+                        var data = try DataDefinition.decode(reader, allocator);
+                        try module.datas.append(data);
+                    }
+                },
+                .DataCount => {
+                    module.data_count = try std.leb.readULEB128(u32, reader);
+                    try module.datas.ensureTotalCapacity(module.data_count.?);
+                },
                 else => {
                     std.debug.print("Skipping module section {}\n", .{section_id});
                     try stream.seekBy(@intCast(i64, size_bytes));
@@ -1902,9 +1982,35 @@ pub const Store = struct {
             }
         }
 
-        // TODO
         try store.datas.ensureTotalCapacity(module_def.datas.items.len);
-        for (module_def.datas.items) |_| {}
+        for (module_def.datas.items) |*def_data, i| {
+            if (def_data.mode == .Active) {
+                var memory_index: u32 = def_data.memory_index.?;
+                if (module_def.memories.items.len <= memory_index) {
+                    return error.AssertUnknownMemory;
+                }
+
+                var memory: *MemoryInstance = &store.memories.items[memory_index];
+
+                const num_bytes: usize = def_data.bytes.items.len;
+                if (num_bytes > 0) {
+                    const offset_begin: usize = try (def_data.offset.?).resolveTo(u32);
+                    const offset_end: usize = offset_begin + num_bytes;
+                    if (memory.limits.max.? < offset_end) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+
+                    memory.ensureMinSize(offset_end);
+
+                    var destination = memory.mem[offset_begin..offset_end];
+                    std.mem.copy(u8, destination, def_data.bytes.items);
+                }
+            } else {
+                try store.datas.append(DataInstance{
+                    .def_index = i,
+                });
+            }
+        }
 
         return store;
     }
@@ -2097,6 +2203,8 @@ pub const ModuleInstance = struct {
                 const memory: *const MemoryInstance = &memories[0];
                 const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
 
+                // std.debug.print("memory.mem.len: {}, ptr: {*},. offset: {}\n", .{ memory.mem.len, memory.mem.ptr, offset });
+
                 if (memory.mem.len <= offset) {
                     return error.TrapOutOfBoundsMemoryAccess;
                 }
@@ -2150,7 +2258,7 @@ pub const ModuleInstance = struct {
             var instruction = instructions[instruction_offset];
             var next_instruction = instruction_offset + 1;
 
-            // std.debug.print("found opcode: {} (pos {})\n", .{ opcode, stream.pos });
+            // std.debug.print("found opcode: {} (pos {})\n", .{ instruction.opcode, instruction_offset });
 
             switch (instruction.opcode) {
                 Opcode.Unreachable => {
@@ -2168,14 +2276,17 @@ pub const ModuleInstance = struct {
                 Opcode.If => {
                     var condition = try self.stack.popI32();
                     if (condition != 0) {
+                        // std.debug.print(">>> entering block at {}\n", .{instruction_offset});
                         try self.enterBlock(instruction, instruction_offset);
                     } else if (self.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| {
+                        // std.debug.print(">>> else case hit at {}\n", .{else_offset});
                         // +1 to skip the else opcode, since it's treated as an End for the If block.
                         try self.enterBlock(instruction, else_offset);
                         next_instruction = try Helpers.seek(else_offset + 1, instructions.len);
                     } else {
                         const continuation = self.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
-                        next_instruction = try Helpers.seek(continuation, instructions.len);
+                        // std.debug.print(">>> skipping to next_instruction at {}\n", .{continuation + 1});
+                        next_instruction = try Helpers.seek(continuation + 1, instructions.len);
                     }
                 },
                 Opcode.Else => {
@@ -2268,6 +2379,9 @@ pub const ModuleInstance = struct {
                     }
 
                     const is_root_function = (self.stack.size() == 0);
+
+                    // std.debug.print("is_root_function: {}\n", .{is_root_function});
+                    // std.debug.print("stack: {s}\n", .{self.stack.stack.items});
 
                     // std.debug.print("pushing returns: {s}\n", .{returns});
                     while (returns.items.len > 0) {
