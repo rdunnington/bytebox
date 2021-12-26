@@ -41,6 +41,7 @@ pub const TrapError = error{
     TrapIndirectCallTypeMismatch,
     TrapInvalidIntegerConversion,
     TrapOutOfBoundsMemoryAccess,
+    TrapUndefinedElement,
     TrapUnknown,
 };
 
@@ -313,6 +314,8 @@ pub const Val = union(ValType) {
             else => unreachable,
         }
 
+        std.debug.print("\tExpected value of type {}, but got {}\n", .{ T, val });
+
         return error.AssertTypeMismatch;
     }
 
@@ -416,6 +419,7 @@ const Stack = struct {
     fn popValue(self: *Self) !Val {
         var item = try self.pop();
         // std.debug.print("\tpop value: {}\n", .{item});
+        // std.debug.print("\tstack: {any}\n", .{self.stack.items});
         switch (item) {
             .Val => |v| return v,
             .Label => return error.AssertTypeMismatch,
@@ -525,12 +529,12 @@ const Stack = struct {
 
     fn findCurrentFrame(self: *const Self) !*const CallFrame {
         var item_index: i32 = @intCast(i32, self.stack.items.len) - 1;
-        while (item_index >= 0) {
+        while (item_index >= 0) : (item_index -= 1) {
             var index = @intCast(usize, item_index);
             if (std.meta.activeTag(self.stack.items[index]) == .Frame) {
-                return &self.stack.items[index].Frame;
+                var frame: *const CallFrame = &self.stack.items[index].Frame;
+                return frame; // why doesn't this get returned properly in the normal case??
             }
-            item_index -= 1;
         }
 
         return error.AssertMissingCallFrame;
@@ -592,12 +596,26 @@ const Stack = struct {
         return self.stack.items.len;
     }
 
+    fn forceClearAll(self: *Self) void {
+        while (self.stack.items.len > 0) {
+            var item = self.pop() catch unreachable;
+            switch (item) {
+                .Val => {},
+                .Label => {},
+                .Frame => |callframe| {
+                    callframe.locals.deinit();
+                },
+            }
+        }
+        self.last_label_index = -1;
+        self.next_label_id = 0;
+    }
+
     stack: std.ArrayList(StackItem),
     last_label_index: i32 = -1,
     next_label_id: u32 = 0,
 };
 
-// TODO Import, Memory, Start, Data
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
 
 const k_function_type_sentinel_byte: u8 = 0x60;
@@ -1727,7 +1745,7 @@ pub const ModuleDefinition = struct {
                         while (parsing_code) {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
-                            const instruction = try Instruction.decode(reader, &module);
+                            var instruction = try Instruction.decode(reader, &module);
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
@@ -1737,6 +1755,7 @@ pub const ModuleDefinition = struct {
                             } else if (instruction.opcode == .Else) {
                                 const block: *const BlockData = &block_stack.items[block_stack.items.len - 1];
                                 try module.if_to_else_offsets.putNoClobber(block.offset, parsing_offset);
+                                instruction.immediate = module.code.instructions.items[block.offset].immediate; // the else gets the matching if's immediate index
                             } else if (instruction.opcode == .End) {
                                 const block: BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
                                 if (block_stack.items.len == 0) {
@@ -2086,7 +2105,10 @@ pub const ModuleInstance = struct {
                     .locals = locals,
                 });
                 try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
-                try self.executeWasm(self.module_def.code.instructions.items, func.offset_into_instructions);
+                self.executeWasm(self.module_def.code.instructions.items, func.offset_into_instructions) catch |err| {
+                    self.stack.forceClearAll(); // ensure current stack state doesn't pollute future invokes
+                    return err;
+                };
 
                 if (self.stack.size() != returns.len) {
                     std.debug.print("stack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
@@ -2258,7 +2280,7 @@ pub const ModuleInstance = struct {
             var instruction = instructions[instruction_offset];
             var next_instruction = instruction_offset + 1;
 
-            // std.debug.print("found opcode: {} (pos {})\n", .{ instruction.opcode, instruction_offset });
+            // std.debug.print("\tfound opcode: {} (pos {})\n", .{ instruction.opcode, instruction_offset });
 
             switch (instruction.opcode) {
                 Opcode.Unreachable => {
@@ -2276,16 +2298,16 @@ pub const ModuleInstance = struct {
                 Opcode.If => {
                     var condition = try self.stack.popI32();
                     if (condition != 0) {
-                        // std.debug.print(">>> entering block at {}\n", .{instruction_offset});
+                        // std.debug.print("\t>>> entering block at {}\n", .{instruction_offset});
                         try self.enterBlock(instruction, instruction_offset);
                     } else if (self.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| {
-                        // std.debug.print(">>> else case hit at {}\n", .{else_offset});
+                        // std.debug.print("\t>>> else case hit at {}\n", .{else_offset});
                         // +1 to skip the else opcode, since it's treated as an End for the If block.
                         try self.enterBlock(instruction, else_offset);
                         next_instruction = try Helpers.seek(else_offset + 1, instructions.len);
                     } else {
                         const continuation = self.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
-                        // std.debug.print(">>> skipping to next_instruction at {}\n", .{continuation + 1});
+                        // std.debug.print("\t>>> skipping to next_instruction at {}\n", .{continuation + 1});
                         next_instruction = try Helpers.seek(continuation + 1, instructions.len);
                     }
                 },
@@ -2301,14 +2323,14 @@ pub const ModuleInstance = struct {
                     // id 0 means this is the end of a function, otherwise it's the end of a block
                     const label_ptr: *const Label = self.stack.topLabel();
                     if (label_ptr.id != 0) {
-                        try popValues(&returns, &self.stack, self.getReturnTypesFromBlockType(label_ptr.blocktype));
+                        try popValues(&returns, &self.stack, self.getreturn_typesFromBlockType(label_ptr.blocktype));
                         _ = try self.stack.popLabel();
                         try pushValues(returns.items, &self.stack);
                     } else {
                         var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                        const returnTypes: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
+                        const return_types: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
 
-                        try popValues(&returns, &self.stack, returnTypes);
+                        try popValues(&returns, &self.stack, return_types);
                         var label = try self.stack.popLabel();
                         try self.stack.popFrame();
                         const is_root_function = (self.stack.size() == 0);
@@ -2343,19 +2365,24 @@ pub const ModuleInstance = struct {
                     const label_id: u32 = if (label_index < immediates.label_ids.items.len) immediates.label_ids.items[label_index] else immediates.fallback_id;
                     const branch_to_instruction = try self.branch(label_id);
 
+                    // std.debug.print("branch_table) label_index: {}, label_ids: {any}, label_id: {}\n", .{ label_index, immediates.label_ids.items, label_id });
+
                     next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                 },
                 Opcode.Return => {
                     var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                    const returnTypes: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
+                    const return_types: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
 
                     var returns = std.ArrayList(Val).init(self.allocator);
                     defer returns.deinit();
-                    try returns.ensureTotalCapacity(returnTypes.len);
+                    try returns.ensureTotalCapacity(return_types.len);
 
-                    while (returns.items.len < returnTypes.len) {
+                    // std.debug.print("stack: {any}, expected: {any}\n", .{ self.stack.stack.items, return_types });
+
+                    while (returns.items.len < return_types.len) {
                         var value = try self.stack.popValue();
-                        if (std.meta.activeTag(value) != returnTypes[returns.items.len]) {
+                        if (std.meta.activeTag(value) != return_types[return_types.len - returns.items.len - 1]) {
+                            std.debug.print("\tExpected value of type {}, but got {}\n", .{ return_types[returns.items.len], value });
                             return error.AssertTypeMismatch;
                         }
                         try returns.append(value);
@@ -2419,7 +2446,7 @@ pub const ModuleInstance = struct {
 
                     const ref_index = try self.stack.popI32();
                     if (table.refs.items.len <= ref_index or ref_index < 0) {
-                        return error.TrapUnknown;
+                        return error.TrapUndefinedElement;
                     }
 
                     const ref: Val = table.refs.items[@intCast(usize, ref_index)];
@@ -2467,6 +2494,7 @@ pub const ModuleInstance = struct {
                     var locals_index: u32 = instruction.immediate;
                     var frame: *const CallFrame = try self.stack.findCurrentFrame();
                     var v: Val = try self.stack.popValue();
+
                     frame.locals.items[locals_index] = v;
                 },
                 Opcode.Local_Tee => {
@@ -3476,13 +3504,19 @@ pub const ModuleInstance = struct {
         };
 
         const param_types: []const ValType = functype.getParams();
-        try frame.locals.resize(param_types.len);
+
+        var total_local_count: usize = param_types.len;
+        for (func.locals) |count| {
+            total_local_count += count;
+        }
+        try frame.locals.resize(total_local_count);
 
         var param_index = param_types.len;
         while (param_index > 0) {
             param_index -= 1;
             var value = try self.stack.popValue();
             if (std.meta.activeTag(value) != param_types[param_index]) {
+                std.debug.print("\tExpected value of type {}, but got {}\n", .{ param_types[param_index], value });
                 return error.AssertTypeMismatch;
             }
             frame.locals.items[param_index] = value;
@@ -3499,8 +3533,37 @@ pub const ModuleInstance = struct {
     fn enterBlock(self: *ModuleInstance, instruction: Instruction, label_offset: u32) !void {
         var block_type_value = self.module_def.code.block_type_values.items[instruction.immediate];
 
+        var params = std.ArrayList(Val).init(self.allocator);
+        defer params.deinit();
+
+        switch (block_type_value) {
+            .TypeIndex => {
+                const type_index = block_type_value.TypeIndex;
+                const func_type: *const FunctionTypeDefinition = &self.module_def.types.items[type_index];
+                const type_params: []const ValType = func_type.getParams();
+
+                try params.ensureTotalCapacity(type_params.len);
+
+                var param_index: u32 = 0;
+                while (param_index < type_params.len) : (param_index += 1) {
+                    var value = try self.stack.popValue();
+                    if (value != type_params[param_index]) {
+                        return error.AssertTypeMismatch;
+                    }
+                    params.addOneAssumeCapacity().* = value;
+                }
+            },
+            else => {},
+        }
+
         const continuation = self.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
         try self.stack.pushLabel(block_type_value, continuation);
+
+        var param_index: u32 = 0;
+        while (param_index < params.items.len) : (param_index += 1) {
+            var val = params.items[params.items.len - param_index - 1];
+            try self.stack.pushValue(val);
+        }
     }
 
     fn branch(self: *ModuleInstance, label_id: u32) !u32 {
@@ -3517,7 +3580,7 @@ pub const ModuleInstance = struct {
         var args = std.ArrayList(Val).init(self.allocator);
         defer args.deinit();
 
-        try popValues(&args, &self.stack, self.getReturnTypesFromBlockType(label.blocktype));
+        try popValues(&args, &self.stack, self.getreturn_typesFromBlockType(label.blocktype));
 
         while (true) {
             var topItem = try self.stack.top();
@@ -3540,10 +3603,10 @@ pub const ModuleInstance = struct {
         try pushValues(args.items, &self.stack);
 
         // std.debug.print("branching to continuation: {}\n", .{continuation});
-        return continuation;
+        return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
     }
 
-    fn getReturnTypesFromBlockType(self: *ModuleInstance, blocktype: BlockTypeValue) []const ValType {
+    fn getreturn_typesFromBlockType(self: *ModuleInstance, blocktype: BlockTypeValue) []const ValType {
         const Statics = struct {
             const empty = [_]ValType{};
             const valtype_i32 = [_]ValType{.I32};
@@ -3575,8 +3638,8 @@ pub const ModuleInstance = struct {
         while (returns.items.len < types.len) {
             // std.debug.print("returns.items.len < types.len: {}, {}\n", .{returns.items.len, types.len});
             var item = try stack.popValue();
-            if (types[returns.items.len] != std.meta.activeTag(item)) {
-                // std.debug.print("popValues mismatch: required: {s}, got {}\n", .{types, item});
+            if (types[types.len - returns.items.len - 1] != std.meta.activeTag(item)) {
+                // std.debug.print("popValues mismatch: required: {s}, got {}\n", .{ types, item });
                 return error.AssertTypeMismatch;
             }
             try returns.append(item);

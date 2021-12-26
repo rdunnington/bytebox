@@ -118,6 +118,7 @@ fn error_to_text(err: anyerror) []const u8 {
         wasm.TrapError.TrapIntegerOverflow => "integer overflow",
         wasm.TrapError.TrapInvalidIntegerConversion => "invalid conversion to integer",
         wasm.TrapError.TrapOutOfBoundsMemoryAccess => "out of bounds memory access",
+        wasm.TrapError.TrapUndefinedElement => "undefined element",
         wasm.AssertError.AssertTypeMismatch => "type mismatch",
         wasm.AssertError.AssertUnknownMemory => "unknown memory",
         else => {
@@ -322,6 +323,13 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                     }
                 }
 
+                if (test_filter_or_null) |filter| {
+                    if (strcmp(filter, c.invocation.field) == false) {
+                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module_name, c.invocation.field });
+                        continue;
+                    }
+                }
+
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..];
 
@@ -404,6 +412,7 @@ pub fn main() !void {
         "f64_cmp",
         "i32",
         "i64",
+        "if",
         "memory",
         "nop",
         "store",
