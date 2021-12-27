@@ -2219,14 +2219,14 @@ pub const ModuleInstance = struct {
                     return error.AssertUnknownMemory;
                 }
 
-                const memory: *const MemoryInstance = &memories[0];
-                const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
-
-                // std.debug.print("memory.mem.len: {}, ptr: {*},. offset: {}\n", .{ memory.mem.len, memory.mem.ptr, offset });
-
-                if (memory.mem.len <= offset) {
+                if (offset_from_stack < 0) {
                     return error.TrapOutOfBoundsMemoryAccess;
                 }
+
+                const memory: *const MemoryInstance = &memories[0];
+                const offset: usize = offset_from_memarg + @intCast(usize, offset_from_stack);
+
+                // std.debug.print("memory.mem.len: {}, ptr: {*},. offset: {}\n", .{ memory.mem.len, memory.mem.ptr, offset });
 
                 const bit_count = std.meta.bitCount(T);
                 const read_type = switch (bit_count) {
@@ -2237,7 +2237,15 @@ pub const ModuleInstance = struct {
                     else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
                 };
 
-                const mem = memory.mem[offset .. offset + bit_count];
+                const end = offset + (bit_count / 8);
+
+                // std.debug.print("memory.mem.len: {}, offset: {}, bit_count: {}, T: {}\n", .{ memory.mem.len, offset, bit_count, T });
+
+                if (memory.mem.len < end) {
+                    return error.TrapOutOfBoundsMemoryAccess;
+                }
+
+                const mem = memory.mem[offset..end];
                 const value = std.mem.readIntSliceLittle(read_type, mem);
                 return @bitCast(T, value);
             }
@@ -2247,12 +2255,12 @@ pub const ModuleInstance = struct {
                     return error.AssertUnknownMemory;
                 }
 
-                const memory: *const MemoryInstance = &memories[0];
-                const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
-
-                if (memory.mem.len <= offset) {
+                if (offset_from_stack < 0) {
                     return error.TrapOutOfBoundsMemoryAccess;
                 }
+
+                const memory: *const MemoryInstance = &memories[0];
+                const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
 
                 const bit_count = std.meta.bitCount(@TypeOf(value));
                 const write_type = switch (bit_count) {
@@ -2262,6 +2270,12 @@ pub const ModuleInstance = struct {
                     64 => u64,
                     else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
                 };
+
+                const end = offset + (bit_count / 8);
+                if (memory.mem.len < end) {
+                    return error.TrapOutOfBoundsMemoryAccess;
+                }
+
                 const write_value = @bitCast(write_type, value);
 
                 const mem = memory.mem[offset .. offset + bit_count];

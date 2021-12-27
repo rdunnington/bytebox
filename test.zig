@@ -330,6 +330,8 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                     }
                 }
 
+                log_verbose("assert_trap: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..];
 
@@ -347,9 +349,12 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                 };
 
                 if (invoke_failed and invoke_failed_with_correct_trap) {
-                    log_verbose("assert_trap: {s}:{s}({s})\n\tSuccess!\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    log_verbose("\tSuccess!\n", .{});
                 } else {
-                    print("assert_trap: {s}:{s}({s}):\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    if (!g_verbose_logging) {
+                        print("assert_trap: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    }
+                    // print("assert_trap: {s}:{s}({s}):\n", .{ module_name, c.invocation.field, c.invocation.args.items });
                     if (invoke_failed_with_correct_trap == false) {
                         print("\tInvoke trapped, but got error '{s}'' instead of expected '{s}':\n", .{ trap_string.?, c.expected_error });
                     } else {
@@ -403,6 +408,7 @@ pub fn main() !void {
     }
 
     const all_suites = [_][]const u8{
+        "address",
         "binary",
         "binary-leb128",
         "block",
