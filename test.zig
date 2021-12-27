@@ -403,6 +403,8 @@ pub fn main() !void {
     }
 
     const all_suites = [_][]const u8{
+        "br",
+        "br_if",
         "conversions",
         "f32",
         "f32_bitwise",

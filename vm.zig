@@ -349,10 +349,15 @@ const BlockTypeValue = union(BlockType) {
 };
 
 const Label = struct {
-    id: u32,
+    const k_invalid_continuation = std.math.maxInt(u32);
+
     blocktype: BlockTypeValue,
     continuation: u32,
     last_label_index: i32,
+
+    fn isFirstInCallFrame(label: *const Label) bool {
+        return label.last_label_index == -1;
+    }
 };
 
 const CallFrame = struct {
@@ -428,10 +433,8 @@ const Stack = struct {
     }
 
     fn pushLabel(self: *Self, blocktype: BlockTypeValue, continuation: u32) !void {
-        // std.debug.print(">> push label: {}\n", .{self.next_label_id});
-        const id: u32 = self.next_label_id;
+        // std.debug.print("\t>> push label: \n", .{});
         var item = StackItem{ .Label = .{
-            .id = id,
             .blocktype = blocktype,
             .continuation = continuation,
             .last_label_index = self.last_label_index,
@@ -439,11 +442,9 @@ const Stack = struct {
         try self.stack.append(item);
 
         self.last_label_index = @intCast(i32, self.stack.items.len) - 1;
-        self.next_label_id += 1;
     }
 
     fn popLabel(self: *Self) !Label {
-        // std.debug.print(">> pop label: {}\n", .{self.next_label_id});
         var item = try self.pop();
         var label = switch (item) {
             .Val => return error.AssertTypeMismatch,
@@ -451,8 +452,9 @@ const Stack = struct {
             .Frame => return error.AssertTypeMismatch,
         };
 
+        // std.debug.print("\t>> pop label: {}\n", .{label.id});
+
         self.last_label_index = label.last_label_index;
-        self.next_label_id = label.id;
 
         return label;
     }
@@ -466,25 +468,24 @@ const Stack = struct {
             return error.AssertInvalidLabel;
         }
 
+        var stack_label_id: u32 = 0;
         var label_index = self.last_label_index;
         while (label_index > 0) {
+            if (stack_label_id == id) {
+                return &self.stack.items[@intCast(usize, label_index)].Label;
+            }
             switch (self.stack.items[@intCast(usize, label_index)]) {
                 .Label => |*label| {
-                    const label_id_from_top = (self.next_label_id - 1) - label.id;
-                    // std.debug.print("found label_id_from_top: {}\n", .{label_id_from_top});
-                    if (label_id_from_top == id) {
-                        return label;
-                    } else {
-                        label_index = label.last_label_index;
-                        if (label_index == -1) {
-                            return error.AssertInvalidLabel;
-                        }
+                    if (label.last_label_index == -1) {
+                        return error.AssertInvalidLabel;
                     }
+                    label_index = label.last_label_index;
                 },
                 else => {
                     unreachable; // last_label_index should only point to Labels
                 },
             }
+            stack_label_id += 1;
         }
 
         unreachable;
@@ -496,7 +497,6 @@ const Stack = struct {
 
         // frames reset the label index since you can't jump to labels in a different function
         self.last_label_index = -1;
-        self.next_label_id = 0;
     }
 
     fn popFrame(self: *Self) !void {
@@ -515,9 +515,8 @@ const Stack = struct {
             item_index -= 1;
             switch (self.stack.items[item_index]) {
                 .Val => {},
-                .Label => |*label| {
+                .Label => {
                     self.last_label_index = @intCast(i32, item_index);
-                    self.next_label_id = label.id + 1;
                     break;
                 },
                 .Frame => {
@@ -608,12 +607,10 @@ const Stack = struct {
             }
         }
         self.last_label_index = -1;
-        self.next_label_id = 0;
     }
 
     stack: std.ArrayList(StackItem),
     last_label_index: i32 = -1,
-    next_label_id: u32 = 0,
 };
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
@@ -641,7 +638,7 @@ const ConstantExpression = struct {
             .I64_Const => Val{ .I64 = try std.leb.readULEB128(i64, reader) },
             .F32_Const => Val{ .F32 = try readFloat(f32, reader) },
             .F64_Const => Val{ .F64 = try readFloat(f64, reader) },
-            // TODO handle f64, ref.null, ref.func, global.get
+            // TODO handle ref.null, ref.func, global.get
             else => unreachable,
         };
 
@@ -1768,7 +1765,7 @@ pub const ModuleDefinition = struct {
                                 } else {
                                     if (block.opcode == .Loop) {
                                         try module.label_continuations.putNoClobber(block.offset, block.offset);
-                                        // std.debug.print("adding loop continuation for offset {}: {}\n", .{block.offset, block.offset});
+                                        // std.debug.print("adding loop continuation for offset {}: {}\n", .{ block.offset, block.offset });
                                     } else {
                                         try module.label_continuations.putNoClobber(block.offset, parsing_offset);
                                         // std.debug.print("adding block continuation for offset {}: {}\n", .{block.offset, parsing_offset});
@@ -2133,7 +2130,7 @@ pub const ModuleInstance = struct {
     fn executeWasm(self: *ModuleInstance, instructions: []const Instruction, root_offset: u32) !void {
         const Helpers = struct {
             fn seek(offset: u32, max: usize) !u32 {
-                if (offset < max) {
+                if (offset < max or offset == Label.k_invalid_continuation) {
                     return offset;
                 }
                 return error.OutOfBounds;
@@ -2322,7 +2319,7 @@ pub const ModuleInstance = struct {
 
                     // id 0 means this is the end of a function, otherwise it's the end of a block
                     const label_ptr: *const Label = self.stack.topLabel();
-                    if (label_ptr.id != 0) {
+                    if (label_ptr.isFirstInCallFrame() == false) {
                         try popValues(&returns, &self.stack, self.getreturn_typesFromBlockType(label_ptr.blocktype));
                         _ = try self.stack.popLabel();
                         try pushValues(returns.items, &self.stack);
@@ -2370,58 +2367,8 @@ pub const ModuleInstance = struct {
                     next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                 },
                 Opcode.Return => {
-                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                    const return_types: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
-
-                    var returns = std.ArrayList(Val).init(self.allocator);
-                    defer returns.deinit();
-                    try returns.ensureTotalCapacity(return_types.len);
-
-                    // std.debug.print("stack: {any}, expected: {any}\n", .{ self.stack.stack.items, return_types });
-
-                    while (returns.items.len < return_types.len) {
-                        var value = try self.stack.popValue();
-                        if (std.meta.activeTag(value) != return_types[return_types.len - returns.items.len - 1]) {
-                            std.debug.print("\tExpected value of type {}, but got {}\n", .{ return_types[returns.items.len], value });
-                            return error.AssertTypeMismatch;
-                        }
-                        try returns.append(value);
-                    }
-
-                    var last_label: Label = undefined;
-                    while (true) {
-                        var item: *const StackItem = try self.stack.top();
-                        switch (item.*) {
-                            .Val => {
-                                _ = try self.stack.popValue();
-                            },
-                            .Label => {
-                                last_label = try self.stack.popLabel();
-                            },
-                            .Frame => {
-                                _ = try self.stack.popFrame();
-                                break;
-                            },
-                        }
-                    }
-
-                    const is_root_function = (self.stack.size() == 0);
-
-                    // std.debug.print("is_root_function: {}\n", .{is_root_function});
-                    // std.debug.print("stack: {s}\n", .{self.stack.stack.items});
-
-                    // std.debug.print("pushing returns: {s}\n", .{returns});
-                    while (returns.items.len > 0) {
-                        var value = returns.orderedRemove(returns.items.len - 1);
-                        try self.stack.pushValue(value);
-                    }
-
-                    // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
-                    if (is_root_function) {
-                        return;
-                    } else {
-                        next_instruction = try Helpers.seek(last_label.continuation, instructions.len);
-                    }
+                    const continuation: u32 = try self.returnFromFunc();
+                    next_instruction = try Helpers.seek(continuation, instructions.len);
                 },
                 Opcode.Call => {
                     const func_index = instruction.immediate;
@@ -3567,12 +3514,12 @@ pub const ModuleInstance = struct {
     }
 
     fn branch(self: *ModuleInstance, label_id: u32) !u32 {
-        // std.debug.print("branching to label {}\n", .{label_id});
+        // std.debug.print("\tbranching to label {}\n", .{label_id});
         const label: *const Label = try self.stack.findLabel(label_id);
-        if (label.last_label_index == -1) {
-            return error.AssertLabelMismatch; // can't branch to the end of functions - that's the return opcode's job
+        if (label.isFirstInCallFrame()) {
+            return try self.returnFromFunc();
+            // return error.AssertLabelMismatch; // can't branch to the end of functions - that's the return opcode's job
         }
-        const label_stack_id = label.id;
         const continuation = label.continuation;
 
         // std.debug.print("found label: {}\n", .{label});
@@ -3582,9 +3529,10 @@ pub const ModuleInstance = struct {
 
         try popValues(&args, &self.stack, self.getreturn_typesFromBlockType(label.blocktype));
 
+        var stack_label_id: u32 = 0;
         while (true) {
             var topItem = try self.stack.top();
-            switch (std.meta.activeTag(topItem.*)) {
+            switch (topItem.*) {
                 .Val => {
                     _ = try self.stack.popValue();
                 },
@@ -3592,9 +3540,11 @@ pub const ModuleInstance = struct {
                     return error.AssertInvalidLabel;
                 },
                 .Label => {
-                    const popped_label: Label = try self.stack.popLabel();
-                    if (popped_label.id == label_stack_id) {
+                    _ = try self.stack.popLabel();
+                    if (stack_label_id == label_id) {
                         break;
+                    } else {
+                        stack_label_id += 1;
                     }
                 },
             }
@@ -3604,6 +3554,61 @@ pub const ModuleInstance = struct {
 
         // std.debug.print("branching to continuation: {}\n", .{continuation});
         return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
+    }
+
+    fn returnFromFunc(self: *ModuleInstance) !u32 {
+        var frame: *const CallFrame = try self.stack.findCurrentFrame();
+        const return_types: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
+
+        var returns = std.ArrayList(Val).init(self.allocator);
+        defer returns.deinit();
+        try returns.ensureTotalCapacity(return_types.len);
+
+        // std.debug.print("stack: {any}, expected: {any}\n", .{ self.stack.stack.items, return_types });
+
+        while (returns.items.len < return_types.len) {
+            var value = try self.stack.popValue();
+            if (std.meta.activeTag(value) != return_types[return_types.len - returns.items.len - 1]) {
+                std.debug.print("\tExpected value of type {}, but got {}\n", .{ return_types[returns.items.len], value });
+                return error.AssertTypeMismatch;
+            }
+            try returns.append(value);
+        }
+
+        var last_label: Label = undefined;
+        while (true) {
+            var item: *const StackItem = try self.stack.top();
+            switch (item.*) {
+                .Val => {
+                    _ = try self.stack.popValue();
+                },
+                .Label => {
+                    last_label = try self.stack.popLabel();
+                },
+                .Frame => {
+                    _ = try self.stack.popFrame();
+                    break;
+                },
+            }
+        }
+
+        const is_root_function = (self.stack.size() == 0);
+
+        // std.debug.print("is_root_function: {}\n", .{is_root_function});
+        // std.debug.print("stack: {s}\n", .{self.stack.stack.items});
+
+        // std.debug.print("pushing returns: {s}\n", .{returns});
+        while (returns.items.len > 0) {
+            var value = returns.orderedRemove(returns.items.len - 1);
+            try self.stack.pushValue(value);
+        }
+
+        // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
+        if (is_root_function) {
+            return Label.k_invalid_continuation;
+        } else {
+            return last_label.continuation;
+        }
     }
 
     fn getreturn_typesFromBlockType(self: *ModuleInstance, blocktype: BlockTypeValue) []const ValType {
