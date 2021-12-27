@@ -15,7 +15,7 @@ foreach ($file in $wasts)
     }
 
     pushd $output_dir
-    wast2json.exe $file.FullName
+    ..\..\wast2json.exe $file.FullName
     popd
 }
 
