@@ -32,6 +32,7 @@ pub const AssertError = error{
     AssertInvalidData,
     AssertUnknownFunction,
     AssertUnknownMemory,
+    AssertUnknownData,
 };
 
 pub const TrapError = error{
@@ -231,6 +232,10 @@ const Opcode = enum(u16) {
     I64_Trunc_Sat_F32_U = 0xFC05,
     I64_Trunc_Sat_F64_S = 0xFC06,
     I64_Trunc_Sat_F64_U = 0xFC07,
+    Memory_Init = 0xFC08,
+    Data_Drop = 0xFC09,
+    Memory_Copy = 0xFC0A,
+    Memory_Fill = 0xFC0B,
 
     fn expectsEnd(opcode: Opcode) bool {
         return switch (opcode) {
@@ -916,9 +921,13 @@ const MemoryInstance = struct {
         return true;
     }
 
-    fn ensureMinSize(self: *MemoryInstance, size_bytes: usize) void {
+    fn ensureMinSize(self: *MemoryInstance, size_bytes: usize) !void {
         if (self.limits.min * k_page_size < size_bytes) {
             var num_min_pages = std.math.divCeil(usize, size_bytes, k_page_size) catch unreachable;
+            if (num_min_pages > self.limits.max.?) {
+                return error.TrapOutOfBoundsMemoryAccess;
+            }
+
             var needed_pages = num_min_pages - self.limits.min;
             if (self.grow(needed_pages) == false) {
                 unreachable;
@@ -993,10 +1002,6 @@ const DataDefinition = struct {
             .mode = mode,
         };
     }
-};
-
-const DataInstance = struct {
-    def_index: usize,
 };
 
 const MemArg = struct {
@@ -1304,6 +1309,32 @@ const Instruction = struct {
                     return error.AssertInvalidBytecode;
                 }
             },
+            .Memory_Init => {
+                immediate = try std.leb.readULEB128(u32, reader); // dataidx
+                var reserved = try reader.readByte();
+                if (reserved != 0x00) {
+                    return error.AssertInvalidBytecode;
+                }
+            },
+            .Data_Drop => {
+                immediate = try std.leb.readULEB128(u32, reader); // dataidx
+            },
+            .Memory_Copy => {
+                var reserved = try reader.readByte();
+                if (reserved != 0x00) {
+                    return error.AssertInvalidBytecode;
+                }
+                reserved = try reader.readByte();
+                if (reserved != 0x00) {
+                    return error.AssertInvalidBytecode;
+                }
+            },
+            .Memory_Fill => {
+                var reserved = try reader.readByte();
+                if (reserved != 0x00) {
+                    return error.AssertInvalidBytecode;
+                }
+            },
             else => {},
         }
 
@@ -1318,6 +1349,41 @@ const Instruction = struct {
         }
 
         return inst;
+    }
+};
+
+const ModuleValidator = struct {
+    fn validateMemoryIndex(module: *const ModuleDefinition) !void {
+        if (module.memories.items.len < 1) {
+            return error.AssertUnknownMemory;
+        }
+    }
+
+    fn validateDataIndex(index: u32, module: *const ModuleDefinition) !void {
+        if (module.data_count) |count| {
+            if (count <= index) {
+                return error.AssertUnknownData;
+            }
+        }
+    }
+
+    fn validate(instruction: Instruction, module: *const ModuleDefinition) !void {
+        switch (instruction.opcode) {
+            .Memory_Init => {
+                try validateMemoryIndex(module);
+                try validateDataIndex(instruction.immediate, module);
+            },
+            .Data_Drop => {
+                try validateDataIndex(instruction.immediate, module);
+            },
+            .Memory_Copy => {
+                try validateMemoryIndex(module);
+            },
+            .Memory_Fill => {
+                try validateMemoryIndex(module);
+            },
+            else => {},
+        }
     }
 };
 
@@ -1743,6 +1809,7 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
                             var instruction = try Instruction.decode(reader, &module);
+                            try ModuleValidator.validate(instruction, &module);
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
@@ -1880,7 +1947,6 @@ pub const Store = struct {
     memories: std.ArrayList(MemoryInstance),
     globals: std.ArrayList(GlobalInstance),
     elements: std.ArrayList(ElementInstance),
-    datas: std.ArrayList(DataInstance),
 
     module_def: *const ModuleDefinition, // temp
 
@@ -1891,7 +1957,6 @@ pub const Store = struct {
             .memories = std.ArrayList(MemoryInstance).init(allocator),
             .globals = std.ArrayList(GlobalInstance).init(allocator),
             .elements = std.ArrayList(ElementInstance).init(allocator),
-            .datas = std.ArrayList(DataInstance).init(allocator),
 
             .module_def = module_def,
         };
@@ -1998,8 +2063,7 @@ pub const Store = struct {
             }
         }
 
-        try store.datas.ensureTotalCapacity(module_def.datas.items.len);
-        for (module_def.datas.items) |*def_data, i| {
+        for (module_def.datas.items) |*def_data| {
             if (def_data.mode == .Active) {
                 var memory_index: u32 = def_data.memory_index.?;
                 if (module_def.memories.items.len <= memory_index) {
@@ -2012,19 +2076,13 @@ pub const Store = struct {
                 if (num_bytes > 0) {
                     const offset_begin: usize = try (def_data.offset.?).resolveTo(u32);
                     const offset_end: usize = offset_begin + num_bytes;
-                    if (memory.limits.max.? < offset_end) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
+                    // std.debug.print("memory.limits: {}, offset_begin: {}, num_bytes: {}, offset_end: {}\n", .{ memory.limits, offset_begin, num_bytes, offset_end });
 
-                    memory.ensureMinSize(offset_end);
+                    try memory.ensureMinSize(offset_end);
 
                     var destination = memory.mem[offset_begin..offset_end];
                     std.mem.copy(u8, destination, def_data.bytes.items);
                 }
-            } else {
-                try store.datas.append(DataInstance{
-                    .def_index = i,
-                });
             }
         }
 
@@ -2046,7 +2104,7 @@ pub const Store = struct {
 
         self.globals.deinit();
         self.elements.deinit();
-        self.datas.deinit();
+        // self.datas.deinit();
     }
 };
 
@@ -2278,7 +2336,7 @@ pub const ModuleInstance = struct {
 
                 const write_value = @bitCast(write_type, value);
 
-                const mem = memory.mem[offset .. offset + bit_count];
+                const mem = memory.mem[offset..end];
                 std.mem.writeIntSliceLittle(write_type, mem, write_value);
             }
         };
@@ -3450,6 +3508,69 @@ pub const ModuleInstance = struct {
                     var int = Helpers.saturatedTruncateTo(u64, v);
                     try self.stack.pushI64(@bitCast(i64, int));
                 },
+                Opcode.Memory_Init => {
+                    const data_index: u32 = instruction.immediate;
+                    const data: *const DataDefinition = &self.module_def.datas.items[data_index];
+                    const memory: *MemoryInstance = &self.store.memories.items[0];
+
+                    const length = try self.stack.popI32();
+                    const data_offset = try self.stack.popI32();
+                    const memory_offset = try self.stack.popI32();
+
+                    if (length < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+                    if (data.bytes.items.len < data_offset + length or data_offset < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+                    if (memory.mem.len < memory_offset + length or memory_offset < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+
+                    var data_offset_u32 = @intCast(u32, data_offset);
+                    var memory_offset_u32 = @intCast(u32, memory_offset);
+                    var length_u32 = @intCast(u32, length);
+
+                    var source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
+                    var destination = memory.mem[memory_offset_u32 .. memory_offset_u32 + length_u32];
+                    std.mem.copy(u8, destination, source);
+                },
+                Opcode.Data_Drop => {
+                    const data_index: u32 = instruction.immediate;
+                    var data: *DataDefinition = &self.module_def.datas.items[data_index];
+                    data.bytes.clearAndFree();
+                },
+                Opcode.Memory_Copy => {
+                    const memory: *MemoryInstance = &self.store.memories.items[0];
+
+                    const length = try self.stack.popI32();
+                    const source_offset = try self.stack.popI32();
+                    const dest_offset = try self.stack.popI32();
+
+                    if (length < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+                    if (memory.mem.len < source_offset + length or source_offset < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+                    if (memory.mem.len < dest_offset + length or dest_offset < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+
+                    var source_offset_u32 = @intCast(u32, source_offset);
+                    var dest_offset_u32 = @intCast(u32, dest_offset);
+                    var length_u32 = @intCast(u32, length);
+
+                    var source = memory.mem[source_offset_u32 .. source_offset_u32 + length_u32];
+                    var destination = memory.mem[dest_offset_u32 .. dest_offset_u32 + length_u32];
+
+                    if (@ptrToInt(destination.ptr) < @ptrToInt(source.ptr)) {
+                        std.mem.copy(u8, destination, source);
+                    } else {
+                        std.mem.copyBackwards(u8, destination, source);
+                    }
+                },
+                Opcode.Memory_Fill => {},
             }
 
             instruction_offset = next_instruction;

@@ -146,7 +146,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         if (strcmp("module", json_command_type.String)) {
             var fallback = json_command.Object.getPtr("filename").?;
             fallback_module = try allocator.dupe(u8, fallback.String);
-        } else if (strcmp("assert_return", json_command_type.String)) {
+        } else if (strcmp("assert_return", json_command_type.String) or strcmp("action", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
             var invocation = try Invocation.parse(json_action, fallback_module, allocator);
@@ -212,7 +212,14 @@ const Module = struct {
     inst: wasm.ModuleInstance,
 };
 
-fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_or_null: ?[]const u8) !void {
+const TestOpts = struct {
+    suite_filter_or_null: ?[]const u8 = null,
+    test_filter_or_null: ?[]const u8 = null,
+    command_filter_or_null: ?[]const u8 = null,
+    module_filter_or_null: ?[]const u8 = null,
+};
+
+fn run(suite_path: []const u8, opts: *const TestOpts) !void {
     var did_fail_any_test: bool = false;
 
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -226,10 +233,16 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
     defer name_to_module.deinit();
 
     for (commands.items) |*command| {
+        var module_name = command.getModule();
+        if (opts.module_filter_or_null) |filter| {
+            if (strcmp(filter, module_name) == false) {
+                continue;
+            }
+        }
+
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        var module_name = command.getModule();
         var module_or_null: ?*Module = name_to_module.getPtr(module_name);
 
         if (module_or_null == null) {
@@ -260,13 +273,13 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
 
         switch (command.*) {
             .AssertReturn => |c| {
-                if (command_filter_or_null) |filter| {
+                if (opts.command_filter_or_null) |filter| {
                     if (strcmp("assert_return", filter) == false) {
                         continue;
                     }
                 }
 
-                if (test_filter_or_null) |filter| {
+                if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.invocation.field) == false) {
                         log_verbose("assert_return: skipping {s}:{s}\n", .{ module_name, c.invocation.field });
                         continue;
@@ -315,17 +328,19 @@ fn run(suite_path: []const u8, test_filter_or_null: ?[]const u8, command_filter_
                         }
                     }
 
-                    log_verbose("\tSuccess!\n", .{});
+                    if (invoke_succeeded) {
+                        log_verbose("\tSuccess!\n", .{});
+                    }
                 }
             },
             .AssertTrap => |c| {
-                if (command_filter_or_null) |filter| {
+                if (opts.command_filter_or_null) |filter| {
                     if (strcmp("assert_trap", filter) == false) {
                         continue;
                     }
                 }
 
-                if (test_filter_or_null) |filter| {
+                if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.invocation.field) == false) {
                         log_verbose("assert_return: skipping {s}:{s}\n", .{ module_name, c.invocation.field });
                         continue;
@@ -384,25 +399,27 @@ pub fn main() !void {
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    var suite_filter_or_null: ?[]const u8 = null;
-    var test_filter_or_null: ?[]const u8 = null;
-    var command_filter_or_null: ?[]const u8 = null;
+    var opts = TestOpts{};
 
     var args_index: u32 = 1; // skip program name
     while (args_index < args.len) : (args_index += 1) {
         var arg = args[args_index];
         if (strcmp("--suite", arg)) {
             args_index += 1;
-            suite_filter_or_null = args[args_index];
-            print("found suite filter: {s}\n", .{suite_filter_or_null.?});
+            opts.suite_filter_or_null = args[args_index];
+            print("found suite filter: {s}\n", .{opts.suite_filter_or_null.?});
         } else if (strcmp("--test", arg)) {
             args_index += 1;
-            test_filter_or_null = args[args_index];
-            print("found test filter: {s}\n", .{test_filter_or_null.?});
+            opts.test_filter_or_null = args[args_index];
+            print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
         } else if (strcmp("--command", arg)) {
             args_index += 1;
-            command_filter_or_null = args[args_index];
-            print("found command filter: {s}\n", .{command_filter_or_null.?});
+            opts.command_filter_or_null = args[args_index];
+            print("found command filter: {s}\n", .{opts.command_filter_or_null.?});
+        } else if (strcmp("--module", arg)) {
+            args_index += 1;
+            opts.module_filter_or_null = args[args_index];
+            print("found module filter: {s}\n", .{opts.module_filter_or_null.?});
         } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
             g_verbose_logging = true;
             print("verbose logging: on\n", .{});
@@ -463,10 +480,10 @@ pub fn main() !void {
         // "memory_copy",
         // "memory_fill",
         // "memory_grow",
-        // "memory_init",
+        "memory_init",
         // "memory_redundancy",
-        // "memory_size",
-        // "memory_trap",
+        "memory_size",
+        "memory_trap",
         // "names",
         "nop",
         // "ref_func",
@@ -502,7 +519,7 @@ pub fn main() !void {
     };
 
     for (all_suites) |suite| {
-        if (suite_filter_or_null) |filter| {
+        if (opts.suite_filter_or_null) |filter| {
             if (strcmp(filter, suite) == false) {
                 continue;
             }
@@ -516,6 +533,6 @@ pub fn main() !void {
         var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
-        try run(suite_path, test_filter_or_null, command_filter_or_null);
+        try run(suite_path, &opts);
     }
 }
