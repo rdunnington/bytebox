@@ -292,7 +292,7 @@ pub const Val = union(ValType) {
     F32: f32,
     F64: f64,
     FuncRef: u32, // index into VmState.functions
-    ExternRef: void, // TODO
+    ExternRef: u32, // TODO figure out what this indexes
 
     const k_null_funcref: u32 = std.math.maxInt(u32);
 
@@ -335,7 +335,7 @@ pub const Val = union(ValType) {
     fn isNull(v: Val) bool {
         return switch (v) {
             .FuncRef => |index| index == k_null_funcref,
-            .ExternRef => unreachable,
+            .ExternRef => |index| index == k_null_funcref,
             else => false,
         };
     }
@@ -2429,9 +2429,10 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Branch_Table => {
                     var immediates: *const BranchTableImmediates = &self.module_def.code.branch_table.items[instruction.immediate];
+                    var table: []const u32 = immediates.label_ids.items;
 
-                    const label_index = @intCast(usize, try self.stack.popI32());
-                    const label_id: u32 = if (label_index < immediates.label_ids.items.len) immediates.label_ids.items[label_index] else immediates.fallback_id;
+                    const label_index = try self.stack.popI32();
+                    const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
                     const branch_to_instruction = try self.branch(label_id);
 
                     // std.debug.print("branch_table) label_index: {}, label_ids: {any}, label_id: {}\n", .{ label_index, immediates.label_ids.items, label_id });

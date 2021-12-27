@@ -105,6 +105,9 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
             float = @bitCast(f64, int);
         }
         return Val{ .F64 = float };
+    } else if (strcmp("externref", json_type.String)) {
+        const int = try std.fmt.parseInt(u32, json_value.String, 10);
+        return Val{ .ExternRef = int };
     } else {
         print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
     }
@@ -434,7 +437,7 @@ pub fn main() !void {
         "block",
         "br",
         "br_if",
-        // "br_table",
+        "br_table",
         // "bulk",
         // "call",
         // "call_indirect",
