@@ -403,6 +403,9 @@ pub fn main() !void {
     }
 
     const all_suites = [_][]const u8{
+        "binary",
+        "binary-leb128",
+        "block",
         "br",
         "br_if",
         "conversions",
