@@ -296,6 +296,17 @@ pub const Val = union(ValType) {
 
     const k_null_funcref: u32 = std.math.maxInt(u32);
 
+    fn default(valtype: ValType) Val {
+        return switch (valtype) {
+            .I32 => Val{ .I32 = 0 },
+            .I64 => Val{ .I64 = 0 },
+            .F32 => Val{ .F32 = 0.0 },
+            .F64 => Val{ .F64 = 0.0 },
+            .FuncRef => Val{ .FuncRef = 0 },
+            .ExternRef => Val{ .ExternRef = 0 },
+        };
+    }
+
     fn get(val: Val, comptime T: type) !T {
         switch (T) {
             i32 => if (std.meta.activeTag(val) == .I32) {
@@ -438,7 +449,7 @@ const Stack = struct {
     }
 
     fn pushLabel(self: *Self, blocktype: BlockTypeValue, continuation: u32) !void {
-        // std.debug.print("\t>> push label: \n", .{});
+        // std.debug.print("\t>> push label: ({}, {})\n", .{ blocktype, continuation });
         var item = StackItem{ .Label = .{
             .blocktype = blocktype,
             .continuation = continuation,
@@ -457,7 +468,7 @@ const Stack = struct {
             .Frame => return error.AssertTypeMismatch,
         };
 
-        // std.debug.print("\t>> pop label: {}\n", .{label.id});
+        // std.debug.print("\t>> pop label: {}\n", .{label});
 
         self.last_label_index = label.last_label_index;
 
@@ -756,12 +767,20 @@ const FunctionDefinition = struct {
     offset_into_instructions: u32,
     locals: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{}),
     size: u32,
+
+    fn totalLocalCount(def: *const FunctionDefinition) u32 {
+        var total: u32 = 0;
+        for (def.locals) |count| {
+            total += count;
+        }
+        return total;
+    }
 };
 
 const FunctionInstance = struct {
     type_def_index: u32,
     offset_into_instructions: u32,
-    locals: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{}),
+    local_types: std.ArrayList(ValType),
 };
 
 const ExportType = enum(u8) {
@@ -1967,14 +1986,34 @@ pub const Store = struct {
             var f = FunctionInstance{
                 .type_def_index = 0,
                 .offset_into_instructions = 0,
+                .local_types = std.ArrayList(ValType).init(allocator),
             };
             try store.functions.append(f);
         }
         for (module_def.functions.items) |*def_func| {
+            const func_type: *const FunctionTypeDefinition = &module_def.types.items[def_func.type_index];
+            const param_types: []const ValType = func_type.getParams();
+
+            var local_types = std.ArrayList(ValType).init(allocator);
+            try local_types.resize(param_types.len + def_func.totalLocalCount());
+
+            for (param_types) |valtype, i| {
+                local_types.items[i] = valtype;
+            }
+
+            var locals_index: usize = param_types.len;
+            for (def_func.locals) |count, valtype_as_int| {
+                var index: u32 = 0;
+                while (index < count) : (index += 1) {
+                    local_types.items[locals_index] = @intToEnum(ValType, valtype_as_int);
+                    locals_index += 1;
+                }
+            }
+
             var f = FunctionInstance{
                 .type_def_index = def_func.type_index,
                 .offset_into_instructions = def_func.offset_into_instructions,
-                .locals = def_func.locals,
+                .local_types = local_types,
             };
             try store.functions.append(f);
         }
@@ -2147,9 +2186,16 @@ pub const ModuleInstance = struct {
                 }
 
                 var locals = std.ArrayList(Val).init(self.allocator); // gets deinited when popFrame() is called
-                try locals.resize(func.locals.len);
+                try locals.resize(func.local_types.items.len);
                 for (params) |v, i| {
                     locals.items[i] = v;
+                }
+
+                // initialize the rest of the locals according to the type of the local
+                var locals_index = params.len;
+                while (locals_index < locals.items.len) : (locals_index += 1) {
+                    const valtype: ValType = func.local_types.items[locals_index];
+                    locals.items[locals_index] = Val.default(valtype);
                 }
 
                 // TODO move function continuation data into FunctionDefinition
@@ -2392,7 +2438,7 @@ pub const ModuleInstance = struct {
                     // id 0 means this is the end of a function, otherwise it's the end of a block
                     const label_ptr: *const Label = self.stack.topLabel();
                     if (label_ptr.isFirstInCallFrame() == false) {
-                        try popValues(&returns, &self.stack, self.getreturn_typesFromBlockType(label_ptr.blocktype));
+                        try popValues(&returns, &self.stack, self.getReturnTypesFromBlocktype(label_ptr.blocktype));
                         _ = try self.stack.popLabel();
                         try pushValues(returns.items, &self.stack);
                     } else {
@@ -2415,7 +2461,7 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Branch => {
                     const label_id: u32 = instruction.immediate;
-                    const branch_to_instruction = try self.branch(label_id);
+                    const branch_to_instruction = try self.branch(instructions, label_id);
                     next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                 },
                 Opcode.Branch_If => {
@@ -2423,7 +2469,7 @@ pub const ModuleInstance = struct {
                     const v = try self.stack.popI32();
                     // std.debug.print("branch_if stack value: {}, target id: {}\n", .{v, label_id});
                     if (v != 0) {
-                        const branch_to_instruction = try self.branch(label_id);
+                        const branch_to_instruction = try self.branch(instructions, label_id);
                         next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                     }
                 },
@@ -2433,7 +2479,7 @@ pub const ModuleInstance = struct {
 
                     const label_index = try self.stack.popI32();
                     const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
-                    const branch_to_instruction = try self.branch(label_id);
+                    const branch_to_instruction = try self.branch(instructions, label_id);
 
                     // std.debug.print("branch_table) label_index: {}, label_ids: {any}, label_id: {}\n", .{ label_index, immediates.label_ids.items, label_id });
 
@@ -3528,9 +3574,9 @@ pub const ModuleInstance = struct {
                         return error.TrapOutOfBoundsMemoryAccess;
                     }
 
-                    var data_offset_u32 = @intCast(u32, data_offset);
-                    var memory_offset_u32 = @intCast(u32, memory_offset);
-                    var length_u32 = @intCast(u32, length);
+                    const data_offset_u32 = @intCast(u32, data_offset);
+                    const memory_offset_u32 = @intCast(u32, memory_offset);
+                    const length_u32 = @intCast(u32, length);
 
                     var source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
                     var destination = memory.mem[memory_offset_u32 .. memory_offset_u32 + length_u32];
@@ -3558,9 +3604,9 @@ pub const ModuleInstance = struct {
                         return error.TrapOutOfBoundsMemoryAccess;
                     }
 
-                    var source_offset_u32 = @intCast(u32, source_offset);
-                    var dest_offset_u32 = @intCast(u32, dest_offset);
-                    var length_u32 = @intCast(u32, length);
+                    const source_offset_u32 = @intCast(u32, source_offset);
+                    const dest_offset_u32 = @intCast(u32, dest_offset);
+                    const length_u32 = @intCast(u32, length);
 
                     var source = memory.mem[source_offset_u32 .. source_offset_u32 + length_u32];
                     var destination = memory.mem[dest_offset_u32 .. dest_offset_u32 + length_u32];
@@ -3571,7 +3617,27 @@ pub const ModuleInstance = struct {
                         std.mem.copyBackwards(u8, destination, source);
                     }
                 },
-                Opcode.Memory_Fill => {},
+                Opcode.Memory_Fill => {
+                    const memory: *MemoryInstance = &self.store.memories.items[0];
+
+                    const length = try self.stack.popI32();
+                    const value: u8 = @truncate(u8, @bitCast(u32, try self.stack.popI32()));
+                    const offset = try self.stack.popI32();
+
+                    if (length < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+                    if (memory.mem.len < offset + length or offset < 0) {
+                        return error.TrapOutOfBoundsMemoryAccess;
+                    }
+
+                    const offset_u32 = @intCast(u32, offset);
+                    const length_u32 = @intCast(u32, length);
+
+                    var destination = memory.mem[offset_u32 .. offset_u32 + length_u32];
+
+                    std.mem.set(u8, destination, value);
+                },
             }
 
             instruction_offset = next_instruction;
@@ -3588,11 +3654,7 @@ pub const ModuleInstance = struct {
 
         const param_types: []const ValType = functype.getParams();
 
-        var total_local_count: usize = param_types.len;
-        for (func.locals) |count| {
-            total_local_count += count;
-        }
-        try frame.locals.resize(total_local_count);
+        try frame.locals.resize(func.local_types.items.len);
 
         var param_index = param_types.len;
         while (param_index > 0) {
@@ -3603,6 +3665,11 @@ pub const ModuleInstance = struct {
                 return error.AssertTypeMismatch;
             }
             frame.locals.items[param_index] = value;
+        }
+
+        var locals_index: usize = param_types.len;
+        while (locals_index < func.local_types.items.len) : (locals_index += 1) {
+            frame.locals.items[locals_index] = Val.default(func.local_types.items[locals_index]);
         }
 
         const continuation: u32 = instruction_offset.*;
@@ -3625,16 +3692,7 @@ pub const ModuleInstance = struct {
                 const func_type: *const FunctionTypeDefinition = &self.module_def.types.items[type_index];
                 const type_params: []const ValType = func_type.getParams();
 
-                try params.ensureTotalCapacity(type_params.len);
-
-                var param_index: u32 = 0;
-                while (param_index < type_params.len) : (param_index += 1) {
-                    var value = try self.stack.popValue();
-                    if (value != type_params[param_index]) {
-                        return error.AssertTypeMismatch;
-                    }
-                    params.addOneAssumeCapacity().* = value;
-                }
+                try popValues(&params, &self.stack, type_params);
             },
             else => {},
         }
@@ -3642,53 +3700,57 @@ pub const ModuleInstance = struct {
         const continuation = self.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
         try self.stack.pushLabel(block_type_value, continuation);
 
-        var param_index: u32 = 0;
-        while (param_index < params.items.len) : (param_index += 1) {
-            var val = params.items[params.items.len - param_index - 1];
-            try self.stack.pushValue(val);
-        }
+        try pushValues(params.items, &self.stack);
     }
 
-    fn branch(self: *ModuleInstance, label_id: u32) !u32 {
+    fn branch(self: *ModuleInstance, instructions: []const Instruction, label_id: u32) !u32 {
         // std.debug.print("\tbranching to label {}\n", .{label_id});
         const label: *const Label = try self.stack.findLabel(label_id);
         if (label.isFirstInCallFrame()) {
             return try self.returnFromFunc();
-            // return error.AssertLabelMismatch; // can't branch to the end of functions - that's the return opcode's job
         }
         const continuation = label.continuation;
 
         // std.debug.print("found label: {}\n", .{label});
 
-        var args = std.ArrayList(Val).init(self.allocator);
-        defer args.deinit();
+        const is_loop_continuation = instructions[continuation].opcode == .Loop;
 
-        try popValues(&args, &self.stack, self.getreturn_typesFromBlockType(label.blocktype));
+        if (is_loop_continuation == false or label_id != 0) {
+            var args = std.ArrayList(Val).init(self.allocator);
+            defer args.deinit();
 
-        var stack_label_id: u32 = 0;
-        while (true) {
-            var topItem = try self.stack.top();
-            switch (topItem.*) {
-                .Val => {
-                    _ = try self.stack.popValue();
-                },
-                .Frame => {
-                    return error.AssertInvalidLabel;
-                },
-                .Label => {
-                    _ = try self.stack.popLabel();
-                    if (stack_label_id == label_id) {
-                        break;
-                    } else {
-                        stack_label_id += 1;
-                    }
-                },
+            const return_types: []const ValType = self.getReturnTypesFromBlocktype(label.blocktype);
+            // std.debug.print("looking for return types: {any}", .{return_types});
+            try popValues(&args, &self.stack, return_types);
+
+            var stack_label_id: u32 = 0;
+            while (true) {
+                var topItem = try self.stack.top();
+                switch (topItem.*) {
+                    .Val => {
+                        _ = try self.stack.popValue();
+                    },
+                    .Frame => {
+                        return error.AssertInvalidLabel;
+                    },
+                    .Label => {
+                        if (stack_label_id == label_id) {
+                            if (is_loop_continuation == false) {
+                                _ = try self.stack.popLabel();
+                            }
+                            break;
+                        } else {
+                            _ = try self.stack.popLabel();
+                            stack_label_id += 1;
+                        }
+                    },
+                }
             }
+
+            try pushValues(args.items, &self.stack);
         }
 
-        try pushValues(args.items, &self.stack);
-
-        // std.debug.print("branching to continuation: {}\n", .{continuation});
+        // std.debug.print("\tbranching to continuation: {}, stack state:\n\t{any}\n", .{ continuation, self.stack.stack.items });
         return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
     }
 
@@ -3747,7 +3809,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn getreturn_typesFromBlockType(self: *ModuleInstance, blocktype: BlockTypeValue) []const ValType {
+    fn getReturnTypesFromBlocktype(self: *ModuleInstance, blocktype: BlockTypeValue) []const ValType {
         const Statics = struct {
             const empty = [_]ValType{};
             const valtype_i32 = [_]ValType{.I32};
@@ -3780,7 +3842,7 @@ pub const ModuleInstance = struct {
             // std.debug.print("returns.items.len < types.len: {}, {}\n", .{returns.items.len, types.len});
             var item = try stack.popValue();
             if (types[types.len - returns.items.len - 1] != std.meta.activeTag(item)) {
-                // std.debug.print("popValues mismatch: required: {s}, got {}\n", .{ types, item });
+                std.debug.print("popValues mismatch: required: {s}, got {}\n", .{ types, item });
                 return error.AssertTypeMismatch;
             }
             try returns.append(item);

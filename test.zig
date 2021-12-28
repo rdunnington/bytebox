@@ -478,7 +478,7 @@ pub fn main() !void {
         // "local_get",
         // "local_set",
         // "local_tee",
-        // "loop",
+        "loop",
         "memory",
         // "memory_copy",
         // "memory_fill",
