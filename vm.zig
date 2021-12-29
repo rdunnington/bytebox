@@ -1,9 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const MalformedError = error{
+    AssertInvalidMagicSignature,
+};
+
 pub const AssertError = error{
     AssertUnsupportedWasmVersion,
-    AssertInvalidMagicSignature,
     AssertInvalidValType,
     AssertInvalidBytecode,
     AssertInvalidExport,
@@ -224,6 +227,9 @@ const Opcode = enum(u16) {
     I64_Extend8_S = 0xC2,
     I64_Extend16_S = 0xC3,
     I64_Extend32_S = 0xC4,
+    Ref_Null = 0xD0,
+    Ref_Is_Null = 0xD1,
+    Ref_Func = 0xD2,
     I32_Trunc_Sat_F32_S = 0xFC00,
     I32_Trunc_Sat_F32_U = 0xFC01,
     I32_Trunc_Sat_F64_S = 0xFC02,
@@ -307,6 +313,14 @@ pub const Val = union(ValType) {
         };
     }
 
+    fn nullRef(valtype: ValType) !Val {
+        return switch (valtype) {
+            .FuncRef => Val{ .FuncRef = Val.k_null_funcref },
+            .ExternRef => Val{ .ExternRef = Val.k_null_funcref },
+            else => error.AssertInvalidBytecode,
+        };
+    }
+
     fn get(val: Val, comptime T: type) !T {
         switch (T) {
             i32 => if (std.meta.activeTag(val) == .I32) {
@@ -347,7 +361,7 @@ pub const Val = union(ValType) {
         return switch (v) {
             .FuncRef => |index| index == k_null_funcref,
             .ExternRef => |index| index == k_null_funcref,
-            else => false,
+            else => unreachable,
         };
     }
 };
@@ -654,7 +668,9 @@ const ConstantExpression = struct {
             .I64_Const => Val{ .I64 = try std.leb.readULEB128(i64, reader) },
             .F32_Const => Val{ .F32 = try readFloat(f32, reader) },
             .F64_Const => Val{ .F64 = try readFloat(f64, reader) },
-            // TODO handle ref.null, ref.func, global.get
+            .Ref_Null => try Val.nullRef(try ValType.decode(reader)),
+            .Ref_Func => Val{ .FuncRef = try std.leb.readULEB128(u32, reader) },
+            // TODO handle global.get
             else => unreachable,
         };
 
@@ -1225,95 +1241,95 @@ const Instruction = struct {
                 }
             },
             .I32_Load => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Load => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .F32_Load => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .F64_Load => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I32_Load8_S => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I32_Load8_U => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I32_Load16_S => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I32_Load16_U => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Load8_S => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Load8_U => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Load16_S => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Load16_U => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Load32_S => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Load32_U => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I32_Store => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Store => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .F32_Store => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .F64_Store => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I32_Store8 => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I32_Store16 => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Store8 => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Store16 => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .I64_Store32 => {
-                var memarg = try MemArg.decode(&reader);
+                var memarg = try MemArg.decode(reader);
                 immediate = memarg.offset;
             },
             .Memory_Size => {
@@ -1334,6 +1350,17 @@ const Instruction = struct {
                 if (reserved != 0x00) {
                     return error.AssertInvalidBytecode;
                 }
+            },
+            .Ref_Null => {
+                var valtype = try ValType.decode(reader);
+                if (valtype.isRefType() == false) {
+                    return error.AssertInvalidBytecode;
+                }
+
+                immediate = @enumToInt(valtype);
+            },
+            .Ref_Func => {
+                immediate = try std.leb.readULEB128(u32, reader); // funcidx
             },
             .Data_Drop => {
                 immediate = try std.leb.readULEB128(u32, reader); // dataidx
@@ -1444,8 +1471,9 @@ pub const ModuleDefinition = struct {
     memories: std.ArrayList(MemoryDefinition),
     elements: std.ArrayList(ElementDefinition),
     exports: Exports,
-    data_count: ?u32 = null,
     datas: std.ArrayList(DataDefinition),
+    start_func_index: ?u32 = null,
+    data_count: ?u32 = null,
 
     function_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
@@ -1549,7 +1577,7 @@ pub const ModuleDefinition = struct {
                         while (params_left > 0) {
                             params_left -= 1;
 
-                            var param_type = try ValType.decode(&reader);
+                            var param_type = try ValType.decode(reader);
                             try func.types.append(param_type);
                         }
 
@@ -1558,7 +1586,7 @@ pub const ModuleDefinition = struct {
                         while (returns_left > 0) {
                             returns_left -= 1;
 
-                            var return_type = try ValType.decode(&reader);
+                            var return_type = try ValType.decode(reader);
                             try func.types.append(return_type);
                         }
 
@@ -1593,12 +1621,12 @@ pub const ModuleDefinition = struct {
 
                     var table_index: u32 = 0;
                     while (table_index < num_tables) : (table_index += 1) {
-                        const valtype = try ValType.decode(&reader);
+                        const valtype = try ValType.decode(reader);
                         if (valtype.isRefType() == false) {
                             return error.InvalidTableType;
                         }
 
-                        const limits = try Limits.decode(&reader);
+                        const limits = try Limits.decode(reader);
 
                         try module.tables.append(TableDefinition{
                             // .refs = std.ArrayList(Val).init(allocator),
@@ -1618,7 +1646,7 @@ pub const ModuleDefinition = struct {
 
                     var memory_index: u32 = 0;
                     while (memory_index < num_memories) : (memory_index += 1) {
-                        var limits = try Limits.decode(&reader);
+                        var limits = try Limits.decode(reader);
                         if (limits.max) |max| {
                             if (max < limits.min) {
                                 return error.AssertMemoryInvalidMaxLimit;
@@ -1641,11 +1669,11 @@ pub const ModuleDefinition = struct {
 
                     var global_index: u32 = 0;
                     while (global_index < num_globals) : (global_index += 1) {
-                        var valtype = try ValType.decode(&reader);
+                        var valtype = try ValType.decode(reader);
                         var mut = @intToEnum(GlobalMut, try reader.readByte());
 
                         // TODO validate global references are for imports only
-                        const expr = try ConstantExpression.decode(&reader);
+                        const expr = try ConstantExpression.decode(reader);
 
                         try module.globals.append(GlobalDefinition{
                             .valtype = valtype,
@@ -1697,7 +1725,13 @@ pub const ModuleDefinition = struct {
                         }
                     }
                 },
-                //.Start
+                .Start => {
+                    module.start_func_index = try std.leb.readULEB128(u32, reader);
+
+                    if (module.functions.items.len <= module.start_func_index.?) {
+                        return error.AssertUnknownFunction;
+                    }
+                },
                 .Element => {
                     const ElementHelpers = struct {
                         fn readElemsVal(elems: *std.ArrayList(Val), valtype: ValType, _reader: anytype) !void {
@@ -1718,6 +1752,13 @@ pub const ModuleDefinition = struct {
                             while (elem_index < num_elems) : (elem_index += 1) {
                                 var expr = try ConstantExpression.decode(_reader);
                                 try elems.append(expr);
+                            }
+                        }
+
+                        fn readNullElemkind(_reader: anytype) !void {
+                            var null_elemkind = try _reader.readByte();
+                            if (null_elemkind != 0x00) {
+                                return error.AssertInvalidBytecode;
                             }
                         }
                     };
@@ -1743,44 +1784,44 @@ pub const ModuleDefinition = struct {
 
                         switch (flags) {
                             0x00 => {
-                                def.offset = try ConstantExpression.decode(&reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                def.offset = try ConstantExpression.decode(reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x01 => {
                                 def.mode = .Passive;
-                                def.reftype = try ValType.decode(&reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                try ElementHelpers.readNullElemkind(reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x02 => {
                                 def.table_index = try std.leb.readULEB128(u32, reader);
-                                def.offset = try ConstantExpression.decode(&reader);
-                                def.reftype = try ValType.decode(&reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                def.offset = try ConstantExpression.decode(reader);
+                                def.reftype = try ValType.decode(reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x03 => {
                                 def.mode = .Declarative;
-                                def.reftype = try ValType.decode(&reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, &reader);
+                                try ElementHelpers.readNullElemkind(reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x04 => {
-                                def.offset = try ConstantExpression.decode(&reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                                def.offset = try ConstantExpression.decode(reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader);
                             },
                             0x05 => {
                                 def.mode = .Passive;
-                                def.reftype = try ValType.decode(&reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                                def.reftype = try ValType.decode(reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader);
                             },
                             0x06 => {
                                 def.table_index = try std.leb.readULEB128(u32, reader);
-                                def.offset = try ConstantExpression.decode(&reader);
-                                def.reftype = try ValType.decode(&reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                                def.offset = try ConstantExpression.decode(reader);
+                                def.reftype = try ValType.decode(reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader);
                             },
                             0x07 => {
                                 def.mode = .Declarative;
-                                def.reftype = try ValType.decode(&reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, &reader);
+                                def.reftype = try ValType.decode(reader);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader);
                             },
                             else => unreachable,
                         }
@@ -1812,7 +1853,7 @@ pub const ModuleDefinition = struct {
                         while (locals_index < num_locals) {
                             locals_index += 1;
                             const n = try std.leb.readULEB128(u32, reader);
-                            const local_type = try ValType.decode(&reader);
+                            const local_type = try ValType.decode(reader);
                             def.locals[@enumToInt(local_type)] = n;
                         }
 
@@ -2154,12 +2195,21 @@ pub const ModuleInstance = struct {
     module_def: *const ModuleDefinition,
 
     pub fn init(module_def: *const ModuleDefinition, imports: *PackageImports, allocator: std.mem.Allocator) !ModuleInstance {
-        return ModuleInstance{
+        var inst = ModuleInstance{
             .allocator = allocator,
             .stack = Stack.init(allocator),
             .store = try Store.init(module_def, imports, allocator),
             .module_def = module_def,
         };
+        errdefer inst.deinit();
+
+        if (module_def.start_func_index) |func_index| {
+            const params = [0]Val{};
+            var returns = [0]Val{};
+            try inst.invoke_internal(func_index + module_def.imports.functions.items.len, &params, &returns);
+        }
+
+        return inst;
     }
 
     pub fn deinit(self: *ModuleInstance) void {
@@ -2170,65 +2220,69 @@ pub const ModuleInstance = struct {
     pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) !void {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name.items)) {
-                const func: FunctionInstance = self.store.functions.items[func_export.index + self.module_def.imports.functions.items.len];
-                const func_type_params: []const ValType = self.module_def.types.items[func.type_def_index].getParams();
-
-                if (params.len != func_type_params.len) {
-                    // std.debug.print("params.len: {}, func_type_params.len: {}\n", .{params.len, func_type_params.len});
-                    // std.debug.print("params: {s}, func_type_params: {s}\n", .{params, func_type_params});
-                    return error.AssertTypeMismatch;
-                }
-
-                for (params) |param, i| {
-                    if (std.meta.activeTag(param) != func_type_params[i]) {
-                        return error.AssertTypeMismatch;
-                    }
-                }
-
-                var locals = std.ArrayList(Val).init(self.allocator); // gets deinited when popFrame() is called
-                try locals.resize(func.local_types.items.len);
-                for (params) |v, i| {
-                    locals.items[i] = v;
-                }
-
-                // initialize the rest of the locals according to the type of the local
-                var locals_index = params.len;
-                while (locals_index < locals.items.len) : (locals_index += 1) {
-                    const valtype: ValType = func.local_types.items[locals_index];
-                    locals.items[locals_index] = Val.default(valtype);
-                }
-
-                // TODO move function continuation data into FunctionDefinition
-                var function_continuation = self.module_def.function_continuations.get(func.offset_into_instructions) orelse return error.AssertInvalidFunction;
-
-                try self.stack.pushFrame(CallFrame{
-                    .func = &func,
-                    .locals = locals,
-                });
-                try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
-                self.executeWasm(self.module_def.code.instructions.items, func.offset_into_instructions) catch |err| {
-                    self.stack.forceClearAll(); // ensure current stack state doesn't pollute future invokes
-                    return err;
-                };
-
-                if (self.stack.size() != returns.len) {
-                    std.debug.print("stack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
-                    return error.AssertTypeMismatch;
-                }
-
-                if (returns.len > 0) {
-                    var index: i32 = @intCast(i32, returns.len - 1);
-                    while (index >= 0) {
-                        // std.debug.print("stack size: {}, index: {}\n", .{self.stack.size(), index});
-                        returns[@intCast(usize, index)] = try self.stack.popValue();
-                        index -= 1;
-                    }
-                }
+                const func_index: usize = func_export.index + self.module_def.imports.functions.items.len;
+                try self.invoke_internal(func_index, params, returns);
                 return;
             }
         }
-
         return error.AssertUnknownExport;
+    }
+
+    fn invoke_internal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
+        const func: FunctionInstance = self.store.functions.items[func_instance_index];
+        const func_type_params: []const ValType = self.module_def.types.items[func.type_def_index].getParams();
+
+        if (params.len != func_type_params.len) {
+            // std.debug.print("params.len: {}, func_type_params.len: {}\n", .{params.len, func_type_params.len});
+            // std.debug.print("params: {s}, func_type_params: {s}\n", .{params, func_type_params});
+            return error.AssertTypeMismatch;
+        }
+
+        for (params) |param, i| {
+            if (std.meta.activeTag(param) != func_type_params[i]) {
+                return error.AssertTypeMismatch;
+            }
+        }
+
+        var locals = std.ArrayList(Val).init(self.allocator); // gets deinited when popFrame() is called
+        try locals.resize(func.local_types.items.len);
+        for (params) |v, i| {
+            locals.items[i] = v;
+        }
+
+        // initialize the rest of the locals according to the type of the local
+        var locals_index = params.len;
+        while (locals_index < locals.items.len) : (locals_index += 1) {
+            const valtype: ValType = func.local_types.items[locals_index];
+            locals.items[locals_index] = Val.default(valtype);
+        }
+
+        // TODO move function continuation data into FunctionDefinition
+        var function_continuation = self.module_def.function_continuations.get(func.offset_into_instructions) orelse return error.AssertInvalidFunction;
+
+        try self.stack.pushFrame(CallFrame{
+            .func = &func,
+            .locals = locals,
+        });
+        try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
+        self.executeWasm(self.module_def.code.instructions.items, func.offset_into_instructions) catch |err| {
+            self.stack.forceClearAll(); // ensure current stack state doesn't pollute future invokes
+            return err;
+        };
+
+        if (self.stack.size() != returns.len) {
+            std.debug.print("stack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
+            return error.AssertTypeMismatch;
+        }
+
+        if (returns.len > 0) {
+            var index: i32 = @intCast(i32, returns.len - 1);
+            while (index >= 0) {
+                // std.debug.print("stack size: {}, index: {}\n", .{self.stack.size(), index});
+                returns[@intCast(usize, index)] = try self.stack.popValue();
+                index -= 1;
+            }
+        }
     }
 
     fn executeWasm(self: *ModuleInstance, instructions: []const Instruction, root_offset: u32) !void {
@@ -3514,6 +3568,24 @@ pub const ModuleInstance = struct {
                     var v_truncated = @truncate(i32, v);
                     var v_extended: i64 = v_truncated;
                     try self.stack.pushI64(v_extended);
+                },
+                Opcode.Ref_Null => {
+                    var valtype = @intToEnum(ValType, instruction.immediate);
+                    var val = try Val.nullRef(valtype);
+                    try self.stack.pushValue(val);
+                },
+                Opcode.Ref_Is_Null => {
+                    const val: Val = try self.stack.popValue();
+                    if (val.isRefType() == false) {
+                        return error.AssertTypeMismatch;
+                    }
+                    const boolean: i32 = if (val.isNull()) 1 else 0;
+                    try self.stack.pushI32(boolean);
+                },
+                Opcode.Ref_Func => {
+                    const func_index = instruction.immediate;
+                    const val = Val{ .FuncRef = func_index };
+                    try self.stack.pushValue(val);
                 },
                 Opcode.I32_Trunc_Sat_F32_S => {
                     var v = try self.stack.popF32();
