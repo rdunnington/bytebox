@@ -20,33 +20,20 @@ const CommandType = enum {
     DecodeModule,
     AssertReturn,
     AssertTrap,
-    AssertUninstantiable,
+    AssertMalformed,
     AssertInvalid,
+    AssertUninstantiable,
 };
 
 const Invocation = struct {
     module: []const u8,
     field: []const u8,
     args: std.ArrayList(Val),
+};
 
-    fn parse(json_action: *std.json.Value, fallback_module: []const u8, allocator: std.mem.Allocator) !Invocation {
-        const json_field = json_action.Object.getPtr("field").?;
-
-        const json_args_or_null = json_action.Object.getPtr("args");
-        var args = std.ArrayList(Val).init(allocator);
-        if (json_args_or_null) |json_args| {
-            for (json_args.Array.items) |item| {
-                var val: Val = try parseVal(item.Object);
-                try args.append(val);
-            }
-        }
-
-        return Invocation{
-            .module = fallback_module,
-            .field = try allocator.dupe(u8, json_field.String),
-            .args = args,
-        };
-    }
+const BadModuleError = struct {
+    module: []const u8,
+    expected_error: []const u8,
 };
 
 const CommandDecodeModule = struct {
@@ -63,30 +50,34 @@ const CommandAssertTrap = struct {
     expected_error: []const u8,
 };
 
-const CommandAssertUninstantiable = struct {
-    module: []const u8,
-    expected_error: []const u8,
+const CommandAssertMalformed = struct {
+    err: BadModuleError,
 };
 
 const CommandAssertInvalid = struct {
-    module: []const u8,
-    expected_error: []const u8,
+    err: BadModuleError,
+};
+
+const CommandAssertUninstantiable = struct {
+    err: BadModuleError,
 };
 
 const Command = union(CommandType) {
     DecodeModule: CommandDecodeModule,
     AssertReturn: CommandAssertReturn,
     AssertTrap: CommandAssertTrap,
-    AssertUninstantiable: CommandAssertUninstantiable,
+    AssertMalformed: CommandAssertMalformed,
     AssertInvalid: CommandAssertInvalid,
+    AssertUninstantiable: CommandAssertUninstantiable,
 
     fn getModule(self: @This()) []const u8 {
         return switch (self) {
             .DecodeModule => |c| c.module,
             .AssertReturn => |c| c.invocation.module,
             .AssertTrap => |c| c.invocation.module,
-            .AssertUninstantiable => |c| c.module,
-            .AssertInvalid => |c| c.module,
+            .AssertMalformed => |c| c.err.module,
+            .AssertInvalid => |c| c.err.module,
+            .AssertUninstantiable => |c| c.err.module,
         };
     }
 };
@@ -152,6 +143,37 @@ fn errorToText(err: anyerror) []const u8 {
 }
 
 fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.ArrayList(Command) {
+    const Helpers = struct {
+        fn parseInvocation(json_action: *std.json.Value, fallback_module: []const u8, _allocator: std.mem.Allocator) !Invocation {
+            const json_field = json_action.Object.getPtr("field").?;
+
+            const json_args_or_null = json_action.Object.getPtr("args");
+            var args = std.ArrayList(Val).init(_allocator);
+            if (json_args_or_null) |json_args| {
+                for (json_args.Array.items) |item| {
+                    var val: Val = try parseVal(item.Object);
+                    try args.append(val);
+                }
+            }
+
+            return Invocation{
+                .module = fallback_module,
+                .field = try _allocator.dupe(u8, json_field.String),
+                .args = args,
+            };
+        }
+
+        fn parseBadModuleError(json_command: *const std.json.Value, _allocator: std.mem.Allocator) !BadModuleError {
+            const json_filename = json_command.Object.get("filename").?;
+            const json_expected = json_command.Object.get("text").?;
+
+            return BadModuleError{
+                .module = try _allocator.dupe(u8, json_filename.String),
+                .expected_error = try _allocator.dupe(u8, json_expected.String),
+            };
+        }
+    };
+
     // print("json_path: {s}\n", .{json_path});
     var json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
     var parser = std.json.Parser.init(allocator, false);
@@ -178,7 +200,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         } else if (strcmp("assert_return", json_command_type.String) or strcmp("action", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
-            var invocation = try Invocation.parse(json_action, fallback_module, allocator);
+            var invocation = try Helpers.parseInvocation(json_action, fallback_module, allocator);
 
             var expected_returns_or_null: ?std.ArrayList(Val) = null;
             const json_expected_or_null = json_command.Object.getPtr("expected");
@@ -200,7 +222,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         } else if (strcmp("assert_trap", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
-            var invocation = try Invocation.parse(json_action, fallback_module, allocator);
+            var invocation = try Helpers.parseInvocation(json_action, fallback_module, allocator);
 
             const json_text = json_command.Object.getPtr("text").?;
 
@@ -211,30 +233,27 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_uninstantiable", json_command_type.String)) {
-            const json_filename = json_command.Object.get("filename").?;
-            const json_expected = json_command.Object.get("text").?;
-
+        } else if (strcmp("assert_malformed", json_command_type.String)) {
             var command = Command{
-                .AssertUninstantiable = CommandAssertUninstantiable{
-                    .module = try allocator.dupe(u8, json_filename.String),
-                    .expected_error = try allocator.dupe(u8, json_expected.String),
+                .AssertMalformed = CommandAssertMalformed{
+                    .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
             try commands.append(command);
         } else if (strcmp("assert_invalid", json_command_type.String)) {
-            const json_filename = json_command.Object.get("filename").?;
-            const json_expected = json_command.Object.get("text").?;
-
             var command = Command{
                 .AssertInvalid = CommandAssertInvalid{
-                    .module = try allocator.dupe(u8, json_filename.String),
-                    .expected_error = try allocator.dupe(u8, json_expected.String),
+                    .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_malformed", json_command_type.String)) {
-            // we will never test these since we aren't going to generate wasm from a wast
+        } else if (strcmp("assert_uninstantiable", json_command_type.String)) {
+            var command = Command{
+                .AssertUninstantiable = CommandAssertUninstantiable{
+                    .err = try Helpers.parseBadModuleError(&json_command, allocator),
+                },
+            };
+            try commands.append(command);
         } else {
             print("unknown command type: {s}\n", .{json_command_type.String});
             unreachable;
@@ -271,7 +290,14 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
     for (commands.items) |*command| {
         switch (command.*) {
-            .AssertInvalid => continue,
+            .AssertInvalid => |c| {
+                log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
+                continue;
+            },
+            .AssertMalformed => |c| {
+                log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
+                continue;
+            },
             .AssertUninstantiable => continue,
             else => {},
         }
@@ -426,14 +452,8 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                         print("\tInvoke succeeded instead of trapping on expected {s}:\n", .{c.expected_error});
                     }
                 }
-
-                // print("skipping trap\n", .{});
             },
             else => {},
-            // .AssertInvalid => {
-            //     // var returns: [8]Val = undefined;
-            //     // try module.callFunc(c.field, c.args.items, &returns[0..c.expected.items.len]);
-            // },
         }
     }
 
