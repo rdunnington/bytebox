@@ -298,7 +298,6 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
                 continue;
             },
-            .AssertUninstantiable => continue,
             else => {},
         }
 
@@ -311,6 +310,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
         switch (command.*) {
             .DecodeModule => |c| log_verbose("module: {s}\n", .{c.module}),
+            .AssertUninstantiable => |c| log_verbose("assert_uninstantiable: {s}\n", .{c.err.module}),
             else => {},
         }
 
@@ -331,14 +331,39 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             defer imports.imports.deinit();
 
             var def = try wasm.ModuleDefinition.init(module_data, arena_commands.child_allocator);
-            var inst = try wasm.ModuleInstance.init(&def, &imports, arena_commands.child_allocator);
 
-            var module = Module{
-                .def = def,
-                .inst = inst,
-            };
-            var entry = try name_to_module.getOrPutValue(module_name, module);
-            module_or_null = entry.value_ptr;
+            switch (command.*) {
+                .AssertUninstantiable => |c| {
+                    _ = wasm.ModuleInstance.init(&def, &imports, arena_commands.child_allocator) catch |e| {
+                        const err_string: []const u8 = errorToText(e);
+                        if (strcmp(err_string, c.err.expected_error)) {
+                            log_verbose("\tSuccess!\n", .{});
+                            continue;
+                        } else {
+                            if (!g_verbose_logging) {
+                                print("assert_uninstantiable: {s}\n", .{c.err.module});
+                            }
+                            print("Fail: instantiate failed with error '{s}', but expected '{s}", .{ err_string, c.err.expected_error });
+                            continue;
+                        }
+                    };
+                    if (!g_verbose_logging) {
+                        print("assert_uninstantiable: {s}\n", .{c.err.module});
+                    }
+                    print("Fail: instantiate succeded, but it shouldn't have.", .{});
+                    continue;
+                },
+                else => {
+                    var inst = try wasm.ModuleInstance.init(&def, &imports, arena_commands.child_allocator);
+
+                    var module = Module{
+                        .def = def,
+                        .inst = inst,
+                    };
+                    var entry = try name_to_module.getOrPutValue(module_name, module);
+                    module_or_null = entry.value_ptr;
+                },
+            }
         }
 
         var module = module_or_null.?;
