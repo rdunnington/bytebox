@@ -17,8 +17,11 @@ const TestSuiteError = error{
 };
 
 const CommandType = enum {
+    DecodeModule,
     AssertReturn,
     AssertTrap,
+    AssertUninstantiable,
+    AssertInvalid,
 };
 
 const Invocation = struct {
@@ -46,6 +49,10 @@ const Invocation = struct {
     }
 };
 
+const CommandDecodeModule = struct {
+    module: []const u8,
+};
+
 const CommandAssertReturn = struct {
     invocation: Invocation,
     expected_returns: ?std.ArrayList(Val),
@@ -56,19 +63,30 @@ const CommandAssertTrap = struct {
     expected_error: []const u8,
 };
 
-// const CommandAssertInvalid = struct {
-//     invocation: Invocation,
-//     expected_error: []const u8,
-// };
+const CommandAssertUninstantiable = struct {
+    module: []const u8,
+    expected_error: []const u8,
+};
+
+const CommandAssertInvalid = struct {
+    module: []const u8,
+    expected_error: []const u8,
+};
 
 const Command = union(CommandType) {
+    DecodeModule: CommandDecodeModule,
     AssertReturn: CommandAssertReturn,
     AssertTrap: CommandAssertTrap,
+    AssertUninstantiable: CommandAssertUninstantiable,
+    AssertInvalid: CommandAssertInvalid,
 
     fn getModule(self: @This()) []const u8 {
         return switch (self) {
+            .DecodeModule => |c| c.module,
             .AssertReturn => |c| c.invocation.module,
             .AssertTrap => |c| c.invocation.module,
+            .AssertUninstantiable => |c| c.module,
+            .AssertInvalid => |c| c.module,
         };
     }
 };
@@ -115,18 +133,19 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     unreachable;
 }
 
-fn error_to_text(err: anyerror) []const u8 {
+fn errorToText(err: anyerror) []const u8 {
     return switch (err) {
+        wasm.MalformedError.AssertInvalidMagicSignature => "magic header not detected",
+        wasm.AssertError.AssertTypeMismatch => "type mismatch",
+        wasm.AssertError.AssertUnknownMemory => "unknown memory",
         wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
         wasm.TrapError.TrapIntegerOverflow => "integer overflow",
         wasm.TrapError.TrapInvalidIntegerConversion => "invalid conversion to integer",
         wasm.TrapError.TrapOutOfBoundsMemoryAccess => "out of bounds memory access",
         wasm.TrapError.TrapUndefinedElement => "undefined element",
         wasm.TrapError.TrapUnreachable => "unreachable",
-        wasm.AssertError.AssertTypeMismatch => "type mismatch",
-        wasm.AssertError.AssertUnknownMemory => "unknown memory",
         else => {
-            std.debug.print("error_to_text unknown err: {}\n", .{err});
+            std.debug.print("errorToText unknown err: {}\n", .{err});
             unreachable;
         },
     };
@@ -149,6 +168,13 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         if (strcmp("module", json_command_type.String)) {
             var fallback = json_command.Object.getPtr("filename").?;
             fallback_module = try allocator.dupe(u8, fallback.String);
+
+            var command = Command{
+                .DecodeModule = CommandDecodeModule{
+                    .module = try allocator.dupe(u8, fallback.String),
+                },
+            };
+            try commands.append(command);
         } else if (strcmp("assert_return", json_command_type.String) or strcmp("action", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
@@ -164,10 +190,12 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 expected_returns_or_null = expected_returns;
             }
 
-            var command = Command{ .AssertReturn = CommandAssertReturn{
-                .invocation = invocation,
-                .expected_returns = expected_returns_or_null,
-            } };
+            var command = Command{
+                .AssertReturn = CommandAssertReturn{
+                    .invocation = invocation,
+                    .expected_returns = expected_returns_or_null,
+                },
+            };
             try commands.append(command);
         } else if (strcmp("assert_trap", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
@@ -176,29 +204,35 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
             const json_text = json_command.Object.getPtr("text").?;
 
-            var command = Command{ .AssertTrap = CommandAssertTrap{
-                .invocation = invocation,
-                .expected_error = try allocator.dupe(u8, json_text.String),
-            } };
+            var command = Command{
+                .AssertTrap = CommandAssertTrap{
+                    .invocation = invocation,
+                    .expected_error = try allocator.dupe(u8, json_text.String),
+                },
+            };
+            try commands.append(command);
+        } else if (strcmp("assert_uninstantiable", json_command_type.String)) {
+            const json_filename = json_command.Object.get("filename").?;
+            const json_expected = json_command.Object.get("text").?;
+
+            var command = Command{
+                .AssertUninstantiable = CommandAssertUninstantiable{
+                    .module = try allocator.dupe(u8, json_filename.String),
+                    .expected_error = try allocator.dupe(u8, json_expected.String),
+                },
+            };
             try commands.append(command);
         } else if (strcmp("assert_invalid", json_command_type.String)) {
-            // const json_filename = json_command.Object.get("filename").?;
-            // const json_expected = json_command.Object.get("text").?;
+            const json_filename = json_command.Object.get("filename").?;
+            const json_expected = json_command.Object.get("text").?;
 
-            // var expected_error: ?anyerror = null;
-            // const json_text_or_null = json_command.Object.get("text");
-            // if (json_text_or_null) |text| {
-            //     expected_error = error_from_text(text.String);
-            // }
-
-            // var command = Command{
-            //     .AssertInvalid = CommandAssertInvalid {
-            //         .module = try std.mem.dupe(allocator, u8, json_filename.String),
-            //         .expected = try std.mem.dupe(allocator, u8, json_expected.String),
-            //     },
-            // };
-            // try commands.append(command);
-            log_verbose("Skipping assert_invalid test...\n", .{});
+            var command = Command{
+                .AssertInvalid = CommandAssertInvalid{
+                    .module = try allocator.dupe(u8, json_filename.String),
+                    .expected_error = try allocator.dupe(u8, json_expected.String),
+                },
+            };
+            try commands.append(command);
         } else if (strcmp("assert_malformed", json_command_type.String)) {
             // we will never test these since we aren't going to generate wasm from a wast
         } else {
@@ -236,11 +270,22 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
     defer name_to_module.deinit();
 
     for (commands.items) |*command| {
+        switch (command.*) {
+            .AssertInvalid => continue,
+            .AssertUninstantiable => continue,
+            else => {},
+        }
+
         var module_name = command.getModule();
         if (opts.module_filter_or_null) |filter| {
             if (strcmp(filter, module_name) == false) {
                 continue;
             }
+        }
+
+        switch (command.*) {
+            .DecodeModule => |c| log_verbose("module: {s}\n", .{c.module}),
+            else => {},
         }
 
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -361,7 +406,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 module.inst.invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
                     invoke_failed = true;
 
-                    trap_string = error_to_text(e);
+                    trap_string = errorToText(e);
 
                     if (strcmp(trap_string.?, c.expected_error)) {
                         invoke_failed_with_correct_trap = true;
@@ -384,6 +429,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
                 // print("skipping trap\n", .{});
             },
+            else => {},
             // .AssertInvalid => {
             //     // var returns: [8]Val = undefined;
             //     // try module.callFunc(c.field, c.args.items, &returns[0..c.expected.items.len]);
