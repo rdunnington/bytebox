@@ -36,6 +36,8 @@ pub const AssertError = error{
     AssertUnknownFunction,
     AssertUnknownMemory,
     AssertUnknownData,
+    AssertInvalidName,
+    AssertInvalidImport,
 };
 
 pub const TrapError = error{
@@ -253,7 +255,7 @@ const Opcode = enum(u16) {
     }
 };
 
-const ValType = enum(u8) {
+pub const ValType = enum(u8) {
     I32,
     I64,
     F32,
@@ -717,10 +719,6 @@ const Limits = struct {
     }
 };
 
-const ImportDefinition = struct {
-    index: u32,
-};
-
 const FunctionTypeDefinition = struct {
     types: std.ArrayList(ValType),
     num_params: u32,
@@ -806,11 +804,20 @@ const ExportType = enum(u8) {
     Global = 0x03,
 };
 
-const ExportDefinition = struct { name: std.ArrayList(u8), index: u32 };
+const ExportDefinition = struct {
+    name: []const u8,
+    index: u32,
+};
 
 const GlobalMut = enum(u8) {
     Immutable = 0,
     Mutable = 1,
+
+    fn decode(reader: anytype) !GlobalMut {
+        const byte = try reader.readByte();
+        const value = try std.meta.intToEnum(GlobalMut, byte);
+        return value;
+    }
 };
 
 const GlobalDefinition = struct {
@@ -1037,6 +1044,33 @@ const DataDefinition = struct {
             .mode = mode,
         };
     }
+};
+
+const ImportNames = struct {
+    module_name: []const u8,
+    import_name: []const u8,
+};
+
+const FunctionImportDefinition = struct {
+    names: ImportNames,
+    type_index: u32,
+};
+
+const TableImportDefinition = struct {
+    names: ImportNames,
+    valtype: ValType,
+    limits: Limits,
+};
+
+const MemoryImportDefinition = struct {
+    names: ImportNames,
+    limits: Limits,
+};
+
+const GlobalImportDefinition = struct {
+    names: ImportNames,
+    valtype: ValType,
+    mut: GlobalMut,
 };
 
 const MemArg = struct {
@@ -1446,10 +1480,10 @@ pub const ModuleDefinition = struct {
     };
 
     const Imports = struct {
-        functions: std.ArrayList(ImportDefinition),
-        tables: std.ArrayList(ImportDefinition),
-        memories: std.ArrayList(ImportDefinition),
-        globals: std.ArrayList(ImportDefinition),
+        functions: std.ArrayList(FunctionImportDefinition),
+        tables: std.ArrayList(TableImportDefinition),
+        memories: std.ArrayList(MemoryImportDefinition),
+        globals: std.ArrayList(GlobalImportDefinition),
     };
 
     const Exports = struct {
@@ -1492,10 +1526,10 @@ pub const ModuleDefinition = struct {
             },
             .types = std.ArrayList(FunctionTypeDefinition).init(allocator),
             .imports = Imports{
-                .functions = std.ArrayList(ImportDefinition).init(allocator),
-                .tables = std.ArrayList(ImportDefinition).init(allocator),
-                .memories = std.ArrayList(ImportDefinition).init(allocator),
-                .globals = std.ArrayList(ImportDefinition).init(allocator),
+                .functions = std.ArrayList(FunctionImportDefinition).init(allocator),
+                .tables = std.ArrayList(TableImportDefinition).init(allocator),
+                .memories = std.ArrayList(MemoryImportDefinition).init(allocator),
+                .globals = std.ArrayList(GlobalImportDefinition).init(allocator),
             },
             .functions = std.ArrayList(FunctionDefinition).init(allocator),
             .globals = std.ArrayList(GlobalDefinition).init(allocator),
@@ -1531,6 +1565,19 @@ pub const ModuleDefinition = struct {
                     },
                     else => unreachable,
                 }
+            }
+
+            fn readName(reader: anytype, _allocator: std.mem.Allocator) ![]const u8 {
+                const name_length = try std.leb.readULEB128(u32, reader);
+
+                var name: []u8 = try _allocator.alloc(u8, name_length);
+                errdefer _allocator.free(name);
+                var read_length = try reader.read(name);
+                if (read_length != name_length) {
+                    return error.AssertInvalidName;
+                }
+
+                return name;
             }
         };
 
@@ -1591,6 +1638,64 @@ pub const ModuleDefinition = struct {
                         }
 
                         try module.types.append(func);
+                    }
+                },
+                .Import => {
+                    const num_imports = try std.leb.readULEB128(u32, reader);
+
+                    var import_index: u32 = 0;
+                    while (import_index < num_imports) : (import_index += 1) {
+                        var module_name: []const u8 = try DecodeHelpers.readName(reader, allocator);
+                        errdefer allocator.free(module_name);
+
+                        var import_name: []const u8 = try DecodeHelpers.readName(reader, allocator);
+                        errdefer allocator.free(module_name);
+
+                        const names = ImportNames{
+                            .module_name = module_name,
+                            .import_name = import_name,
+                        };
+
+                        const desc = try reader.readByte();
+                        switch (desc) {
+                            0x00 => {
+                                const type_index = try std.leb.readULEB128(u32, reader);
+                                try module.imports.functions.append(FunctionImportDefinition{
+                                    .names = names,
+                                    .type_index = type_index,
+                                });
+                            },
+                            0x01 => {
+                                const valtype = try ValType.decode(reader);
+                                if (valtype.isRefType() == false) {
+                                    return error.AssertInvalidImport;
+                                }
+                                const limits = try Limits.decode(reader);
+                                try module.imports.tables.append(TableImportDefinition{
+                                    .names = names,
+                                    .valtype = valtype,
+                                    .limits = limits,
+                                });
+                            },
+                            0x02 => {
+                                const limits = try Limits.decode(reader);
+                                try module.imports.memories.append(MemoryImportDefinition{
+                                    .names = names,
+                                    .limits = limits,
+                                });
+                            },
+                            0x03 => {
+                                const valtype = try ValType.decode(reader);
+                                const mut = try GlobalMut.decode(reader);
+
+                                try module.imports.globals.append(GlobalImportDefinition{
+                                    .names = names,
+                                    .valtype = valtype,
+                                    .mut = mut,
+                                });
+                            },
+                            else => return error.AssertInvalidImport,
+                        }
                     }
                 },
                 .Function => {
@@ -1670,7 +1775,7 @@ pub const ModuleDefinition = struct {
                     var global_index: u32 = 0;
                     while (global_index < num_globals) : (global_index += 1) {
                         var valtype = try ValType.decode(reader);
-                        var mut = @intToEnum(GlobalMut, try reader.readByte());
+                        var mut = try GlobalMut.decode(reader);
 
                         // TODO validate global references are for imports only
                         const expr = try ConstantExpression.decode(reader);
@@ -1687,11 +1792,8 @@ pub const ModuleDefinition = struct {
 
                     var export_index: u32 = 0;
                     while (export_index < num_exports) : (export_index += 1) {
-                        const name_length = try std.leb.readULEB128(u32, reader);
-                        var name = std.ArrayList(u8).init(allocator);
-                        try name.resize(name_length);
-                        errdefer name.deinit();
-                        _ = try stream.read(name.items);
+                        var name: []const u8 = try DecodeHelpers.readName(reader, allocator);
+                        errdefer allocator.free(name);
 
                         const exportType = @intToEnum(ExportType, try reader.readByte());
                         const item_index = try std.leb.readULEB128(u32, reader);
@@ -1950,6 +2052,36 @@ pub const ModuleDefinition = struct {
         self.code.f64_const.deinit();
         self.code.branch_table.deinit();
 
+        for (self.imports.functions.items) |*item| {
+            self.allocator.free(item.names.module_name);
+            self.allocator.free(item.names.import_name);
+        }
+        for (self.imports.tables.items) |*item| {
+            self.allocator.free(item.names.module_name);
+            self.allocator.free(item.names.import_name);
+        }
+        for (self.imports.memories.items) |*item| {
+            self.allocator.free(item.names.module_name);
+            self.allocator.free(item.names.import_name);
+        }
+        for (self.imports.globals.items) |*item| {
+            self.allocator.free(item.names.module_name);
+            self.allocator.free(item.names.import_name);
+        }
+
+        for (self.exports.functions.items) |*item| {
+            self.allocator.free(item.name);
+        }
+        for (self.exports.tables.items) |*item| {
+            self.allocator.free(item.name);
+        }
+        for (self.exports.memories.items) |*item| {
+            self.allocator.free(item.name);
+        }
+        for (self.exports.globals.items) |*item| {
+            self.allocator.free(item.name);
+        }
+
         self.types.deinit();
         self.imports.functions.deinit();
         self.imports.tables.deinit();
@@ -1972,33 +2104,117 @@ pub const ModuleDefinition = struct {
     }
 };
 
+const ImportType = enum(u8) {
+    Host,
+    Wasm,
+};
+
+const HostFunctionCallback = fn (userdata: ?*c_void, params: []const Val, returns: []Val) void;
+
+const HostFunction = struct {
+    userdata: ?*c_void,
+    param_types: std.ArrayList(ValType),
+    callback: HostFunctionCallback,
+};
+
 pub const FunctionImport = struct {
     name: []const u8,
-    // TODO
+    data: union(ImportType) {
+        Host: HostFunction,
+        Wasm: u32, // index into function instances
+    },
 };
 
 pub const TableImport = struct {
     name: []const u8,
+    data: union(ImportType) {
+        Host: *TableInstance,
+        Wasm: u32, // index into tables
+    },
 };
 
 pub const MemoryImport = struct {
     name: []const u8,
+    data: union(ImportType) {
+        Host: *MemoryInstance,
+        Wasm: void, // no need for an index since there can only be 1 instance
+    },
 };
 
 pub const GlobalImport = struct {
     name: []const u8,
+    data: union(ImportType) {
+        Host: *GlobalInstance,
+        Wasm: u32, // index into globals
+    },
 };
 
 pub const ModuleImports = struct {
     name: []const u8,
+    instance: ?*ModuleInstance,
     functions: std.ArrayList(FunctionImport),
-    tables: std.ArrayList(FunctionImport),
-    memories: std.ArrayList(FunctionImport),
+    tables: std.ArrayList(TableImport),
+    memories: std.ArrayList(MemoryImport),
     globals: std.ArrayList(GlobalImport),
-};
+    allocator: std.mem.Allocator,
 
-pub const PackageImports = struct {
-    imports: std.ArrayList(ModuleImports),
+    pub fn init(name: []const u8, instance: ?*ModuleInstance, allocator: std.mem.Allocator) !ModuleImports {
+        return ModuleImports{
+            .name = try allocator.dupe(u8, name),
+            .instance = instance,
+            .functions = std.ArrayList(FunctionImport).init(allocator),
+            .tables = std.ArrayList(TableImport).init(allocator),
+            .memories = std.ArrayList(MemoryImport).init(allocator),
+            .globals = std.ArrayList(GlobalImport).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn addHostFunction(self: *ModuleImports, name: []const u8, userdata: ?*c_void, param_types: []const ValType, callback: HostFunctionCallback) !void {
+        std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
+
+        var type_list = std.ArrayList(ValType).init(self.allocator);
+        try type_list.appendSlice(param_types);
+
+        try self.functions.append(FunctionImport{
+            .name = try self.allocator.dupe(u8, name),
+            .data = .{
+                .Host = HostFunction{
+                    .userdata = userdata,
+                    .param_types = type_list,
+                    .callback = callback,
+                },
+            },
+        });
+    }
+
+    pub fn deinit(self: *ModuleImports) void {
+        self.allocator.free(self.name);
+
+        for (self.functions.items) |*item| {
+            self.allocator.free(item.name);
+            switch (item.data) {
+                .Host => |h| h.param_types.deinit(),
+                else => {},
+            }
+        }
+        self.functions.deinit();
+
+        for (self.tables.items) |*item| {
+            self.allocator.free(item.name);
+        }
+        self.tables.deinit();
+
+        for (self.memories.items) |*item| {
+            self.allocator.free(item.name);
+        }
+        self.memories.deinit();
+
+        for (self.globals.items) |*item| {
+            self.allocator.free(item.name);
+        }
+        self.globals.deinit();
+    }
 };
 
 pub const Store = struct {
@@ -2010,7 +2226,7 @@ pub const Store = struct {
 
     module_def: *const ModuleDefinition, // temp
 
-    fn init(module_def: *const ModuleDefinition, _: *PackageImports, allocator: std.mem.Allocator) !Store {
+    fn init(module_def: *const ModuleDefinition, _: []const ModuleImports, allocator: std.mem.Allocator) !Store {
         var store = Store{
             .functions = std.ArrayList(FunctionInstance).init(allocator),
             .tables = std.ArrayList(TableInstance).init(allocator),
@@ -2194,7 +2410,7 @@ pub const ModuleInstance = struct {
     store: Store,
     module_def: *const ModuleDefinition,
 
-    pub fn init(module_def: *const ModuleDefinition, imports: *PackageImports, allocator: std.mem.Allocator) !ModuleInstance {
+    pub fn init(module_def: *const ModuleDefinition, imports: []const ModuleImports, allocator: std.mem.Allocator) !ModuleInstance {
         var inst = ModuleInstance{
             .allocator = allocator,
             .stack = Stack.init(allocator),
@@ -2219,7 +2435,7 @@ pub const ModuleInstance = struct {
 
     pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) !void {
         for (self.module_def.exports.functions.items) |func_export| {
-            if (std.mem.eql(u8, func_name, func_export.name.items)) {
+            if (std.mem.eql(u8, func_name, func_export.name)) {
                 const func_index: usize = func_export.index + self.module_def.imports.functions.items.len;
                 try self.invoke_internal(func_index, params, returns);
                 return;

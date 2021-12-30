@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const wasm = @import("vm.zig");
+const ValType = wasm.ValType;
 const Val = wasm.Val;
 const print = std.debug.print;
 
@@ -275,6 +276,65 @@ const TestOpts = struct {
     module_filter_or_null: ?[]const u8 = null,
 };
 
+fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
+    const Functions = struct {
+        fn printI32(_: ?*c_void, params: []const Val, returns: []Val) void {
+            std.debug.assert(params.len == 1);
+            std.debug.assert(returns.len == 0);
+            std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
+            std.debug.print("{}", .{params[0].I32});
+        }
+
+        fn printI64(_: ?*c_void, params: []const Val, returns: []Val) void {
+            std.debug.assert(params.len == 1);
+            std.debug.assert(returns.len == 0);
+            std.debug.assert(std.meta.activeTag(params[0]) == ValType.I64);
+            std.debug.print("{}", .{params[0].I64});
+        }
+
+        fn printF32(_: ?*c_void, params: []const Val, returns: []Val) void {
+            std.debug.assert(params.len == 1);
+            std.debug.assert(returns.len == 0);
+            std.debug.assert(std.meta.activeTag(params[0]) == ValType.F32);
+            std.debug.print("{}", .{params[0].F32});
+        }
+
+        fn printF64(_: ?*c_void, params: []const Val, returns: []Val) void {
+            std.debug.assert(params.len == 1);
+            std.debug.assert(returns.len == 0);
+            std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
+            std.debug.print("{}", .{params[0].F64});
+        }
+
+        fn printI32F32(_: ?*c_void, params: []const Val, returns: []Val) void {
+            std.debug.assert(params.len == 2);
+            std.debug.assert(returns.len == 0);
+            std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
+            std.debug.assert(std.meta.activeTag(params[1]) == ValType.F32);
+            std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
+        }
+
+        fn printF64F64(_: ?*c_void, params: []const Val, returns: []Val) void {
+            std.debug.assert(params.len == 2);
+            std.debug.assert(returns.len == 0);
+            std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
+            std.debug.assert(std.meta.activeTag(params[1]) == ValType.F64);
+            std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
+        }
+    };
+
+    var imports: wasm.ModuleImports = try wasm.ModuleImports.init("spectest", null, allocator);
+
+    try imports.addHostFunction("print_i32", null, &[_]ValType{.I32}, Functions.printI32);
+    try imports.addHostFunction("print_i64", null, &[_]ValType{.I64}, Functions.printI64);
+    try imports.addHostFunction("print_f32", null, &[_]ValType{.I32}, Functions.printF32);
+    try imports.addHostFunction("print_f64", null, &[_]ValType{.F64}, Functions.printF64);
+    try imports.addHostFunction("print_i32_f32", null, &[_]ValType{ .I32, .F32 }, Functions.printI32F32);
+    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, Functions.printI32F32);
+
+    return imports;
+}
+
 fn run(suite_path: []const u8, opts: *const TestOpts) !void {
     var did_fail_any_test: bool = false;
 
@@ -287,6 +347,9 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
     var name_to_module = std.StringHashMap(Module).init(std.testing.allocator);
     defer name_to_module.deinit();
+
+    var spectest_imports: wasm.ModuleImports = try makeSpectestImports(std.testing.allocator);
+    defer spectest_imports.deinit();
 
     for (commands.items) |*command| {
         switch (command.*) {
@@ -325,10 +388,8 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             var module_data = try cwd.readFileAlloc(arena_commands.child_allocator, module_path, 1024 * 1024 * 8);
             // wasm.printBytecode("module data", module_data);
 
-            var imports = wasm.PackageImports{
-                .imports = std.ArrayList(wasm.ModuleImports).init(arena_commands.child_allocator),
-            };
-            defer imports.imports.deinit();
+            // NOTE this shares the same copies of the import arrays, if the modules must avoid sharing instances this will need to change
+            var imports = [_]wasm.ModuleImports{spectest_imports};
 
             var def = try wasm.ModuleDefinition.init(module_data, arena_commands.child_allocator);
 
