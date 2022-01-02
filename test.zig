@@ -19,6 +19,7 @@ const TestSuiteError = error{
 
 const CommandType = enum {
     DecodeModule,
+    Register,
     AssertReturn,
     AssertTrap,
     AssertMalformed,
@@ -39,6 +40,11 @@ const BadModuleError = struct {
 
 const CommandDecodeModule = struct {
     module: []const u8,
+};
+
+const CommandRegister = struct {
+    module: []const u8,
+    name: []const u8,
 };
 
 const CommandAssertReturn = struct {
@@ -65,6 +71,7 @@ const CommandAssertUninstantiable = struct {
 
 const Command = union(CommandType) {
     DecodeModule: CommandDecodeModule,
+    Register: CommandRegister,
     AssertReturn: CommandAssertReturn,
     AssertTrap: CommandAssertTrap,
     AssertMalformed: CommandAssertMalformed,
@@ -74,6 +81,7 @@ const Command = union(CommandType) {
     fn getModule(self: @This()) []const u8 {
         return switch (self) {
             .DecodeModule => |c| c.module,
+            .Register => |c| c.module,
             .AssertReturn => |c| c.invocation.module,
             .AssertTrap => |c| c.invocation.module,
             .AssertMalformed => |c| c.err.module,
@@ -127,7 +135,7 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
 
 fn errorToText(err: anyerror) []const u8 {
     return switch (err) {
-        wasm.MalformedError.AssertInvalidMagicSignature => "magic header not detected",
+        wasm.MalformedError.MalformedMagicSignature => "magic header not detected",
         wasm.AssertError.AssertTypeMismatch => "type mismatch",
         wasm.AssertError.AssertUnknownMemory => "unknown memory",
         wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
@@ -198,6 +206,15 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
+        } else if (strcmp("register", json_command_type.String)) {
+            const json_as = json_command.Object.getPtr("as").?;
+            var command = Command{
+                .Register = CommandRegister{
+                    .module = try allocator.dupe(u8, fallback_module),
+                    .name = try allocator.dupe(u8, json_as.String),
+                },
+            };
+            try commands.append(command);
         } else if (strcmp("assert_return", json_command_type.String) or strcmp("action", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
@@ -240,7 +257,9 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
-            try commands.append(command);
+            if (std.mem.endsWith(u8, command.AssertMalformed.err.module, ".wasm")) {
+                try commands.append(command);
+            }
         } else if (strcmp("assert_invalid", json_command_type.String)) {
             var command = Command{
                 .AssertInvalid = CommandAssertInvalid{
@@ -255,6 +274,9 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
+        } else if (strcmp("assert_unlinkable", json_command_type.String)) {
+            // TODO
+            log_verbose("skipping assert_unlinkable\n", .{});
         } else {
             print("unknown command type: {s}\n", .{json_command_type.String});
             unreachable;
@@ -265,8 +287,8 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 }
 
 const Module = struct {
-    def: wasm.ModuleDefinition,
-    inst: wasm.ModuleInstance,
+    def: ?wasm.ModuleDefinition = null,
+    inst: ?wasm.ModuleInstance = null,
 };
 
 const TestOpts = struct {
@@ -325,12 +347,46 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
 
     var imports: wasm.ModuleImports = try wasm.ModuleImports.init("spectest", null, allocator);
 
-    try imports.addHostFunction("print_i32", null, &[_]ValType{.I32}, Functions.printI32);
-    try imports.addHostFunction("print_i64", null, &[_]ValType{.I64}, Functions.printI64);
-    try imports.addHostFunction("print_f32", null, &[_]ValType{.I32}, Functions.printF32);
-    try imports.addHostFunction("print_f64", null, &[_]ValType{.F64}, Functions.printF64);
-    try imports.addHostFunction("print_i32_f32", null, &[_]ValType{ .I32, .F32 }, Functions.printI32F32);
-    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, Functions.printI32F32);
+    const no_returns = &[0]ValType{};
+
+    try imports.addHostFunction("print_i32", null, &[_]ValType{.I32}, no_returns, Functions.printI32);
+    try imports.addHostFunction("print_i64", null, &[_]ValType{.I64}, no_returns, Functions.printI64);
+    try imports.addHostFunction("print_f32", null, &[_]ValType{.F32}, no_returns, Functions.printF32);
+    try imports.addHostFunction("print_f64", null, &[_]ValType{.F64}, no_returns, Functions.printF64);
+    try imports.addHostFunction("print_i32_f32", null, &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
+    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printI32F32);
+
+    const GlobalInstance = wasm.GlobalInstance;
+
+    var global_i32 = try allocator.create(GlobalInstance);
+    global_i32.* = GlobalInstance{
+        .mut = wasm.GlobalMut.Immutable,
+        .value = Val{ .I32 = 666 },
+    };
+    try imports.globals.append(wasm.GlobalImport{
+        .name = try allocator.dupe(u8, "global_i32"),
+        .data = .{ .Host = global_i32 },
+    });
+
+    var global_f32 = try allocator.create(GlobalInstance);
+    global_f32.* = GlobalInstance{
+        .mut = wasm.GlobalMut.Immutable,
+        .value = Val{ .F32 = 666 },
+    };
+    try imports.globals.append(wasm.GlobalImport{
+        .name = try allocator.dupe(u8, "global_f32"),
+        .data = .{ .Host = global_f32 },
+    });
+
+    var global_f64 = try allocator.create(GlobalInstance);
+    global_f64.* = GlobalInstance{
+        .mut = wasm.GlobalMut.Immutable,
+        .value = Val{ .F64 = 666 },
+    };
+    try imports.globals.append(wasm.GlobalImport{
+        .name = try allocator.dupe(u8, "global_f64"),
+        .data = .{ .Host = global_f64 },
+    });
 
     return imports;
 }
@@ -348,8 +404,14 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
     var name_to_module = std.StringHashMap(Module).init(std.testing.allocator);
     defer name_to_module.deinit();
 
-    var spectest_imports: wasm.ModuleImports = try makeSpectestImports(std.testing.allocator);
-    defer spectest_imports.deinit();
+    // this should be enough to avoid resizing, just bump it up if it's not
+    // note that module instance uses the pointer to the stored struct so it's important that the stored instances never move
+    name_to_module.ensureTotalCapacity(256) catch unreachable;
+
+    // NOTE this shares the same copies of the import arrays, if the modules must avoid sharing instances this will need to change
+    var imports = std.ArrayList(wasm.ModuleImports).init(std.testing.allocator);
+
+    try imports.append(try makeSpectestImports(std.testing.allocator));
 
     for (commands.items) |*command| {
         switch (command.*) {
@@ -358,7 +420,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 continue;
             },
             .AssertMalformed => |c| {
-                log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
+                log_verbose("Skipping assert_malformed: {s}\n", .{c.err.module});
                 continue;
             },
             else => {},
@@ -371,31 +433,40 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             }
         }
 
+        var entry = name_to_module.getOrPutAssumeCapacity(module_name);
+        var module: *Module = entry.value_ptr;
+        if (entry.found_existing == false) {
+            module.* = Module{};
+        }
+
         switch (command.*) {
+            .Register => |c| {
+                if (module.inst == null) {
+                    print("Register: module instance {s} was not found in the cache. Is the wast malformed?", .{c.module});
+                    continue;
+                }
+
+                // var module_imports = try wasm.ModuleImports.init(c.name, &module.inst, arena_commands.child_allocator);
+                var module_imports: wasm.ModuleImports = try (module.inst.?).exports(c.name);
+                try imports.append(module_imports);
+                continue;
+            },
             .DecodeModule => |c| log_verbose("module: {s}\n", .{c.module}),
             .AssertUninstantiable => |c| log_verbose("assert_uninstantiable: {s}\n", .{c.err.module}),
             else => {},
         }
 
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-
-        var module_or_null: ?*Module = name_to_module.getPtr(module_name);
-
-        if (module_or_null == null) {
+        if (module.inst == null) {
             var module_path = try std.fs.path.join(arena_commands.child_allocator, &[_][]const u8{ suite_dir, module_name });
             var cwd = std.fs.cwd();
             var module_data = try cwd.readFileAlloc(arena_commands.child_allocator, module_path, 1024 * 1024 * 8);
             // wasm.printBytecode("module data", module_data);
 
-            // NOTE this shares the same copies of the import arrays, if the modules must avoid sharing instances this will need to change
-            var imports = [_]wasm.ModuleImports{spectest_imports};
-
-            var def = try wasm.ModuleDefinition.init(module_data, arena_commands.child_allocator);
+            module.def = try wasm.ModuleDefinition.init(module_data, arena_commands.child_allocator);
 
             switch (command.*) {
                 .AssertUninstantiable => |c| {
-                    _ = wasm.ModuleInstance.init(&def, &imports, arena_commands.child_allocator) catch |e| {
+                    _ = wasm.ModuleInstance.init(&module.def.?, imports.items, arena_commands.child_allocator) catch |e| {
                         const err_string: []const u8 = errorToText(e);
                         if (strcmp(err_string, c.err.expected_error)) {
                             log_verbose("\tSuccess!\n", .{});
@@ -415,19 +486,10 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                     continue;
                 },
                 else => {
-                    var inst = try wasm.ModuleInstance.init(&def, &imports, arena_commands.child_allocator);
-
-                    var module = Module{
-                        .def = def,
-                        .inst = inst,
-                    };
-                    var entry = try name_to_module.getOrPutValue(module_name, module);
-                    module_or_null = entry.value_ptr;
+                    module.inst = try wasm.ModuleInstance.init(&module.def.?, imports.items, arena_commands.child_allocator);
                 },
             }
         }
-
-        var module = module_or_null.?;
 
         // print("module_path: {s}\n", .{module_path});
 
@@ -453,8 +515,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 log_verbose("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
 
                 var invoke_succeeded = true;
-                // try module.inst.invoke(c.field, c.args.items, returns);
-                module.inst.invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
+                (module.inst.?).invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
                     if (!g_verbose_logging) {
                         print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
                     }
@@ -515,7 +576,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 var invoke_failed = false;
                 var invoke_failed_with_correct_trap = false;
                 var trap_string: ?[]const u8 = null;
-                module.inst.invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
+                (module.inst.?).invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
                     invoke_failed = true;
 
                     trap_string = errorToText(e);
@@ -542,6 +603,22 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             else => {},
         }
     }
+
+    var spectest_imports = imports.items[0];
+    for (spectest_imports.tables.items) |*item| {
+        std.testing.allocator.destroy(item.data.Host);
+    }
+    for (spectest_imports.memories.items) |*item| {
+        std.testing.allocator.destroy(item.data.Host);
+    }
+    for (spectest_imports.globals.items) |*item| {
+        std.testing.allocator.destroy(item.data.Host);
+    }
+
+    for (imports.items) |*item| {
+        item.deinit();
+    }
+    imports.deinit();
 
     if (did_fail_any_test) {
         return TestSuiteError.Fail;

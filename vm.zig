@@ -2,7 +2,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const MalformedError = error{
-    AssertInvalidMagicSignature,
+    MalformedMagicSignature,
+};
+
+pub const UnlinkableError = error{
+    UnlinkableUnknownImport,
+    UnlinkableIncompatibleImportType,
 };
 
 pub const AssertError = error{
@@ -14,7 +19,7 @@ pub const AssertError = error{
     AssertInvalidLabel,
     AssertInvalidConstantExpression,
     AssertInvalidElement,
-    AssertOneTableAllowed,
+    // AssertOneTableAllowed,
     AssertTableMaxExceeded,
     AssertMultipleMemories,
     AssertMemoryMaxPagesExceeded,
@@ -742,7 +747,7 @@ const FunctionTypeContext = struct {
         return std.hash.Murmur2_64.hashWithSeed(std.mem.asBytes(&f.num_params), seed);
     }
 
-    pub fn eql(_: Self, a: *FunctionTypeDefinition, b: *FunctionTypeDefinition) bool {
+    pub fn eql(_: Self, a: *const FunctionTypeDefinition, b: *const FunctionTypeDefinition) bool {
         if (a.num_params != b.num_params or a.types.items.len != b.types.items.len) {
             return false;
         }
@@ -809,7 +814,7 @@ const ExportDefinition = struct {
     index: u32,
 };
 
-const GlobalMut = enum(u8) {
+pub const GlobalMut = enum(u8) {
     Immutable = 0,
     Mutable = 1,
 
@@ -826,7 +831,7 @@ const GlobalDefinition = struct {
     expr: ConstantExpression,
 };
 
-const GlobalInstance = struct {
+pub const GlobalInstance = struct {
     mut: GlobalMut,
     value: Val,
 };
@@ -836,7 +841,7 @@ const TableDefinition = struct {
     limits: Limits,
 };
 
-const TableInstance = struct {
+pub const TableInstance = struct {
     refs: std.ArrayList(Val), // should only be reftypes
     reftype: ValType,
     limits: Limits,
@@ -898,7 +903,7 @@ const MemoryDefinition = struct {
     limits: Limits,
 };
 
-const MemoryInstance = struct {
+pub const MemoryInstance = struct {
     const k_page_size: usize = 64 * 1024;
     const k_max_pages: usize = std.math.powi(usize, 2, 16) catch unreachable;
 
@@ -936,7 +941,7 @@ const MemoryInstance = struct {
         w.VirtualFree(@ptrCast(*c_void, self.mem.ptr), 0, w.MEM_RELEASE);
     }
 
-    fn size(self: *MemoryInstance) usize {
+    fn size(self: *const MemoryInstance) usize {
         return self.mem.len / k_page_size;
     }
 
@@ -948,11 +953,12 @@ const MemoryInstance = struct {
             return false;
         }
 
+        const commit_size: usize = (self.limits.min + num_pages) * k_page_size;
+
         const w = std.os.windows;
         _ = w.VirtualAlloc(
             self.base_addr,
-            // @ptrCast(?*c_void, self.mem.ptr),
-            (self.limits.min + num_pages) * k_page_size,
+            commit_size,
             w.MEM_COMMIT,
             w.PAGE_READWRITE,
         ) catch unreachable;
@@ -1058,7 +1064,7 @@ const FunctionImportDefinition = struct {
 
 const TableImportDefinition = struct {
     names: ImportNames,
-    valtype: ValType,
+    reftype: ValType,
     limits: Limits,
 };
 
@@ -1588,7 +1594,7 @@ pub const ModuleDefinition = struct {
         {
             const magic = try reader.readIntBig(u32);
             if (magic != 0x0061736D) {
-                return error.AssertInvalidMagicSignature;
+                return error.MalformedMagicSignature;
             }
             const version = try reader.readIntLittle(u32);
             if (version != 1) {
@@ -1673,7 +1679,7 @@ pub const ModuleDefinition = struct {
                                 const limits = try Limits.decode(reader);
                                 try module.imports.tables.append(TableImportDefinition{
                                     .names = names,
-                                    .valtype = valtype,
+                                    .reftype = valtype,
                                     .limits = limits,
                                 });
                             },
@@ -1718,9 +1724,9 @@ pub const ModuleDefinition = struct {
                 },
                 .Table => {
                     const num_tables = try std.leb.readULEB128(u32, reader);
-                    if (num_tables > 1) {
-                        return error.AssertOneTableAllowed;
-                    }
+                    // if (num_tables > 1) {
+                    //     return error.AssertOneTableAllowed;
+                    // }
 
                     try module.tables.ensureTotalCapacity(num_tables);
 
@@ -1801,25 +1807,29 @@ pub const ModuleDefinition = struct {
 
                         switch (exportType) {
                             .Function => {
-                                if (item_index >= module.functions.items.len) {
+                                if (item_index >= module.imports.functions.items.len + module.functions.items.len) {
+                                    // if (item_index >= module.functions.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.functions.append(def);
                             },
                             .Table => {
-                                if (item_index >= module.tables.items.len) {
+                                if (item_index >= module.imports.tables.items.len + module.tables.items.len) {
+                                    // if (item_index >= module.tables.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.tables.append(def);
                             },
                             .Memory => {
-                                if (item_index >= module.memories.items.len) {
+                                if (item_index >= module.imports.memories.items.len + module.memories.items.len) {
+                                    // if (item_index >= module.memories.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.memories.append(def);
                             },
                             .Global => {
-                                if (item_index >= module.globals.items.len) {
+                                if (item_index >= module.imports.globals.items.len + module.globals.items.len) {
+                                    // if (item_index >= module.globals.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.globals.append(def);
@@ -2113,7 +2123,7 @@ const HostFunctionCallback = fn (userdata: ?*c_void, params: []const Val, return
 
 const HostFunction = struct {
     userdata: ?*c_void,
-    param_types: std.ArrayList(ValType),
+    func_def: FunctionTypeDefinition,
     callback: HostFunctionCallback,
 };
 
@@ -2121,16 +2131,44 @@ pub const FunctionImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: HostFunction,
-        Wasm: u32, // index into function instances
+        Wasm: u32,
+        // Wasm: struct {
+        //     module_instance: *ModuleInstance,
+        //     func_instance_index: u32,
+        // },
     },
+
+    fn dupe(import: *const FunctionImport, allocator: std.mem.Allocator) !FunctionImport {
+        var copy = import.*;
+        copy.name = try allocator.dupe(u8, copy.name);
+        switch (copy.data) {
+            .Host => |*data| {
+                var func_def = FunctionTypeDefinition{
+                    .types = std.ArrayList(ValType).init(allocator),
+                    .num_params = data.func_def.num_params,
+                };
+                try func_def.types.appendSlice(data.func_def.types.items);
+                data.func_def = func_def;
+            },
+            .Wasm => {},
+        }
+
+        return copy;
+    }
 };
 
 pub const TableImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: *TableInstance,
-        Wasm: u32, // index into tables
+        Wasm: u32, // index into table instances
     },
+
+    fn dupe(import: *const TableImport, allocator: std.mem.Allocator) !TableImport {
+        var copy = import.*;
+        copy.name = try allocator.dupe(u8, copy.name);
+        return copy;
+    }
 };
 
 pub const MemoryImport = struct {
@@ -2139,14 +2177,26 @@ pub const MemoryImport = struct {
         Host: *MemoryInstance,
         Wasm: void, // no need for an index since there can only be 1 instance
     },
+
+    fn dupe(import: *const MemoryImport, allocator: std.mem.Allocator) !TableImport {
+        var copy = import.*;
+        copy.name = try allocator.dupe(u8, copy.name);
+        return copy;
+    }
 };
 
 pub const GlobalImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: *GlobalInstance,
-        Wasm: u32, // index into globals
+        Wasm: u32, // index into global instances
     },
+
+    fn dupe(import: *const MemoryImport, allocator: std.mem.Allocator) !TableImport {
+        var copy = import.*;
+        copy.name = try allocator.dupe(u8, copy.name);
+        return copy;
+    }
 };
 
 pub const ModuleImports = struct {
@@ -2170,18 +2220,22 @@ pub const ModuleImports = struct {
         };
     }
 
-    pub fn addHostFunction(self: *ModuleImports, name: []const u8, userdata: ?*c_void, param_types: []const ValType, callback: HostFunctionCallback) !void {
+    pub fn addHostFunction(self: *ModuleImports, name: []const u8, userdata: ?*c_void, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
         var type_list = std.ArrayList(ValType).init(self.allocator);
         try type_list.appendSlice(param_types);
+        try type_list.appendSlice(return_types);
 
         try self.functions.append(FunctionImport{
             .name = try self.allocator.dupe(u8, name),
             .data = .{
                 .Host = HostFunction{
                     .userdata = userdata,
-                    .param_types = type_list,
+                    .func_def = FunctionTypeDefinition{
+                        .types = type_list,
+                        .num_params = @intCast(u32, param_types.len),
+                    },
                     .callback = callback,
                 },
             },
@@ -2194,7 +2248,7 @@ pub const ModuleImports = struct {
         for (self.functions.items) |*item| {
             self.allocator.free(item.name);
             switch (item.data) {
-                .Host => |h| h.param_types.deinit(),
+                .Host => |h| h.func_def.types.deinit(),
                 else => {},
             }
         }
@@ -2223,30 +2277,148 @@ pub const Store = struct {
     memories: std.ArrayList(MemoryInstance),
     globals: std.ArrayList(GlobalInstance),
     elements: std.ArrayList(ElementInstance),
+    imports: struct {
+        functions: std.ArrayList(FunctionImport),
+        tables: std.ArrayList(TableImport),
+        memories: std.ArrayList(MemoryImport),
+        globals: std.ArrayList(GlobalImport),
+    },
 
-    module_def: *const ModuleDefinition, // temp
-
-    fn init(module_def: *const ModuleDefinition, _: []const ModuleImports, allocator: std.mem.Allocator) !Store {
+    fn init(module_def: *const ModuleDefinition, imports: []const ModuleImports, allocator: std.mem.Allocator) !Store {
         var store = Store{
+            .imports = .{
+                .functions = std.ArrayList(FunctionImport).init(allocator),
+                .tables = std.ArrayList(TableImport).init(allocator),
+                .memories = std.ArrayList(MemoryImport).init(allocator),
+                .globals = std.ArrayList(GlobalImport).init(allocator),
+            },
             .functions = std.ArrayList(FunctionInstance).init(allocator),
             .tables = std.ArrayList(TableInstance).init(allocator),
             .memories = std.ArrayList(MemoryInstance).init(allocator),
             .globals = std.ArrayList(GlobalInstance).init(allocator),
             .elements = std.ArrayList(ElementInstance).init(allocator),
-
-            .module_def = module_def,
         };
         errdefer store.deinit();
 
-        try store.functions.ensureTotalCapacity(module_def.imports.functions.items.len + module_def.functions.items.len);
-        for (module_def.imports.functions.items) |_| {
-            var f = FunctionInstance{
-                .type_def_index = 0,
-                .offset_into_instructions = 0,
-                .local_types = std.ArrayList(ValType).init(allocator),
-            };
-            try store.functions.append(f);
+        // TODO probably should change the imports stuff to a hashed lookup of module_name+item_name -> array of items to make this faster
+        for (module_def.imports.functions.items) |*func_import_def| {
+            var found: bool = false;
+            for (imports) |import_module| {
+                if (std.mem.eql(u8, func_import_def.names.module_name, import_module.name)) {
+                    for (import_module.functions.items) |import_func| {
+                        if (std.mem.eql(u8, func_import_def.names.import_name, import_func.name)) {
+                            const type_def: *const FunctionTypeDefinition = &module_def.types.items[func_import_def.type_index];
+                            const type_comparer = FunctionTypeContext{};
+
+                            const is_type_signature_eql: bool = switch (import_func.data) {
+                                .Host => |import_data| type_comparer.eql(type_def, &import_data.func_def),
+                                .Wasm => |import_type_index| type_comparer.eql(type_def, &(import_module.instance.?).module_def.types.items[import_type_index]),
+                            };
+
+                            if (is_type_signature_eql == false) {
+                                return error.UnlinkableIncompatibleImportType;
+                            }
+
+                            try store.imports.functions.append(try import_func.dupe(allocator));
+                            found = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (found == false) {
+                return error.UnlinkableUnknownImport;
+            }
         }
+
+        for (module_def.imports.tables.items) |*table_import_def| {
+            var found: bool = false;
+            for (imports) |import_module| {
+                if (std.mem.eql(u8, table_import_def.names.module_name, import_module.name)) {
+                    for (import_module.tables.items) |import_table| {
+                        if (std.mem.eql(u8, table_import_def.names.import_name, import_table.name)) {
+                            var is_eql: bool = undefined;
+                            switch (import_table.data) {
+                                .Host => |table_instance| {
+                                    is_eql = table_instance.reftype == table_import_def.reftype and
+                                        std.meta.eql(table_instance.limits, table_import_def.limits);
+                                },
+                                .Wasm => |table_index| {
+                                    const tables: []const TableInstance = (import_module.instance.?).store.tables.items;
+                                    if (tables.len <= table_index) {
+                                        return error.UnlinkableUnknownImport;
+                                    }
+                                    const table_instance: *const TableInstance = &tables[table_index];
+                                    is_eql = table_instance.reftype == table_import_def.reftype and
+                                        std.meta.eql(table_instance.limits, table_import_def.limits);
+                                },
+                            }
+
+                            if (is_eql == false) {
+                                return error.UnlinkableIncompatibleImportType;
+                            }
+
+                            try store.imports.tables.append(try import_table.dupe(allocator));
+                            found = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (found == false) {
+                return error.UnlinkableUnknownImport;
+            }
+        }
+
+        // for (module_def.imports.memories.items) |*memory_import_def| {
+        //     for (imports) |import_module| {
+        //         if (std.mem.eql(u8, memory_import_def.names.module_name, import_module.name)) {
+        //             for (import_module.tables.items) |import_table| {
+        //                 if (std.mem.eql(u8, memory_import_def.names.import_name, import_table.name)) {
+        //                     var is_eql: bool = undefined;
+        //                     switch (import_table.data) {
+        //                         .Host => |memory_instance| {
+        //                             is_eql = is_eql and std.meta.eql(table_instance.limits, memory_import_def.limits);
+        //                         },
+        //                         .Wasm => |table_index| {
+        //                             const memories: []const TableInstance = (import_module.instance.?).store.memories.items;
+        //                             if (memories.len <= table_index) {
+        //                                 return error.UnlinkableUnknownImport;
+        //                             }
+        //                             const table_instance: *const TableInstance = &tables[table_index];
+        //                             is_eql = is_eql and std.meta.eql(table_instance.limits, memory_import_def.limits);
+        //                         },
+        //                     }
+
+        //                     if (is_eql == false) {
+        //                         return error.UnlinkableIncompatibleImportType;
+        //                     }
+
+        //                     try store.imports.tables.append(try import_table.dupe(allocator));
+        //                     break;
+        //                 }
+        //             }
+        //             break;
+        //         }
+        //     }
+        // }
+
+        // instantiate the rest of the needed module definitions
+
+        try store.functions.ensureTotalCapacity(module_def.imports.functions.items.len + module_def.functions.items.len);
+        // for (module_def.imports.functions.items) |_| {
+        //     // var f = FunctionInstance{
+        //     //     .type_def_index = 0,
+        //     //     .offset_into_instructions = 0,
+        //     //     .local_types = std.ArrayList(ValType).init(allocator),
+        //     // };
+        //     // try store.functions.append(f);
+        //     unreachable;
+        // }
         for (module_def.functions.items) |*def_func| {
             const func_type: *const FunctionTypeDefinition = &module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
@@ -2276,18 +2448,18 @@ pub const Store = struct {
         }
 
         try store.tables.ensureTotalCapacity(module_def.imports.tables.items.len + module_def.tables.items.len);
-        for (module_def.imports.tables.items) |_| {
-            // stub
-            var t = TableInstance{
-                .refs = std.ArrayList(Val).init(allocator),
-                .reftype = ValType.FuncRef,
-                .limits = Limits{
-                    .min = 0,
-                    .max = null,
-                },
-            };
-            try store.tables.append(t);
-        }
+        // for (module_def.imports.tables.items) |_| {
+        //     var t = TableInstance{
+        //         .refs = std.ArrayList(Val).init(allocator),
+        //         .reftype = ValType.FuncRef,
+        //         .limits = Limits{
+        //             .min = 0,
+        //             .max = null,
+        //         },
+        //     };
+        //     try store.tables.append(t);
+        //     unreachable;
+        // }
         for (module_def.tables.items) |*def_table| {
             var t = TableInstance{
                 .refs = std.ArrayList(Val).init(allocator),
@@ -2299,13 +2471,14 @@ pub const Store = struct {
         }
 
         try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
-        for (module_def.imports.memories.items) |_| {
-            var m = MemoryInstance.init(Limits{
-                .min = 0,
-                .max = null,
-            });
-            try store.memories.append(m);
-        }
+        // for (module_def.imports.memories.items) |_| {
+        //     var m = MemoryInstance.init(Limits{
+        //         .min = 0,
+        //         .max = null,
+        //     });
+        //     try store.memories.append(m);
+        //     unreachable;
+        // }
         for (module_def.memories.items) |*def_memory| {
             var memory = MemoryInstance.init(def_memory.limits);
             if (def_memory.limits.min > 0) {
@@ -2317,12 +2490,13 @@ pub const Store = struct {
         }
 
         try store.globals.ensureTotalCapacity(module_def.imports.globals.items.len + module_def.globals.items.len);
-        for (module_def.imports.globals.items) |_| {
-            var g = GlobalInstance{ .mut = GlobalMut.Immutable, .value = Val{
-                .I32 = 0,
-            } };
-            try store.globals.append(g);
-        }
+        // for (module_def.imports.globals.items) |_| {
+        //     var g = GlobalInstance{ .mut = GlobalMut.Immutable, .value = Val{
+        //         .I32 = 0,
+        //     } };
+        //     try store.globals.append(g);
+        //     unreachable;
+        // }
         for (module_def.globals.items) |*def_global| {
             var global = GlobalInstance{
                 .mut = def_global.mut,
@@ -2339,6 +2513,7 @@ pub const Store = struct {
 
             var table: *TableInstance = &store.tables.items[def_elem.table_index];
 
+            // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_elem.mode == .Active) {
                 var start_table_index_i32: i32 = if (def_elem.offset) |offset| (try offset.resolveTo(i32)) else 0;
                 if (start_table_index_i32 < 0) {
@@ -2354,12 +2529,11 @@ pub const Store = struct {
                     var elems = def_elem.elems_expr.items;
                     try table.init_range_expr(elems, @intCast(u32, elems.len), 0, start_table_index);
                 }
-            } else {
-                // TODO
             }
         }
 
         for (module_def.datas.items) |*def_data| {
+            // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_data.mode == .Active) {
                 var memory_index: u32 = def_data.memory_index.?;
                 if (module_def.memories.items.len <= memory_index) {
@@ -2400,7 +2574,6 @@ pub const Store = struct {
 
         self.globals.deinit();
         self.elements.deinit();
-        // self.datas.deinit();
     }
 };
 
@@ -2433,14 +2606,50 @@ pub const ModuleInstance = struct {
         self.store.deinit();
     }
 
+    pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImports {
+        var imports = try ModuleImports.init(name, self, self.allocator);
+
+        for (self.module_def.exports.functions.items) |*item| {
+            try imports.functions.append(FunctionImport{ .name = try imports.allocator.dupe(u8, item.name), .data = .{ .Wasm = item.index } });
+        }
+
+        for (self.module_def.exports.tables.items) |*item| {
+            try imports.tables.append(TableImport{
+                .name = try imports.allocator.dupe(u8, item.name),
+                .data = .{ .Wasm = item.index },
+            });
+        }
+
+        for (self.module_def.exports.memories.items) |*item| {
+            try imports.memories.append(MemoryImport{
+                .name = try imports.allocator.dupe(u8, item.name),
+                .data = .{ .Wasm = {} },
+            });
+        }
+
+        for (self.module_def.exports.globals.items) |*item| {
+            try imports.globals.append(GlobalImport{
+                .name = try imports.allocator.dupe(u8, item.name),
+                .data = .{ .Wasm = item.index },
+            });
+        }
+
+        return imports;
+    }
+
     pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) !void {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name)) {
-                const func_index: usize = func_export.index + self.module_def.imports.functions.items.len;
+                var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
                 try self.invoke_internal(func_index, params, returns);
                 return;
             }
         }
+        // for (self.imports.functions.items) |func_import, i| {
+        //     if (std.mem.eql(u8, func_name, func_import.name)) {
+        //         var func_index: usize =
+        //     }
+        // }
         return error.AssertUnknownExport;
     }
 
@@ -2761,12 +2970,57 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Call => {
                     const func_index = instruction.immediate;
-                    if (self.store.functions.items.len <= func_index) {
+                    if (self.store.imports.functions.items.len + self.store.functions.items.len <= func_index) {
                         return error.AssertUnknownFunction;
                     }
 
-                    const func: *const FunctionInstance = &self.store.functions.items[@intCast(usize, func_index)];
-                    try self.call(func, &next_instruction);
+                    if (func_index >= self.store.imports.functions.items.len) {
+                        const func_instance_index = func_index - self.store.imports.functions.items.len;
+                        const func: *const FunctionInstance = &self.store.functions.items[@intCast(usize, func_instance_index)];
+                        next_instruction = try self.call(func, next_instruction);
+                    } else {
+                        var func_import = &self.store.imports.functions.items[func_index];
+                        switch (func_import.data) {
+                            .Host => |data| {
+                                const param_types = data.func_def.getParams();
+                                const return_types = data.func_def.getReturns();
+
+                                var values = std.ArrayList(Val).init(self.allocator);
+                                defer values.deinit();
+                                try values.resize(param_types.len + return_types.len);
+
+                                var params = values.items[0..param_types.len];
+                                var returns = values.items[param_types.len..];
+
+                                for (params) |*item, i| {
+                                    var v = try self.stack.popValue();
+                                    if (std.meta.activeTag(v) != param_types[i]) {
+                                        return error.AssertTypeMismatch;
+                                    }
+                                    item.* = v;
+                                }
+
+                                data.callback(data.userdata, params, returns);
+
+                                // validate return types
+                                if (returns.len != return_types.len) {
+                                    return error.AssertTypeMismatch;
+                                }
+                                for (returns) |val, i| {
+                                    if (std.meta.activeTag(val) != return_types[i]) {
+                                        return error.AssertTypeMismatch;
+                                    }
+                                }
+
+                                try pushValues(returns, &self.stack);
+                            },
+                            .Wasm => {
+                                // func_import.module.invoke();
+                                // next_instruction = try func_import.module.call(instance_index, &self.stack, next_instruction);
+                                unreachable;
+                            },
+                        }
+                    }
                 },
                 Opcode.Call_Indirect => {
                     var immediates: *const CallIndirectImmediates = &self.module_def.code.call_indirect.items[instruction.immediate];
@@ -2800,7 +3054,7 @@ pub const ModuleInstance = struct {
                         return error.TrapIndirectCallTypeMismatch;
                     }
 
-                    try self.call(func, &next_instruction);
+                    next_instruction = try self.call(func, next_instruction);
                 },
                 Opcode.Drop => {
                     _ = try self.stack.popValue();
@@ -2974,8 +3228,8 @@ pub const ModuleInstance = struct {
                         return error.AssertMemoryInvalidIndex;
                     }
 
-                    const num_pages: i32 = @intCast(i32, self.store.memories.items[memory_index].limits.min);
-
+                    var memory_instance: *const MemoryInstance = &self.store.memories.items[memory_index];
+                    const num_pages: i32 = @intCast(i32, memory_instance.size());
                     try self.stack.pushI32(num_pages);
                 },
                 Opcode.Memory_Grow => {
@@ -3932,7 +4186,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn call(self: *ModuleInstance, func: *const FunctionInstance, instruction_offset: *u32) !void {
+    fn call(self: *ModuleInstance, func: *const FunctionInstance, next_instruction: u32) !u32 {
         const functype: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
 
         var frame = CallFrame{
@@ -3960,12 +4214,12 @@ pub const ModuleInstance = struct {
             frame.locals.items[locals_index] = Val.default(func.local_types.items[locals_index]);
         }
 
-        const continuation: u32 = instruction_offset.*;
+        const continuation: u32 = next_instruction;
 
         try self.stack.pushFrame(frame);
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
 
-        instruction_offset.* = func.offset_into_instructions;
+        return func.offset_into_instructions;
     }
 
     fn enterBlock(self: *ModuleInstance, instruction: Instruction, label_offset: u32) !void {
