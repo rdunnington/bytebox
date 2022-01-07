@@ -300,35 +300,35 @@ const TestOpts = struct {
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     const Functions = struct {
-        fn printI32(_: ?*c_void, params: []const Val, returns: []Val) void {
+        fn printI32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
             std.debug.print("{}", .{params[0].I32});
         }
 
-        fn printI64(_: ?*c_void, params: []const Val, returns: []Val) void {
+        fn printI64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I64);
             std.debug.print("{}", .{params[0].I64});
         }
 
-        fn printF32(_: ?*c_void, params: []const Val, returns: []Val) void {
+        fn printF32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F32);
             std.debug.print("{}", .{params[0].F32});
         }
 
-        fn printF64(_: ?*c_void, params: []const Val, returns: []Val) void {
+        fn printF64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
             std.debug.print("{}", .{params[0].F64});
         }
 
-        fn printI32F32(_: ?*c_void, params: []const Val, returns: []Val) void {
+        fn printI32F32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 2);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
@@ -336,7 +336,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
             std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
         }
 
-        fn printF64F64(_: ?*c_void, params: []const Val, returns: []Val) void {
+        fn printF64F64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 2);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
@@ -397,7 +397,9 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_commands.deinit();
 
-    var commands: std.ArrayList(Command) = try parseCommands(suite_path, arena_commands.child_allocator);
+    var scratch_allocator = arena_commands.allocator();
+
+    var commands: std.ArrayList(Command) = try parseCommands(suite_path, scratch_allocator);
 
     const suite_dir = std.fs.path.dirname(suite_path).?;
 
@@ -446,7 +448,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                     continue;
                 }
 
-                // var module_imports = try wasm.ModuleImports.init(c.name, &module.inst, arena_commands.child_allocator);
+                // var module_imports = try wasm.ModuleImports.init(c.name, &module.inst, scratch_allocator);
                 var module_imports: wasm.ModuleImports = try (module.inst.?).exports(c.name);
                 try imports.append(module_imports);
                 continue;
@@ -457,16 +459,16 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
         }
 
         if (module.inst == null) {
-            var module_path = try std.fs.path.join(arena_commands.child_allocator, &[_][]const u8{ suite_dir, module_name });
+            var module_path = try std.fs.path.join(scratch_allocator, &[_][]const u8{ suite_dir, module_name });
             var cwd = std.fs.cwd();
-            var module_data = try cwd.readFileAlloc(arena_commands.child_allocator, module_path, 1024 * 1024 * 8);
+            var module_data = try cwd.readFileAlloc(scratch_allocator, module_path, 1024 * 1024 * 8);
             // wasm.printBytecode("module data", module_data);
 
-            module.def = try wasm.ModuleDefinition.init(module_data, arena_commands.child_allocator);
+            module.def = try wasm.ModuleDefinition.init(module_data, scratch_allocator);
 
             switch (command.*) {
                 .AssertUninstantiable => |c| {
-                    _ = wasm.ModuleInstance.init(&module.def.?, imports.items, arena_commands.child_allocator) catch |e| {
+                    _ = wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator) catch |e| {
                         const err_string: []const u8 = errorToText(e);
                         if (strcmp(err_string, c.err.expected_error)) {
                             log_verbose("\tSuccess!\n", .{});
@@ -486,7 +488,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                     continue;
                 },
                 else => {
-                    module.inst = try wasm.ModuleInstance.init(&module.def.?, imports.items, arena_commands.child_allocator);
+                    module.inst = try wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator);
                 },
             }
         }

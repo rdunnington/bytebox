@@ -399,6 +399,7 @@ const Label = struct {
 
 const CallFrame = struct {
     func: *const FunctionInstance,
+    module_instance: *ModuleInstance,
     locals: std.ArrayList(Val),
 };
 
@@ -563,12 +564,12 @@ const Stack = struct {
         }
     }
 
-    fn findCurrentFrame(self: *const Self) !*const CallFrame {
+    fn findCurrentFrame(self: *const Self) !*CallFrame {
         var item_index: i32 = @intCast(i32, self.stack.items.len) - 1;
         while (item_index >= 0) : (item_index -= 1) {
             var index = @intCast(usize, item_index);
             if (std.meta.activeTag(self.stack.items[index]) == .Frame) {
-                var frame: *const CallFrame = &self.stack.items[index].Frame;
+                var frame: *CallFrame = &self.stack.items[index].Frame;
                 return frame; // why doesn't this get returned properly in the normal case??
             }
         }
@@ -938,7 +939,7 @@ pub const MemoryInstance = struct {
 
     fn deinit(self: *MemoryInstance) void {
         const w = std.os.windows;
-        w.VirtualFree(@ptrCast(*c_void, self.mem.ptr), 0, w.MEM_RELEASE);
+        w.VirtualFree(@ptrCast(*anyopaque, self.mem.ptr), 0, w.MEM_RELEASE);
     }
 
     fn size(self: *const MemoryInstance) usize {
@@ -2119,10 +2120,10 @@ const ImportType = enum(u8) {
     Wasm,
 };
 
-const HostFunctionCallback = fn (userdata: ?*c_void, params: []const Val, returns: []Val) void;
+const HostFunctionCallback = fn (userdata: ?*anyopaque, params: []const Val, returns: []Val) void;
 
 const HostFunction = struct {
-    userdata: ?*c_void,
+    userdata: ?*anyopaque,
     func_def: FunctionTypeDefinition,
     callback: HostFunctionCallback,
 };
@@ -2131,11 +2132,10 @@ pub const FunctionImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: HostFunction,
-        Wasm: u32,
-        // Wasm: struct {
-        //     module_instance: *ModuleInstance,
-        //     func_instance_index: u32,
-        // },
+        Wasm: struct {
+            module_instance: *ModuleInstance,
+            instance_index: u32,
+        },
     },
 
     fn dupe(import: *const FunctionImport, allocator: std.mem.Allocator) !FunctionImport {
@@ -2220,7 +2220,7 @@ pub const ModuleImports = struct {
         };
     }
 
-    pub fn addHostFunction(self: *ModuleImports, name: []const u8, userdata: ?*c_void, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
+    pub fn addHostFunction(self: *ModuleImports, name: []const u8, userdata: ?*anyopaque, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
         var type_list = std.ArrayList(ValType).init(self.allocator);
@@ -2312,7 +2312,7 @@ pub const Store = struct {
 
                             const is_type_signature_eql: bool = switch (import_func.data) {
                                 .Host => |import_data| type_comparer.eql(type_def, &import_data.func_def),
-                                .Wasm => |import_type_index| type_comparer.eql(type_def, &(import_module.instance.?).module_def.types.items[import_type_index]),
+                                .Wasm => |import_data| type_comparer.eql(type_def, &(import_module.instance.?).module_def.types.items[import_data.instance_index]),
                             };
 
                             if (is_type_signature_eql == false) {
@@ -2409,16 +2409,8 @@ pub const Store = struct {
 
         // instantiate the rest of the needed module definitions
 
-        try store.functions.ensureTotalCapacity(module_def.imports.functions.items.len + module_def.functions.items.len);
-        // for (module_def.imports.functions.items) |_| {
-        //     // var f = FunctionInstance{
-        //     //     .type_def_index = 0,
-        //     //     .offset_into_instructions = 0,
-        //     //     .local_types = std.ArrayList(ValType).init(allocator),
-        //     // };
-        //     // try store.functions.append(f);
-        //     unreachable;
-        // }
+        try store.functions.ensureTotalCapacity(module_def.functions.items.len);
+
         for (module_def.functions.items) |*def_func| {
             const func_type: *const FunctionTypeDefinition = &module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
@@ -2448,18 +2440,7 @@ pub const Store = struct {
         }
 
         try store.tables.ensureTotalCapacity(module_def.imports.tables.items.len + module_def.tables.items.len);
-        // for (module_def.imports.tables.items) |_| {
-        //     var t = TableInstance{
-        //         .refs = std.ArrayList(Val).init(allocator),
-        //         .reftype = ValType.FuncRef,
-        //         .limits = Limits{
-        //             .min = 0,
-        //             .max = null,
-        //         },
-        //     };
-        //     try store.tables.append(t);
-        //     unreachable;
-        // }
+
         for (module_def.tables.items) |*def_table| {
             var t = TableInstance{
                 .refs = std.ArrayList(Val).init(allocator),
@@ -2471,14 +2452,7 @@ pub const Store = struct {
         }
 
         try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
-        // for (module_def.imports.memories.items) |_| {
-        //     var m = MemoryInstance.init(Limits{
-        //         .min = 0,
-        //         .max = null,
-        //     });
-        //     try store.memories.append(m);
-        //     unreachable;
-        // }
+
         for (module_def.memories.items) |*def_memory| {
             var memory = MemoryInstance.init(def_memory.limits);
             if (def_memory.limits.min > 0) {
@@ -2490,13 +2464,7 @@ pub const Store = struct {
         }
 
         try store.globals.ensureTotalCapacity(module_def.imports.globals.items.len + module_def.globals.items.len);
-        // for (module_def.imports.globals.items) |_| {
-        //     var g = GlobalInstance{ .mut = GlobalMut.Immutable, .value = Val{
-        //         .I32 = 0,
-        //     } };
-        //     try store.globals.append(g);
-        //     unreachable;
-        // }
+
         for (module_def.globals.items) |*def_global| {
             var global = GlobalInstance{
                 .mut = def_global.mut,
@@ -2583,6 +2551,14 @@ pub const ModuleInstance = struct {
     store: Store,
     module_def: *const ModuleDefinition,
 
+    const CallContext = struct {
+        module: *ModuleInstance,
+        module_def: *const ModuleDefinition,
+        stack: *Stack,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+    };
+
     pub fn init(module_def: *const ModuleDefinition, imports: []const ModuleImports, allocator: std.mem.Allocator) !ModuleInstance {
         var inst = ModuleInstance{
             .allocator = allocator,
@@ -2593,9 +2569,12 @@ pub const ModuleInstance = struct {
         errdefer inst.deinit();
 
         if (module_def.start_func_index) |func_index| {
+            const num_imports = module_def.imports.functions.items.len;
+            std.debug.assert(func_index >= num_imports); // if this ever happens, need to support calling import functions at start
+
             const params = [0]Val{};
             var returns = [0]Val{};
-            try inst.invoke_internal(func_index + module_def.imports.functions.items.len, &params, &returns);
+            try inst.invokeInternal(func_index - num_imports, &params, &returns);
         }
 
         return inst;
@@ -2610,7 +2589,15 @@ pub const ModuleInstance = struct {
         var imports = try ModuleImports.init(name, self, self.allocator);
 
         for (self.module_def.exports.functions.items) |*item| {
-            try imports.functions.append(FunctionImport{ .name = try imports.allocator.dupe(u8, item.name), .data = .{ .Wasm = item.index } });
+            try imports.functions.append(FunctionImport{
+                .name = try imports.allocator.dupe(u8, item.name),
+                .data = .{
+                    .Wasm = .{
+                        .module_instance = self,
+                        .instance_index = item.index,
+                    },
+                },
+            });
         }
 
         for (self.module_def.exports.tables.items) |*item| {
@@ -2637,23 +2624,59 @@ pub const ModuleInstance = struct {
         return imports;
     }
 
-    pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) !void {
+    pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) anyerror!void {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name)) {
                 var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
-                try self.invoke_internal(func_index, params, returns);
+                try self.invokeInternal(func_index, params, returns);
                 return;
             }
         }
-        // for (self.imports.functions.items) |func_import, i| {
-        //     if (std.mem.eql(u8, func_name, func_import.name)) {
-        //         var func_index: usize =
-        //     }
-        // }
+
+        for (self.store.imports.functions.items) |*func_import| {
+            if (std.mem.eql(u8, func_name, func_import.name)) {
+                switch (func_import.data) {
+                    .Host => |data| {
+                        const param_types = data.func_def.getParams();
+                        const return_types = data.func_def.getReturns();
+
+                        for (params) |v, i| {
+                            if (std.meta.activeTag(v) != param_types[i]) {
+                                return error.AssertTypeMismatch;
+                            }
+                        }
+
+                        if (returns.len != return_types.len) {
+                            return error.AssertTypeMismatch;
+                        }
+
+                        data.callback(data.userdata, params, returns);
+
+                        // validate return types
+                        for (returns) |val, i| {
+                            if (std.meta.activeTag(val) != return_types[i]) {
+                                return error.AssertTypeMismatch;
+                            }
+                        }
+                    },
+                    .Wasm => |data| {
+                        var instance: *ModuleInstance = data.module_instance;
+                        // std.debug.print("module instructions len: {}\n", .{instance.module_def.code.instructions.items.len});
+                        instance.invoke(func_import.name, params, returns) catch {
+                            return error.OutOfBounds;
+                        };
+                        // try data.module_instance.invoke(func_import.name, params, returns);
+                    },
+                }
+
+                // try invokeImport(func_import, params, returns);
+            }
+        }
+
         return error.AssertUnknownExport;
     }
 
-    fn invoke_internal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
+    fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
         const func: FunctionInstance = self.store.functions.items[func_instance_index];
         const func_type_params: []const ValType = self.module_def.types.items[func.type_def_index].getParams();
 
@@ -2663,15 +2686,13 @@ pub const ModuleInstance = struct {
             return error.AssertTypeMismatch;
         }
 
-        for (params) |param, i| {
-            if (std.meta.activeTag(param) != func_type_params[i]) {
-                return error.AssertTypeMismatch;
-            }
-        }
-
         var locals = std.ArrayList(Val).init(self.allocator); // gets deinited when popFrame() is called
         try locals.resize(func.local_types.items.len);
+
         for (params) |v, i| {
+            if (std.meta.activeTag(v) != func_type_params[i]) {
+                return error.AssertTypeMismatch;
+            }
             locals.items[i] = v;
         }
 
@@ -2687,10 +2708,11 @@ pub const ModuleInstance = struct {
 
         try self.stack.pushFrame(CallFrame{
             .func = &func,
+            .module_instance = self,
             .locals = locals,
         });
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
-        self.executeWasm(self.module_def.code.instructions.items, func.offset_into_instructions) catch |err| {
+        executeWasm(&self.stack, self.allocator, func.offset_into_instructions) catch |err| {
             self.stack.forceClearAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
@@ -2710,7 +2732,38 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn executeWasm(self: *ModuleInstance, instructions: []const Instruction, root_offset: u32) !void {
+    fn invokeImport(func: *const FunctionImport, params: []const Val, returns: []Val) !void {
+        switch (func.data) {
+            .Host => |data| {
+                const param_types = data.func_def.getParams();
+                const return_types = data.func_def.getReturns();
+
+                for (params) |v, i| {
+                    if (std.meta.activeTag(v) != param_types[i]) {
+                        return error.AssertTypeMismatch;
+                    }
+                }
+
+                if (returns.len != return_types.len) {
+                    return error.AssertTypeMismatch;
+                }
+
+                data.callback(data.userdata, params, returns);
+
+                // validate return types
+                for (returns) |val, i| {
+                    if (std.meta.activeTag(val) != return_types[i]) {
+                        return error.AssertTypeMismatch;
+                    }
+                }
+            },
+            .Wasm => |data| {
+                try data.module_instance.invoke(func.name, params, returns);
+            },
+        }
+    }
+
+    fn executeWasm(stack: *Stack, allocator: std.mem.Allocator, root_offset: u32) !void {
         const Helpers = struct {
             fn seek(offset: u32, max: usize) !u32 {
                 if (offset < max or offset == Label.k_invalid_continuation) {
@@ -2868,11 +2921,27 @@ pub const ModuleInstance = struct {
 
         var instruction_offset: u32 = root_offset;
 
-        // TODO use a linear allocator for scratch allocations that gets reset on each loop iteration
+        while (instruction_offset != Label.k_invalid_continuation) {
+            // TODO should use some sort of infinitely growing arena allocator with a quick pointer reset instead of this
+            var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+            defer arena_allocator.deinit();
 
-        while (instruction_offset < instructions.len) {
-            var instruction = instructions[instruction_offset];
-            var next_instruction = instruction_offset + 1;
+            var scratch_allocator = arena_allocator.allocator();
+
+            var current_callframe: *CallFrame = try stack.findCurrentFrame();
+            var current_store: *Store = &current_callframe.module_instance.store;
+
+            var context = CallContext{
+                .module = current_callframe.module_instance,
+                .module_def = current_callframe.module_instance.module_def,
+                .stack = stack,
+                .allocator = allocator,
+                .scratch_allocator = scratch_allocator,
+            };
+
+            const instructions: []const Instruction = context.module_def.code.instructions.items;
+            var instruction: Instruction = instructions[instruction_offset];
+            var next_instruction: u32 = instruction_offset + 1;
 
             // std.debug.print("\tfound opcode: {} (pos {})\n", .{ instruction.opcode, instruction_offset });
 
@@ -2884,51 +2953,51 @@ pub const ModuleInstance = struct {
                     unreachable;
                 }, // should have been stripped in the decoding phase
                 Opcode.Block => {
-                    try self.enterBlock(instruction, instruction_offset);
+                    try enterBlock(&context, instruction, instruction_offset);
                 },
                 Opcode.Loop => {
-                    try self.enterBlock(instruction, instruction_offset);
+                    try enterBlock(&context, instruction, instruction_offset);
                 },
                 Opcode.If => {
-                    var condition = try self.stack.popI32();
+                    var condition = try stack.popI32();
                     if (condition != 0) {
                         // std.debug.print("\t>>> entering block at {}\n", .{instruction_offset});
-                        try self.enterBlock(instruction, instruction_offset);
-                    } else if (self.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| {
+                        try enterBlock(&context, instruction, instruction_offset);
+                    } else if (context.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| {
                         // std.debug.print("\t>>> else case hit at {}\n", .{else_offset});
                         // +1 to skip the else opcode, since it's treated as an End for the If block.
-                        try self.enterBlock(instruction, else_offset);
+                        try enterBlock(&context, instruction, else_offset);
                         next_instruction = try Helpers.seek(else_offset + 1, instructions.len);
                     } else {
-                        const continuation = self.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
+                        const continuation = context.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
                         // std.debug.print("\t>>> skipping to next_instruction at {}\n", .{continuation + 1});
                         next_instruction = try Helpers.seek(continuation + 1, instructions.len);
                     }
                 },
                 Opcode.Else => {
                     // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
-                    const end_offset = self.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
+                    const end_offset = context.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
                     next_instruction = try Helpers.seek(end_offset, instructions.len);
                 },
                 Opcode.End => {
-                    var returns = std.ArrayList(Val).init(self.allocator);
+                    var returns = std.ArrayList(Val).init(scratch_allocator);
                     defer returns.deinit();
 
                     // id 0 means this is the end of a function, otherwise it's the end of a block
-                    const label_ptr: *const Label = self.stack.topLabel();
+                    const label_ptr: *const Label = stack.topLabel();
                     if (label_ptr.isFirstInCallFrame() == false) {
-                        try popValues(&returns, &self.stack, self.getReturnTypesFromBlocktype(label_ptr.blocktype));
-                        _ = try self.stack.popLabel();
-                        try pushValues(returns.items, &self.stack);
+                        try popValues(&returns, stack, getReturnTypesFromBlocktype(context.module_def, label_ptr.blocktype));
+                        _ = try stack.popLabel();
+                        try pushValues(returns.items, stack);
                     } else {
-                        var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                        const return_types: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
+                        var frame: *const CallFrame = try stack.findCurrentFrame();
+                        const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
 
-                        try popValues(&returns, &self.stack, return_types);
-                        var label = try self.stack.popLabel();
-                        try self.stack.popFrame();
-                        const is_root_function = (self.stack.size() == 0);
-                        try pushValues(returns.items, &self.stack);
+                        try popValues(&returns, stack, return_types);
+                        var label = try stack.popLabel();
+                        try stack.popFrame();
+                        const is_root_function = (stack.size() == 0);
+                        try pushValues(returns.items, stack);
 
                         // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
                         if (is_root_function) {
@@ -2940,101 +3009,62 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Branch => {
                     const label_id: u32 = instruction.immediate;
-                    const branch_to_instruction = try self.branch(instructions, label_id);
+                    const branch_to_instruction = try branch(&context, label_id);
                     next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                 },
                 Opcode.Branch_If => {
                     const label_id: u32 = instruction.immediate;
-                    const v = try self.stack.popI32();
+                    const v = try stack.popI32();
                     // std.debug.print("branch_if stack value: {}, target id: {}\n", .{v, label_id});
                     if (v != 0) {
-                        const branch_to_instruction = try self.branch(instructions, label_id);
+                        const branch_to_instruction = try branch(&context, label_id);
                         next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                     }
                 },
                 Opcode.Branch_Table => {
-                    var immediates: *const BranchTableImmediates = &self.module_def.code.branch_table.items[instruction.immediate];
+                    var immediates: *const BranchTableImmediates = &context.module_def.code.branch_table.items[instruction.immediate];
                     var table: []const u32 = immediates.label_ids.items;
 
-                    const label_index = try self.stack.popI32();
+                    const label_index = try stack.popI32();
                     const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
-                    const branch_to_instruction = try self.branch(instructions, label_id);
+                    const branch_to_instruction = try branch(&context, label_id);
 
                     // std.debug.print("branch_table) label_index: {}, label_ids: {any}, label_id: {}\n", .{ label_index, immediates.label_ids.items, label_id });
 
                     next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                 },
                 Opcode.Return => {
-                    const continuation: u32 = try self.returnFromFunc();
+                    const continuation: u32 = try returnFromFunc(&context);
                     next_instruction = try Helpers.seek(continuation, instructions.len);
                 },
                 Opcode.Call => {
                     const func_index = instruction.immediate;
-                    if (self.store.imports.functions.items.len + self.store.functions.items.len <= func_index) {
+                    if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
                         return error.AssertUnknownFunction;
                     }
 
-                    if (func_index >= self.store.imports.functions.items.len) {
-                        const func_instance_index = func_index - self.store.imports.functions.items.len;
-                        const func: *const FunctionInstance = &self.store.functions.items[@intCast(usize, func_instance_index)];
-                        next_instruction = try self.call(func, next_instruction);
+                    if (func_index >= current_store.imports.functions.items.len) {
+                        const func_instance_index = func_index - current_store.imports.functions.items.len;
+                        const func: *const FunctionInstance = &current_store.functions.items[@intCast(usize, func_instance_index)];
+                        next_instruction = try call(&context, func, next_instruction);
                     } else {
-                        var func_import = &self.store.imports.functions.items[func_index];
-                        switch (func_import.data) {
-                            .Host => |data| {
-                                const param_types = data.func_def.getParams();
-                                const return_types = data.func_def.getReturns();
-
-                                var values = std.ArrayList(Val).init(self.allocator);
-                                defer values.deinit();
-                                try values.resize(param_types.len + return_types.len);
-
-                                var params = values.items[0..param_types.len];
-                                var returns = values.items[param_types.len..];
-
-                                for (params) |*item, i| {
-                                    var v = try self.stack.popValue();
-                                    if (std.meta.activeTag(v) != param_types[i]) {
-                                        return error.AssertTypeMismatch;
-                                    }
-                                    item.* = v;
-                                }
-
-                                data.callback(data.userdata, params, returns);
-
-                                // validate return types
-                                if (returns.len != return_types.len) {
-                                    return error.AssertTypeMismatch;
-                                }
-                                for (returns) |val, i| {
-                                    if (std.meta.activeTag(val) != return_types[i]) {
-                                        return error.AssertTypeMismatch;
-                                    }
-                                }
-
-                                try pushValues(returns, &self.stack);
-                            },
-                            .Wasm => {
-                                // func_import.module.invoke();
-                                // next_instruction = try func_import.module.call(instance_index, &self.stack, next_instruction);
-                                unreachable;
-                            },
-                        }
+                        var func_import = &current_store.imports.functions.items[func_index];
+                        next_instruction = try callImport(&context, func_import, next_instruction);
                     }
                 },
                 Opcode.Call_Indirect => {
-                    var immediates: *const CallIndirectImmediates = &self.module_def.code.call_indirect.items[instruction.immediate];
+                    var immediates: *const CallIndirectImmediates = &context.module_def.code.call_indirect.items[instruction.immediate];
 
-                    if (self.module_def.types.items.len <= immediates.type_index) {
+                    if (context.module_def.types.items.len <= immediates.type_index) {
                         return error.AssertUnknownType;
                     }
-                    if (self.store.tables.items.len <= immediates.table_index) {
+                    if (current_store.tables.items.len <= immediates.table_index) {
                         return error.AssertUnknownTable;
                     }
 
-                    var table: *TableInstance = &self.store.tables.items[immediates.table_index];
+                    var table: *TableInstance = &current_store.tables.items[immediates.table_index];
 
-                    const ref_index = try self.stack.popI32();
+                    const ref_index = try stack.popI32();
                     if (table.refs.items.len <= ref_index or ref_index < 0) {
                         return error.TrapUndefinedElement;
                     }
@@ -3045,465 +3075,465 @@ pub const ModuleInstance = struct {
                     }
 
                     const func_index = ref.FuncRef;
-                    if (self.store.functions.items.len <= func_index) {
+                    if (current_store.functions.items.len <= func_index) {
                         return error.AssertUnknownFunction;
                     }
 
-                    const func: *const FunctionInstance = &self.store.functions.items[func_index];
+                    const func: *const FunctionInstance = &current_store.functions.items[func_index];
                     if (func.type_def_index != immediates.type_index) {
                         return error.TrapIndirectCallTypeMismatch;
                     }
 
-                    next_instruction = try self.call(func, next_instruction);
+                    next_instruction = try call(&context, func, next_instruction);
                 },
                 Opcode.Drop => {
-                    _ = try self.stack.popValue();
+                    _ = try stack.popValue();
                 },
                 Opcode.Select => {
-                    var boolean = try self.stack.popI32();
-                    var v2 = try self.stack.popValue();
-                    var v1 = try self.stack.popValue();
+                    var boolean = try stack.popI32();
+                    var v2 = try stack.popValue();
+                    var v1 = try stack.popValue();
 
                     if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
                         return error.AssertTypeMismatch;
                     }
 
                     if (boolean != 0) {
-                        try self.stack.pushValue(v1);
+                        try stack.pushValue(v1);
                     } else {
-                        try self.stack.pushValue(v2);
+                        try stack.pushValue(v2);
                     }
                 },
                 Opcode.Local_Get => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
+                    var frame: *const CallFrame = try stack.findCurrentFrame();
                     var v: Val = frame.locals.items[locals_index];
-                    try self.stack.pushValue(v);
+                    try stack.pushValue(v);
                 },
                 Opcode.Local_Set => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                    var v: Val = try self.stack.popValue();
+                    var frame: *const CallFrame = try stack.findCurrentFrame();
+                    var v: Val = try stack.popValue();
 
                     frame.locals.items[locals_index] = v;
                 },
                 Opcode.Local_Tee => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = try self.stack.findCurrentFrame();
-                    var v: Val = try self.stack.topValue();
+                    var frame: *const CallFrame = try stack.findCurrentFrame();
+                    var v: Val = try stack.topValue();
                     frame.locals.items[locals_index] = v;
                 },
                 Opcode.Global_Get => {
                     var global_index: u32 = instruction.immediate;
-                    var global = &self.store.globals.items[global_index];
-                    try self.stack.pushValue(global.value);
+                    var global = &current_store.globals.items[global_index];
+                    try stack.pushValue(global.value);
                 },
                 Opcode.Global_Set => {
                     var global_index: u32 = instruction.immediate;
-                    var global = &self.store.globals.items[global_index];
+                    var global = &current_store.globals.items[global_index];
                     if (global.mut == GlobalMut.Immutable) {
                         return error.AssertAttemptToSetImmutable;
                     }
-                    global.value = try self.stack.popValue();
+                    global.value = try stack.popValue();
                 },
                 Opcode.I32_Load => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value = try Helpers.loadFromMem(i32, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI32(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value = try Helpers.loadFromMem(i32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI32(value);
                 },
                 Opcode.I64_Load => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value = try Helpers.loadFromMem(i64, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI64(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value = try Helpers.loadFromMem(i64, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI64(value);
                 },
                 Opcode.F32_Load => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value = try Helpers.loadFromMem(f32, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushF32(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value = try Helpers.loadFromMem(f32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushF32(value);
                 },
                 Opcode.F64_Load => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value = try Helpers.loadFromMem(f64, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushF64(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value = try Helpers.loadFromMem(f64, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushF64(value);
                 },
                 Opcode.I32_Load8_S => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: i32 = try Helpers.loadFromMem(i8, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI32(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: i32 = try Helpers.loadFromMem(i8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Load8_U => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: u32 = try Helpers.loadFromMem(u8, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI32(@bitCast(i32, value));
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: u32 = try Helpers.loadFromMem(u8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI32(@bitCast(i32, value));
                 },
                 Opcode.I32_Load16_S => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: i32 = try Helpers.loadFromMem(i16, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI32(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: i32 = try Helpers.loadFromMem(i16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Load16_U => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: u32 = try Helpers.loadFromMem(u16, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI32(@bitCast(i32, value));
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: u32 = try Helpers.loadFromMem(u16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI32(@bitCast(i32, value));
                 },
                 Opcode.I64_Load8_S => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i8, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI64(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: i64 = try Helpers.loadFromMem(i8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Load8_U => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u8, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI64(@bitCast(i64, value));
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: u64 = try Helpers.loadFromMem(u8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI64(@bitCast(i64, value));
                 },
                 Opcode.I64_Load16_S => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i16, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI64(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: i64 = try Helpers.loadFromMem(i16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Load16_U => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u16, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI64(@bitCast(i64, value));
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: u64 = try Helpers.loadFromMem(u16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI64(@bitCast(i64, value));
                 },
                 Opcode.I64_Load32_S => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i32, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI64(value);
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: i64 = try Helpers.loadFromMem(i32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Load32_U => {
-                    var offset_from_stack: i32 = try self.stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u32, self.store.memories.items, instruction.immediate, offset_from_stack);
-                    try self.stack.pushI64(@bitCast(i64, value));
+                    var offset_from_stack: i32 = try stack.popI32();
+                    var value: u64 = try Helpers.loadFromMem(u32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try stack.pushI64(@bitCast(i64, value));
                 },
                 Opcode.I32_Store => {
-                    const value: i32 = try self.stack.popI32();
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: i32 = try stack.popI32();
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store => {
-                    const value: i64 = try self.stack.popI64();
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: i64 = try stack.popI64();
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.F32_Store => {
-                    const value: f32 = try self.stack.popF32();
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: f32 = try stack.popF32();
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.F64_Store => {
-                    const value: f64 = try self.stack.popF64();
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: f64 = try stack.popF64();
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I32_Store8 => {
-                    const value: i8 = @truncate(i8, try self.stack.popI32());
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: i8 = @truncate(i8, try stack.popI32());
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I32_Store16 => {
-                    const value: i16 = @truncate(i16, try self.stack.popI32());
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: i16 = @truncate(i16, try stack.popI32());
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store8 => {
-                    const value: i8 = @truncate(i8, try self.stack.popI64());
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: i8 = @truncate(i8, try stack.popI64());
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store16 => {
-                    const value: i16 = @truncate(i16, try self.stack.popI64());
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: i16 = @truncate(i16, try stack.popI64());
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store32 => {
-                    const value: i32 = @truncate(i32, try self.stack.popI64());
-                    const offset_from_stack: i32 = try self.stack.popI32();
-                    try Helpers.storeInMem(value, self.store.memories.items, instruction.immediate, offset_from_stack);
+                    const value: i32 = @truncate(i32, try stack.popI64());
+                    const offset_from_stack: i32 = try stack.popI32();
+                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
                 },
                 Opcode.Memory_Size => {
                     const memory_index: usize = 0;
 
-                    if (self.store.memories.items.len <= memory_index) {
+                    if (current_store.memories.items.len <= memory_index) {
                         return error.AssertMemoryInvalidIndex;
                     }
 
-                    var memory_instance: *const MemoryInstance = &self.store.memories.items[memory_index];
+                    var memory_instance: *const MemoryInstance = &current_store.memories.items[memory_index];
                     const num_pages: i32 = @intCast(i32, memory_instance.size());
-                    try self.stack.pushI32(num_pages);
+                    try stack.pushI32(num_pages);
                 },
                 Opcode.Memory_Grow => {
                     const memory_index: usize = 0;
 
-                    if (self.store.memories.items.len <= memory_index) {
+                    if (current_store.memories.items.len <= memory_index) {
                         return error.AssertMemoryInvalidIndex;
                     }
 
-                    var memory_instance: *MemoryInstance = &self.store.memories.items[memory_index];
+                    var memory_instance: *MemoryInstance = &current_store.memories.items[memory_index];
 
                     const old_num_pages: i32 = @intCast(i32, memory_instance.limits.min);
-                    const num_pages: i32 = try self.stack.popI32();
+                    const num_pages: i32 = try stack.popI32();
 
                     if (num_pages >= 0 and memory_instance.grow(@intCast(usize, num_pages))) {
-                        try self.stack.pushI32(old_num_pages);
+                        try stack.pushI32(old_num_pages);
                     } else {
-                        try self.stack.pushI32(-1);
+                        try stack.pushI32(-1);
                     }
                 },
                 Opcode.I32_Const => {
                     var v: i32 = @bitCast(i32, instruction.immediate);
-                    try self.stack.pushI32(v);
+                    try stack.pushI32(v);
                 },
                 Opcode.I64_Const => {
-                    var v: i64 = self.module_def.code.i64_const.items[instruction.immediate];
-                    try self.stack.pushI64(v);
+                    var v: i64 = context.module_def.code.i64_const.items[instruction.immediate];
+                    try stack.pushI64(v);
                 },
                 Opcode.F32_Const => {
                     var v: f32 = @bitCast(f32, instruction.immediate);
-                    try self.stack.pushF32(v);
+                    try stack.pushF32(v);
                 },
                 Opcode.F64_Const => {
-                    var v: f64 = self.module_def.code.f64_const.items[instruction.immediate];
-                    try self.stack.pushF64(v);
+                    var v: f64 = context.module_def.code.f64_const.items[instruction.immediate];
+                    try stack.pushF64(v);
                 },
                 Opcode.I32_Eqz => {
-                    var v1: i32 = try self.stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result: i32 = if (v1 == 0) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_Eq => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result: i32 = if (v1 == v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_NE => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result: i32 = if (v1 != v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_LT_S => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_LT_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_GT_S => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_GT_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_LE_S => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_LE_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_GE_S => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_GE_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_Eqz => {
-                    var v1: i64 = try self.stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result: i32 = if (v1 == 0) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_Eq => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result: i32 = if (v1 == v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_NE => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result: i32 = if (v1 != v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_LT_S => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_LT_U => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var result: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_GT_S => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_GT_U => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var result: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_LE_S => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_LE_U => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var result: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_GE_S => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I64_GE_U => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var result: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.F32_EQ => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value: i32 = if (v1 == v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F32_NE => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value: i32 = if (v1 != v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F32_LT => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F32_GT => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F32_LE => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F32_GE => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F64_EQ => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value: i32 = if (v1 == v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F64_NE => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value: i32 = if (v1 != v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F64_LT => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value: i32 = if (v1 < v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F64_GT => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value: i32 = if (v1 > v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F64_LE => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value: i32 = if (v1 <= v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.F64_GE => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value: i32 = if (v1 >= v2) 1 else 0;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Clz => {
-                    var v: i32 = try self.stack.popI32();
+                    var v: i32 = try stack.popI32();
                     var num_zeroes = @clz(i32, v);
-                    try self.stack.pushI32(num_zeroes);
+                    try stack.pushI32(num_zeroes);
                 },
                 Opcode.I32_Ctz => {
-                    var v: i32 = try self.stack.popI32();
+                    var v: i32 = try stack.popI32();
                     var num_zeroes = @ctz(i32, v);
-                    try self.stack.pushI32(num_zeroes);
+                    try stack.pushI32(num_zeroes);
                 },
                 Opcode.I32_Popcnt => {
-                    var v: i32 = try self.stack.popI32();
+                    var v: i32 = try stack.popI32();
                     var num_bits_set = @popCount(i32, v);
-                    try self.stack.pushI32(num_bits_set);
+                    try stack.pushI32(num_bits_set);
                 },
                 Opcode.I32_Add => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result = v1 +% v2;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_Sub => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var result = v1 -% v2;
-                    try self.stack.pushI32(result);
+                    try stack.pushI32(result);
                 },
                 Opcode.I32_Mul => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var value = v1 *% v2;
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Div_S => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var value = std.math.divTrunc(i32, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
                             return error.TrapIntegerDivisionByZero;
@@ -3513,11 +3543,11 @@ pub const ModuleInstance = struct {
                             return e;
                         }
                     };
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Div_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var value_unsigned = std.math.divFloor(u32, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
                             return error.TrapIntegerDivisionByZero;
@@ -3528,11 +3558,11 @@ pub const ModuleInstance = struct {
                         }
                     };
                     var value = @bitCast(i32, value_unsigned);
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Rem_S => {
-                    var v2: i32 = try self.stack.popI32();
-                    var v1: i32 = try self.stack.popI32();
+                    var v2: i32 = try stack.popI32();
+                    var v1: i32 = try stack.popI32();
                     var denom = try std.math.absInt(v2);
                     var value = std.math.rem(i32, v1, denom) catch |e| {
                         if (e == error.DivisionByZero) {
@@ -3541,11 +3571,11 @@ pub const ModuleInstance = struct {
                             return e;
                         }
                     };
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Rem_U => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var value_unsigned = std.math.rem(u32, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
                             return error.TrapIntegerDivisionByZero;
@@ -3554,95 +3584,95 @@ pub const ModuleInstance = struct {
                         }
                     };
                     var value = @bitCast(i32, value_unsigned);
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_And => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var value = @bitCast(i32, v1 & v2);
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Or => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var value = @bitCast(i32, v1 | v2);
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Xor => {
-                    var v2: u32 = @bitCast(u32, try self.stack.popI32());
-                    var v1: u32 = @bitCast(u32, try self.stack.popI32());
+                    var v2: u32 = @bitCast(u32, try stack.popI32());
+                    var v1: u32 = @bitCast(u32, try stack.popI32());
                     var value = @bitCast(i32, v1 ^ v2);
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Shl => {
-                    var shift_unsafe: i32 = try self.stack.popI32();
-                    var int: i32 = try self.stack.popI32();
+                    var shift_unsafe: i32 = try stack.popI32();
+                    var int: i32 = try stack.popI32();
                     var shift: i32 = try std.math.mod(i32, shift_unsafe, 32);
                     var value = std.math.shl(i32, int, shift);
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Shr_S => {
-                    var shift_unsafe: i32 = try self.stack.popI32();
-                    var int: i32 = try self.stack.popI32();
+                    var shift_unsafe: i32 = try stack.popI32();
+                    var int: i32 = try stack.popI32();
                     var shift = try std.math.mod(i32, shift_unsafe, 32);
                     var value = std.math.shr(i32, int, shift);
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Shr_U => {
-                    var shift_unsafe: u32 = @bitCast(u32, try self.stack.popI32());
-                    var int: u32 = @bitCast(u32, try self.stack.popI32());
+                    var shift_unsafe: u32 = @bitCast(u32, try stack.popI32());
+                    var int: u32 = @bitCast(u32, try stack.popI32());
                     var shift = try std.math.mod(u32, shift_unsafe, 32);
                     var value = @bitCast(i32, std.math.shr(u32, int, shift));
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Rotl => {
-                    var rot: u32 = @bitCast(u32, try self.stack.popI32());
-                    var int: u32 = @bitCast(u32, try self.stack.popI32());
+                    var rot: u32 = @bitCast(u32, try stack.popI32());
+                    var int: u32 = @bitCast(u32, try stack.popI32());
                     var value = @bitCast(i32, std.math.rotl(u32, int, rot));
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I32_Rotr => {
-                    var rot: u32 = @bitCast(u32, try self.stack.popI32());
-                    var int: u32 = @bitCast(u32, try self.stack.popI32());
+                    var rot: u32 = @bitCast(u32, try stack.popI32());
+                    var int: u32 = @bitCast(u32, try stack.popI32());
                     var value = @bitCast(i32, std.math.rotr(u32, int, rot));
-                    try self.stack.pushI32(value);
+                    try stack.pushI32(value);
                 },
                 Opcode.I64_Clz => {
-                    var v: i64 = try self.stack.popI64();
+                    var v: i64 = try stack.popI64();
                     var num_zeroes = @clz(i64, v);
-                    try self.stack.pushI64(num_zeroes);
+                    try stack.pushI64(num_zeroes);
                 },
                 Opcode.I64_Ctz => {
-                    var v: i64 = try self.stack.popI64();
+                    var v: i64 = try stack.popI64();
                     var num_zeroes = @ctz(i64, v);
-                    try self.stack.pushI64(num_zeroes);
+                    try stack.pushI64(num_zeroes);
                 },
                 Opcode.I64_Popcnt => {
-                    var v: i64 = try self.stack.popI64();
+                    var v: i64 = try stack.popI64();
                     var num_bits_set = @popCount(i64, v);
-                    try self.stack.pushI64(num_bits_set);
+                    try stack.pushI64(num_bits_set);
                 },
                 Opcode.I64_Add => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result = v1 +% v2;
-                    try self.stack.pushI64(result);
+                    try stack.pushI64(result);
                 },
                 Opcode.I64_Sub => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var result = v1 -% v2;
-                    try self.stack.pushI64(result);
+                    try stack.pushI64(result);
                 },
                 Opcode.I64_Mul => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var value = v1 *% v2;
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Div_S => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var value = std.math.divTrunc(i64, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
                             return error.TrapIntegerDivisionByZero;
@@ -3652,11 +3682,11 @@ pub const ModuleInstance = struct {
                             return e;
                         }
                     };
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Div_U => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var value_unsigned = std.math.divFloor(u64, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
                             return error.TrapIntegerDivisionByZero;
@@ -3667,11 +3697,11 @@ pub const ModuleInstance = struct {
                         }
                     };
                     var value = @bitCast(i64, value_unsigned);
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Rem_S => {
-                    var v2: i64 = try self.stack.popI64();
-                    var v1: i64 = try self.stack.popI64();
+                    var v2: i64 = try stack.popI64();
+                    var v1: i64 = try stack.popI64();
                     var denom = try std.math.absInt(v2);
                     var value = std.math.rem(i64, v1, denom) catch |e| {
                         if (e == error.DivisionByZero) {
@@ -3680,11 +3710,11 @@ pub const ModuleInstance = struct {
                             return e;
                         }
                     };
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Rem_U => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var value_unsigned = std.math.rem(u64, v1, v2) catch |e| {
                         if (e == error.DivisionByZero) {
                             return error.TrapIntegerDivisionByZero;
@@ -3693,418 +3723,418 @@ pub const ModuleInstance = struct {
                         }
                     };
                     var value = @bitCast(i64, value_unsigned);
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_And => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var value = @bitCast(i64, v1 & v2);
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Or => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var value = @bitCast(i64, v1 | v2);
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Xor => {
-                    var v2: u64 = @bitCast(u64, try self.stack.popI64());
-                    var v1: u64 = @bitCast(u64, try self.stack.popI64());
+                    var v2: u64 = @bitCast(u64, try stack.popI64());
+                    var v1: u64 = @bitCast(u64, try stack.popI64());
                     var value = @bitCast(i64, v1 ^ v2);
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Shl => {
-                    var shift_unsafe: i64 = try self.stack.popI64();
-                    var int: i64 = try self.stack.popI64();
+                    var shift_unsafe: i64 = try stack.popI64();
+                    var int: i64 = try stack.popI64();
                     var shift: i64 = try std.math.mod(i64, shift_unsafe, 64);
                     var value = std.math.shl(i64, int, shift);
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Shr_S => {
-                    var shift_unsafe: i64 = try self.stack.popI64();
-                    var int: i64 = try self.stack.popI64();
+                    var shift_unsafe: i64 = try stack.popI64();
+                    var int: i64 = try stack.popI64();
                     var shift = try std.math.mod(i64, shift_unsafe, 64);
                     var value = std.math.shr(i64, int, shift);
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Shr_U => {
-                    var shift_unsafe: u64 = @bitCast(u64, try self.stack.popI64());
-                    var int: u64 = @bitCast(u64, try self.stack.popI64());
+                    var shift_unsafe: u64 = @bitCast(u64, try stack.popI64());
+                    var int: u64 = @bitCast(u64, try stack.popI64());
                     var shift = try std.math.mod(u64, shift_unsafe, 64);
                     var value = @bitCast(i64, std.math.shr(u64, int, shift));
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Rotl => {
-                    var rot: u64 = @bitCast(u64, try self.stack.popI64());
-                    var int: u64 = @bitCast(u64, try self.stack.popI64());
+                    var rot: u64 = @bitCast(u64, try stack.popI64());
+                    var int: u64 = @bitCast(u64, try stack.popI64());
                     var value = @bitCast(i64, std.math.rotl(u64, int, rot));
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.I64_Rotr => {
-                    var rot: u64 = @bitCast(u64, try self.stack.popI64());
-                    var int: u64 = @bitCast(u64, try self.stack.popI64());
+                    var rot: u64 = @bitCast(u64, try stack.popI64());
+                    var int: u64 = @bitCast(u64, try stack.popI64());
                     var value = @bitCast(i64, std.math.rotr(u64, int, rot));
-                    try self.stack.pushI64(value);
+                    try stack.pushI64(value);
                 },
                 Opcode.F32_Abs => {
-                    var f = try self.stack.popF32();
+                    var f = try stack.popF32();
                     var value = std.math.fabs(f);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Neg => {
-                    var f = try self.stack.popF32();
-                    try self.stack.pushF32(-f);
+                    var f = try stack.popF32();
+                    try stack.pushF32(-f);
                 },
                 Opcode.F32_Ceil => {
-                    var f = try self.stack.popF32();
+                    var f = try stack.popF32();
                     var value = @ceil(f);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Floor => {
-                    var f = try self.stack.popF32();
+                    var f = try stack.popF32();
                     var value = @floor(f);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Trunc => {
-                    var f = try self.stack.popF32();
+                    var f = try stack.popF32();
                     var value = @trunc(f);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Nearest => {
-                    var f = try self.stack.popF32();
+                    var f = try stack.popF32();
                     var value: f32 = @trunc(f);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Sqrt => {
-                    var f = try self.stack.popF32();
+                    var f = try stack.popF32();
                     var value = std.math.sqrt(f);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Add => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value = v1 + v2;
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Sub => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value = v1 - v2;
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Mul => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value = v1 * v2;
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Div => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value = v1 / v2;
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Min => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Max => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F32_Copysign => {
-                    var v2 = try self.stack.popF32();
-                    var v1 = try self.stack.popF32();
+                    var v2 = try stack.popF32();
+                    var v1 = try stack.popF32();
                     var value = std.math.copysign(f32, v1, v2);
-                    try self.stack.pushF32(value);
+                    try stack.pushF32(value);
                 },
                 Opcode.F64_Abs => {
-                    var f = try self.stack.popF64();
+                    var f = try stack.popF64();
                     var value = std.math.fabs(f);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Neg => {
-                    var f = try self.stack.popF64();
-                    try self.stack.pushF64(-f);
+                    var f = try stack.popF64();
+                    try stack.pushF64(-f);
                 },
                 Opcode.F64_Ceil => {
-                    var f = try self.stack.popF64();
+                    var f = try stack.popF64();
                     var value = @ceil(f);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Floor => {
-                    var f = try self.stack.popF64();
+                    var f = try stack.popF64();
                     var value = @floor(f);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Trunc => {
-                    var f = try self.stack.popF64();
+                    var f = try stack.popF64();
                     var value = @trunc(f);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Nearest => {
-                    var f = try self.stack.popF64();
+                    var f = try stack.popF64();
                     var value: f64 = @trunc(f);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Sqrt => {
-                    var f = try self.stack.popF64();
+                    var f = try stack.popF64();
                     var value = std.math.sqrt(f);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Add => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value = v1 + v2;
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Sub => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value = v1 - v2;
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Mul => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value = v1 * v2;
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Div => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value = v1 / v2;
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Min => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Max => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.F64_Copysign => {
-                    var v2 = try self.stack.popF64();
-                    var v1 = try self.stack.popF64();
+                    var v2 = try stack.popF64();
+                    var v1 = try stack.popF64();
                     var value = std.math.copysign(f64, v1, v2);
-                    try self.stack.pushF64(value);
+                    try stack.pushF64(value);
                 },
                 Opcode.I32_Wrap_I64 => {
-                    var v = try self.stack.popI64();
+                    var v = try stack.popI64();
                     var mod = @truncate(i32, v);
-                    try self.stack.pushI32(mod);
+                    try stack.pushI32(mod);
                 },
                 Opcode.I32_Trunc_F32_S => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = try Helpers.truncateTo(i32, v);
-                    try self.stack.pushI32(int);
+                    try stack.pushI32(int);
                 },
                 Opcode.I32_Trunc_F32_U => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = try Helpers.truncateTo(u32, v);
-                    try self.stack.pushI32(@bitCast(i32, int));
+                    try stack.pushI32(@bitCast(i32, int));
                 },
                 Opcode.I32_Trunc_F64_S => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = try Helpers.truncateTo(i32, v);
-                    try self.stack.pushI32(int);
+                    try stack.pushI32(int);
                 },
                 Opcode.I32_Trunc_F64_U => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = try Helpers.truncateTo(u32, v);
-                    try self.stack.pushI32(@bitCast(i32, int));
+                    try stack.pushI32(@bitCast(i32, int));
                 },
                 Opcode.I64_Extend_I32_S => {
-                    var v32 = try self.stack.popI32();
+                    var v32 = try stack.popI32();
                     var v64: i64 = v32;
-                    try self.stack.pushI64(v64);
+                    try stack.pushI64(v64);
                 },
                 Opcode.I64_Extend_I32_U => {
-                    var v32 = try self.stack.popI32();
+                    var v32 = try stack.popI32();
                     var v64: u64 = @bitCast(u32, v32);
-                    try self.stack.pushI64(@bitCast(i64, v64));
+                    try stack.pushI64(@bitCast(i64, v64));
                 },
                 Opcode.I64_Trunc_F32_S => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = try Helpers.truncateTo(i64, v);
-                    try self.stack.pushI64(int);
+                    try stack.pushI64(int);
                 },
                 Opcode.I64_Trunc_F32_U => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = try Helpers.truncateTo(u64, v);
-                    try self.stack.pushI64(@bitCast(i64, int));
+                    try stack.pushI64(@bitCast(i64, int));
                 },
                 Opcode.I64_Trunc_F64_S => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = try Helpers.truncateTo(i64, v);
-                    try self.stack.pushI64(int);
+                    try stack.pushI64(int);
                 },
                 Opcode.I64_Trunc_F64_U => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = try Helpers.truncateTo(u64, v);
-                    try self.stack.pushI64(@bitCast(i64, int));
+                    try stack.pushI64(@bitCast(i64, int));
                 },
                 Opcode.F32_Convert_I32_S => {
-                    var v = try self.stack.popI32();
-                    try self.stack.pushF32(@intToFloat(f32, v));
+                    var v = try stack.popI32();
+                    try stack.pushF32(@intToFloat(f32, v));
                 },
                 Opcode.F32_Convert_I32_U => {
-                    var v = @bitCast(u32, try self.stack.popI32());
-                    try self.stack.pushF32(@intToFloat(f32, v));
+                    var v = @bitCast(u32, try stack.popI32());
+                    try stack.pushF32(@intToFloat(f32, v));
                 },
                 Opcode.F32_Convert_I64_S => {
-                    var v = try self.stack.popI64();
-                    try self.stack.pushF32(@intToFloat(f32, v));
+                    var v = try stack.popI64();
+                    try stack.pushF32(@intToFloat(f32, v));
                 },
                 Opcode.F32_Convert_I64_U => {
-                    var v = @bitCast(u64, try self.stack.popI64());
-                    try self.stack.pushF32(@intToFloat(f32, v));
+                    var v = @bitCast(u64, try stack.popI64());
+                    try stack.pushF32(@intToFloat(f32, v));
                 },
                 Opcode.F32_Demote_F64 => {
-                    var v = try self.stack.popF64();
-                    try self.stack.pushF32(@floatCast(f32, v));
+                    var v = try stack.popF64();
+                    try stack.pushF32(@floatCast(f32, v));
                 },
                 Opcode.F64_Convert_I32_S => {
-                    var v = try self.stack.popI32();
-                    try self.stack.pushF64(@intToFloat(f64, v));
+                    var v = try stack.popI32();
+                    try stack.pushF64(@intToFloat(f64, v));
                 },
                 Opcode.F64_Convert_I32_U => {
-                    var v = @bitCast(u32, try self.stack.popI32());
-                    try self.stack.pushF64(@intToFloat(f64, v));
+                    var v = @bitCast(u32, try stack.popI32());
+                    try stack.pushF64(@intToFloat(f64, v));
                 },
                 Opcode.F64_Convert_I64_S => {
-                    var v = try self.stack.popI64();
-                    try self.stack.pushF64(@intToFloat(f64, v));
+                    var v = try stack.popI64();
+                    try stack.pushF64(@intToFloat(f64, v));
                 },
                 Opcode.F64_Convert_I64_U => {
-                    var v = @bitCast(u64, try self.stack.popI64());
-                    try self.stack.pushF64(@intToFloat(f64, v));
+                    var v = @bitCast(u64, try stack.popI64());
+                    try stack.pushF64(@intToFloat(f64, v));
                 },
                 Opcode.F64_Promote_F32 => {
-                    var v = try self.stack.popF32();
-                    try self.stack.pushF64(@floatCast(f64, v));
+                    var v = try stack.popF32();
+                    try stack.pushF64(@floatCast(f64, v));
                 },
                 Opcode.I32_Reinterpret_F32 => {
-                    var v = try self.stack.popF32();
-                    try self.stack.pushI32(@bitCast(i32, v));
+                    var v = try stack.popF32();
+                    try stack.pushI32(@bitCast(i32, v));
                 },
                 Opcode.I64_Reinterpret_F64 => {
-                    var v = try self.stack.popF64();
-                    try self.stack.pushI64(@bitCast(i64, v));
+                    var v = try stack.popF64();
+                    try stack.pushI64(@bitCast(i64, v));
                 },
                 Opcode.F32_Reinterpret_I32 => {
-                    var v = try self.stack.popI32();
-                    try self.stack.pushF32(@bitCast(f32, v));
+                    var v = try stack.popI32();
+                    try stack.pushF32(@bitCast(f32, v));
                 },
                 Opcode.F64_Reinterpret_I64 => {
-                    var v = try self.stack.popI64();
-                    try self.stack.pushF64(@bitCast(f64, v));
+                    var v = try stack.popI64();
+                    try stack.pushF64(@bitCast(f64, v));
                 },
                 Opcode.I32_Extend8_S => {
-                    var v = try self.stack.popI32();
+                    var v = try stack.popI32();
                     var v_truncated = @truncate(i8, v);
                     var v_extended: i32 = v_truncated;
-                    try self.stack.pushI32(v_extended);
+                    try stack.pushI32(v_extended);
                 },
                 Opcode.I32_Extend16_S => {
-                    var v = try self.stack.popI32();
+                    var v = try stack.popI32();
                     var v_truncated = @truncate(i16, v);
                     var v_extended: i32 = v_truncated;
-                    try self.stack.pushI32(v_extended);
+                    try stack.pushI32(v_extended);
                 },
                 Opcode.I64_Extend8_S => {
-                    var v = try self.stack.popI64();
+                    var v = try stack.popI64();
                     var v_truncated = @truncate(i8, v);
                     var v_extended: i64 = v_truncated;
-                    try self.stack.pushI64(v_extended);
+                    try stack.pushI64(v_extended);
                 },
                 Opcode.I64_Extend16_S => {
-                    var v = try self.stack.popI64();
+                    var v = try stack.popI64();
                     var v_truncated = @truncate(i16, v);
                     var v_extended: i64 = v_truncated;
-                    try self.stack.pushI64(v_extended);
+                    try stack.pushI64(v_extended);
                 },
                 Opcode.I64_Extend32_S => {
-                    var v = try self.stack.popI64();
+                    var v = try stack.popI64();
                     var v_truncated = @truncate(i32, v);
                     var v_extended: i64 = v_truncated;
-                    try self.stack.pushI64(v_extended);
+                    try stack.pushI64(v_extended);
                 },
                 Opcode.Ref_Null => {
                     var valtype = @intToEnum(ValType, instruction.immediate);
                     var val = try Val.nullRef(valtype);
-                    try self.stack.pushValue(val);
+                    try stack.pushValue(val);
                 },
                 Opcode.Ref_Is_Null => {
-                    const val: Val = try self.stack.popValue();
+                    const val: Val = try stack.popValue();
                     if (val.isRefType() == false) {
                         return error.AssertTypeMismatch;
                     }
                     const boolean: i32 = if (val.isNull()) 1 else 0;
-                    try self.stack.pushI32(boolean);
+                    try stack.pushI32(boolean);
                 },
                 Opcode.Ref_Func => {
                     const func_index = instruction.immediate;
                     const val = Val{ .FuncRef = func_index };
-                    try self.stack.pushValue(val);
+                    try stack.pushValue(val);
                 },
                 Opcode.I32_Trunc_Sat_F32_S => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = Helpers.saturatedTruncateTo(i32, v);
-                    try self.stack.pushI32(int);
+                    try stack.pushI32(int);
                 },
                 Opcode.I32_Trunc_Sat_F32_U => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = Helpers.saturatedTruncateTo(u32, v);
-                    try self.stack.pushI32(@bitCast(i32, int));
+                    try stack.pushI32(@bitCast(i32, int));
                 },
                 Opcode.I32_Trunc_Sat_F64_S => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = Helpers.saturatedTruncateTo(i32, v);
-                    try self.stack.pushI32(int);
+                    try stack.pushI32(int);
                 },
                 Opcode.I32_Trunc_Sat_F64_U => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = Helpers.saturatedTruncateTo(u32, v);
-                    try self.stack.pushI32(@bitCast(i32, int));
+                    try stack.pushI32(@bitCast(i32, int));
                 },
                 Opcode.I64_Trunc_Sat_F32_S => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = Helpers.saturatedTruncateTo(i64, v);
-                    try self.stack.pushI64(int);
+                    try stack.pushI64(int);
                 },
                 Opcode.I64_Trunc_Sat_F32_U => {
-                    var v = try self.stack.popF32();
+                    var v = try stack.popF32();
                     var int = Helpers.saturatedTruncateTo(u64, v);
-                    try self.stack.pushI64(@bitCast(i64, int));
+                    try stack.pushI64(@bitCast(i64, int));
                 },
                 Opcode.I64_Trunc_Sat_F64_S => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = Helpers.saturatedTruncateTo(i64, v);
-                    try self.stack.pushI64(int);
+                    try stack.pushI64(int);
                 },
                 Opcode.I64_Trunc_Sat_F64_U => {
-                    var v = try self.stack.popF64();
+                    var v = try stack.popF64();
                     var int = Helpers.saturatedTruncateTo(u64, v);
-                    try self.stack.pushI64(@bitCast(i64, int));
+                    try stack.pushI64(@bitCast(i64, int));
                 },
                 Opcode.Memory_Init => {
                     const data_index: u32 = instruction.immediate;
-                    const data: *const DataDefinition = &self.module_def.datas.items[data_index];
-                    const memory: *MemoryInstance = &self.store.memories.items[0];
+                    const data: *const DataDefinition = &context.module_def.datas.items[data_index];
+                    const memory: *MemoryInstance = &current_store.memories.items[0];
 
-                    const length = try self.stack.popI32();
-                    const data_offset = try self.stack.popI32();
-                    const memory_offset = try self.stack.popI32();
+                    const length = try stack.popI32();
+                    const data_offset = try stack.popI32();
+                    const memory_offset = try stack.popI32();
 
                     if (length < 0) {
                         return error.TrapOutOfBoundsMemoryAccess;
@@ -4126,15 +4156,15 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Data_Drop => {
                     const data_index: u32 = instruction.immediate;
-                    var data: *DataDefinition = &self.module_def.datas.items[data_index];
+                    var data: *DataDefinition = &context.module_def.datas.items[data_index];
                     data.bytes.clearAndFree();
                 },
                 Opcode.Memory_Copy => {
-                    const memory: *MemoryInstance = &self.store.memories.items[0];
+                    const memory: *MemoryInstance = &current_store.memories.items[0];
 
-                    const length = try self.stack.popI32();
-                    const source_offset = try self.stack.popI32();
-                    const dest_offset = try self.stack.popI32();
+                    const length = try stack.popI32();
+                    const source_offset = try stack.popI32();
+                    const dest_offset = try stack.popI32();
 
                     if (length < 0) {
                         return error.TrapOutOfBoundsMemoryAccess;
@@ -4160,11 +4190,11 @@ pub const ModuleInstance = struct {
                     }
                 },
                 Opcode.Memory_Fill => {
-                    const memory: *MemoryInstance = &self.store.memories.items[0];
+                    const memory: *MemoryInstance = &current_store.memories.items[0];
 
-                    const length = try self.stack.popI32();
-                    const value: u8 = @truncate(u8, @bitCast(u32, try self.stack.popI32()));
-                    const offset = try self.stack.popI32();
+                    const length = try stack.popI32();
+                    const value: u8 = @truncate(u8, @bitCast(u32, try stack.popI32()));
+                    const offset = try stack.popI32();
 
                     if (length < 0) {
                         return error.TrapOutOfBoundsMemoryAccess;
@@ -4186,12 +4216,13 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn call(self: *ModuleInstance, func: *const FunctionInstance, next_instruction: u32) !u32 {
-        const functype: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
+    fn call(context: *CallContext, func: *const FunctionInstance, next_instruction: u32) !u32 {
+        const functype: *const FunctionTypeDefinition = &context.module_def.types.items[func.type_def_index];
 
         var frame = CallFrame{
             .func = func,
-            .locals = std.ArrayList(Val).init(self.allocator),
+            .module_instance = context.module,
+            .locals = std.ArrayList(Val).init(context.allocator),
         };
 
         const param_types: []const ValType = functype.getParams();
@@ -4201,7 +4232,7 @@ pub const ModuleInstance = struct {
         var param_index = param_types.len;
         while (param_index > 0) {
             param_index -= 1;
-            var value = try self.stack.popValue();
+            var value = try context.stack.popValue();
             if (std.meta.activeTag(value) != param_types[param_index]) {
                 std.debug.print("\tExpected value of type {}, but got {}\n", .{ param_types[param_index], value });
                 return error.AssertTypeMismatch;
@@ -4216,61 +4247,113 @@ pub const ModuleInstance = struct {
 
         const continuation: u32 = next_instruction;
 
-        try self.stack.pushFrame(frame);
-        try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
+        try context.stack.pushFrame(frame);
+        try context.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
 
         return func.offset_into_instructions;
     }
 
-    fn enterBlock(self: *ModuleInstance, instruction: Instruction, label_offset: u32) !void {
-        var block_type_value = self.module_def.code.block_type_values.items[instruction.immediate];
+    fn callImport(context: *CallContext, func: *const FunctionImport, next_instruction: u32) !u32 {
+        switch (func.data) {
+            .Host => |data| {
+                const param_types = data.func_def.getParams();
+                const return_types = data.func_def.getReturns();
 
-        var params = std.ArrayList(Val).init(self.allocator);
+                var values = std.ArrayList(Val).init(context.allocator);
+                defer values.deinit();
+                try values.resize(param_types.len + return_types.len);
+
+                var params = values.items[0..param_types.len];
+                var returns = values.items[param_types.len..];
+
+                for (params) |*item, i| {
+                    var v = try context.stack.popValue();
+                    if (std.meta.activeTag(v) != param_types[i]) {
+                        return error.AssertTypeMismatch;
+                    }
+                    item.* = v;
+                }
+
+                data.callback(data.userdata, params, returns);
+
+                // validate return types
+                if (returns.len != return_types.len) {
+                    return error.AssertTypeMismatch;
+                }
+                for (returns) |val, i| {
+                    if (std.meta.activeTag(val) != return_types[i]) {
+                        return error.AssertTypeMismatch;
+                    }
+                }
+
+                try pushValues(returns, context.stack);
+
+                return next_instruction + 1;
+            },
+            .Wasm => |data| {
+                var next_context = CallContext{
+                    .module = data.module_instance,
+                    .module_def = data.module_instance.module_def,
+                    .stack = context.stack,
+                    .allocator = context.allocator,
+                    .scratch_allocator = context.scratch_allocator,
+                };
+
+                const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.instance_index];
+                return try call(&next_context, func_instance, next_instruction);
+            },
+        }
+    }
+
+    fn enterBlock(context: *CallContext, instruction: Instruction, label_offset: u32) !void {
+        var block_type_value = context.module_def.code.block_type_values.items[instruction.immediate];
+
+        var params = std.ArrayList(Val).init(context.scratch_allocator);
         defer params.deinit();
 
         switch (block_type_value) {
             .TypeIndex => {
                 const type_index = block_type_value.TypeIndex;
-                const func_type: *const FunctionTypeDefinition = &self.module_def.types.items[type_index];
+                const func_type: *const FunctionTypeDefinition = &context.module_def.types.items[type_index];
                 const type_params: []const ValType = func_type.getParams();
 
-                try popValues(&params, &self.stack, type_params);
+                try popValues(&params, context.stack, type_params);
             },
             else => {},
         }
 
-        const continuation = self.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
-        try self.stack.pushLabel(block_type_value, continuation);
+        const continuation = context.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
+        try context.stack.pushLabel(block_type_value, continuation);
 
-        try pushValues(params.items, &self.stack);
+        try pushValues(params.items, context.stack);
     }
 
-    fn branch(self: *ModuleInstance, instructions: []const Instruction, label_id: u32) !u32 {
+    fn branch(context: *CallContext, label_id: u32) !u32 {
         // std.debug.print("\tbranching to label {}\n", .{label_id});
-        const label: *const Label = try self.stack.findLabel(label_id);
+        const label: *const Label = try context.stack.findLabel(label_id);
         if (label.isFirstInCallFrame()) {
-            return try self.returnFromFunc();
+            return try returnFromFunc(context);
         }
         const continuation = label.continuation;
 
         // std.debug.print("found label: {}\n", .{label});
 
-        const is_loop_continuation = instructions[continuation].opcode == .Loop;
+        const is_loop_continuation = context.module_def.code.instructions.items[continuation].opcode == .Loop;
 
         if (is_loop_continuation == false or label_id != 0) {
-            var args = std.ArrayList(Val).init(self.allocator);
+            var args = std.ArrayList(Val).init(context.allocator);
             defer args.deinit();
 
-            const return_types: []const ValType = self.getReturnTypesFromBlocktype(label.blocktype);
+            const return_types: []const ValType = getReturnTypesFromBlocktype(context.module_def, label.blocktype);
             // std.debug.print("looking for return types: {any}", .{return_types});
-            try popValues(&args, &self.stack, return_types);
+            try popValues(&args, context.stack, return_types);
 
             var stack_label_id: u32 = 0;
             while (true) {
-                var topItem = try self.stack.top();
+                var topItem = try context.stack.top();
                 switch (topItem.*) {
                     .Val => {
-                        _ = try self.stack.popValue();
+                        _ = try context.stack.popValue();
                     },
                     .Frame => {
                         return error.AssertInvalidLabel;
@@ -4278,36 +4361,36 @@ pub const ModuleInstance = struct {
                     .Label => {
                         if (stack_label_id == label_id) {
                             if (is_loop_continuation == false) {
-                                _ = try self.stack.popLabel();
+                                _ = try context.stack.popLabel();
                             }
                             break;
                         } else {
-                            _ = try self.stack.popLabel();
+                            _ = try context.stack.popLabel();
                             stack_label_id += 1;
                         }
                     },
                 }
             }
 
-            try pushValues(args.items, &self.stack);
+            try pushValues(args.items, context.stack);
         }
 
-        // std.debug.print("\tbranching to continuation: {}, stack state:\n\t{any}\n", .{ continuation, self.stack.stack.items });
+        // std.debug.print("\tbranching to continuation: {}, context.stack state:\n\t{any}\n", .{ continuation, context.stack.stack.items });
         return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
     }
 
-    fn returnFromFunc(self: *ModuleInstance) !u32 {
-        var frame: *const CallFrame = try self.stack.findCurrentFrame();
-        const return_types: []const ValType = self.module_def.types.items[frame.func.type_def_index].getReturns();
+    fn returnFromFunc(context: *CallContext) !u32 {
+        var frame: *const CallFrame = try context.stack.findCurrentFrame();
+        const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
 
-        var returns = std.ArrayList(Val).init(self.allocator);
+        var returns = std.ArrayList(Val).init(context.scratch_allocator);
         defer returns.deinit();
         try returns.ensureTotalCapacity(return_types.len);
 
-        // std.debug.print("stack: {any}, expected: {any}\n", .{ self.stack.stack.items, return_types });
+        // std.debug.print("stack: {any}, expected: {any}\n", .{ stack.stack.items, return_types });
 
         while (returns.items.len < return_types.len) {
-            var value = try self.stack.popValue();
+            var value = try context.stack.popValue();
             if (std.meta.activeTag(value) != return_types[return_types.len - returns.items.len - 1]) {
                 std.debug.print("\tExpected value of type {}, but got {}\n", .{ return_types[returns.items.len], value });
                 return error.AssertTypeMismatch;
@@ -4317,30 +4400,30 @@ pub const ModuleInstance = struct {
 
         var last_label: Label = undefined;
         while (true) {
-            var item: *const StackItem = try self.stack.top();
+            var item: *const StackItem = try context.stack.top();
             switch (item.*) {
                 .Val => {
-                    _ = try self.stack.popValue();
+                    _ = try context.stack.popValue();
                 },
                 .Label => {
-                    last_label = try self.stack.popLabel();
+                    last_label = try context.stack.popLabel();
                 },
                 .Frame => {
-                    _ = try self.stack.popFrame();
+                    _ = try context.stack.popFrame();
                     break;
                 },
             }
         }
 
-        const is_root_function = (self.stack.size() == 0);
+        const is_root_function = (context.stack.size() == 0);
 
         // std.debug.print("is_root_function: {}\n", .{is_root_function});
-        // std.debug.print("stack: {s}\n", .{self.stack.stack.items});
+        // std.debug.print("stack: {s}\n", .{stack.stack.items});
 
         // std.debug.print("pushing returns: {s}\n", .{returns});
         while (returns.items.len > 0) {
             var value = returns.orderedRemove(returns.items.len - 1);
-            try self.stack.pushValue(value);
+            try context.stack.pushValue(value);
         }
 
         // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
@@ -4351,7 +4434,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn getReturnTypesFromBlocktype(self: *ModuleInstance, blocktype: BlockTypeValue) []const ValType {
+    fn getReturnTypesFromBlocktype(module_def: *const ModuleDefinition, blocktype: BlockTypeValue) []const ValType {
         const Statics = struct {
             const empty = [_]ValType{};
             const valtype_i32 = [_]ValType{.I32};
@@ -4372,7 +4455,7 @@ pub const ModuleInstance = struct {
                 .FuncRef => &Statics.reftype_funcref,
                 .ExternRef => &Statics.reftype_externref,
             },
-            .TypeIndex => |index| return self.module_def.types.items[index].getReturns(),
+            .TypeIndex => |index| return module_def.types.items[index].getReturns(),
         }
     }
 
