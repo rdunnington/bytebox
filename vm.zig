@@ -2155,6 +2155,20 @@ pub const FunctionImport = struct {
 
         return copy;
     }
+
+    fn isTypeSignatureEql(import: *const FunctionImport, type_signature: *const FunctionTypeDefinition) bool {
+        var type_comparer = FunctionTypeContext{};
+        switch (import.data) {
+            .Host => |data| {
+                return type_comparer.eql(&data.func_def, type_signature);
+            },
+            .Wasm => |data| {
+                var func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.instance_index];
+                var func_type_def: *const FunctionTypeDefinition = &data.module_instance.module_def.types.items[func_instance.type_def_index];
+                return type_comparer.eql(func_type_def, type_signature);
+            },
+        }
+    }
 };
 
 pub const TableImport = struct {
@@ -2943,7 +2957,7 @@ pub const ModuleInstance = struct {
             var instruction: Instruction = instructions[instruction_offset];
             var next_instruction: u32 = instruction_offset + 1;
 
-            // std.debug.print("\tfound opcode: {} (pos {})\n", .{ instruction.opcode, instruction_offset });
+            // std.debug.print("\tfound opcode: {} (immediate {}, pos {})\n", .{ instruction.opcode, instruction.immediate, instruction_offset });
 
             switch (instruction.opcode) {
                 Opcode.Unreachable => {
@@ -3075,16 +3089,24 @@ pub const ModuleInstance = struct {
                     }
 
                     const func_index = ref.FuncRef;
-                    if (current_store.functions.items.len <= func_index) {
+                    if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
                         return error.AssertUnknownFunction;
                     }
 
-                    const func: *const FunctionInstance = &current_store.functions.items[func_index];
-                    if (func.type_def_index != immediates.type_index) {
-                        return error.TrapIndirectCallTypeMismatch;
+                    if (func_index >= current_store.imports.functions.items.len) {
+                        const func: *const FunctionInstance = &current_store.functions.items[func_index - current_store.imports.functions.items.len];
+                        if (func.type_def_index != immediates.type_index) {
+                            return error.TrapIndirectCallTypeMismatch;
+                        }
+                        next_instruction = try call(&context, func, next_instruction);
+                    } else {
+                        var func_import: *const FunctionImport = &current_store.imports.functions.items[func_index];
+                        var func_type_def: *const FunctionTypeDefinition = &context.module_def.types.items[immediates.type_index];
+                        if (func_import.isTypeSignatureEql(func_type_def) == false) {
+                            return error.TrapIndirectCallTypeMismatch;
+                        }
+                        next_instruction = try callImport(&context, func_import, next_instruction);
                     }
-
-                    next_instruction = try call(&context, func, next_instruction);
                 },
                 Opcode.Drop => {
                     _ = try stack.popValue();
@@ -4266,20 +4288,17 @@ pub const ModuleInstance = struct {
                 var params = values.items[0..param_types.len];
                 var returns = values.items[param_types.len..];
 
-                for (params) |*item, i| {
+                for (params) |_, i| {
                     var v = try context.stack.popValue();
-                    if (std.meta.activeTag(v) != param_types[i]) {
+                    if (std.meta.activeTag(v) != param_types[param_types.len - i - 1]) {
                         return error.AssertTypeMismatch;
                     }
-                    item.* = v;
+                    params[params.len - i - 1] = v;
                 }
 
                 data.callback(data.userdata, params, returns);
 
                 // validate return types
-                if (returns.len != return_types.len) {
-                    return error.AssertTypeMismatch;
-                }
                 for (returns) |val, i| {
                     if (std.meta.activeTag(val) != return_types[i]) {
                         return error.AssertTypeMismatch;
@@ -4288,7 +4307,7 @@ pub const ModuleInstance = struct {
 
                 try pushValues(returns, context.stack);
 
-                return next_instruction + 1;
+                return next_instruction;
             },
             .Wasm => |data| {
                 var next_context = CallContext{
