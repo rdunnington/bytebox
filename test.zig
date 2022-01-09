@@ -138,11 +138,13 @@ fn errorToText(err: anyerror) []const u8 {
         wasm.MalformedError.MalformedMagicSignature => "magic header not detected",
         wasm.AssertError.AssertTypeMismatch => "type mismatch",
         wasm.AssertError.AssertUnknownMemory => "unknown memory",
+        wasm.AssertError.AssertUnknownTable => "unknown table",
         wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
         wasm.TrapError.TrapIntegerOverflow => "integer overflow",
         wasm.TrapError.TrapInvalidIntegerConversion => "invalid conversion to integer",
         wasm.TrapError.TrapOutOfBoundsMemoryAccess => "out of bounds memory access",
         wasm.TrapError.TrapUndefinedElement => "undefined element",
+        wasm.TrapError.TrapUninitializedElement => "uninitialized element",
         wasm.TrapError.TrapUnreachable => "unreachable",
         else => {
             std.debug.print("errorToText unknown err: {}\n", .{err});
@@ -304,28 +306,28 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
-            std.debug.print("{}", .{params[0].I32});
+            // std.debug.print("{}", .{params[0].I32});
         }
 
         fn printI64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I64);
-            std.debug.print("{}", .{params[0].I64});
+            // std.debug.print("{}", .{params[0].I64});
         }
 
         fn printF32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F32);
-            std.debug.print("{}", .{params[0].F32});
+            // std.debug.print("{}", .{params[0].F32});
         }
 
         fn printF64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
-            std.debug.print("{}", .{params[0].F64});
+            // std.debug.print("{}", .{params[0].F64});
         }
 
         fn printI32F32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
@@ -333,7 +335,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
             std.debug.assert(std.meta.activeTag(params[1]) == ValType.F32);
-            std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
+            // std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
         }
 
         fn printF64F64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
@@ -341,7 +343,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
             std.debug.assert(std.meta.activeTag(params[1]) == ValType.F64);
-            std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
+            // std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
         }
     };
 
@@ -354,7 +356,29 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     try imports.addHostFunction("print_f32", null, &[_]ValType{.F32}, no_returns, Functions.printF32);
     try imports.addHostFunction("print_f64", null, &[_]ValType{.F64}, no_returns, Functions.printF64);
     try imports.addHostFunction("print_i32_f32", null, &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
-    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printI32F32);
+    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
+
+    const TableInstance = wasm.TableInstance;
+
+    var table = try allocator.create(TableInstance);
+    table.* = try TableInstance.init(ValType.FuncRef, wasm.Limits{ .min = 10, .max = 20 }, allocator);
+    try imports.tables.append(wasm.TableImport{
+        .name = try allocator.dupe(u8, "table"),
+        .data = .{ .Host = table },
+    });
+
+    const MemoryInstance = wasm.MemoryInstance;
+
+    var memory = try allocator.create(MemoryInstance);
+    memory.* = MemoryInstance.init(wasm.Limits{
+        .min = 1,
+        .max = 2,
+    });
+    _ = memory.grow(1);
+    try imports.memories.append(wasm.MemoryImport{
+        .name = try allocator.dupe(u8, "memory"),
+        .data = .{ .Host = memory },
+    });
 
     const GlobalInstance = wasm.GlobalInstance;
 
@@ -410,7 +434,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
     // note that module instance uses the pointer to the stored struct so it's important that the stored instances never move
     name_to_module.ensureTotalCapacity(256) catch unreachable;
 
-    // NOTE this shares the same copies of the import arrays, if the modules must avoid sharing instances this will need to change
+    // NOTE this shares the same copies of the import arrays, since the modules must share instances
     var imports = std.ArrayList(wasm.ModuleImports).init(std.testing.allocator);
 
     try imports.append(try makeSpectestImports(std.testing.allocator));
@@ -448,7 +472,6 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                     continue;
                 }
 
-                // var module_imports = try wasm.ModuleImports.init(c.name, &module.inst, scratch_allocator);
                 var module_imports: wasm.ModuleImports = try (module.inst.?).exports(c.name);
                 try imports.append(module_imports);
                 continue;
@@ -462,7 +485,6 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             var module_path = try std.fs.path.join(scratch_allocator, &[_][]const u8{ suite_dir, module_name });
             var cwd = std.fs.cwd();
             var module_data = try cwd.readFileAlloc(scratch_allocator, module_path, 1024 * 1024 * 8);
-            // wasm.printBytecode("module data", module_data);
 
             module.def = try wasm.ModuleDefinition.init(module_data, scratch_allocator);
 
@@ -608,16 +630,21 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
     var spectest_imports = imports.items[0];
     for (spectest_imports.tables.items) |*item| {
+        std.testing.allocator.free(item.name);
+        item.data.Host.deinit();
         std.testing.allocator.destroy(item.data.Host);
     }
     for (spectest_imports.memories.items) |*item| {
+        std.testing.allocator.free(item.name);
+        item.data.Host.deinit();
         std.testing.allocator.destroy(item.data.Host);
     }
     for (spectest_imports.globals.items) |*item| {
+        std.testing.allocator.free(item.name);
         std.testing.allocator.destroy(item.data.Host);
     }
 
-    for (imports.items) |*item| {
+    for (imports.items[1..]) |*item| {
         item.deinit();
     }
     imports.deinit();
@@ -698,7 +725,7 @@ pub fn main() !void {
         "i32",
         "i64",
         "if",
-        // "imports",
+        "imports",
         "inline-module",
         "int_exprs",
         "int_literals",

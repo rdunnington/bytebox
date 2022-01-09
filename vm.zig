@@ -19,7 +19,6 @@ pub const AssertError = error{
     AssertInvalidLabel,
     AssertInvalidConstantExpression,
     AssertInvalidElement,
-    // AssertOneTableAllowed,
     AssertTableMaxExceeded,
     AssertMultipleMemories,
     AssertMemoryMaxPagesExceeded,
@@ -53,6 +52,7 @@ pub const TrapError = error{
     TrapInvalidIntegerConversion,
     TrapOutOfBoundsMemoryAccess,
     TrapUndefinedElement,
+    TrapUninitializedElement,
     TrapUnknown,
 };
 
@@ -368,7 +368,10 @@ pub const Val = union(ValType) {
         return switch (v) {
             .FuncRef => |index| index == k_null_funcref,
             .ExternRef => |index| index == k_null_funcref,
-            else => unreachable,
+            else => {
+                // std.debug.print("called isNull on value {}\n", .{v});
+                unreachable;
+            },
         };
     }
 };
@@ -701,7 +704,7 @@ const ConstantExpression = struct {
     }
 };
 
-const Limits = struct {
+pub const Limits = struct {
     min: u32,
     max: ?u32,
 
@@ -844,8 +847,28 @@ const TableDefinition = struct {
 
 pub const TableInstance = struct {
     refs: std.ArrayList(Val), // should only be reftypes
+    initialized: std.DynamicBitSet,
     reftype: ValType,
     limits: Limits,
+
+    pub fn init(reftype: ValType, limits: Limits, allocator: std.mem.Allocator) !TableInstance {
+        var table = TableInstance{
+            .refs = std.ArrayList(Val).init(allocator),
+            .initialized = try std.DynamicBitSet.initEmpty(allocator, 0),
+            .reftype = reftype,
+            .limits = limits,
+        };
+        if (limits.min > 0) {
+            try table.refs.resize(limits.min);
+            try table.initialized.resize(limits.min, false);
+        }
+        return table;
+    }
+
+    pub fn deinit(table: *TableInstance) void {
+        table.refs.deinit();
+        table.initialized.deinit();
+    }
 
     fn ensureMinSize(table: *TableInstance, size: usize) !void {
         if (table.limits.max) |max| {
@@ -856,6 +879,7 @@ pub const TableInstance = struct {
 
         if (table.refs.items.len < size) {
             try table.refs.resize(size);
+            try table.initialized.resize(size, false);
         }
     }
 
@@ -872,6 +896,11 @@ pub const TableInstance = struct {
 
         var elem_range = elems[start_elem_index .. start_elem_index + init_length];
         try table.refs.replaceRange(start_table_index, init_length, elem_range);
+
+        var initialized_index = start_table_index;
+        while (initialized_index < start_table_index + init_length) : (initialized_index += 1) {
+            table.initialized.set(initialized_index);
+        }
     }
 
     fn init_range_expr(table: *TableInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
@@ -896,6 +925,8 @@ pub const TableInstance = struct {
             }
 
             table_range[index] = val;
+
+            table.initialized.set(index + start_table_index);
         }
     }
 };
@@ -912,7 +943,7 @@ pub const MemoryInstance = struct {
     mem: []u8,
     base_addr: std.os.windows.PVOID,
 
-    fn init(limits: Limits) MemoryInstance {
+    pub fn init(limits: Limits) MemoryInstance {
         comptime {
             std.debug.assert(builtin.os.tag == .windows);
         }
@@ -937,16 +968,20 @@ pub const MemoryInstance = struct {
         return instance;
     }
 
-    fn deinit(self: *MemoryInstance) void {
+    pub fn deinit(self: *MemoryInstance) void {
         const w = std.os.windows;
         w.VirtualFree(@ptrCast(*anyopaque, self.mem.ptr), 0, w.MEM_RELEASE);
     }
 
-    fn size(self: *const MemoryInstance) usize {
+    pub fn size(self: *const MemoryInstance) usize {
         return self.mem.len / k_page_size;
     }
 
-    fn grow(self: *MemoryInstance, num_pages: usize) bool {
+    pub fn grow(self: *MemoryInstance, num_pages: usize) bool {
+        if (num_pages == 0) {
+            return true;
+        }
+
         const total_pages = self.limits.min + num_pages;
         const max_pages = if (self.limits.max) |max| max else k_max_pages;
 
@@ -1725,9 +1760,6 @@ pub const ModuleDefinition = struct {
                 },
                 .Table => {
                     const num_tables = try std.leb.readULEB128(u32, reader);
-                    // if (num_tables > 1) {
-                    //     return error.AssertOneTableAllowed;
-                    // }
 
                     try module.tables.ensureTotalCapacity(num_tables);
 
@@ -1741,7 +1773,6 @@ pub const ModuleDefinition = struct {
                         const limits = try Limits.decode(reader);
 
                         try module.tables.append(TableDefinition{
-                            // .refs = std.ArrayList(Val).init(allocator),
                             .reftype = valtype,
                             .limits = limits,
                         });
@@ -1809,28 +1840,24 @@ pub const ModuleDefinition = struct {
                         switch (exportType) {
                             .Function => {
                                 if (item_index >= module.imports.functions.items.len + module.functions.items.len) {
-                                    // if (item_index >= module.functions.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.functions.append(def);
                             },
                             .Table => {
                                 if (item_index >= module.imports.tables.items.len + module.tables.items.len) {
-                                    // if (item_index >= module.tables.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.tables.append(def);
                             },
                             .Memory => {
                                 if (item_index >= module.imports.memories.items.len + module.memories.items.len) {
-                                    // if (item_index >= module.memories.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.memories.append(def);
                             },
                             .Global => {
                                 if (item_index >= module.imports.globals.items.len + module.globals.items.len) {
-                                    // if (item_index >= module.globals.items.len) {
                                     return error.AssertInvalidExport;
                                 }
                                 try module.exports.globals.append(def);
@@ -2128,14 +2155,16 @@ const HostFunction = struct {
     callback: HostFunctionCallback,
 };
 
+const ImportDataWasm = struct {
+    module_instance: *ModuleInstance,
+    index: u32,
+};
+
 pub const FunctionImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: HostFunction,
-        Wasm: struct {
-            module_instance: *ModuleInstance,
-            instance_index: u32,
-        },
+        Wasm: ImportDataWasm,
     },
 
     fn dupe(import: *const FunctionImport, allocator: std.mem.Allocator) !FunctionImport {
@@ -2163,7 +2192,7 @@ pub const FunctionImport = struct {
                 return type_comparer.eql(&data.func_def, type_signature);
             },
             .Wasm => |data| {
-                var func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.instance_index];
+                var func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
                 var func_type_def: *const FunctionTypeDefinition = &data.module_instance.module_def.types.items[func_instance.type_def_index];
                 return type_comparer.eql(func_type_def, type_signature);
             },
@@ -2175,7 +2204,7 @@ pub const TableImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: *TableInstance,
-        Wasm: u32, // index into table instances
+        Wasm: ImportDataWasm,
     },
 
     fn dupe(import: *const TableImport, allocator: std.mem.Allocator) !TableImport {
@@ -2189,10 +2218,10 @@ pub const MemoryImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: *MemoryInstance,
-        Wasm: void, // no need for an index since there can only be 1 instance
+        Wasm: ImportDataWasm,
     },
 
-    fn dupe(import: *const MemoryImport, allocator: std.mem.Allocator) !TableImport {
+    fn dupe(import: *const MemoryImport, allocator: std.mem.Allocator) !MemoryImport {
         var copy = import.*;
         copy.name = try allocator.dupe(u8, copy.name);
         return copy;
@@ -2203,10 +2232,10 @@ pub const GlobalImport = struct {
     name: []const u8,
     data: union(ImportType) {
         Host: *GlobalInstance,
-        Wasm: u32, // index into global instances
+        Wasm: ImportDataWasm,
     },
 
-    fn dupe(import: *const MemoryImport, allocator: std.mem.Allocator) !TableImport {
+    fn dupe(import: *const GlobalImport, allocator: std.mem.Allocator) !GlobalImport {
         var copy = import.*;
         copy.name = try allocator.dupe(u8, copy.name);
         return copy;
@@ -2299,6 +2328,15 @@ pub const Store = struct {
     },
 
     fn init(module_def: *const ModuleDefinition, imports: []const ModuleImports, allocator: std.mem.Allocator) !Store {
+        const Helpers = struct {
+            fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
+                var def_max: u32 = if (def.max) |max| max else std.math.maxInt(u32);
+                var instance_max: u32 = if (instance.max) |max| max else 0;
+
+                return def.min <= instance.min and def_max >= instance_max;
+            }
+        };
+
         var store = Store{
             .imports = .{
                 .functions = std.ArrayList(FunctionImport).init(allocator),
@@ -2322,12 +2360,7 @@ pub const Store = struct {
                     for (import_module.functions.items) |import_func| {
                         if (std.mem.eql(u8, func_import_def.names.import_name, import_func.name)) {
                             const type_def: *const FunctionTypeDefinition = &module_def.types.items[func_import_def.type_index];
-                            const type_comparer = FunctionTypeContext{};
-
-                            const is_type_signature_eql: bool = switch (import_func.data) {
-                                .Host => |import_data| type_comparer.eql(type_def, &import_data.func_def),
-                                .Wasm => |import_data| type_comparer.eql(type_def, &(import_module.instance.?).module_def.types.items[import_data.instance_index]),
-                            };
+                            const is_type_signature_eql: bool = import_func.isTypeSignatureEql(type_def);
 
                             if (is_type_signature_eql == false) {
                                 return error.UnlinkableIncompatibleImportType;
@@ -2357,16 +2390,12 @@ pub const Store = struct {
                             switch (import_table.data) {
                                 .Host => |table_instance| {
                                     is_eql = table_instance.reftype == table_import_def.reftype and
-                                        std.meta.eql(table_instance.limits, table_import_def.limits);
+                                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
                                 },
-                                .Wasm => |table_index| {
-                                    const tables: []const TableInstance = (import_module.instance.?).store.tables.items;
-                                    if (tables.len <= table_index) {
-                                        return error.UnlinkableUnknownImport;
-                                    }
-                                    const table_instance: *const TableInstance = &tables[table_index];
+                                .Wasm => |data| {
+                                    const table_instance: *const TableInstance = data.module_instance.store.getTable(data.index);
                                     is_eql = table_instance.reftype == table_import_def.reftype and
-                                        std.meta.eql(table_instance.limits, table_import_def.limits);
+                                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
                                 },
                             }
 
@@ -2388,38 +2417,75 @@ pub const Store = struct {
             }
         }
 
-        // for (module_def.imports.memories.items) |*memory_import_def| {
-        //     for (imports) |import_module| {
-        //         if (std.mem.eql(u8, memory_import_def.names.module_name, import_module.name)) {
-        //             for (import_module.tables.items) |import_table| {
-        //                 if (std.mem.eql(u8, memory_import_def.names.import_name, import_table.name)) {
-        //                     var is_eql: bool = undefined;
-        //                     switch (import_table.data) {
-        //                         .Host => |memory_instance| {
-        //                             is_eql = is_eql and std.meta.eql(table_instance.limits, memory_import_def.limits);
-        //                         },
-        //                         .Wasm => |table_index| {
-        //                             const memories: []const TableInstance = (import_module.instance.?).store.memories.items;
-        //                             if (memories.len <= table_index) {
-        //                                 return error.UnlinkableUnknownImport;
-        //                             }
-        //                             const table_instance: *const TableInstance = &tables[table_index];
-        //                             is_eql = is_eql and std.meta.eql(table_instance.limits, memory_import_def.limits);
-        //                         },
-        //                     }
+        for (module_def.imports.memories.items) |*memory_import_def| {
+            var found: bool = false;
+            for (imports) |import_module| {
+                if (std.mem.eql(u8, memory_import_def.names.module_name, import_module.name)) {
+                    for (import_module.memories.items) |import_memory| {
+                        if (std.mem.eql(u8, memory_import_def.names.import_name, import_memory.name)) {
+                            var is_eql: bool = undefined;
+                            switch (import_memory.data) {
+                                .Host => |memory_instance| {
+                                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
+                                },
+                                .Wasm => |data| {
+                                    const memory_instance: *const MemoryInstance = data.module_instance.store.getMemory(data.index);
+                                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
+                                },
+                            }
 
-        //                     if (is_eql == false) {
-        //                         return error.UnlinkableIncompatibleImportType;
-        //                     }
+                            if (is_eql == false) {
+                                return error.UnlinkableIncompatibleImportType;
+                            }
 
-        //                     try store.imports.tables.append(try import_table.dupe(allocator));
-        //                     break;
-        //                 }
-        //             }
-        //             break;
-        //         }
-        //     }
-        // }
+                            try store.imports.memories.append(try import_memory.dupe(allocator));
+                            found = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (found == false) {
+                return error.UnlinkableUnknownImport;
+            }
+        }
+
+        for (module_def.imports.globals.items) |*global_import_def| {
+            var found: bool = false;
+            for (imports) |import_module| {
+                if (std.mem.eql(u8, global_import_def.names.module_name, import_module.name)) {
+                    for (import_module.globals.items) |import_global| {
+                        if (std.mem.eql(u8, global_import_def.names.import_name, import_global.name)) {
+                            var is_eql: bool = undefined;
+                            switch (import_global.data) {
+                                .Host => |global_instance| {
+                                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value);
+                                },
+                                .Wasm => |data| {
+                                    const global_instance: *const GlobalInstance = data.module_instance.store.getGlobal(data.index);
+                                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value);
+                                },
+                            }
+
+                            if (is_eql == false) {
+                                return error.UnlinkableIncompatibleImportType;
+                            }
+
+                            try store.imports.globals.append(try import_global.dupe(allocator));
+                            found = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (found == false) {
+                return error.UnlinkableUnknownImport;
+            }
+        }
 
         // instantiate the rest of the needed module definitions
 
@@ -2456,12 +2522,7 @@ pub const Store = struct {
         try store.tables.ensureTotalCapacity(module_def.imports.tables.items.len + module_def.tables.items.len);
 
         for (module_def.tables.items) |*def_table| {
-            var t = TableInstance{
-                .refs = std.ArrayList(Val).init(allocator),
-                .reftype = def_table.reftype,
-                .limits = def_table.limits,
-            };
-            try t.refs.ensureTotalCapacity(def_table.limits.min);
+            var t = try TableInstance.init(def_table.reftype, def_table.limits, allocator);
             try store.tables.append(t);
         }
 
@@ -2469,10 +2530,8 @@ pub const Store = struct {
 
         for (module_def.memories.items) |*def_memory| {
             var memory = MemoryInstance.init(def_memory.limits);
-            if (def_memory.limits.min > 0) {
-                if (memory.grow(def_memory.limits.min) == false) {
-                    return error.OutOfMemory;
-                }
+            if (memory.grow(def_memory.limits.min) == false) {
+                return error.AssertMemoryMaxPagesExceeded;
             }
             try store.memories.append(memory);
         }
@@ -2489,11 +2548,12 @@ pub const Store = struct {
 
         // iterate over elements and init the ones needed
         for (module_def.elements.items) |*def_elem| {
-            if (store.tables.items.len <= def_elem.table_index) {
+            // std.debug.print("def_elem.table_index: {}, store.imports.tables.items.len: {}\n", .{ def_elem.table_index, store.imports.tables.items.len });
+            if (store.imports.tables.items.len + store.tables.items.len <= def_elem.table_index) {
                 return error.AssertUnknownTable;
             }
 
-            var table: *TableInstance = &store.tables.items[def_elem.table_index];
+            var table: *TableInstance = store.getTable(def_elem.table_index);
 
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_elem.mode == .Active) {
@@ -2518,11 +2578,11 @@ pub const Store = struct {
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_data.mode == .Active) {
                 var memory_index: u32 = def_data.memory_index.?;
-                if (module_def.memories.items.len <= memory_index) {
+                if (store.imports.memories.items.len + store.memories.items.len <= memory_index) {
                     return error.AssertUnknownMemory;
                 }
 
-                var memory: *MemoryInstance = &store.memories.items[memory_index];
+                var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
                 if (num_bytes > 0) {
@@ -2545,7 +2605,7 @@ pub const Store = struct {
         self.functions.deinit();
 
         for (self.tables.items) |*item| {
-            item.refs.deinit();
+            item.deinit();
         }
         self.tables.deinit();
 
@@ -2556,6 +2616,45 @@ pub const Store = struct {
 
         self.globals.deinit();
         self.elements.deinit();
+    }
+
+    fn getTable(self: *Store, index: u32) *TableInstance {
+        if (self.imports.tables.items.len <= index) {
+            var instance_index = index - self.imports.tables.items.len;
+            return &self.tables.items[instance_index];
+        } else {
+            var import: *TableImport = &self.imports.tables.items[index];
+            return switch (import.data) {
+                .Host => |data| data,
+                .Wasm => |data| data.module_instance.store.getTable(data.index),
+            };
+        }
+    }
+
+    fn getMemory(self: *Store, index: u32) *MemoryInstance {
+        if (self.imports.memories.items.len <= index) {
+            var instance_index = index - self.imports.memories.items.len;
+            return &self.memories.items[instance_index];
+        } else {
+            var import: *MemoryImport = &self.imports.memories.items[index];
+            return switch (import.data) {
+                .Host => |data| data,
+                .Wasm => |data| data.module_instance.store.getMemory(data.index),
+            };
+        }
+    }
+
+    fn getGlobal(self: *Store, index: u32) *GlobalInstance {
+        if (self.imports.globals.items.len <= index) {
+            var instance_index = index - self.imports.globals.items.len;
+            return &self.globals.items[instance_index];
+        } else {
+            var import: *GlobalImport = &self.imports.globals.items[index];
+            return switch (import.data) {
+                .Host => |data| data,
+                .Wasm => |data| data.module_instance.store.getGlobal(data.index),
+            };
+        }
     }
 };
 
@@ -2606,9 +2705,9 @@ pub const ModuleInstance = struct {
             try imports.functions.append(FunctionImport{
                 .name = try imports.allocator.dupe(u8, item.name),
                 .data = .{
-                    .Wasm = .{
+                    .Wasm = ImportDataWasm{
                         .module_instance = self,
-                        .instance_index = item.index,
+                        .index = item.index,
                     },
                 },
             });
@@ -2617,21 +2716,36 @@ pub const ModuleInstance = struct {
         for (self.module_def.exports.tables.items) |*item| {
             try imports.tables.append(TableImport{
                 .name = try imports.allocator.dupe(u8, item.name),
-                .data = .{ .Wasm = item.index },
+                .data = .{
+                    .Wasm = ImportDataWasm{
+                        .module_instance = self,
+                        .index = item.index,
+                    },
+                },
             });
         }
 
         for (self.module_def.exports.memories.items) |*item| {
             try imports.memories.append(MemoryImport{
                 .name = try imports.allocator.dupe(u8, item.name),
-                .data = .{ .Wasm = {} },
+                .data = .{
+                    .Wasm = ImportDataWasm{
+                        .module_instance = self,
+                        .index = item.index,
+                    },
+                },
             });
         }
 
         for (self.module_def.exports.globals.items) |*item| {
             try imports.globals.append(GlobalImport{
                 .name = try imports.allocator.dupe(u8, item.name),
-                .data = .{ .Wasm = item.index },
+                .data = .{
+                    .Wasm = ImportDataWasm{
+                        .module_instance = self,
+                        .index = item.index,
+                    },
+                },
             });
         }
 
@@ -2679,11 +2793,8 @@ pub const ModuleInstance = struct {
                         instance.invoke(func_import.name, params, returns) catch {
                             return error.OutOfBounds;
                         };
-                        // try data.module_instance.invoke(func_import.name, params, returns);
                     },
                 }
-
-                // try invokeImport(func_import, params, returns);
             }
         }
 
@@ -2864,16 +2975,12 @@ pub const ModuleInstance = struct {
                 return @floatToInt(T, truncated);
             }
 
-            fn loadFromMem(comptime T: type, memories: []const MemoryInstance, offset_from_memarg: u32, offset_from_stack: i32) !T {
-                if (memories.len == 0) {
-                    return error.AssertUnknownMemory;
-                }
-
+            fn loadFromMem(comptime T: type, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !T {
                 if (offset_from_stack < 0) {
                     return error.TrapOutOfBoundsMemoryAccess;
                 }
 
-                const memory: *const MemoryInstance = &memories[0];
+                const memory: *const MemoryInstance = store.getMemory(0);
                 const offset: usize = offset_from_memarg + @intCast(usize, offset_from_stack);
 
                 // std.debug.print("memory.mem.len: {}, ptr: {*},. offset: {}\n", .{ memory.mem.len, memory.mem.ptr, offset });
@@ -2900,16 +3007,12 @@ pub const ModuleInstance = struct {
                 return @bitCast(T, value);
             }
 
-            fn storeInMem(value: anytype, memories: []const MemoryInstance, offset_from_memarg: u32, offset_from_stack: i32) !void {
-                if (memories.len == 0) {
-                    return error.AssertUnknownMemory;
-                }
-
+            fn storeInMem(value: anytype, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !void {
                 if (offset_from_stack < 0) {
                     return error.TrapOutOfBoundsMemoryAccess;
                 }
 
-                const memory: *const MemoryInstance = &memories[0];
+                const memory: *MemoryInstance = store.getMemory(0);
                 const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
 
                 const bit_count = std.meta.bitCount(@TypeOf(value));
@@ -2936,7 +3039,6 @@ pub const ModuleInstance = struct {
         var instruction_offset: u32 = root_offset;
 
         while (instruction_offset != Label.k_invalid_continuation) {
-            // TODO should use some sort of infinitely growing arena allocator with a quick pointer reset instead of this
             var arena_allocator = std.heap.ArenaAllocator.init(allocator);
             defer arena_allocator.deinit();
 
@@ -2964,8 +3066,9 @@ pub const ModuleInstance = struct {
                     return error.TrapUnreachable;
                 },
                 Opcode.Noop => {
+                    // should have been stripped in the decoding phase
                     unreachable;
-                }, // should have been stripped in the decoding phase
+                },
                 Opcode.Block => {
                     try enterBlock(&context, instruction, instruction_offset);
                 },
@@ -3004,20 +3107,25 @@ pub const ModuleInstance = struct {
                         _ = try stack.popLabel();
                         try pushValues(returns.items, stack);
                     } else {
-                        var frame: *const CallFrame = try stack.findCurrentFrame();
-                        const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
+                        {
+                            var frame: *const CallFrame = try stack.findCurrentFrame();
+                            const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
+                            try popValues(&returns, stack, return_types);
+                        }
 
-                        try popValues(&returns, stack, return_types);
                         var label = try stack.popLabel();
                         try stack.popFrame();
                         const is_root_function = (stack.size() == 0);
+                        // std.debug.print("Opcode.end, stack: {any}\n", .{stack.stack.items});
                         try pushValues(returns.items, stack);
 
                         // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
                         if (is_root_function) {
                             return;
                         } else {
-                            next_instruction = try Helpers.seek(label.continuation, instructions.len);
+                            const new_frame: *const CallFrame = try stack.findCurrentFrame();
+                            const new_instructions_len = new_frame.module_instance.module_def.code.instructions.items.len;
+                            next_instruction = try Helpers.seek(label.continuation, new_instructions_len);
                         }
                     }
                 },
@@ -3072,15 +3180,19 @@ pub const ModuleInstance = struct {
                     if (context.module_def.types.items.len <= immediates.type_index) {
                         return error.AssertUnknownType;
                     }
-                    if (current_store.tables.items.len <= immediates.table_index) {
+                    if (current_store.imports.tables.items.len + current_store.tables.items.len <= immediates.table_index) {
                         return error.AssertUnknownTable;
                     }
 
-                    var table: *TableInstance = &current_store.tables.items[immediates.table_index];
+                    const table: *const TableInstance = current_store.getTable(immediates.table_index);
 
                     const ref_index = try stack.popI32();
                     if (table.refs.items.len <= ref_index or ref_index < 0) {
                         return error.TrapUndefinedElement;
+                    }
+
+                    if (table.initialized.isSet(@intCast(usize, ref_index)) == false) {
+                        return error.TrapUninitializedElement;
                     }
 
                     const ref: Val = table.refs.items[@intCast(usize, ref_index)];
@@ -3147,12 +3259,12 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Global_Get => {
                     var global_index: u32 = instruction.immediate;
-                    var global = &current_store.globals.items[global_index];
+                    var global: *GlobalInstance = current_store.getGlobal(global_index);
                     try stack.pushValue(global.value);
                 },
                 Opcode.Global_Set => {
                     var global_index: u32 = instruction.immediate;
-                    var global = &current_store.globals.items[global_index];
+                    var global: *GlobalInstance = current_store.getGlobal(global_index);
                     if (global.mut == GlobalMut.Immutable) {
                         return error.AssertAttemptToSetImmutable;
                     }
@@ -3160,138 +3272,129 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.I32_Load => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(i32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value = try Helpers.loadFromMem(i32, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI32(value);
                 },
                 Opcode.I64_Load => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(i64, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value = try Helpers.loadFromMem(i64, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI64(value);
                 },
                 Opcode.F32_Load => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(f32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value = try Helpers.loadFromMem(f32, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushF32(value);
                 },
                 Opcode.F64_Load => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(f64, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value = try Helpers.loadFromMem(f64, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushF64(value);
                 },
                 Opcode.I32_Load8_S => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: i32 = try Helpers.loadFromMem(i8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: i32 = try Helpers.loadFromMem(i8, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI32(value);
                 },
                 Opcode.I32_Load8_U => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: u32 = try Helpers.loadFromMem(u8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: u32 = try Helpers.loadFromMem(u8, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI32(@bitCast(i32, value));
                 },
                 Opcode.I32_Load16_S => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: i32 = try Helpers.loadFromMem(i16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: i32 = try Helpers.loadFromMem(i16, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI32(value);
                 },
                 Opcode.I32_Load16_U => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: u32 = try Helpers.loadFromMem(u16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: u32 = try Helpers.loadFromMem(u16, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI32(@bitCast(i32, value));
                 },
                 Opcode.I64_Load8_S => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: i64 = try Helpers.loadFromMem(i8, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI64(value);
                 },
                 Opcode.I64_Load8_U => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u8, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: u64 = try Helpers.loadFromMem(u8, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI64(@bitCast(i64, value));
                 },
                 Opcode.I64_Load16_S => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: i64 = try Helpers.loadFromMem(i16, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI64(value);
                 },
                 Opcode.I64_Load16_U => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u16, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: u64 = try Helpers.loadFromMem(u16, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI64(@bitCast(i64, value));
                 },
                 Opcode.I64_Load32_S => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: i64 = try Helpers.loadFromMem(i32, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI64(value);
                 },
                 Opcode.I64_Load32_U => {
                     var offset_from_stack: i32 = try stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u32, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    var value: u64 = try Helpers.loadFromMem(u32, current_store, instruction.immediate, offset_from_stack);
                     try stack.pushI64(@bitCast(i64, value));
                 },
                 Opcode.I32_Store => {
                     const value: i32 = try stack.popI32();
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store => {
                     const value: i64 = try stack.popI64();
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.F32_Store => {
                     const value: f32 = try stack.popF32();
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.F64_Store => {
                     const value: f64 = try stack.popF64();
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I32_Store8 => {
                     const value: i8 = @truncate(i8, try stack.popI32());
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I32_Store16 => {
                     const value: i16 = @truncate(i16, try stack.popI32());
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store8 => {
                     const value: i8 = @truncate(i8, try stack.popI64());
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store16 => {
                     const value: i16 = @truncate(i16, try stack.popI64());
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.I64_Store32 => {
                     const value: i32 = @truncate(i32, try stack.popI64());
                     const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store.memories.items, instruction.immediate, offset_from_stack);
+                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
                 },
                 Opcode.Memory_Size => {
                     const memory_index: usize = 0;
+                    var memory_instance: *const MemoryInstance = current_store.getMemory(memory_index);
 
-                    if (current_store.memories.items.len <= memory_index) {
-                        return error.AssertMemoryInvalidIndex;
-                    }
-
-                    var memory_instance: *const MemoryInstance = &current_store.memories.items[memory_index];
                     const num_pages: i32 = @intCast(i32, memory_instance.size());
                     try stack.pushI32(num_pages);
                 },
                 Opcode.Memory_Grow => {
                     const memory_index: usize = 0;
-
-                    if (current_store.memories.items.len <= memory_index) {
-                        return error.AssertMemoryInvalidIndex;
-                    }
-
-                    var memory_instance: *MemoryInstance = &current_store.memories.items[memory_index];
+                    var memory_instance: *MemoryInstance = current_store.getMemory(memory_index);
 
                     const old_num_pages: i32 = @intCast(i32, memory_instance.limits.min);
                     const num_pages: i32 = try stack.popI32();
@@ -4293,6 +4396,7 @@ pub const ModuleInstance = struct {
                     if (std.meta.activeTag(v) != param_types[param_types.len - i - 1]) {
                         return error.AssertTypeMismatch;
                     }
+                    // std.debug.print("\tcallImport host: setting param {} to {}\n", .{ i, v });
                     params[params.len - i - 1] = v;
                 }
 
@@ -4318,7 +4422,7 @@ pub const ModuleInstance = struct {
                     .scratch_allocator = context.scratch_allocator,
                 };
 
-                const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.instance_index];
+                const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
                 return try call(&next_context, func_instance, next_instruction);
             },
         }
