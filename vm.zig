@@ -2330,10 +2330,102 @@ pub const Store = struct {
     fn init(module_def: *const ModuleDefinition, imports: []const ModuleImports, allocator: std.mem.Allocator) !Store {
         const Helpers = struct {
             fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
+                if (def.max != null and instance.max == null) {
+                    return false;
+                }
+
                 var def_max: u32 = if (def.max) |max| max else std.math.maxInt(u32);
                 var instance_max: u32 = if (instance.max) |max| max else 0;
 
                 return def.min <= instance.min and def_max >= instance_max;
+            }
+
+            // TODO probably should change the imports search to a hashed lookup of module_name+item_name -> array of items to make this faster
+            fn findImportInMultiple(comptime T: type, names: *const ImportNames, _imports: []const ModuleImports) UnlinkableError!*const T {
+                for (_imports) |*module_imports| {
+                    if (std.mem.eql(u8, names.module_name, module_imports.name)) {
+                        switch (T) {
+                            FunctionImport => {
+                                if (findImportInSingle(FunctionImport, names, module_imports)) |import| {
+                                    return import;
+                                }
+                                if (findImportInSingle(TableImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                            },
+                            TableImport => {
+                                if (findImportInSingle(TableImport, names, module_imports)) |import| {
+                                    return import;
+                                }
+                                if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                            },
+                            MemoryImport => {
+                                if (findImportInSingle(MemoryImport, names, module_imports)) |import| {
+                                    return import;
+                                }
+                                if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(TableImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                            },
+                            GlobalImport => {
+                                if (findImportInSingle(GlobalImport, names, module_imports)) |import| {
+                                    return import;
+                                }
+                                if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(TableImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                                if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
+                                    return error.UnlinkableIncompatibleImportType;
+                                }
+                            },
+                            else => unreachable,
+                        }
+                        break;
+                    }
+                }
+
+                return error.UnlinkableUnknownImport;
+            }
+
+            fn findImportInSingle(comptime T: type, names: *const ImportNames, module_imports: *const ModuleImports) ?*const T {
+                var items: []const T = switch (T) {
+                    FunctionImport => module_imports.functions.items,
+                    TableImport => module_imports.tables.items,
+                    MemoryImport => module_imports.memories.items,
+                    GlobalImport => module_imports.globals.items,
+                    else => unreachable,
+                };
+
+                for (items) |*item| {
+                    if (std.mem.eql(u8, names.import_name, item.name)) {
+                        return item;
+                    }
+                }
+
+                return null;
             }
         };
 
@@ -2352,139 +2444,84 @@ pub const Store = struct {
         };
         errdefer store.deinit();
 
-        // TODO probably should change the imports stuff to a hashed lookup of module_name+item_name -> array of items to make this faster
         for (module_def.imports.functions.items) |*func_import_def| {
-            var found: bool = false;
-            for (imports) |import_module| {
-                if (std.mem.eql(u8, func_import_def.names.module_name, import_module.name)) {
-                    for (import_module.functions.items) |import_func| {
-                        if (std.mem.eql(u8, func_import_def.names.import_name, import_func.name)) {
-                            const type_def: *const FunctionTypeDefinition = &module_def.types.items[func_import_def.type_index];
-                            const is_type_signature_eql: bool = import_func.isTypeSignatureEql(type_def);
+            var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, imports);
 
-                            if (is_type_signature_eql == false) {
-                                return error.UnlinkableIncompatibleImportType;
-                            }
+            const type_def: *const FunctionTypeDefinition = &module_def.types.items[func_import_def.type_index];
+            const is_type_signature_eql: bool = import_func.isTypeSignatureEql(type_def);
 
-                            try store.imports.functions.append(try import_func.dupe(allocator));
-                            found = true;
-                            break;
-                        }
-                    }
-                    break;
-                }
+            if (is_type_signature_eql == false) {
+                return error.UnlinkableIncompatibleImportType;
             }
 
-            if (found == false) {
-                return error.UnlinkableUnknownImport;
-            }
+            try store.imports.functions.append(try import_func.dupe(allocator));
         }
 
         for (module_def.imports.tables.items) |*table_import_def| {
-            var found: bool = false;
-            for (imports) |import_module| {
-                if (std.mem.eql(u8, table_import_def.names.module_name, import_module.name)) {
-                    for (import_module.tables.items) |import_table| {
-                        if (std.mem.eql(u8, table_import_def.names.import_name, import_table.name)) {
-                            var is_eql: bool = undefined;
-                            switch (import_table.data) {
-                                .Host => |table_instance| {
-                                    is_eql = table_instance.reftype == table_import_def.reftype and
-                                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
-                                },
-                                .Wasm => |data| {
-                                    const table_instance: *const TableInstance = data.module_instance.store.getTable(data.index);
-                                    is_eql = table_instance.reftype == table_import_def.reftype and
-                                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
-                                },
-                            }
+            var import_table: *const TableImport = try Helpers.findImportInMultiple(TableImport, &table_import_def.names, imports);
 
-                            if (is_eql == false) {
-                                return error.UnlinkableIncompatibleImportType;
-                            }
-
-                            try store.imports.tables.append(try import_table.dupe(allocator));
-                            found = true;
-                            break;
-                        }
-                    }
-                    break;
-                }
+            var is_eql: bool = undefined;
+            switch (import_table.data) {
+                .Host => |table_instance| {
+                    is_eql = table_instance.reftype == table_import_def.reftype and
+                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
+                },
+                .Wasm => |data| {
+                    const table_instance: *const TableInstance = data.module_instance.store.getTable(data.index);
+                    is_eql = table_instance.reftype == table_import_def.reftype and
+                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
+                },
             }
 
-            if (found == false) {
-                return error.UnlinkableUnknownImport;
+            if (is_eql == false) {
+                return error.UnlinkableIncompatibleImportType;
             }
+
+            try store.imports.tables.append(try import_table.dupe(allocator));
         }
 
         for (module_def.imports.memories.items) |*memory_import_def| {
-            var found: bool = false;
-            for (imports) |import_module| {
-                if (std.mem.eql(u8, memory_import_def.names.module_name, import_module.name)) {
-                    for (import_module.memories.items) |import_memory| {
-                        if (std.mem.eql(u8, memory_import_def.names.import_name, import_memory.name)) {
-                            var is_eql: bool = undefined;
-                            switch (import_memory.data) {
-                                .Host => |memory_instance| {
-                                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
-                                },
-                                .Wasm => |data| {
-                                    const memory_instance: *const MemoryInstance = data.module_instance.store.getMemory(data.index);
-                                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
-                                },
-                            }
+            var import_memory: *const MemoryImport = try Helpers.findImportInMultiple(MemoryImport, &memory_import_def.names, imports);
 
-                            if (is_eql == false) {
-                                return error.UnlinkableIncompatibleImportType;
-                            }
-
-                            try store.imports.memories.append(try import_memory.dupe(allocator));
-                            found = true;
-                            break;
-                        }
-                    }
-                    break;
-                }
+            var is_eql: bool = undefined;
+            switch (import_memory.data) {
+                .Host => |memory_instance| {
+                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
+                },
+                .Wasm => |data| {
+                    const memory_instance: *const MemoryInstance = data.module_instance.store.getMemory(data.index);
+                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
+                },
             }
 
-            if (found == false) {
-                return error.UnlinkableUnknownImport;
+            if (is_eql == false) {
+                return error.UnlinkableIncompatibleImportType;
             }
+
+            try store.imports.memories.append(try import_memory.dupe(allocator));
         }
 
         for (module_def.imports.globals.items) |*global_import_def| {
-            var found: bool = false;
-            for (imports) |import_module| {
-                if (std.mem.eql(u8, global_import_def.names.module_name, import_module.name)) {
-                    for (import_module.globals.items) |import_global| {
-                        if (std.mem.eql(u8, global_import_def.names.import_name, import_global.name)) {
-                            var is_eql: bool = undefined;
-                            switch (import_global.data) {
-                                .Host => |global_instance| {
-                                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value);
-                                },
-                                .Wasm => |data| {
-                                    const global_instance: *const GlobalInstance = data.module_instance.store.getGlobal(data.index);
-                                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value);
-                                },
-                            }
+            var import_global: *const GlobalImport = try Helpers.findImportInMultiple(GlobalImport, &global_import_def.names, imports);
 
-                            if (is_eql == false) {
-                                return error.UnlinkableIncompatibleImportType;
-                            }
-
-                            try store.imports.globals.append(try import_global.dupe(allocator));
-                            found = true;
-                            break;
-                        }
-                    }
-                    break;
-                }
+            var is_eql: bool = undefined;
+            switch (import_global.data) {
+                .Host => |global_instance| {
+                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value) and
+                        global_import_def.mut == global_instance.mut;
+                },
+                .Wasm => |data| {
+                    const global_instance: *const GlobalInstance = data.module_instance.store.getGlobal(data.index);
+                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value) and
+                        global_import_def.mut == global_instance.mut;
+                },
             }
 
-            if (found == false) {
-                return error.UnlinkableUnknownImport;
+            if (is_eql == false) {
+                return error.UnlinkableIncompatibleImportType;
             }
+
+            try store.imports.globals.append(try import_global.dupe(allocator));
         }
 
         // instantiate the rest of the needed module definitions

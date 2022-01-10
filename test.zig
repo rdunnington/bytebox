@@ -24,6 +24,7 @@ const CommandType = enum {
     AssertTrap,
     AssertMalformed,
     AssertInvalid,
+    AssertUnlinkable,
     AssertUninstantiable,
 };
 
@@ -65,6 +66,10 @@ const CommandAssertInvalid = struct {
     err: BadModuleError,
 };
 
+const CommandAssertUnlinkable = struct {
+    err: BadModuleError,
+};
+
 const CommandAssertUninstantiable = struct {
     err: BadModuleError,
 };
@@ -76,6 +81,7 @@ const Command = union(CommandType) {
     AssertTrap: CommandAssertTrap,
     AssertMalformed: CommandAssertMalformed,
     AssertInvalid: CommandAssertInvalid,
+    AssertUnlinkable: CommandAssertUnlinkable,
     AssertUninstantiable: CommandAssertUninstantiable,
 
     fn getModule(self: @This()) []const u8 {
@@ -86,6 +92,7 @@ const Command = union(CommandType) {
             .AssertTrap => |c| c.invocation.module,
             .AssertMalformed => |c| c.err.module,
             .AssertInvalid => |c| c.err.module,
+            .AssertUnlinkable => |c| c.err.module,
             .AssertUninstantiable => |c| c.err.module,
         };
     }
@@ -139,6 +146,8 @@ fn errorToText(err: anyerror) []const u8 {
         wasm.AssertError.AssertTypeMismatch => "type mismatch",
         wasm.AssertError.AssertUnknownMemory => "unknown memory",
         wasm.AssertError.AssertUnknownTable => "unknown table",
+        wasm.UnlinkableError.UnlinkableUnknownImport => "unknown import",
+        wasm.UnlinkableError.UnlinkableIncompatibleImportType => "incompatible import type",
         wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
         wasm.TrapError.TrapIntegerOverflow => "integer overflow",
         wasm.TrapError.TrapInvalidIntegerConversion => "invalid conversion to integer",
@@ -269,6 +278,13 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
+        } else if (strcmp("assert_unlinkable", json_command_type.String)) {
+            var command = Command{
+                .AssertUnlinkable = CommandAssertUnlinkable{
+                    .err = try Helpers.parseBadModuleError(&json_command, allocator),
+                },
+            };
+            try commands.append(command);
         } else if (strcmp("assert_uninstantiable", json_command_type.String)) {
             var command = Command{
                 .AssertUninstantiable = CommandAssertUninstantiable{
@@ -276,9 +292,6 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_unlinkable", json_command_type.String)) {
-            // TODO
-            log_verbose("skipping assert_unlinkable\n", .{});
         } else {
             print("unknown command type: {s}\n", .{json_command_type.String});
             unreachable;
@@ -488,30 +501,46 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
             module.def = try wasm.ModuleDefinition.init(module_data, scratch_allocator);
 
+            var expected_error: ?[]const u8 = null;
+            var instantiate_test_name: ?[]const u8 = null;
             switch (command.*) {
                 .AssertUninstantiable => |c| {
-                    _ = wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator) catch |e| {
-                        const err_string: []const u8 = errorToText(e);
-                        if (strcmp(err_string, c.err.expected_error)) {
-                            log_verbose("\tSuccess!\n", .{});
-                            continue;
-                        } else {
-                            if (!g_verbose_logging) {
-                                print("assert_uninstantiable: {s}\n", .{c.err.module});
-                            }
-                            print("Fail: instantiate failed with error '{s}', but expected '{s}", .{ err_string, c.err.expected_error });
-                            continue;
-                        }
-                    };
-                    if (!g_verbose_logging) {
-                        print("assert_uninstantiable: {s}\n", .{c.err.module});
-                    }
-                    print("Fail: instantiate succeded, but it shouldn't have.", .{});
-                    continue;
+                    expected_error = c.err.expected_error;
+                    instantiate_test_name = "assert_uninstantiable";
+                    log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
+                },
+                .AssertUnlinkable => |c| {
+                    expected_error = c.err.expected_error;
+                    instantiate_test_name = "assert_unlinkable";
+                    log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
                 },
                 else => {
                     module.inst = try wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator);
                 },
+            }
+
+            module.inst = wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator) catch |e| {
+                const err_string: []const u8 = errorToText(e);
+                if (expected_error) |expected| {
+                    if (strcmp(err_string, expected)) {
+                        log_verbose("\tSuccess!\n", .{});
+                    } else {
+                        if (!g_verbose_logging) {
+                            print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
+                        }
+                        print("\tFail: instantiate failed with error '{s}', but expected '{s}\n", .{ err_string, expected });
+                    }
+                } else {
+                    log_verbose("\tInstaniate failed with error: {}\n", .{e});
+                }
+                continue;
+            };
+
+            if (expected_error) |_| {
+                if (!g_verbose_logging) {
+                    print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
+                }
+                print("\tFail: instantiate succeded, but it shouldn't have.\n", .{});
             }
         }
 
