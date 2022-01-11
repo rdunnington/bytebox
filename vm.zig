@@ -3,6 +3,10 @@ const builtin = @import("builtin");
 
 pub const MalformedError = error{
     MalformedMagicSignature,
+    MalformedUnexpectedEnd,
+    MalformedUnsupportedWasmVersion,
+    MalformedSectionId,
+    MalformedFunctionTypeSentinel,
 };
 
 pub const UnlinkableError = error{
@@ -11,7 +15,6 @@ pub const UnlinkableError = error{
 };
 
 pub const AssertError = error{
-    AssertUnsupportedWasmVersion,
     AssertInvalidValType,
     AssertInvalidBytecode,
     AssertInvalidExport,
@@ -55,6 +58,8 @@ pub const TrapError = error{
     TrapUninitializedElement,
     TrapUnknown,
 };
+
+pub const WasmError = MalformedError || UnlinkableError || AssertError || TrapError;
 
 const Opcode = enum(u16) {
     Unreachable = 0x00,
@@ -659,7 +664,19 @@ const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory
 const k_function_type_sentinel_byte: u8 = 0x60;
 const k_block_type_void_sentinel_byte: u8 = 0x40;
 
-fn readFloat(comptime T: type, reader: anytype) !T {
+fn decodeLEB128(comptime T: type, reader: anytype) !T {
+    return switch (T) {
+        u32 => std.leb.readULEB128(u32, reader) catch {
+            return error.MalformedLEB128;
+        },
+        i32 => std.leb.readILEB128(i32, reader) catch {
+            return error.MalformedLEB128;
+        },
+        else => unreachable,
+    };
+}
+
+fn decodeFloat(comptime T: type, reader: anytype) !T {
     return switch (T) {
         f32 => @bitCast(f32, try reader.readIntLittle(u32)),
         f64 => @bitCast(f64, try reader.readIntLittle(u64)),
@@ -675,12 +692,12 @@ const ConstantExpression = struct {
         // std.debug.print("opcode_value: 0x{X}\n", .{opcode_value});
         const opcode = @intToEnum(Opcode, opcode_value);
         const val = switch (opcode) {
-            .I32_Const => Val{ .I32 = try std.leb.readILEB128(i32, reader) },
-            .I64_Const => Val{ .I64 = try std.leb.readULEB128(i64, reader) },
-            .F32_Const => Val{ .F32 = try readFloat(f32, reader) },
-            .F64_Const => Val{ .F64 = try readFloat(f64, reader) },
+            .I32_Const => Val{ .I32 = try decodeLEB128(i32, reader) },
+            .I64_Const => Val{ .I64 = try decodeLEB128(i64, reader) },
+            .F32_Const => Val{ .F32 = try decodeFloat(f32, reader) },
+            .F64_Const => Val{ .F64 = try decodeFloat(f64, reader) },
             .Ref_Null => try Val.nullRef(try ValType.decode(reader)),
-            .Ref_Func => Val{ .FuncRef = try std.leb.readULEB128(u32, reader) },
+            .Ref_Func => Val{ .FuncRef = try decodeLEB128(u32, reader) },
             // TODO handle global.get
             else => unreachable,
         };
@@ -710,13 +727,13 @@ pub const Limits = struct {
 
     fn decode(reader: anytype) !Limits {
         const has_max = try reader.readByte();
-        const min = try std.leb.readULEB128(u32, reader);
+        const min = try decodeLEB128(u32, reader);
         var max: ?u32 = null;
 
         switch (has_max) {
             0 => {},
             1 => {
-                max = try std.leb.readULEB128(u32, reader);
+                max = try decodeLEB128(u32, reader);
             },
             else => return error.InvalidTableType,
         }
@@ -1061,7 +1078,7 @@ const DataDefinition = struct {
         if (data_type == 0x00) {
             memory_index = 0;
         } else if (data_type == 0x02) {
-            memory_index = try std.leb.readULEB128(u32, reader);
+            memory_index = try decodeLEB128(u32, reader);
         }
 
         var mode = DataMode.Passive;
@@ -1071,7 +1088,7 @@ const DataDefinition = struct {
             offset = try ConstantExpression.decode(reader);
         }
 
-        var num_bytes = try std.leb.readULEB128(u32, reader);
+        var num_bytes = try decodeLEB128(u32, reader);
         var bytes = std.ArrayList(u8).init(allocator);
         try bytes.resize(num_bytes);
         var num_read = try reader.read(bytes.items);
@@ -1121,8 +1138,8 @@ const MemArg = struct {
 
     fn decode(reader: anytype) !MemArg {
         return MemArg{
-            .alignment = try std.leb.readULEB128(u32, reader),
-            .offset = try std.leb.readULEB128(u32, reader),
+            .alignment = try decodeLEB128(u32, reader),
+            .offset = try decodeLEB128(u32, reader),
         };
     }
 };
@@ -1155,7 +1172,7 @@ const Instruction = struct {
                         return 0; // the first item in the blocktype array is always void
                     } else {
                         _reader.context.pos -= 1; // move the stream backwards 1 byte to reconstruct the integer
-                        var index_33bit = try std.leb.readILEB128(i33, _reader);
+                        var index_33bit = try decodeLEB128(i33, _reader);
                         if (index_33bit < 0) {
                             return error.AssertInvalidBytecode;
                         }
@@ -1197,26 +1214,26 @@ const Instruction = struct {
 
         switch (opcode) {
             .Local_Get => {
-                immediate = try std.leb.readULEB128(u32, reader); // locals index
+                immediate = try decodeLEB128(u32, reader); // locals index
             },
             .Local_Set => {
-                immediate = try std.leb.readULEB128(u32, reader); // locals index
+                immediate = try decodeLEB128(u32, reader); // locals index
             },
             .Local_Tee => {
-                immediate = try std.leb.readULEB128(u32, reader); // locals index
+                immediate = try decodeLEB128(u32, reader); // locals index
             },
             .Global_Get => {
-                immediate = try std.leb.readULEB128(u32, reader); // locals index
+                immediate = try decodeLEB128(u32, reader); // locals index
             },
             .Global_Set => {
-                immediate = try std.leb.readULEB128(u32, reader); // locals index
+                immediate = try decodeLEB128(u32, reader); // locals index
             },
             .I32_Const => {
-                var value = try std.leb.readILEB128(i32, reader);
+                var value = try decodeLEB128(i32, reader);
                 immediate = @bitCast(u32, value);
             },
             .I64_Const => {
-                var value = try std.leb.readILEB128(i64, reader);
+                var value = try decodeLEB128(i64, reader);
 
                 for (module.code.i64_const.items) |item, i| {
                     if (value == item) {
@@ -1230,11 +1247,11 @@ const Instruction = struct {
                 }
             },
             .F32_Const => {
-                var value = try readFloat(f32, reader);
+                var value = try decodeFloat(f32, reader);
                 immediate = @bitCast(u32, value);
             },
             .F64_Const => {
-                var value = try readFloat(f64, reader);
+                var value = try decodeFloat(f64, reader);
 
                 for (module.code.f64_const.items) |item, i| {
                     if (value == item) {
@@ -1258,23 +1275,23 @@ const Instruction = struct {
                 immediate = try Helpers.decodeBlockType(reader, module);
             },
             .Branch => {
-                immediate = try std.leb.readULEB128(u32, reader); // label id
+                immediate = try decodeLEB128(u32, reader); // label id
             },
             .Branch_If => {
-                immediate = try std.leb.readULEB128(u32, reader); // label id
+                immediate = try decodeLEB128(u32, reader); // label id
             },
             .Branch_Table => {
-                const table_length = try std.leb.readULEB128(u32, reader);
+                const table_length = try decodeLEB128(u32, reader);
 
                 var label_ids = std.ArrayList(u32).init(module.allocator);
                 try label_ids.ensureTotalCapacity(table_length);
 
                 var index: u32 = 0;
                 while (index < table_length) : (index += 1) {
-                    var id = try std.leb.readULEB128(u32, reader);
+                    var id = try decodeLEB128(u32, reader);
                     label_ids.addOneAssumeCapacity().* = id;
                 }
-                var fallback_id = try std.leb.readULEB128(u32, reader);
+                var fallback_id = try decodeLEB128(u32, reader);
 
                 var branch_table = BranchTableImmediates{
                     .label_ids = label_ids,
@@ -1296,12 +1313,12 @@ const Instruction = struct {
                 }
             },
             .Call => {
-                immediate = try std.leb.readULEB128(u32, reader); // function index
+                immediate = try decodeLEB128(u32, reader); // function index
             },
             .Call_Indirect => {
                 var call_indirect_immedates = CallIndirectImmediates{
-                    .type_index = try std.leb.readULEB128(u32, reader),
-                    .table_index = try std.leb.readULEB128(u32, reader),
+                    .type_index = try decodeLEB128(u32, reader),
+                    .table_index = try decodeLEB128(u32, reader),
                 };
 
                 for (module.code.call_indirect.items) |*item, i| {
@@ -1421,7 +1438,7 @@ const Instruction = struct {
                 }
             },
             .Memory_Init => {
-                immediate = try std.leb.readULEB128(u32, reader); // dataidx
+                immediate = try decodeLEB128(u32, reader); // dataidx
                 var reserved = try reader.readByte();
                 if (reserved != 0x00) {
                     return error.AssertInvalidBytecode;
@@ -1436,10 +1453,10 @@ const Instruction = struct {
                 immediate = @enumToInt(valtype);
             },
             .Ref_Func => {
-                immediate = try std.leb.readULEB128(u32, reader); // funcidx
+                immediate = try decodeLEB128(u32, reader); // funcidx
             },
             .Data_Drop => {
-                immediate = try std.leb.readULEB128(u32, reader); // dataidx
+                immediate = try decodeLEB128(u32, reader); // dataidx
             },
             .Memory_Copy => {
                 var reserved = try reader.readByte();
@@ -1555,7 +1572,7 @@ pub const ModuleDefinition = struct {
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
 
-    pub fn init(wasm: []const u8, allocator: std.mem.Allocator) !ModuleDefinition {
+    pub fn init(wasm: []const u8, allocator: std.mem.Allocator) anyerror!ModuleDefinition {
         var module = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
@@ -1592,14 +1609,24 @@ pub const ModuleDefinition = struct {
         };
         errdefer module.deinit();
 
-        // first block type is always void for quick decoding
-        try module.code.block_type_values.append(BlockTypeValue{ .Void = {} });
+        decode(wasm, &module, allocator) catch |e| {
+            // std.debug.print(">>>>>caught error {}\n", .{e});
+            var any: anyerror = switch (e) {
+                error.EndOfStream => error.MalformedUnexpectedEnd,
+                else => e,
+            };
+            return any;
+        };
 
+        return module;
+    }
+
+    fn decode(wasm: []const u8, module: *ModuleDefinition, allocator: std.mem.Allocator) anyerror!void {
         const DecodeHelpers = struct {
             fn readRefType(valtype: ValType, reader: anytype) !Val {
                 switch (valtype) {
                     .FuncRef => {
-                        const func_index = try std.leb.readULEB128(u32, reader);
+                        const func_index = try decodeLEB128(u32, reader);
                         return Val{ .FuncRef = func_index };
                     },
                     .ExternRef => {
@@ -1610,7 +1637,7 @@ pub const ModuleDefinition = struct {
             }
 
             fn readName(reader: anytype, _allocator: std.mem.Allocator) ![]const u8 {
-                const name_length = try std.leb.readULEB128(u32, reader);
+                const name_length = try decodeLEB128(u32, reader);
 
                 var name: []u8 = try _allocator.alloc(u8, name_length);
                 errdefer _allocator.free(name);
@@ -1623,6 +1650,9 @@ pub const ModuleDefinition = struct {
             }
         };
 
+        // first block type is always void for quick decoding
+        try module.code.block_type_values.append(BlockTypeValue{ .Void = {} });
+
         var stream = std.io.fixedBufferStream(wasm);
         var reader = stream.reader();
 
@@ -1634,19 +1664,21 @@ pub const ModuleDefinition = struct {
             }
             const version = try reader.readIntLittle(u32);
             if (version != 1) {
-                return error.AssertUnsupportedWasmVersion;
+                return error.MalformedUnsupportedWasmVersion;
             }
         }
 
         while (stream.pos < stream.buffer.len) {
-            const section_id: Section = @intToEnum(Section, try reader.readByte());
-            const size_bytes: usize = try std.leb.readULEB128(u32, reader);
+            const section_id: Section = std.meta.intToEnum(Section, try reader.readByte()) catch {
+                return error.MalformedSectionId;
+            };
+            const size_bytes: usize = try decodeLEB128(u32, reader);
 
-            // std.debug.print("parseWasm: section: {}: {} bytes, pos: {}\n", .{section_id, size_bytes, stream.pos});
+            // std.debug.print("parseWasm: section: {}: {} bytes, pos: {}\n", .{ section_id, size_bytes, stream.pos });
 
             switch (section_id) {
                 .FunctionType => {
-                    const num_types = try std.leb.readULEB128(u32, reader);
+                    const num_types = try decodeLEB128(u32, reader);
 
                     try module.types.ensureTotalCapacity(num_types);
 
@@ -1654,10 +1686,10 @@ pub const ModuleDefinition = struct {
                     while (types_index < num_types) : (types_index += 1) {
                         const sentinel = try reader.readByte();
                         if (sentinel != k_function_type_sentinel_byte) {
-                            return error.AssertInvalidBytecode;
+                            return error.MalformedFunctionTypeSentinel;
                         }
 
-                        const num_params = try std.leb.readULEB128(u32, reader);
+                        const num_params = try decodeLEB128(u32, reader);
 
                         var func = FunctionTypeDefinition{ .num_params = num_params, .types = std.ArrayList(ValType).init(allocator) };
                         errdefer func.types.deinit();
@@ -1670,7 +1702,7 @@ pub const ModuleDefinition = struct {
                             try func.types.append(param_type);
                         }
 
-                        const num_returns = try std.leb.readULEB128(u32, reader);
+                        const num_returns = try decodeLEB128(u32, reader);
                         var returns_left = num_returns;
                         while (returns_left > 0) {
                             returns_left -= 1;
@@ -1683,7 +1715,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Import => {
-                    const num_imports = try std.leb.readULEB128(u32, reader);
+                    const num_imports = try decodeLEB128(u32, reader);
 
                     var import_index: u32 = 0;
                     while (import_index < num_imports) : (import_index += 1) {
@@ -1701,7 +1733,7 @@ pub const ModuleDefinition = struct {
                         const desc = try reader.readByte();
                         switch (desc) {
                             0x00 => {
-                                const type_index = try std.leb.readULEB128(u32, reader);
+                                const type_index = try decodeLEB128(u32, reader);
                                 try module.imports.functions.append(FunctionImportDefinition{
                                     .names = names,
                                     .type_index = type_index,
@@ -1741,14 +1773,14 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Function => {
-                    const num_funcs = try std.leb.readULEB128(u32, reader);
+                    const num_funcs = try decodeLEB128(u32, reader);
 
                     try module.functions.ensureTotalCapacity(num_funcs);
 
                     var func_index: u32 = 0;
                     while (func_index < num_funcs) : (func_index += 1) {
                         var func = FunctionDefinition{
-                            .type_index = try std.leb.readULEB128(u32, reader),
+                            .type_index = try decodeLEB128(u32, reader),
 
                             // we'll fix these up later when we find them in the Code section
                             .offset_into_instructions = 0,
@@ -1759,7 +1791,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Table => {
-                    const num_tables = try std.leb.readULEB128(u32, reader);
+                    const num_tables = try decodeLEB128(u32, reader);
 
                     try module.tables.ensureTotalCapacity(num_tables);
 
@@ -1779,7 +1811,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Memory => {
-                    const num_memories = try std.leb.readULEB128(u32, reader);
+                    const num_memories = try decodeLEB128(u32, reader);
 
                     if (num_memories > 1) {
                         return error.AssertMultipleMemories;
@@ -1806,7 +1838,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Global => {
-                    const num_globals = try std.leb.readULEB128(u32, reader);
+                    const num_globals = try decodeLEB128(u32, reader);
 
                     try module.globals.ensureTotalCapacity(num_globals);
 
@@ -1826,7 +1858,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Export => {
-                    const num_exports = try std.leb.readULEB128(u32, reader);
+                    const num_exports = try decodeLEB128(u32, reader);
 
                     var export_index: u32 = 0;
                     while (export_index < num_exports) : (export_index += 1) {
@@ -1834,7 +1866,7 @@ pub const ModuleDefinition = struct {
                         errdefer allocator.free(name);
 
                         const exportType = @intToEnum(ExportType, try reader.readByte());
-                        const item_index = try std.leb.readULEB128(u32, reader);
+                        const item_index = try decodeLEB128(u32, reader);
                         const def = ExportDefinition{ .name = name, .index = item_index };
 
                         switch (exportType) {
@@ -1866,7 +1898,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Start => {
-                    module.start_func_index = try std.leb.readULEB128(u32, reader);
+                    module.start_func_index = try decodeLEB128(u32, reader);
 
                     if (module.functions.items.len <= module.start_func_index.?) {
                         return error.AssertUnknownFunction;
@@ -1875,7 +1907,7 @@ pub const ModuleDefinition = struct {
                 .Element => {
                     const ElementHelpers = struct {
                         fn readElemsVal(elems: *std.ArrayList(Val), valtype: ValType, _reader: anytype) !void {
-                            const num_elems = try std.leb.readULEB128(u32, _reader);
+                            const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
                             var elem_index: u32 = 0;
@@ -1885,7 +1917,7 @@ pub const ModuleDefinition = struct {
                         }
 
                         fn readElemsExpr(elems: *std.ArrayList(ConstantExpression), _reader: anytype) !void {
-                            const num_elems = try std.leb.readULEB128(u32, _reader);
+                            const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
                             var elem_index: u32 = 0;
@@ -1903,7 +1935,7 @@ pub const ModuleDefinition = struct {
                         }
                     };
 
-                    const num_segments = try std.leb.readULEB128(u32, reader);
+                    const num_segments = try decodeLEB128(u32, reader);
 
                     try module.elements.ensureTotalCapacity(num_segments);
 
@@ -1933,7 +1965,7 @@ pub const ModuleDefinition = struct {
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x02 => {
-                                def.table_index = try std.leb.readULEB128(u32, reader);
+                                def.table_index = try decodeLEB128(u32, reader);
                                 def.offset = try ConstantExpression.decode(reader);
                                 def.reftype = try ValType.decode(reader);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
@@ -1953,7 +1985,7 @@ pub const ModuleDefinition = struct {
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, reader);
                             },
                             0x06 => {
-                                def.table_index = try std.leb.readULEB128(u32, reader);
+                                def.table_index = try decodeLEB128(u32, reader);
                                 def.offset = try ConstantExpression.decode(reader);
                                 def.reftype = try ValType.decode(reader);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, reader);
@@ -1977,22 +2009,22 @@ pub const ModuleDefinition = struct {
                     var block_stack = std.ArrayList(BlockData).init(allocator);
                     defer block_stack.deinit();
 
-                    const num_codes = try std.leb.readULEB128(u32, reader);
+                    const num_codes = try decodeLEB128(u32, reader);
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
                         // std.debug.print(">>> parsing code index {}\n", .{code_index});
-                        const code_size = try std.leb.readULEB128(u32, reader);
+                        const code_size = try decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
                         var def = &module.functions.items[code_index];
                         def.offset_into_instructions = @intCast(u32, code_begin_pos);
                         def.size = code_size;
 
-                        const num_locals = try std.leb.readULEB128(u32, reader);
+                        const num_locals = try decodeLEB128(u32, reader);
                         var locals_index: u32 = 0;
                         while (locals_index < num_locals) {
                             locals_index += 1;
-                            const n = try std.leb.readULEB128(u32, reader);
+                            const n = try decodeLEB128(u32, reader);
                             const local_type = try ValType.decode(reader);
                             def.locals[@enumToInt(local_type)] = n;
                         }
@@ -2008,8 +2040,8 @@ pub const ModuleDefinition = struct {
                         while (parsing_code) {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
-                            var instruction = try Instruction.decode(reader, &module);
-                            try ModuleValidator.validate(instruction, &module);
+                            var instruction = try Instruction.decode(reader, module);
+                            try ModuleValidator.validate(instruction, module);
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
@@ -2058,7 +2090,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .Data => {
-                    const num_datas = try std.leb.readULEB128(u32, reader);
+                    const num_datas = try decodeLEB128(u32, reader);
                     var data_index: u32 = 0;
                     while (data_index < num_datas) : (data_index += 1) {
                         var data = try DataDefinition.decode(reader, allocator);
@@ -2066,7 +2098,7 @@ pub const ModuleDefinition = struct {
                     }
                 },
                 .DataCount => {
-                    module.data_count = try std.leb.readULEB128(u32, reader);
+                    module.data_count = try decodeLEB128(u32, reader);
                     try module.datas.ensureTotalCapacity(module.data_count.?);
                 },
                 else => {
@@ -2075,8 +2107,6 @@ pub const ModuleDefinition = struct {
                 },
             }
         }
-
-        return module;
     }
 
     pub fn deinit(self: *ModuleDefinition) void {

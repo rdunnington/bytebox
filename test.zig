@@ -143,6 +143,10 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
 fn errorToText(err: anyerror) []const u8 {
     return switch (err) {
         wasm.MalformedError.MalformedMagicSignature => "magic header not detected",
+        wasm.MalformedError.MalformedUnexpectedEnd => "unexpected end",
+        wasm.MalformedError.MalformedUnsupportedWasmVersion => "unknown binary version",
+        wasm.MalformedError.MalformedSectionId => "malformed section id",
+        wasm.MalformedError.MalformedFunctionTypeSentinel => "integer representation too long",
         wasm.AssertError.AssertTypeMismatch => "type mismatch",
         wasm.AssertError.AssertUnknownMemory => "unknown memory",
         wasm.AssertError.AssertUnknownTable => "unknown table",
@@ -458,10 +462,10 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
                 continue;
             },
-            .AssertMalformed => |c| {
-                log_verbose("Skipping assert_malformed: {s}\n", .{c.err.module});
-                continue;
-            },
+            // .AssertMalformed => |c| {
+            //     print("Skipping assert_malformed: {s}\n", .{c.err.module});
+            //     continue;
+            // },
             else => {},
         }
 
@@ -490,6 +494,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 continue;
             },
             .DecodeModule => |c| log_verbose("module: {s}\n", .{c.module}),
+            .AssertMalformed => |c| log_verbose("assert_malformed: {s}\n", .{c.err.module}),
             .AssertUninstantiable => |c| log_verbose("assert_uninstantiable: {s}\n", .{c.err.module}),
             else => {},
         }
@@ -499,29 +504,56 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             var cwd = std.fs.cwd();
             var module_data = try cwd.readFileAlloc(scratch_allocator, module_path, 1024 * 1024 * 8);
 
-            module.def = try wasm.ModuleDefinition.init(module_data, scratch_allocator);
+            var decode_expected_error: ?[]const u8 = null;
+            var decode_test_name: ?[]const u8 = null;
+            switch (command.*) {
+                .AssertMalformed => |c| {
+                    decode_expected_error = c.err.expected_error;
+                    decode_test_name = "assert_malformed";
+                    // log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
+                },
+                else => {},
+            }
 
-            var expected_error: ?[]const u8 = null;
+            module.def = wasm.ModuleDefinition.init(module_data, scratch_allocator) catch |e| {
+                const err_string: []const u8 = errorToText(e);
+                if (decode_expected_error) |expected| {
+                    if (strcmp(err_string, expected)) {
+                        log_verbose("\tSuccess!\n", .{});
+                    } else {
+                        if (!g_verbose_logging) {
+                            print("{s}: {s}\n", .{ decode_test_name.?, module_name });
+                        }
+                        print("\tFail: decode failed with error '{s}', but expected '{s}\n", .{ err_string, expected });
+                    }
+                } else {
+                    if (!g_verbose_logging) {
+                        print("{s}: {s}\n", .{ decode_test_name.?, module_name });
+                    }
+                    print("\tDecode failed with error: {}\n", .{e});
+                }
+                continue;
+            };
+
+            var instantiate_expected_error: ?[]const u8 = null;
             var instantiate_test_name: ?[]const u8 = null;
             switch (command.*) {
                 .AssertUninstantiable => |c| {
-                    expected_error = c.err.expected_error;
+                    instantiate_expected_error = c.err.expected_error;
                     instantiate_test_name = "assert_uninstantiable";
                     log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
                 },
                 .AssertUnlinkable => |c| {
-                    expected_error = c.err.expected_error;
+                    instantiate_expected_error = c.err.expected_error;
                     instantiate_test_name = "assert_unlinkable";
                     log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
                 },
-                else => {
-                    module.inst = try wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator);
-                },
+                else => {},
             }
 
             module.inst = wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator) catch |e| {
                 const err_string: []const u8 = errorToText(e);
-                if (expected_error) |expected| {
+                if (instantiate_expected_error) |expected| {
                     if (strcmp(err_string, expected)) {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
@@ -531,12 +563,15 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                         print("\tFail: instantiate failed with error '{s}', but expected '{s}\n", .{ err_string, expected });
                     }
                 } else {
-                    log_verbose("\tInstaniate failed with error: {}\n", .{e});
+                    if (!g_verbose_logging) {
+                        print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
+                    }
+                    print("\tInstantiate failed with error: {}\n", .{e});
                 }
                 continue;
             };
 
-            if (expected_error) |_| {
+            if (instantiate_expected_error) |_| {
                 if (!g_verbose_logging) {
                     print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
                 }
