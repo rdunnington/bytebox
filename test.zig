@@ -140,13 +140,50 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     unreachable;
 }
 
+fn isSameError(err: anyerror, err_string: []const u8) bool {
+    return switch (err) {
+        wasm.MalformedError.MalformedMagicSignature => strcmp(err_string, "magic header not detected"),
+        wasm.MalformedError.MalformedUnexpectedEnd => strcmp(err_string, "unexpected end") or strcmp(err_string, "unexpected end of section or function"),
+        wasm.MalformedError.MalformedUnsupportedWasmVersion => strcmp(err_string, "unknown binary version"),
+        wasm.MalformedError.MalformedSectionId => strcmp(err_string, "malformed section id"),
+        wasm.MalformedError.MalformedTypeSentinel => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
+        wasm.MalformedError.MalformedLEB128 => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
+        wasm.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero byte expected"),
+        wasm.MalformedError.MalformedTooManyLocals => strcmp(err_string, "too many locals"),
+        wasm.MalformedError.MalformedFunctionCodeSectionMismatch => strcmp(err_string, "function and code section have inconsistent lengths"),
+        wasm.MalformedError.MalformedMissingDataCountSection => strcmp(err_string, "data count section required"),
+        wasm.MalformedError.MalformedDataCountMismatch => strcmp(err_string, "data count and data section have inconsistent lengths"),
+        wasm.MalformedError.MalformedDataType => strcmp(err_string, "integer representation too long"),
+        wasm.MalformedError.MalformedIllegalOpcode => strcmp(err_string, "illegal opcode"),
+        wasm.MalformedError.MalformedReferenceType => strcmp(err_string, "malformed reference type"),
+        wasm.MalformedError.MalformedSectionSizeMismatch => strcmp(err_string, "section size mismatch"),
+        wasm.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
+        wasm.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
+        wasm.MalformedError.MalformedExtraStartSection => strcmp(err_string, "unexpected content after last section"),
+        wasm.AssertError.AssertTypeMismatch => strcmp(err_string, "type mismatch"),
+        wasm.AssertError.AssertUnknownMemory => strcmp(err_string, "unknown memory"),
+        wasm.AssertError.AssertUnknownTable => strcmp(err_string, "unknown table"),
+        wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
+        wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
+        wasm.TrapError.TrapIntegerDivisionByZero => strcmp(err_string, "integer divide by zero"),
+        wasm.TrapError.TrapIntegerOverflow => strcmp(err_string, "integer overflow"),
+        wasm.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
+        wasm.TrapError.TrapOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
+        wasm.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
+        wasm.TrapError.TrapUninitializedElement => strcmp(err_string, "uninitialized element"),
+        wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
+        else => false,
+    };
+}
+
 fn errorToText(err: anyerror) []const u8 {
     return switch (err) {
         wasm.MalformedError.MalformedMagicSignature => "magic header not detected",
         wasm.MalformedError.MalformedUnexpectedEnd => "unexpected end",
         wasm.MalformedError.MalformedUnsupportedWasmVersion => "unknown binary version",
         wasm.MalformedError.MalformedSectionId => "malformed section id",
-        wasm.MalformedError.MalformedFunctionTypeSentinel => "integer representation too long",
+        wasm.MalformedError.MalformedTypeSentinel => "integer representation too long",
+        wasm.MalformedError.MalformedLEB128 => "integer representation too long",
         wasm.AssertError.AssertTypeMismatch => "type mismatch",
         wasm.AssertError.AssertUnknownMemory => "unknown memory",
         wasm.AssertError.AssertUnknownTable => "unknown table",
@@ -510,21 +547,19 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 .AssertMalformed => |c| {
                     decode_expected_error = c.err.expected_error;
                     decode_test_name = "assert_malformed";
-                    // log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
                 },
                 else => {},
             }
 
             module.def = wasm.ModuleDefinition.init(module_data, scratch_allocator) catch |e| {
-                const err_string: []const u8 = errorToText(e);
-                if (decode_expected_error) |expected| {
-                    if (strcmp(err_string, expected)) {
+                if (decode_expected_error) |expected_str| {
+                    if (isSameError(e, expected_str)) {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
                             print("{s}: {s}\n", .{ decode_test_name.?, module_name });
                         }
-                        print("\tFail: decode failed with error '{s}', but expected '{s}\n", .{ err_string, expected });
+                        print("\tFail: decode failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                     }
                 } else {
                     if (!g_verbose_logging) {
@@ -534,6 +569,13 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 }
                 continue;
             };
+
+            if (decode_expected_error) |expected| {
+                if (!g_verbose_logging) {
+                    print("{s}: {s}\n", .{ decode_test_name.?, module_name });
+                }
+                print("\tFail: decode succeeded, but it should have failed with error '{s}'\n", .{expected});
+            }
 
             var instantiate_expected_error: ?[]const u8 = null;
             var instantiate_test_name: ?[]const u8 = null;
@@ -571,11 +613,11 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 continue;
             };
 
-            if (instantiate_expected_error) |_| {
+            if (instantiate_expected_error) |expected| {
                 if (!g_verbose_logging) {
                     print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
                 }
-                print("\tFail: instantiate succeded, but it shouldn't have.\n", .{});
+                print("\tFail: instantiate succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
         }
 
