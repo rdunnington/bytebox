@@ -20,6 +20,7 @@ pub const MalformedError = error{
     MalformedInvalidImport,
     MalformedLimits,
     MalformedExtraStartSection,
+    MalformedElementType,
 };
 
 pub const UnlinkableError = error{
@@ -1238,10 +1239,14 @@ const Instruction = struct {
             extended |= byte2;
 
             // std.debug.print(">>>>>> opcode extended_byte: 0x{X}\n", .{extended});
-            opcode = @intToEnum(Opcode, extended);
+            opcode = std.meta.intToEnum(Opcode, extended) catch {
+                return error.MalformedIllegalOpcode;
+            };
         } else {
             // std.debug.print(">>>>>> opcode byte: 0x{X}\n", .{byte});
-            opcode = @intToEnum(Opcode, byte);
+            opcode = std.meta.intToEnum(Opcode, byte) catch {
+                return error.MalformedIllegalOpcode;
+            };
         }
         var immediate: u32 = k_invalid_immediate;
 
@@ -1713,6 +1718,18 @@ pub const ModuleDefinition = struct {
             // std.debug.print("parseWasm: section: {}: {} bytes, pos: {}\n", .{ section_id, section_size_bytes, stream.pos });
 
             switch (section_id) {
+                .Custom => {
+                    var name = std.ArrayList(u8).init(allocator);
+                    defer name.deinit();
+
+                    const name_length = try decodeLEB128(u32, reader);
+                    try name.resize(name_length);
+
+                    const read_length = try reader.read(name.items);
+                    if (read_length != name_length) {
+                        return error.MalformedUnexpectedEnd;
+                    }
+                },
                 .FunctionType => {
                     const num_types = try decodeLEB128(u32, reader);
 
@@ -2035,7 +2052,9 @@ pub const ModuleDefinition = struct {
                                 def.reftype = try ValType.decodeReftype(reader);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, reader);
                             },
-                            else => unreachable,
+                            else => {
+                                return error.MalformedElementType;
+                            },
                         }
 
                         try module.elements.append(def);
@@ -2156,10 +2175,6 @@ pub const ModuleDefinition = struct {
                 .DataCount => {
                     module.data_count = try decodeLEB128(u32, reader);
                     try module.datas.ensureTotalCapacity(module.data_count.?);
-                },
-                else => {
-                    std.debug.print("Skipping module section {}\n", .{section_id});
-                    try stream.seekBy(@intCast(i64, section_size_bytes));
                 },
             }
 
