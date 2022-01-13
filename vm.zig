@@ -1529,6 +1529,11 @@ const Instruction = struct {
     }
 };
 
+const CustomSection = struct {
+    name: std.ArrayList(u8),
+    data: std.ArrayList(u8),
+};
+
 const ModuleValidator = struct {
     fn validateMemoryIndex(module: *const ModuleDefinition) !void {
         if (module.memories.items.len < 1) {
@@ -1605,6 +1610,8 @@ pub const ModuleDefinition = struct {
     elements: std.ArrayList(ElementDefinition),
     exports: Exports,
     datas: std.ArrayList(DataDefinition),
+    custom_sections: std.ArrayList(CustomSection),
+
     start_func_index: ?u32 = null,
     data_count: ?u32 = null,
 
@@ -1642,6 +1649,7 @@ pub const ModuleDefinition = struct {
                 .globals = std.ArrayList(ExportDefinition).init(allocator),
             },
             .datas = std.ArrayList(DataDefinition).init(allocator),
+            .custom_sections = std.ArrayList(CustomSection).init(allocator),
 
             .function_continuations = std.AutoHashMap(u32, u32).init(allocator),
             .label_continuations = std.AutoHashMap(u32, u32).init(allocator),
@@ -1715,20 +1723,37 @@ pub const ModuleDefinition = struct {
             const section_size_bytes: usize = try decodeLEB128(u32, reader);
             const section_start_pos = stream.pos;
 
-            // std.debug.print("parseWasm: section: {}: {} bytes, pos: {}\n", .{ section_id, section_size_bytes, stream.pos });
+            // std.debug.print("\tparseWasm: section: {}: {} bytes, pos: {}\n", .{ section_id, section_size_bytes, stream.pos });
 
             switch (section_id) {
                 .Custom => {
-                    var name = std.ArrayList(u8).init(allocator);
-                    defer name.deinit();
-
-                    const name_length = try decodeLEB128(u32, reader);
-                    try name.resize(name_length);
-
-                    const read_length = try reader.read(name.items);
-                    if (read_length != name_length) {
+                    if (section_size_bytes == 0) {
                         return error.MalformedUnexpectedEnd;
                     }
+
+                    var section = CustomSection{
+                        .name = std.ArrayList(u8).init(allocator),
+                        .data = std.ArrayList(u8).init(allocator),
+                    };
+
+                    const name_length = try decodeLEB128(u32, reader);
+                    try section.name.resize(name_length);
+
+                    const name_length_read = try reader.read(section.name.items);
+                    if (name_length != name_length_read) {
+                        return error.MalformedUnexpectedEnd;
+                    }
+
+                    const data_length = section_size_bytes - name_length;
+                    try section.data.resize(data_length);
+                    const data_length_read = try reader.read(section.data.items);
+                    if (data_length != data_length_read) {
+                        return error.MalformedUnexpectedEnd;
+                    }
+
+                    // std.debug.print("\tparsed custom section: '{s}'\n", .{section.name.items});
+
+                    try module.custom_sections.append(section);
                 },
                 .FunctionType => {
                     const num_types = try decodeLEB128(u32, reader);
@@ -2245,6 +2270,12 @@ pub const ModuleDefinition = struct {
         self.exports.memories.deinit();
         self.exports.globals.deinit();
         self.datas.deinit();
+
+        for (self.custom_sections.items) |*item| {
+            item.name.deinit();
+            item.data.deinit();
+        }
+        self.custom_sections.deinit();
 
         self.function_continuations.deinit();
         self.label_continuations.deinit();

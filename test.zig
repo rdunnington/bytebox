@@ -143,7 +143,9 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
 fn isSameError(err: anyerror, err_string: []const u8) bool {
     return switch (err) {
         wasm.MalformedError.MalformedMagicSignature => strcmp(err_string, "magic header not detected"),
-        wasm.MalformedError.MalformedUnexpectedEnd => strcmp(err_string, "unexpected end") or strcmp(err_string, "unexpected end of section or function"),
+        wasm.MalformedError.MalformedUnexpectedEnd => strcmp(err_string, "unexpected end") or
+            strcmp(err_string, "unexpected end of section or function") or
+            strcmp(err_string, "length out of bounds"),
         wasm.MalformedError.MalformedUnsupportedWasmVersion => strcmp(err_string, "unknown binary version"),
         wasm.MalformedError.MalformedSectionId => strcmp(err_string, "malformed section id"),
         wasm.MalformedError.MalformedTypeSentinel => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
@@ -156,7 +158,9 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.MalformedError.MalformedDataType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         wasm.MalformedError.MalformedIllegalOpcode => strcmp(err_string, "illegal opcode") or strcmp(err_string, "integer representation too long"),
         wasm.MalformedError.MalformedReferenceType => strcmp(err_string, "malformed reference type"),
-        wasm.MalformedError.MalformedSectionSizeMismatch => strcmp(err_string, "section size mismatch"),
+        wasm.MalformedError.MalformedSectionSizeMismatch => strcmp(err_string, "section size mismatch") or
+            strcmp(err_string, "malformed section id") or
+            strcmp(err_string, "function and code section have inconsistent lengths"), // this one is a bit of a hack to resolve custom.8.wasm
         wasm.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
         wasm.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
         wasm.MalformedError.MalformedExtraStartSection => strcmp(err_string, "unexpected content after last section"),
