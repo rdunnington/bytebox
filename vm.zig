@@ -21,6 +21,7 @@ pub const MalformedError = error{
     MalformedLimits,
     MalformedExtraStartSection,
     MalformedElementType,
+    MalformedUTF8Encoding,
 };
 
 pub const UnlinkableError = error{
@@ -1530,7 +1531,7 @@ const Instruction = struct {
 };
 
 const CustomSection = struct {
-    name: std.ArrayList(u8),
+    name: []const u8,
     data: std.ArrayList(u8),
 };
 
@@ -1694,6 +1695,10 @@ pub const ModuleDefinition = struct {
                     return error.MalformedUnexpectedEnd;
                 }
 
+                if (std.unicode.utf8ValidateSlice(name) == false) {
+                    return error.MalformedUTF8Encoding;
+                }
+
                 return name;
             }
         };
@@ -1731,20 +1736,15 @@ pub const ModuleDefinition = struct {
                         return error.MalformedUnexpectedEnd;
                     }
 
+                    var name = try DecodeHelpers.readName(reader, allocator);
+                    errdefer allocator.free(name);
+
                     var section = CustomSection{
-                        .name = std.ArrayList(u8).init(allocator),
+                        .name = name,
                         .data = std.ArrayList(u8).init(allocator),
                     };
 
-                    const name_length = try decodeLEB128(u32, reader);
-                    try section.name.resize(name_length);
-
-                    const name_length_read = try reader.read(section.name.items);
-                    if (name_length != name_length_read) {
-                        return error.MalformedUnexpectedEnd;
-                    }
-
-                    const data_length = section_size_bytes - name_length;
+                    const data_length = section_size_bytes - name.len;
                     try section.data.resize(data_length);
                     const data_length_read = try reader.read(section.data.items);
                     if (data_length != data_length_read) {
@@ -2272,7 +2272,7 @@ pub const ModuleDefinition = struct {
         self.datas.deinit();
 
         for (self.custom_sections.items) |*item| {
-            item.name.deinit();
+            self.allocator.free(item.name);
             item.data.deinit();
         }
         self.custom_sections.deinit();

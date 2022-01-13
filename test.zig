@@ -165,6 +165,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
         wasm.MalformedError.MalformedExtraStartSection => strcmp(err_string, "unexpected content after last section"),
         wasm.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
+        wasm.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
         wasm.AssertError.AssertTypeMismatch => strcmp(err_string, "type mismatch"),
         wasm.AssertError.AssertUnknownMemory => strcmp(err_string, "unknown memory"),
         wasm.AssertError.AssertUnknownTable => strcmp(err_string, "unknown table"),
