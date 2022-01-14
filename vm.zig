@@ -19,7 +19,7 @@ pub const MalformedError = error{
     MalformedSectionSizeMismatch,
     MalformedInvalidImport,
     MalformedLimits,
-    MalformedExtraStartSection,
+    MalformedMultipleStartSections,
     MalformedElementType,
     MalformedUTF8Encoding,
 };
@@ -1977,12 +1977,12 @@ pub const ModuleDefinition = struct {
                 },
                 .Start => {
                     if (module.start_func_index != null) {
-                        return error.MalformedExtraStartSection;
+                        return error.MalformedMultipleStartSections;
                     }
 
                     module.start_func_index = try decodeLEB128(u32, reader);
 
-                    if (module.functions.items.len <= module.start_func_index.?) {
+                    if (module.imports.functions.items.len + module.functions.items.len <= module.start_func_index.?) {
                         return error.AssertUnknownFunction;
                     }
                 },
@@ -2860,12 +2860,16 @@ pub const ModuleInstance = struct {
         errdefer inst.deinit();
 
         if (module_def.start_func_index) |func_index| {
-            const num_imports = module_def.imports.functions.items.len;
-            std.debug.assert(func_index >= num_imports); // if this ever happens, need to support calling import functions at start
+            const params = &[0]Val{};
+            var returns = &[0]Val{};
 
-            const params = [0]Val{};
-            var returns = [0]Val{};
-            try inst.invokeInternal(func_index - num_imports, &params, &returns);
+            const num_imports = module_def.imports.functions.items.len;
+            if (func_index >= num_imports) {
+                var instance_index = func_index - num_imports;
+                try inst.invokeInternal(instance_index, params, returns);
+            } else {
+                try inst.invokeImportInternal(func_index, params, returns);
+            }
         }
 
         return inst;
@@ -2939,40 +2943,9 @@ pub const ModuleInstance = struct {
             }
         }
 
-        for (self.store.imports.functions.items) |*func_import| {
+        for (self.store.imports.functions.items) |*func_import, i| {
             if (std.mem.eql(u8, func_name, func_import.name)) {
-                switch (func_import.data) {
-                    .Host => |data| {
-                        const param_types = data.func_def.getParams();
-                        const return_types = data.func_def.getReturns();
-
-                        for (params) |v, i| {
-                            if (std.meta.activeTag(v) != param_types[i]) {
-                                return error.AssertTypeMismatch;
-                            }
-                        }
-
-                        if (returns.len != return_types.len) {
-                            return error.AssertTypeMismatch;
-                        }
-
-                        data.callback(data.userdata, params, returns);
-
-                        // validate return types
-                        for (returns) |val, i| {
-                            if (std.meta.activeTag(val) != return_types[i]) {
-                                return error.AssertTypeMismatch;
-                            }
-                        }
-                    },
-                    .Wasm => |data| {
-                        var instance: *ModuleInstance = data.module_instance;
-                        // std.debug.print("module instructions len: {}\n", .{instance.module_def.code.instructions.items.len});
-                        instance.invoke(func_import.name, params, returns) catch {
-                            return error.OutOfBounds;
-                        };
-                    },
-                }
+                try self.invokeImportInternal(i, params, returns);
             }
         }
 
@@ -3035,8 +3008,9 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn invokeImport(func: *const FunctionImport, params: []const Val, returns: []Val) !void {
-        switch (func.data) {
+    fn invokeImportInternal(self: *ModuleInstance, import_index: usize, params: []const Val, returns: []Val) !void {
+        const func_import: *const FunctionImport = &self.store.imports.functions.items[import_index];
+        switch (func_import.data) {
             .Host => |data| {
                 const param_types = data.func_def.getParams();
                 const return_types = data.func_def.getReturns();
@@ -3061,7 +3035,11 @@ pub const ModuleInstance = struct {
                 }
             },
             .Wasm => |data| {
-                try data.module_instance.invoke(func.name, params, returns);
+                var instance: *ModuleInstance = data.module_instance;
+                // std.debug.print("module instructions len: {}\n", .{instance.module_def.code.instructions.items.len});
+                instance.invoke(func_import.name, params, returns) catch {
+                    return error.OutOfBounds;
+                };
             },
         }
     }

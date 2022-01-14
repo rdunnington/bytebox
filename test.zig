@@ -163,7 +163,8 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
             strcmp(err_string, "function and code section have inconsistent lengths"), // this one is a bit of a hack to resolve custom.8.wasm
         wasm.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
         wasm.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
-        wasm.MalformedError.MalformedExtraStartSection => strcmp(err_string, "unexpected content after last section"),
+        wasm.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or 
+            strcmp(err_string, "unexpected content after last section"),
         wasm.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         wasm.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
         wasm.AssertError.AssertTypeMismatch => strcmp(err_string, "type mismatch"),
@@ -405,6 +406,12 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
             std.debug.assert(std.meta.activeTag(params[1]) == ValType.F64);
             // std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
         }
+
+        fn print(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+            std.debug.assert(params.len == 0);
+            std.debug.assert(returns.len == 0);
+            // std.debug.print("\n", .{});
+        }
     };
 
     var imports: wasm.ModuleImports = try wasm.ModuleImports.init("spectest", null, allocator);
@@ -417,6 +424,8 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     try imports.addHostFunction("print_f64", null, &[_]ValType{.F64}, no_returns, Functions.printF64);
     try imports.addHostFunction("print_i32_f32", null, &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
     try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
+    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
+    try imports.addHostFunction("print", null, &[_]ValType{}, no_returns, Functions.print);
 
     const TableInstance = wasm.TableInstance;
 
@@ -539,6 +548,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             .DecodeModule => |c| log_verbose("module: {s}\n", .{c.module}),
             .AssertMalformed => |c| log_verbose("assert_malformed: {s}\n", .{c.err.module}),
             .AssertUninstantiable => |c| log_verbose("assert_uninstantiable: {s}\n", .{c.err.module}),
+            .AssertUnlinkable => |c| log_verbose("assert_unlinkable: {s}\n", .{c.err.module}),
             else => {},
         }
 
@@ -589,12 +599,10 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 .AssertUninstantiable => |c| {
                     instantiate_expected_error = c.err.expected_error;
                     instantiate_test_name = "assert_uninstantiable";
-                    log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
                 },
                 .AssertUnlinkable => |c| {
                     instantiate_expected_error = c.err.expected_error;
                     instantiate_test_name = "assert_unlinkable";
-                    log_verbose("{s}: {s}\n", .{ instantiate_test_name.?, c.err.module });
                 },
                 else => {},
             }
@@ -866,9 +874,9 @@ pub fn main() !void {
         // "select",
         // "skip-stack-guard-page",
         // "stack",
-        // "start",
+        "start",
         "store",
-        // "switch",
+        "switch",
         //"table",
         //"table-sub",
         //"table_copy",
