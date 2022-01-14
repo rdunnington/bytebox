@@ -84,8 +84,21 @@ const Command = union(CommandType) {
     AssertUnlinkable: CommandAssertUnlinkable,
     AssertUninstantiable: CommandAssertUninstantiable,
 
-    fn getModule(self: @This()) []const u8 {
-        return switch (self) {
+    fn getCommandName(self: *const Command) []const u8 {
+        return switch (self.*) {
+            .DecodeModule => "decode_module",
+            .Register => "register",
+            .AssertReturn => "assert_return",
+            .AssertTrap => "assert_trap",
+            .AssertMalformed => "assert_malformed",
+            .AssertInvalid => "assert_invalid",
+            .AssertUnlinkable => "assert_unlinkable",
+            .AssertUninstantiable => "assert_uninstantiable",
+        };
+    }
+
+    fn getModule(self: *const Command) []const u8 {
+        return switch (self.*) {
             .DecodeModule => |c| c.module,
             .Register => |c| c.module,
             .AssertReturn => |c| c.invocation.module,
@@ -534,6 +547,8 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             module.* = Module{};
         }
 
+        log_verbose("{s}: {s}\n", .{command.getCommandName(), command.getModule()});
+
         switch (command.*) {
             .Register => |c| {
                 if (module.inst == null) {
@@ -545,10 +560,6 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 try imports.append(module_imports);
                 continue;
             },
-            .DecodeModule => |c| log_verbose("module: {s}\n", .{c.module}),
-            .AssertMalformed => |c| log_verbose("assert_malformed: {s}\n", .{c.err.module}),
-            .AssertUninstantiable => |c| log_verbose("assert_uninstantiable: {s}\n", .{c.err.module}),
-            .AssertUnlinkable => |c| log_verbose("assert_unlinkable: {s}\n", .{c.err.module}),
             else => {},
         }
 
@@ -558,11 +569,9 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             var module_data = try cwd.readFileAlloc(scratch_allocator, module_path, 1024 * 1024 * 8);
 
             var decode_expected_error: ?[]const u8 = null;
-            var decode_test_name: ?[]const u8 = null;
             switch (command.*) {
                 .AssertMalformed => |c| {
                     decode_expected_error = c.err.expected_error;
-                    decode_test_name = "assert_malformed";
                 },
                 else => {},
             }
@@ -573,13 +582,13 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
-                            print("{s}: {s}\n", .{ decode_test_name.?, module_name });
+                            print("{s}: {s}\n", .{ command.getCommandName(), module_name });
                         }
                         print("\tFail: decode failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                     }
                 } else {
                     if (!g_verbose_logging) {
-                        print("{s}: {s}\n", .{ decode_test_name.?, module_name });
+                        print("{s}: {s}\n", .{ command.getCommandName(), module_name });
                     }
                     print("\tDecode failed with error: {}\n", .{e});
                 }
@@ -588,21 +597,18 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
             if (decode_expected_error) |expected| {
                 if (!g_verbose_logging) {
-                    print("{s}: {s}\n", .{ decode_test_name.?, module_name });
+                    print("{s}: {s}\n", .{ command.getCommandName(), module_name });
                 }
                 print("\tFail: decode succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
 
             var instantiate_expected_error: ?[]const u8 = null;
-            var instantiate_test_name: ?[]const u8 = null;
             switch (command.*) {
                 .AssertUninstantiable => |c| {
                     instantiate_expected_error = c.err.expected_error;
-                    instantiate_test_name = "assert_uninstantiable";
                 },
                 .AssertUnlinkable => |c| {
                     instantiate_expected_error = c.err.expected_error;
-                    instantiate_test_name = "assert_unlinkable";
                 },
                 else => {},
             }
@@ -614,13 +620,13 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
-                            print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
+                            print("{s}: {s}\n", .{ command.getCommandName(), module_name });
                         }
                         print("\tFail: instantiate failed with error '{s}', but expected '{s}\n", .{ err_string, expected });
                     }
                 } else {
                     if (!g_verbose_logging) {
-                        print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
+                        print("{s}: {s}\n", .{ command.getCommandName(), module_name });
                     }
                     print("\tInstantiate failed with error: {}\n", .{e});
                 }
@@ -629,7 +635,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
             if (instantiate_expected_error) |expected| {
                 if (!g_verbose_logging) {
-                    print("{s}: {s}\n", .{ instantiate_test_name.?, module_name });
+                    print("{s}: {s}\n", .{ command.getCommandName(), module_name });
                 }
                 print("\tFail: instantiate succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
@@ -647,7 +653,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
                 if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.invocation.field) == false) {
-                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module_name, c.invocation.field });
+                        log_verbose("\tskipped...\n", .{ });
                         continue;
                     }
                 }
@@ -853,9 +859,9 @@ pub fn main() !void {
         // "left-to-right",
         // "linking",
         "load",
-        // "local_get",
-        // "local_set",
-        // "local_tee",
+        "local_get",
+        "local_set",
+        "local_tee",
         "loop",
         "memory",
         // "memory_copy",
