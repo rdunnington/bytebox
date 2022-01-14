@@ -840,16 +840,8 @@ const FunctionTypeContext = struct {
 const FunctionDefinition = struct {
     type_index: u32,
     offset_into_instructions: u32,
-    locals: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{}),
+    locals: std.ArrayList(ValType),
     size: u32,
-
-    fn totalLocalCount(def: *const FunctionDefinition) u32 {
-        var total: u32 = 0;
-        for (def.locals) |count| {
-            total += count;
-        }
-        return total;
-    }
 };
 
 const FunctionInstance = struct {
@@ -1859,6 +1851,7 @@ pub const ModuleDefinition = struct {
                     while (func_index < num_funcs) : (func_index += 1) {
                         var func = FunctionDefinition{
                             .type_index = try decodeLEB128(u32, reader),
+                            .locals = std.ArrayList(ValType).init(allocator),
 
                             // we'll fix these up later when we find them in the Code section
                             .offset_into_instructions = 0,
@@ -2109,19 +2102,37 @@ pub const ModuleDefinition = struct {
                         def.offset_into_instructions = @intCast(u32, code_begin_pos);
                         def.size = code_size;
 
+                        var local_type_counts: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{});
+
+                        const k_unused_type_sentinel:i32 = -1;
+                        var local_type_order: [ValType.count()]i32 = std.enums.directEnumArrayDefault(ValType, i32, k_unused_type_sentinel, 0, .{});
+
                         const num_locals = try decodeLEB128(u32, reader);
                         var locals_total: usize = 0;
                         var locals_index: u32 = 0;
-                        while (locals_index < num_locals) {
-                            locals_index += 1;
+                        while (locals_index < num_locals) : (locals_index += 1) {
                             const n = try decodeLEB128(u32, reader);
                             const local_type = try ValType.decode(reader);
-                            def.locals[@enumToInt(local_type)] = n;
+                            local_type_order[locals_index] = @enumToInt(local_type);
+                            local_type_counts[@enumToInt(local_type)] = n;
+
                             locals_total += n;
+                            if (locals_total >= std.math.maxInt(u32)) {
+                                return error.MalformedTooManyLocals;
+                            }
                         }
 
-                        if (locals_total > std.math.maxInt(u32)) {
-                            return error.MalformedTooManyLocals;
+                        try def.locals.ensureTotalCapacity(locals_total);
+                        for (local_type_order) |counts_index_or_sentinel| {
+                            if (counts_index_or_sentinel == k_unused_type_sentinel) { 
+                                continue;
+                            }
+
+                            var valtype = @intToEnum(ValType, counts_index_or_sentinel);
+                            var index = @intCast(usize, counts_index_or_sentinel);
+
+                            const count = local_type_counts[index];
+                            def.locals.appendNTimesAssumeCapacity(valtype, count);
                         }
 
                         const instruction_begin_offset = @intCast(u32, module.code.instructions.items.len);
@@ -2674,20 +2685,9 @@ pub const Store = struct {
             const param_types: []const ValType = func_type.getParams();
 
             var local_types = std.ArrayList(ValType).init(allocator);
-            try local_types.resize(param_types.len + def_func.totalLocalCount());
-
-            for (param_types) |valtype, i| {
-                local_types.items[i] = valtype;
-            }
-
-            var locals_index: usize = param_types.len;
-            for (def_func.locals) |count, valtype_as_int| {
-                var index: u32 = 0;
-                while (index < count) : (index += 1) {
-                    local_types.items[locals_index] = @intToEnum(ValType, valtype_as_int);
-                    locals_index += 1;
-                }
-            }
+            try local_types.ensureTotalCapacity(param_types.len + def_func.locals.items.len);
+            local_types.appendSliceAssumeCapacity(param_types);
+            local_types.appendSliceAssumeCapacity(def_func.locals.items);
 
             var f = FunctionInstance{
                 .type_def_index = def_func.type_index,
