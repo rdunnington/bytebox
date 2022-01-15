@@ -96,6 +96,8 @@ const Opcode = enum(u16) {
     Local_Tee = 0x22,
     Global_Get = 0x23,
     Global_Set = 0x24,
+    Table_Get = 0x25,
+    Table_Set = 0x26,
     I32_Load = 0x28,
     I64_Load = 0x29,
     F32_Load = 0x2A,
@@ -1254,10 +1256,16 @@ const Instruction = struct {
                 immediate = try decodeLEB128(u32, reader); // locals index
             },
             .Global_Get => {
-                immediate = try decodeLEB128(u32, reader); // locals index
+                immediate = try decodeLEB128(u32, reader); // globals index
             },
             .Global_Set => {
-                immediate = try decodeLEB128(u32, reader); // locals index
+                immediate = try decodeLEB128(u32, reader); // globals index
+            },
+            .Table_Get => {
+                immediate = try decodeLEB128(u32, reader); // table index
+            },
+            .Table_Set => {
+                immediate = try decodeLEB128(u32, reader); // table index
             },
             .I32_Const => {
                 var value = try decodeLEB128(i32, reader);
@@ -2104,7 +2112,7 @@ pub const ModuleDefinition = struct {
 
                         var local_type_counts: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{});
 
-                        const k_unused_type_sentinel:i32 = -1;
+                        const k_unused_type_sentinel: i32 = -1;
                         var local_type_order: [ValType.count()]i32 = std.enums.directEnumArrayDefault(ValType, i32, k_unused_type_sentinel, 0, .{});
 
                         const num_locals = try decodeLEB128(u32, reader);
@@ -2124,7 +2132,7 @@ pub const ModuleDefinition = struct {
 
                         try def.locals.ensureTotalCapacity(locals_total);
                         for (local_type_order) |counts_index_or_sentinel| {
-                            if (counts_index_or_sentinel == k_unused_type_sentinel) { 
+                            if (counts_index_or_sentinel == k_unused_type_sentinel) {
                                 continue;
                             }
 
@@ -3425,6 +3433,33 @@ pub const ModuleInstance = struct {
                         return error.AssertAttemptToSetImmutable;
                     }
                     global.value = try stack.popValue();
+                },
+                Opcode.Table_Get => {
+                    const table_index = instruction.immediate;
+                    const table: *const TableInstance = current_store.getTable(table_index);
+                    const index: i32 = try stack.popI32();
+                    if (table.refs.items.len <= index or index < 0) {
+                        return error.TrapUndefinedElement;
+                    }
+                    if (table.initialized.isSet(@intCast(usize, index)) == false) {
+                        return error.TrapUninitializedElement;
+                    }
+                    const ref = table.refs.items[@intCast(usize, index)];
+                    try stack.pushValue(ref);
+                },
+                Opcode.Table_Set => {
+                    const table_index = instruction.immediate;
+                    var table: *TableInstance = current_store.getTable(table_index);
+                    const ref = try stack.popValue();
+                    const index: i32 = try stack.popI32();
+                    if (table.refs.items.len <= index or index < 0) {
+                        return error.TrapUndefinedElement;
+                    }
+                    if (ref.isRefType() == false) {
+                        return error.TrapTableSetTypeMismatch;
+                    }
+                    table.refs.items[@intCast(usize, index)] = ref;
+                    table.initialized.set(@intCast(usize, index));
                 },
                 Opcode.I32_Load => {
                     var offset_from_stack: i32 = try stack.popI32();

@@ -176,7 +176,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
             strcmp(err_string, "function and code section have inconsistent lengths"), // this one is a bit of a hack to resolve custom.8.wasm
         wasm.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
         wasm.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
-        wasm.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or 
+        wasm.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or
             strcmp(err_string, "unexpected content after last section"),
         wasm.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         wasm.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
@@ -547,7 +547,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             module.* = Module{};
         }
 
-        log_verbose("{s}: {s}\n", .{command.getCommandName(), command.getModule()});
+        log_verbose("{s}: {s}\n", .{ command.getCommandName(), command.getModule() });
 
         switch (command.*) {
             .Register => |c| {
@@ -653,7 +653,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
                 if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.invocation.field) == false) {
-                        log_verbose("\tskipped...\n", .{ });
+                        log_verbose("\tskipped...\n", .{});
                         continue;
                     }
                 }
@@ -873,7 +873,7 @@ pub fn main() !void {
         "memory_trap",
         "names",
         "nop",
-        // "ref_func",
+        "ref_func",
         // "ref_is_null",
         // "ref_null",
         // "return",
