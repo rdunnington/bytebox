@@ -70,6 +70,7 @@ pub const TrapError = error{
     TrapOutOfBoundsMemoryAccess,
     TrapUndefinedElement,
     TrapUninitializedElement,
+    TrapOutOfBoundsTableAccess,
     TrapUnknown,
 };
 
@@ -2041,7 +2042,7 @@ pub const ModuleDefinition = struct {
                             0x02 => {
                                 def.table_index = try decodeLEB128(u32, reader);
                                 def.offset = try ConstantExpression.decode(reader);
-                                def.reftype = try ValType.decodeReftype(reader);
+                                try ElementHelpers.readNullElemkind(reader);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x03 => {
@@ -3426,7 +3427,7 @@ pub const ModuleInstance = struct {
                     const table: *const TableInstance = current_store.getTable(table_index);
                     const index: i32 = try stack.popI32();
                     if (table.refs.items.len <= index or index < 0) {
-                        return error.TrapUndefinedElement;
+                        return error.TrapOutOfBoundsTableAccess;
                     }
                     const ref = table.refs.items[@intCast(usize, index)];
                     try stack.pushValue(ref);
@@ -3437,7 +3438,7 @@ pub const ModuleInstance = struct {
                     const ref = try stack.popValue();
                     const index: i32 = try stack.popI32();
                     if (table.refs.items.len <= index or index < 0) {
-                        return error.TrapUndefinedElement;
+                        return error.TrapOutOfBoundsTableAccess;
                     }
                     if (ref.isRefType() == false) {
                         return error.TrapTableSetTypeMismatch;

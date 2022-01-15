@@ -202,6 +202,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.TrapError.TrapOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
         wasm.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
         wasm.TrapError.TrapUninitializedElement => strcmp(err_string, "uninitialized element"),
+        wasm.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
         wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
         else => false,
     };
@@ -538,10 +539,6 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
                 continue;
             },
-            // .AssertMalformed => |c| {
-            //     print("Skipping assert_malformed: {s}\n", .{c.err.module});
-            //     continue;
-            // },
             else => {},
         }
 
@@ -627,15 +624,14 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             }
 
             module.inst = wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator) catch |e| {
-                const err_string: []const u8 = errorToText(e);
-                if (instantiate_expected_error) |expected| {
-                    if (strcmp(err_string, expected)) {
+                if (instantiate_expected_error) |expected_str| {
+                    if (isSameError(e, expected_str)) {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
                             print("{s}: {s}\n", .{ command.getCommandName(), module_name });
                         }
-                        print("\tFail: instantiate failed with error '{s}', but expected '{s}\n", .{ err_string, expected });
+                        print("\tFail: instantiate failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                     }
                 } else {
                     if (!g_verbose_logging) {
@@ -738,13 +734,12 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
                 var invoke_failed = false;
                 var invoke_failed_with_correct_trap = false;
-                var trap_string: ?[]const u8 = null;
+                var caught_error: ?anyerror = null;
                 (module.inst.?).invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
                     invoke_failed = true;
+                    caught_error = e;
 
-                    trap_string = errorToText(e);
-
-                    if (strcmp(trap_string.?, c.expected_error)) {
+                    if (isSameError(e, c.expected_error)) {
                         invoke_failed_with_correct_trap = true;
                     }
                 };
@@ -757,7 +752,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                     }
                     // print("assert_trap: {s}:{s}({s}):\n", .{ module_name, c.invocation.field, c.invocation.args.items });
                     if (invoke_failed_with_correct_trap == false) {
-                        print("\tInvoke trapped, but got error '{s}'' instead of expected '{s}':\n", .{ trap_string.?, c.expected_error });
+                        print("\tInvoke trapped, but got error '{s}'' instead of expected '{s}':\n", .{ caught_error.?, c.expected_error });
                     } else {
                         print("\tInvoke succeeded instead of trapping on expected {s}:\n", .{c.expected_error});
                     }
@@ -896,14 +891,14 @@ pub fn main() !void {
         "start",
         "store",
         "switch",
-        //"table",
-        //"table-sub",
+        "table",
+        "table-sub",
         //"table_copy",
         //"table_fill",
-        //"table_get",
-        //"table_grow",
-        //"table_init",
-        //"table_set",
+        "table_get",
+        // "table_grow",
+        // "table_init",
+        "table_set",
         //"table_size",
         "token",
         "traps",
