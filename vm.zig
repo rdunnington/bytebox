@@ -349,7 +349,7 @@ pub const Val = union(ValType) {
         };
     }
 
-    fn nullRef(valtype: ValType) !Val {
+    pub fn nullRef(valtype: ValType) !Val {
         return switch (valtype) {
             .FuncRef => Val{ .FuncRef = Val.k_null_funcref },
             .ExternRef => Val{ .ExternRef = Val.k_null_funcref },
@@ -893,27 +893,25 @@ const TableDefinition = struct {
 
 pub const TableInstance = struct {
     refs: std.ArrayList(Val), // should only be reftypes
-    initialized: std.DynamicBitSet,
     reftype: ValType,
     limits: Limits,
 
     pub fn init(reftype: ValType, limits: Limits, allocator: std.mem.Allocator) !TableInstance {
+        std.debug.assert(reftype.isRefType());
+
         var table = TableInstance{
             .refs = std.ArrayList(Val).init(allocator),
-            .initialized = try std.DynamicBitSet.initEmpty(allocator, 0),
             .reftype = reftype,
             .limits = limits,
         };
         if (limits.min > 0) {
-            try table.refs.resize(limits.min);
-            try table.initialized.resize(limits.min, false);
+            try table.refs.appendNTimes(try Val.nullRef(reftype), limits.min);
         }
         return table;
     }
 
     pub fn deinit(table: *TableInstance) void {
         table.refs.deinit();
-        table.initialized.deinit();
     }
 
     fn ensureMinSize(table: *TableInstance, size: usize) !void {
@@ -925,11 +923,11 @@ pub const TableInstance = struct {
 
         if (table.refs.items.len < size) {
             try table.refs.resize(size);
-            try table.initialized.resize(size, false);
         }
     }
 
     fn init_range_val(table: *TableInstance, elems: []const Val, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
+        // std.debug.print("\ttable init_range_val: init_length: {}, start_elem_index: {}, start_table_index: {}\n", .{ init_length, start_elem_index, start_table_index });
         try table.ensureMinSize(start_table_index + init_length);
 
         if (table.refs.items.len < start_table_index + init_length) {
@@ -942,11 +940,6 @@ pub const TableInstance = struct {
 
         var elem_range = elems[start_elem_index .. start_elem_index + init_length];
         try table.refs.replaceRange(start_table_index, init_length, elem_range);
-
-        var initialized_index = start_table_index;
-        while (initialized_index < start_table_index + init_length) : (initialized_index += 1) {
-            table.initialized.set(initialized_index);
-        }
     }
 
     fn init_range_expr(table: *TableInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
@@ -971,8 +964,6 @@ pub const TableInstance = struct {
             }
 
             table_range[index] = val;
-
-            table.initialized.set(index + start_table_index);
         }
     }
 };
@@ -3355,13 +3346,9 @@ pub const ModuleInstance = struct {
                         return error.TrapUndefinedElement;
                     }
 
-                    if (table.initialized.isSet(@intCast(usize, ref_index)) == false) {
-                        return error.TrapUninitializedElement;
-                    }
-
                     const ref: Val = table.refs.items[@intCast(usize, ref_index)];
                     if (ref.isNull()) {
-                        return error.TrapUnknown;
+                        return error.TrapUninitializedElement;
                     }
 
                     const func_index = ref.FuncRef;
@@ -3441,9 +3428,6 @@ pub const ModuleInstance = struct {
                     if (table.refs.items.len <= index or index < 0) {
                         return error.TrapUndefinedElement;
                     }
-                    if (table.initialized.isSet(@intCast(usize, index)) == false) {
-                        return error.TrapUninitializedElement;
-                    }
                     const ref = table.refs.items[@intCast(usize, index)];
                     try stack.pushValue(ref);
                 },
@@ -3459,7 +3443,6 @@ pub const ModuleInstance = struct {
                         return error.TrapTableSetTypeMismatch;
                     }
                     table.refs.items[@intCast(usize, index)] = ref;
-                    table.initialized.set(@intCast(usize, index));
                 },
                 Opcode.I32_Load => {
                     var offset_from_stack: i32 = try stack.popI32();

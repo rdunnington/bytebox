@@ -144,8 +144,19 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
         }
         return Val{ .F64 = float };
     } else if (strcmp("externref", json_type.String)) {
-        const int = try std.fmt.parseInt(u32, json_value.String, 10);
-        return Val{ .ExternRef = int };
+        if (strcmp("null", json_value.String)) {
+            return Val.nullRef(ValType.ExternRef);
+        } else {
+            const int = try std.fmt.parseInt(u32, json_value.String, 10);
+            return Val{ .ExternRef = int };
+        }
+    } else if (strcmp("funcref", json_type.String)) {
+        if (strcmp("null", json_value.String)) {
+            return Val.nullRef(ValType.FuncRef);
+        } else {
+            const int = try std.fmt.parseInt(u32, json_value.String, 10);
+            return Val{ .FuncRef = int };
+        }
     } else {
         print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
     }
@@ -547,7 +558,9 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             module.* = Module{};
         }
 
-        log_verbose("{s}: {s}\n", .{ command.getCommandName(), command.getModule() });
+        if (std.meta.activeTag(command.*) != .AssertReturn) {
+            log_verbose("{s}: {s}\n", .{ command.getCommandName(), command.getModule() });
+        }
 
         switch (command.*) {
             .Register => |c| {
@@ -874,8 +887,8 @@ pub fn main() !void {
         "names",
         "nop",
         "ref_func",
-        // "ref_is_null",
-        // "ref_null",
+        "ref_is_null",
+        "ref_null",
         // "return",
         // "select",
         // "skip-stack-guard-page",
