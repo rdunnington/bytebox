@@ -22,6 +22,7 @@ pub const MalformedError = error{
     MalformedMultipleStartSections,
     MalformedElementType,
     MalformedUTF8Encoding,
+    MalformedMutability,
 };
 
 pub const UnlinkableError = error{
@@ -717,8 +718,9 @@ fn decodeFloat(comptime T: type, reader: anytype) !T {
     };
 }
 
-const ConstantExpression = struct {
-    value: Val,
+const ConstantExpression = union(enum) {
+    Value: Val,
+    Global: u32, // global index
 
     fn decode(reader: anytype) !ConstantExpression {
         const opcode_value = try reader.readByte();
@@ -726,33 +728,41 @@ const ConstantExpression = struct {
         const opcode = std.meta.intToEnum(Opcode, opcode_value) catch {
             return error.MalformedIllegalOpcode;
         };
-        const val = switch (opcode) {
-            .I32_Const => Val{ .I32 = try decodeLEB128(i32, reader) },
-            .I64_Const => Val{ .I64 = try decodeLEB128(i64, reader) },
-            .F32_Const => Val{ .F32 = try decodeFloat(f32, reader) },
-            .F64_Const => Val{ .F64 = try decodeFloat(f64, reader) },
-            .Ref_Null => try Val.nullRef(try ValType.decode(reader)),
-            .Ref_Func => Val{ .FuncRef = try decodeLEB128(u32, reader) },
-            // TODO handle global.get
-            else => unreachable,
+        const expr = switch (opcode) {
+            .I32_Const => ConstantExpression{ .Value = Val{ .I32 = try decodeLEB128(i32, reader) } },
+            .I64_Const => ConstantExpression{ .Value = Val{ .I64 = try decodeLEB128(i64, reader) } },
+            .F32_Const => ConstantExpression{ .Value = Val{ .F32 = try decodeFloat(f32, reader) } },
+            .F64_Const => ConstantExpression{ .Value = Val{ .F64 = try decodeFloat(f64, reader) } },
+            .Ref_Null => ConstantExpression{ .Value = try Val.nullRef(try ValType.decode(reader)) },
+            .Ref_Func => ConstantExpression{ .Value = Val{ .FuncRef = try decodeLEB128(u32, reader) } },
+            .Global_Get => ConstantExpression{ .Global = try decodeLEB128(u32, reader) },
+            else => error.MalformedIllegalOpcode,
         };
+
+        // TODO validation on global index
 
         const end = @intToEnum(Opcode, try reader.readByte());
         if (end != .End) {
             return error.AssertInvalidConstantExpression;
         }
 
-        return ConstantExpression{
-            .value = val,
-        };
+        return expr;
     }
 
-    fn resolve(self: ConstantExpression) !Val {
-        return self.value;
+    fn resolve(self: *const ConstantExpression, store: *Store) !Val {
+        switch (self.*) {
+            .Value => |val| return val,
+            .Global => |global_index| {
+                std.debug.assert(global_index < store.imports.globals.items.len + store.globals.items.len);
+                const global: *GlobalInstance = store.getGlobal(global_index);
+                return global.value;
+            },
+        }
     }
 
-    fn resolveTo(self: ConstantExpression, comptime T: type) !T {
-        return try self.value.get(T);
+    fn resolveTo(self: *const ConstantExpression, store: *Store, comptime T: type) !T {
+        const val: Val = try self.resolve(store);
+        return val.get(T);
     }
 };
 
@@ -871,7 +881,9 @@ pub const GlobalMut = enum(u8) {
 
     fn decode(reader: anytype) !GlobalMut {
         const byte = try reader.readByte();
-        const value = try std.meta.intToEnum(GlobalMut, byte);
+        const value = std.meta.intToEnum(GlobalMut, byte) catch {
+            return error.MalformedMutability;
+        };
         return value;
     }
 };
@@ -943,7 +955,7 @@ pub const TableInstance = struct {
         try table.refs.replaceRange(start_table_index, init_length, elem_range);
     }
 
-    fn init_range_expr(table: *TableInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
+    fn init_range_expr(table: *TableInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32, store: *Store) !void {
         try table.ensureMinSize(start_table_index + init_length);
 
         if (start_table_index < 0 or table.refs.items.len < start_table_index + init_length) {
@@ -959,7 +971,7 @@ pub const TableInstance = struct {
 
         var index: u32 = 0;
         while (index < elem_range.len) : (index += 1) {
-            var val: Val = try elem_range[index].resolve();
+            var val: Val = try elem_range[index].resolve(store);
             if (std.meta.activeTag(val) != table.reftype) {
                 return error.AssertTypeMismatch;
             }
@@ -2719,7 +2731,7 @@ pub const Store = struct {
         for (module_def.globals.items) |*def_global| {
             var global = GlobalInstance{
                 .mut = def_global.mut,
-                .value = try def_global.expr.resolve(),
+                .value = try def_global.expr.resolve(&store),
             };
             try store.globals.append(global);
         }
@@ -2735,7 +2747,7 @@ pub const Store = struct {
 
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_elem.mode == .Active) {
-                var start_table_index_i32: i32 = if (def_elem.offset) |offset| (try offset.resolveTo(i32)) else 0;
+                var start_table_index_i32: i32 = if (def_elem.offset) |offset| (try offset.resolveTo(&store, i32)) else 0;
                 if (start_table_index_i32 < 0) {
                     return error.OutOfBounds;
                 }
@@ -2747,7 +2759,7 @@ pub const Store = struct {
                     try table.init_range_val(elems, @intCast(u32, elems.len), 0, start_table_index);
                 } else {
                     var elems = def_elem.elems_expr.items;
-                    try table.init_range_expr(elems, @intCast(u32, elems.len), 0, start_table_index);
+                    try table.init_range_expr(elems, @intCast(u32, elems.len), 0, start_table_index, &store);
                 }
             }
         }
@@ -2764,7 +2776,7 @@ pub const Store = struct {
 
                 const num_bytes: usize = def_data.bytes.items.len;
                 if (num_bytes > 0) {
-                    const offset_begin: usize = try (def_data.offset.?).resolveTo(u32);
+                    const offset_begin: usize = try (def_data.offset.?).resolveTo(&store, u32);
                     const offset_end: usize = offset_begin + num_bytes;
                     // std.debug.print("memory.limits: {}, offset_begin: {}, num_bytes: {}, offset_end: {}\n", .{ memory.limits, offset_begin, num_bytes, offset_end });
 

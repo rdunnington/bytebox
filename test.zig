@@ -191,6 +191,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
             strcmp(err_string, "unexpected content after last section"),
         wasm.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         wasm.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
+        wasm.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
         wasm.AssertError.AssertTypeMismatch => strcmp(err_string, "type mismatch"),
         wasm.AssertError.AssertUnknownMemory => strcmp(err_string, "unknown memory"),
         wasm.AssertError.AssertUnknownTable => strcmp(err_string, "unknown table"),
@@ -205,33 +206,6 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
         wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
         else => false,
-    };
-}
-
-fn errorToText(err: anyerror) []const u8 {
-    return switch (err) {
-        wasm.MalformedError.MalformedMagicSignature => "magic header not detected",
-        wasm.MalformedError.MalformedUnexpectedEnd => "unexpected end",
-        wasm.MalformedError.MalformedUnsupportedWasmVersion => "unknown binary version",
-        wasm.MalformedError.MalformedSectionId => "malformed section id",
-        wasm.MalformedError.MalformedTypeSentinel => "integer representation too long",
-        wasm.MalformedError.MalformedLEB128 => "integer representation too long",
-        wasm.AssertError.AssertTypeMismatch => "type mismatch",
-        wasm.AssertError.AssertUnknownMemory => "unknown memory",
-        wasm.AssertError.AssertUnknownTable => "unknown table",
-        wasm.UnlinkableError.UnlinkableUnknownImport => "unknown import",
-        wasm.UnlinkableError.UnlinkableIncompatibleImportType => "incompatible import type",
-        wasm.TrapError.TrapIntegerDivisionByZero => "integer divide by zero",
-        wasm.TrapError.TrapIntegerOverflow => "integer overflow",
-        wasm.TrapError.TrapInvalidIntegerConversion => "invalid conversion to integer",
-        wasm.TrapError.TrapOutOfBoundsMemoryAccess => "out of bounds memory access",
-        wasm.TrapError.TrapUndefinedElement => "undefined element",
-        wasm.TrapError.TrapUninitializedElement => "uninitialized element",
-        wasm.TrapError.TrapUnreachable => "unreachable",
-        else => {
-            std.debug.print("errorToText unknown err: {}\n", .{err});
-            unreachable;
-        },
     };
 }
 
@@ -439,6 +413,26 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
         }
     };
 
+    const Helpers = struct {
+        fn addGlobal(imports: *wasm.ModuleImports, _allocator: std.mem.Allocator, mut: wasm.GlobalMut, comptime T: type, value: T, name: []const u8) !void {
+            const val: Val = switch (T) {
+                i32 => Val{ .I32 = value },
+                i64 => Val{ .I64 = value },
+                f32 => Val{ .F32 = value },
+                f64 => Val{ .F64 = value },
+                else => unreachable,
+            };
+            var global = try _allocator.create(wasm.GlobalInstance);
+            global.* = wasm.GlobalInstance{
+                .mut = mut,
+                .value = val,
+            };
+            try imports.globals.append(wasm.GlobalImport{
+                .name = try _allocator.dupe(u8, name),
+                .data = .{ .Host = global },
+            });
+        }
+    };
     var imports: wasm.ModuleImports = try wasm.ModuleImports.init("spectest", null, allocator);
 
     const no_returns = &[0]ValType{};
@@ -474,37 +468,14 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
         .data = .{ .Host = memory },
     });
 
-    const GlobalInstance = wasm.GlobalInstance;
-
-    var global_i32 = try allocator.create(GlobalInstance);
-    global_i32.* = GlobalInstance{
-        .mut = wasm.GlobalMut.Immutable,
-        .value = Val{ .I32 = 666 },
-    };
-    try imports.globals.append(wasm.GlobalImport{
-        .name = try allocator.dupe(u8, "global_i32"),
-        .data = .{ .Host = global_i32 },
-    });
-
-    var global_f32 = try allocator.create(GlobalInstance);
-    global_f32.* = GlobalInstance{
-        .mut = wasm.GlobalMut.Immutable,
-        .value = Val{ .F32 = 666 },
-    };
-    try imports.globals.append(wasm.GlobalImport{
-        .name = try allocator.dupe(u8, "global_f32"),
-        .data = .{ .Host = global_f32 },
-    });
-
-    var global_f64 = try allocator.create(GlobalInstance);
-    global_f64.* = GlobalInstance{
-        .mut = wasm.GlobalMut.Immutable,
-        .value = Val{ .F64 = 666 },
-    };
-    try imports.globals.append(wasm.GlobalImport{
-        .name = try allocator.dupe(u8, "global_f64"),
-        .data = .{ .Host = global_f64 },
-    });
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, i32, 666, "global_i32");
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, i64, 666, "global_i64");
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, f32, 666.6, "global_f32");
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, f64, 666.6, "global_f64");
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, i32, 0, "global-i32");
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, f32, 0, "global-f32");
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Mutable, i32, 0, "global-mut-i32");
+    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Mutable, i64, 0, "global-mut-i64");
 
     return imports;
 }
@@ -855,7 +826,7 @@ pub fn main() !void {
         "forward",
         // "func",
         // "func_ptrs",
-        // "global",
+        "global",
         "i32",
         "i64",
         "if",
