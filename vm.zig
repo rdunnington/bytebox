@@ -34,7 +34,6 @@ pub const AssertError = error{
     AssertInvalidValType,
     AssertInvalidBytecode,
     AssertInvalidExport,
-    AssertInvalidGlobalInit,
     AssertInvalidLabel,
     AssertInvalidConstantExpression,
     AssertInvalidElement,
@@ -46,20 +45,18 @@ pub const AssertError = error{
     AssertUnknownType,
     AssertIncompleteInstruction,
     AssertUnknownInstruction,
-    AssertTypeMismatch,
     AssertUnknownExport,
     AssertAttemptToSetImmutable,
-    AssertMissingLabel,
     AssertMissingCallFrame,
-    AssertLabelMismatch,
     AssertInvalidFunction,
-    AssertMemoryMaxReached,
-    AssertMemoryInvalidIndex,
-    AssertInvalidData,
-    AssertUnknownFunction,
-    AssertUnknownMemory,
-    AssertUnknownData,
-    AssertInvalidName,
+};
+
+pub const ValidationError = error{
+    ValidationTypeMismatch,
+    ValidationUnknownTable,
+    ValidationUnknownMemory,
+    ValidationUnknownData,
+    ValidationUnknownFunction,
 };
 
 pub const TrapError = error{
@@ -272,6 +269,12 @@ const Opcode = enum(u16) {
     Data_Drop = 0xFC09,
     Memory_Copy = 0xFC0A,
     Memory_Fill = 0xFC0B,
+    // Table_Init = 0xFC0C,
+    // Elem_Drop = 0xFC0D,
+    // Table_Copy = 0xFC0E,
+    Table_Grow = 0xFC0F,
+    Table_Size = 0xFC10,
+    // Table_Fill = 0xFC11,
 
     fn expectsEnd(opcode: Opcode) bool {
         return switch (opcode) {
@@ -384,7 +387,7 @@ pub const Val = union(ValType) {
 
         std.debug.print("\tExpected value of type {}, but got {}\n", .{ T, val });
 
-        return error.AssertTypeMismatch;
+        return error.ValidationTypeMismatch;
     }
 
     fn isRefType(v: Val) bool {
@@ -481,8 +484,8 @@ const Stack = struct {
         var item = try self.top();
         switch (item.*) {
             .Val => |v| return v,
-            .Label => return error.AssertTypeMismatch,
-            .Frame => return error.AssertTypeMismatch,
+            .Label => return error.ValidationTypeMismatch,
+            .Frame => return error.ValidationTypeMismatch,
         }
     }
 
@@ -499,8 +502,8 @@ const Stack = struct {
         // std.debug.print("\tstack: {any}\n", .{self.stack.items});
         switch (item) {
             .Val => |v| return v,
-            .Label => return error.AssertTypeMismatch,
-            .Frame => return error.AssertTypeMismatch,
+            .Label => return error.ValidationTypeMismatch,
+            .Frame => return error.ValidationTypeMismatch,
         }
     }
 
@@ -519,9 +522,9 @@ const Stack = struct {
     fn popLabel(self: *Self) !Label {
         var item = try self.pop();
         var label = switch (item) {
-            .Val => return error.AssertTypeMismatch,
+            .Val => return error.ValidationTypeMismatch,
             .Label => |label| label,
-            .Frame => return error.AssertTypeMismatch,
+            .Frame => return error.ValidationTypeMismatch,
         };
 
         // std.debug.print("\t>> pop label: {}\n", .{label});
@@ -574,8 +577,8 @@ const Stack = struct {
     fn popFrame(self: *Self) !void {
         var item = try self.pop();
         switch (item) {
-            .Val => return error.AssertTypeMismatch,
-            .Label => return error.AssertTypeMismatch,
+            .Val => return error.ValidationTypeMismatch,
+            .Label => return error.ValidationTypeMismatch,
             .Frame => |*frame| {
                 frame.locals.deinit();
             },
@@ -615,7 +618,7 @@ const Stack = struct {
         var val: Val = try self.popValue();
         switch (val) {
             ValType.I32 => |value| return value,
-            else => return error.AssertTypeMismatch,
+            else => return error.ValidationTypeMismatch,
         }
     }
 
@@ -623,7 +626,7 @@ const Stack = struct {
         var val: Val = try self.popValue();
         switch (val) {
             ValType.I64 => |value| return value,
-            else => return error.AssertTypeMismatch,
+            else => return error.ValidationTypeMismatch,
         }
     }
 
@@ -631,7 +634,7 @@ const Stack = struct {
         var val: Val = try self.popValue();
         switch (val) {
             ValType.F32 => |value| return value,
-            else => return error.AssertTypeMismatch,
+            else => return error.ValidationTypeMismatch,
         }
     }
 
@@ -639,7 +642,7 @@ const Stack = struct {
         var val: Val = try self.popValue();
         switch (val) {
             ValType.F64 => |value| return value,
-            else => return error.AssertTypeMismatch,
+            else => return error.ValidationTypeMismatch,
         }
     }
 
@@ -928,10 +931,9 @@ pub const TableInstance = struct {
     }
 
     fn ensureMinSize(table: *TableInstance, size: usize) !void {
-        if (table.limits.max) |max| {
-            if (size > max) {
-                return error.AssertTableMaxExceeded;
-            }
+        const max = if (table.limits.max) |max| max else std.math.maxInt(i32);
+        if (size > max) {
+            return error.AssertTableMaxExceeded;
         }
 
         if (table.refs.items.len < size) {
@@ -939,16 +941,25 @@ pub const TableInstance = struct {
         }
     }
 
+    fn grow(table: *TableInstance, length: usize, init_value: Val) bool {
+        var old_length: usize = table.refs.items.len;
+        table.ensureMinSize(old_length + length) catch {
+            return false;
+        };
+        std.mem.set(Val, table.refs.items[old_length..], init_value);
+        return true;
+    }
+
     fn init_range_val(table: *TableInstance, elems: []const Val, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
         // std.debug.print("\ttable init_range_val: init_length: {}, start_elem_index: {}, start_table_index: {}\n", .{ init_length, start_elem_index, start_table_index });
         try table.ensureMinSize(start_table_index + init_length);
 
         if (table.refs.items.len < start_table_index + init_length) {
-            return error.OutOfBounds;
+            return error.TrapOutOfBoundsTableAccess;
         }
 
         if (elems.len < start_elem_index + init_length) {
-            return error.OutOfBounds;
+            return error.TrapOutOfBoundsTableAccess;
         }
 
         var elem_range = elems[start_elem_index .. start_elem_index + init_length];
@@ -959,11 +970,11 @@ pub const TableInstance = struct {
         try table.ensureMinSize(start_table_index + init_length);
 
         if (start_table_index < 0 or table.refs.items.len < start_table_index + init_length) {
-            return error.OutOfBounds;
+            return error.TrapOutOfBoundsTableAccess;
         }
 
         if (start_elem_index < 0 or elems.len < start_elem_index + init_length) {
-            return error.OutOfBounds;
+            return error.TrapOutOfBoundsTableAccess;
         }
 
         var elem_range = elems[start_elem_index .. start_elem_index + init_length];
@@ -973,7 +984,7 @@ pub const TableInstance = struct {
         while (index < elem_range.len) : (index += 1) {
             var val: Val = try elem_range[index].resolve(store);
             if (std.meta.activeTag(val) != table.reftype) {
-                return error.AssertTypeMismatch;
+                return error.ValidationTypeMismatch;
             }
 
             table_range[index] = val;
@@ -1517,6 +1528,9 @@ const Instruction = struct {
                     return error.MalformedMissingZeroByte;
                 }
             },
+            .Table_Grow, .Table_Size => {
+                immediate = try decodeLEB128(u32, reader); // tableidx
+            },
             else => {},
         }
 
@@ -1540,9 +1554,15 @@ const CustomSection = struct {
 };
 
 const ModuleValidator = struct {
+    fn validateTableIndex(index: u32, module: *const ModuleDefinition) !void {
+        if (module.imports.tables.items.len + module.tables.items.len <= index) {
+            return error.ValidationUnknownTable;
+        }
+    }
+
     fn validateMemoryIndex(module: *const ModuleDefinition) !void {
         if (module.memories.items.len < 1) {
-            return error.AssertUnknownMemory;
+            return error.ValidationUnknownMemory;
         }
     }
 
@@ -1552,7 +1572,7 @@ const ModuleValidator = struct {
         }
 
         if (module.data_count.? <= index) {
-            return error.AssertUnknownData;
+            return error.ValidationUnknownData;
         }
     }
 
@@ -1570,6 +1590,9 @@ const ModuleValidator = struct {
             },
             .Memory_Fill => {
                 try validateMemoryIndex(module);
+            },
+            .Table_Grow, .Table_Size => {
+                try validateTableIndex(instruction.immediate, module);
             },
             else => {},
         }
@@ -1988,7 +2011,7 @@ pub const ModuleDefinition = struct {
                     module.start_func_index = try decodeLEB128(u32, reader);
 
                     if (module.imports.functions.items.len + module.functions.items.len <= module.start_func_index.?) {
-                        return error.AssertUnknownFunction;
+                        return error.ValidationUnknownFunction;
                     }
                 },
                 .Element => {
@@ -2769,7 +2792,7 @@ pub const Store = struct {
             if (def_data.mode == .Active) {
                 var memory_index: u32 = def_data.memory_index.?;
                 if (store.imports.memories.items.len + store.memories.items.len <= memory_index) {
-                    return error.AssertUnknownMemory;
+                    return error.ValidationUnknownMemory;
                 }
 
                 var memory: *MemoryInstance = store.getMemory(memory_index);
@@ -2971,7 +2994,7 @@ pub const ModuleInstance = struct {
         if (params.len != func_type_params.len) {
             // std.debug.print("params.len: {}, func_type_params.len: {}\n", .{params.len, func_type_params.len});
             // std.debug.print("params: {s}, func_type_params: {s}\n", .{params, func_type_params});
-            return error.AssertTypeMismatch;
+            return error.ValidationTypeMismatch;
         }
 
         var locals = std.ArrayList(Val).init(self.allocator); // gets deinited when popFrame() is called
@@ -2979,7 +3002,7 @@ pub const ModuleInstance = struct {
 
         for (params) |v, i| {
             if (std.meta.activeTag(v) != func_type_params[i]) {
-                return error.AssertTypeMismatch;
+                return error.ValidationTypeMismatch;
             }
             locals.items[i] = v;
         }
@@ -3007,7 +3030,7 @@ pub const ModuleInstance = struct {
 
         if (self.stack.size() != returns.len) {
             std.debug.print("stack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
-            return error.AssertTypeMismatch;
+            return error.ValidationTypeMismatch;
         }
 
         if (returns.len > 0) {
@@ -3029,12 +3052,12 @@ pub const ModuleInstance = struct {
 
                 for (params) |v, i| {
                     if (std.meta.activeTag(v) != param_types[i]) {
-                        return error.AssertTypeMismatch;
+                        return error.ValidationTypeMismatch;
                     }
                 }
 
                 if (returns.len != return_types.len) {
-                    return error.AssertTypeMismatch;
+                    return error.ValidationTypeMismatch;
                 }
 
                 data.callback(data.userdata, params, returns);
@@ -3042,7 +3065,7 @@ pub const ModuleInstance = struct {
                 // validate return types
                 for (returns) |val, i| {
                     if (std.meta.activeTag(val) != return_types[i]) {
-                        return error.AssertTypeMismatch;
+                        return error.ValidationTypeMismatch;
                     }
                 }
             },
@@ -3330,7 +3353,7 @@ pub const ModuleInstance = struct {
                 Opcode.Call => {
                     const func_index = instruction.immediate;
                     if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
-                        return error.AssertUnknownFunction;
+                        return error.ValidationUnknownFunction;
                     }
 
                     if (func_index >= current_store.imports.functions.items.len) {
@@ -3366,7 +3389,7 @@ pub const ModuleInstance = struct {
 
                     const func_index = ref.FuncRef;
                     if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
-                        return error.AssertUnknownFunction;
+                        return error.ValidationUnknownFunction;
                     }
 
                     if (func_index >= current_store.imports.functions.items.len) {
@@ -3393,7 +3416,7 @@ pub const ModuleInstance = struct {
                     var v1 = try stack.popValue();
 
                     if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
-                        return error.AssertTypeMismatch;
+                        return error.ValidationTypeMismatch;
                     }
 
                     if (boolean != 0) {
@@ -4389,7 +4412,7 @@ pub const ModuleInstance = struct {
                 Opcode.Ref_Is_Null => {
                     const val: Val = try stack.popValue();
                     if (val.isRefType() == false) {
-                        return error.AssertTypeMismatch;
+                        return error.ValidationTypeMismatch;
                     }
                     const boolean: i32 = if (val.isNull()) 1 else 0;
                     try stack.pushI32(boolean);
@@ -4522,6 +4545,27 @@ pub const ModuleInstance = struct {
 
                     std.mem.set(u8, destination, value);
                 },
+                Opcode.Table_Grow => {
+                    const table_index: u32 = instruction.immediate;
+                    const table: *TableInstance = current_store.getTable(table_index);
+                    const length = @bitCast(u32, try stack.popI32());
+                    // if (length < 0) {
+                    //     return error.TrapOutOfBoundsTableAccess;
+                    // }
+                    const init_value = try stack.popValue();
+                    if (init_value.isRefType() == false) {
+                        return error.ValidationTypeMismatch;
+                    }
+                    const old_length = @intCast(i32, table.refs.items.len);
+                    const return_value: i32 = if (table.grow(length, init_value)) old_length else -1;
+                    try stack.pushI32(return_value);
+                },
+                Opcode.Table_Size => {
+                    const table_index: u32 = instruction.immediate;
+                    const table: *TableInstance = current_store.getTable(table_index);
+                    const length = @intCast(i32, table.refs.items.len);
+                    try stack.pushI32(length);
+                },
             }
 
             instruction_offset = next_instruction;
@@ -4547,7 +4591,7 @@ pub const ModuleInstance = struct {
             var value = try context.stack.popValue();
             if (std.meta.activeTag(value) != param_types[param_index]) {
                 std.debug.print("\tExpected value of type {}, but got {}\n", .{ param_types[param_index], value });
-                return error.AssertTypeMismatch;
+                return error.ValidationTypeMismatch;
             }
             frame.locals.items[param_index] = value;
         }
@@ -4581,7 +4625,7 @@ pub const ModuleInstance = struct {
                 for (params) |_, i| {
                     var v = try context.stack.popValue();
                     if (std.meta.activeTag(v) != param_types[param_types.len - i - 1]) {
-                        return error.AssertTypeMismatch;
+                        return error.ValidationTypeMismatch;
                     }
                     // std.debug.print("\tcallImport host: setting param {} to {}\n", .{ i, v });
                     params[params.len - i - 1] = v;
@@ -4592,7 +4636,7 @@ pub const ModuleInstance = struct {
                 // validate return types
                 for (returns) |val, i| {
                     if (std.meta.activeTag(val) != return_types[i]) {
-                        return error.AssertTypeMismatch;
+                        return error.ValidationTypeMismatch;
                     }
                 }
 
@@ -4703,7 +4747,7 @@ pub const ModuleInstance = struct {
             var value = try context.stack.popValue();
             if (std.meta.activeTag(value) != return_types[return_types.len - returns.items.len - 1]) {
                 std.debug.print("\tExpected value of type {}, but got {}\n", .{ return_types[returns.items.len], value });
-                return error.AssertTypeMismatch;
+                return error.ValidationTypeMismatch;
             }
             try returns.append(value);
         }
@@ -4778,7 +4822,7 @@ pub const ModuleInstance = struct {
             var item = try stack.popValue();
             if (types[types.len - returns.items.len - 1] != std.meta.activeTag(item)) {
                 std.debug.print("popValues mismatch: required: {s}, got {}\n", .{ types, item });
-                return error.AssertTypeMismatch;
+                return error.ValidationTypeMismatch;
             }
             try returns.append(item);
         }

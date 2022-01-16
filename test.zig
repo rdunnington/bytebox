@@ -192,11 +192,15 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         wasm.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
         wasm.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
-        wasm.AssertError.AssertTypeMismatch => strcmp(err_string, "type mismatch"),
-        wasm.AssertError.AssertUnknownMemory => strcmp(err_string, "unknown memory"),
-        wasm.AssertError.AssertUnknownTable => strcmp(err_string, "unknown table"),
+
+        wasm.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch"),
+        wasm.ValidationError.ValidationUnknownTable => strcmp(err_string, "unknown table"),
+        wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory"),
+        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data"),
+
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
+
         wasm.TrapError.TrapIntegerDivisionByZero => strcmp(err_string, "integer divide by zero"),
         wasm.TrapError.TrapIntegerOverflow => strcmp(err_string, "integer overflow"),
         wasm.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
@@ -205,6 +209,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.TrapError.TrapUninitializedElement => strcmp(err_string, "uninitialized element"),
         wasm.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
         wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
+
         else => false,
     };
 }
@@ -867,10 +872,10 @@ pub fn main() !void {
         //"table_copy",
         //"table_fill",
         "table_get",
-        // "table_grow",
+        "table_grow",
         // "table_init",
         "table_set",
-        //"table_size",
+        "table_size",
         "token",
         "traps",
         "type",
