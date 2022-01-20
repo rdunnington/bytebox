@@ -40,12 +40,14 @@ const BadModuleError = struct {
 };
 
 const CommandDecodeModule = struct {
-    module: []const u8,
+    module_filename: []const u8,
+    module_name: []const u8,
 };
 
 const CommandRegister = struct {
-    module: []const u8,
-    name: []const u8,
+    module_filename: []const u8,
+    module_name: []const u8,
+    import_name: []const u8,
 };
 
 const CommandAssertReturn = struct {
@@ -97,10 +99,18 @@ const Command = union(CommandType) {
         };
     }
 
-    fn getModule(self: *const Command) []const u8 {
+    fn getModuleFilename(self: *const Command) []const u8 {
         return switch (self.*) {
-            .DecodeModule => |c| c.module,
-            .Register => |c| c.module,
+            .DecodeModule => |c| c.module_filename,
+            .Register => |c| c.module_filename,
+            else => return getModuleName(self),
+        };
+    }
+
+    fn getModuleName(self: *const Command) []const u8 {
+        return switch (self.*) {
+            .DecodeModule => |c| c.module_name,
+            .Register => |c| c.module_name,
             .AssertReturn => |c| c.invocation.module,
             .AssertTrap => |c| c.invocation.module,
             .AssertMalformed => |c| c.err.module,
@@ -201,6 +211,8 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
 
+        wasm.UninstantiableError.UninstantiableOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
+
         wasm.TrapError.TrapIntegerDivisionByZero => strcmp(err_string, "integer divide by zero"),
         wasm.TrapError.TrapIntegerOverflow => strcmp(err_string, "integer overflow"),
         wasm.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
@@ -228,8 +240,14 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 }
             }
 
+            var module: []const u8 = fallback_module;
+            const json_module_or_null = json_action.Object.getPtr("module");
+            if (json_module_or_null) |json_module| {
+                module = try _allocator.dupe(u8, json_module.String);
+            }
+
             return Invocation{
-                .module = fallback_module,
+                .module = module,
                 .field = try _allocator.dupe(u8, json_field.String),
                 .args = args,
             };
@@ -260,21 +278,35 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         const json_command_type = json_command.Object.getPtr("type").?;
 
         if (strcmp("module", json_command_type.String)) {
-            var fallback = json_command.Object.getPtr("filename").?;
-            fallback_module = try allocator.dupe(u8, fallback.String);
+            const json_filename = json_command.Object.getPtr("filename").?;
+            var filename: []const u8 = try allocator.dupe(u8, json_filename.String);
+            fallback_module = filename;
+
+            var name = filename;
+            if (json_command.Object.getPtr("name")) |json_module_name| {
+                name = try allocator.dupe(u8, json_module_name.String);
+            }
 
             var command = Command{
                 .DecodeModule = CommandDecodeModule{
-                    .module = try allocator.dupe(u8, fallback.String),
+                    .module_filename = filename,
+                    .module_name = name,
                 },
             };
             try commands.append(command);
         } else if (strcmp("register", json_command_type.String)) {
             const json_as = json_command.Object.getPtr("as").?;
+            var json_import_name = json_as;
+            var json_module_name = json_as;
+            if (json_command.Object.getPtr("name")) |json_name| {
+                json_module_name = json_name;
+            }
+
             var command = Command{
                 .Register = CommandRegister{
-                    .module = try allocator.dupe(u8, fallback_module),
-                    .name = try allocator.dupe(u8, json_as.String),
+                    .module_filename = try allocator.dupe(u8, fallback_module),
+                    .module_name = try allocator.dupe(u8, json_module_name.String),
+                    .import_name = try allocator.dupe(u8, json_import_name.String),
                 },
             };
             try commands.append(command);
@@ -354,6 +386,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 }
 
 const Module = struct {
+    filename: []const u8 = "",
     def: ?wasm.ModuleDefinition = null,
     inst: ?wasm.ModuleInstance = null,
 };
@@ -518,12 +551,14 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             else => {},
         }
 
-        var module_name = command.getModule();
+        const module_filename = command.getModuleFilename();
+        const module_name = command.getModuleName();
         if (opts.module_filter_or_null) |filter| {
-            if (strcmp(filter, module_name) == false) {
+            if (strcmp(filter, module_filename) == false) {
                 continue;
             }
         }
+        // std.debug.print("looking for (name/filename) {s}:{s}\n", .{ module_name, module_filename });
 
         var entry = name_to_module.getOrPutAssumeCapacity(module_name);
         var module: *Module = entry.value_ptr;
@@ -531,18 +566,22 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
             module.* = Module{};
         }
 
-        if (std.meta.activeTag(command.*) != .AssertReturn) {
-            log_verbose("{s}: {s}\n", .{ command.getCommandName(), command.getModule() });
+        switch (command.*) {
+            .AssertReturn => {},
+            .AssertTrap => {},
+            else => log_verbose("{s}: {s}|{s}\n", .{ command.getCommandName(), module_name, module_filename }),
         }
 
         switch (command.*) {
             .Register => |c| {
                 if (module.inst == null) {
-                    print("Register: module instance {s} was not found in the cache. Is the wast malformed?", .{c.module});
+                    print("Register: module instance {s}|{s} was not found in the cache. Is the wast malformed?\n", .{ c.module_name, module.filename });
                     continue;
                 }
 
-                var module_imports: wasm.ModuleImports = try (module.inst.?).exports(c.name);
+                log_verbose("\tSetting export module name to {s}\n", .{c.import_name});
+
+                var module_imports: wasm.ModuleImports = try (module.inst.?).exports(c.import_name);
                 try imports.append(module_imports);
                 continue;
             },
@@ -550,7 +589,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
         }
 
         if (module.inst == null) {
-            var module_path = try std.fs.path.join(scratch_allocator, &[_][]const u8{ suite_dir, module_name });
+            var module_path = try std.fs.path.join(scratch_allocator, &[_][]const u8{ suite_dir, module_filename });
             var cwd = std.fs.cwd();
             var module_data = try cwd.readFileAlloc(scratch_allocator, module_path, 1024 * 1024 * 8);
 
@@ -562,19 +601,21 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 else => {},
             }
 
+            module.filename = try scratch_allocator.dupe(u8, module_filename);
+
             module.def = wasm.ModuleDefinition.init(module_data, scratch_allocator) catch |e| {
                 if (decode_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
-                            print("{s}: {s}\n", .{ command.getCommandName(), module_name });
+                            print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                         }
                         print("\tFail: decode failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                     }
                 } else {
                     if (!g_verbose_logging) {
-                        print("{s}: {s}\n", .{ command.getCommandName(), module_name });
+                        print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                     }
                     print("\tDecode failed with error: {}\n", .{e});
                 }
@@ -583,7 +624,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
             if (decode_expected_error) |expected| {
                 if (!g_verbose_logging) {
-                    print("{s}: {s}\n", .{ command.getCommandName(), module_name });
+                    print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
                 print("\tFail: decode succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
@@ -605,13 +646,13 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
-                            print("{s}: {s}\n", .{ command.getCommandName(), module_name });
+                            print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                         }
                         print("\tFail: instantiate failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                     }
                 } else {
                     if (!g_verbose_logging) {
-                        print("{s}: {s}\n", .{ command.getCommandName(), module_name });
+                        print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                     }
                     print("\tInstantiate failed with error: {}\n", .{e});
                 }
@@ -620,7 +661,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
             if (instantiate_expected_error) |expected| {
                 if (!g_verbose_logging) {
-                    print("{s}: {s}\n", .{ command.getCommandName(), module_name });
+                    print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
                 print("\tFail: instantiate succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
@@ -647,12 +688,12 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..num_expected_returns];
 
-                log_verbose("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                log_verbose("assert_return: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
 
                 var invoke_succeeded = true;
                 (module.inst.?).invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
                     if (!g_verbose_logging) {
-                        print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                        print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
                     }
                     print("\tFail with error: {}\n", .{e});
                     invoke_succeeded = false;
@@ -676,7 +717,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
                             if (pass == false) {
                                 if (!g_verbose_logging) {
-                                    print("assert_return: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                                    print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
                                 }
                                 print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
                                 invoke_succeeded = false;
@@ -698,12 +739,12 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
                 if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.invocation.field) == false) {
-                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module_name, c.invocation.field });
+                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module.filename, c.invocation.field });
                         continue;
                     }
                 }
 
-                log_verbose("assert_trap: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                log_verbose("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
 
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..];
@@ -724,9 +765,9 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                     log_verbose("\tSuccess!\n", .{});
                 } else {
                     if (!g_verbose_logging) {
-                        print("assert_trap: {s}:{s}({s})\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                        print("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
                     }
-                    // print("assert_trap: {s}:{s}({s}):\n", .{ module_name, c.invocation.field, c.invocation.args.items });
+                    // print("assert_trap: {s}:{s}({s}):\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
                     if (invoke_failed_with_correct_trap == false) {
                         print("\tInvoke trapped, but got error '{s}'' instead of expected '{s}':\n", .{ caught_error.?, c.expected_error });
                     } else {
