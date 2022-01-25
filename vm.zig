@@ -30,6 +30,10 @@ pub const UnlinkableError = error{
     UnlinkableIncompatibleImportType,
 };
 
+pub const UninstantiableError = error{
+    UninstantiableOutOfBoundsTableAccess,
+};
+
 pub const AssertError = error{
     AssertInvalidValType,
     AssertInvalidBytecode,
@@ -271,7 +275,7 @@ const Opcode = enum(u16) {
     Memory_Fill = 0xFC0B,
     // Table_Init = 0xFC0C,
     // Elem_Drop = 0xFC0D,
-    // Table_Copy = 0xFC0E,
+    Table_Copy = 0xFC0E,
     Table_Grow = 0xFC0F,
     Table_Size = 0xFC10,
     // Table_Fill = 0xFC11,
@@ -338,7 +342,10 @@ pub const Val = union(ValType) {
     I64: i64,
     F32: f32,
     F64: f64,
-    FuncRef: u32, // index into VmState.functions
+    FuncRef: struct {
+        module_instance: ?*ModuleInstance,
+        index: u32, // index into VmState.functions
+    },
     ExternRef: u32, // TODO figure out what this indexes
 
     const k_null_funcref: u32 = std.math.maxInt(u32);
@@ -349,14 +356,14 @@ pub const Val = union(ValType) {
             .I64 => Val{ .I64 = 0 },
             .F32 => Val{ .F32 = 0.0 },
             .F64 => Val{ .F64 = 0.0 },
-            .FuncRef => Val{ .FuncRef = 0 },
-            .ExternRef => Val{ .ExternRef = 0 },
+            .FuncRef => nullRef(.FuncRef) catch unreachable,
+            .ExternRef => nullRef(.ExternRef) catch unreachable,
         };
     }
 
     pub fn nullRef(valtype: ValType) !Val {
         return switch (valtype) {
-            .FuncRef => Val{ .FuncRef = Val.k_null_funcref },
+            .FuncRef => Val{ .FuncRef = .{ .index = Val.k_null_funcref, .module_instance = null } },
             .ExternRef => Val{ .ExternRef = Val.k_null_funcref },
             else => error.AssertInvalidBytecode,
         };
@@ -400,13 +407,20 @@ pub const Val = union(ValType) {
 
     fn isNull(v: Val) bool {
         return switch (v) {
-            .FuncRef => |index| index == k_null_funcref,
+            .FuncRef => |s| s.index == k_null_funcref,
             .ExternRef => |index| index == k_null_funcref,
             else => {
                 // std.debug.print("called isNull on value {}\n", .{v});
                 unreachable;
             },
         };
+    }
+
+    fn assignModuleToFuncRef(val: *Val, module_instance: *ModuleInstance) void {
+        switch (val) {
+            .FuncRef => |*s| s.module_instance = module_instance,
+            else => unreachable,
+        }
     }
 };
 
@@ -737,7 +751,7 @@ const ConstantExpression = union(enum) {
             .F32_Const => ConstantExpression{ .Value = Val{ .F32 = try decodeFloat(f32, reader) } },
             .F64_Const => ConstantExpression{ .Value = Val{ .F64 = try decodeFloat(f64, reader) } },
             .Ref_Null => ConstantExpression{ .Value = try Val.nullRef(try ValType.decode(reader)) },
-            .Ref_Func => ConstantExpression{ .Value = Val{ .FuncRef = try decodeLEB128(u32, reader) } },
+            .Ref_Func => ConstantExpression{ .Value = Val{ .FuncRef = .{ .index = try decodeLEB128(u32, reader), .module_instance = null } } },
             .Global_Get => ConstantExpression{ .Global = try decodeLEB128(u32, reader) },
             else => error.MalformedIllegalOpcode,
         };
@@ -920,6 +934,7 @@ pub const TableInstance = struct {
             .reftype = reftype,
             .limits = limits,
         };
+
         if (limits.min > 0) {
             try table.refs.appendNTimes(try Val.nullRef(reftype), limits.min);
         }
@@ -930,30 +945,22 @@ pub const TableInstance = struct {
         table.refs.deinit();
     }
 
-    fn ensureMinSize(table: *TableInstance, size: usize) !void {
-        const max = if (table.limits.max) |max| max else std.math.maxInt(i32);
-        if (size > max) {
-            return error.AssertTableMaxExceeded;
-        }
-
-        if (table.refs.items.len < size) {
-            try table.refs.resize(size);
-        }
-    }
-
     fn grow(table: *TableInstance, length: usize, init_value: Val) bool {
-        var old_length: usize = table.refs.items.len;
-        table.ensureMinSize(old_length + length) catch {
+        const max = if (table.limits.max) |m| m else std.math.maxInt(i32);
+        std.debug.assert(table.refs.items.len == table.limits.min);
+
+        var old_length: usize = table.limits.min;
+        if (old_length + length > max) {
             return false;
-        };
-        std.mem.set(Val, table.refs.items[old_length..], init_value);
+        }
+
+        table.limits.min = @intCast(u32, old_length + length);
+
+        table.refs.appendNTimes(init_value, length) catch return false;
         return true;
     }
 
-    fn init_range_val(table: *TableInstance, elems: []const Val, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
-        // std.debug.print("\ttable init_range_val: init_length: {}, start_elem_index: {}, start_table_index: {}\n", .{ init_length, start_elem_index, start_table_index });
-        try table.ensureMinSize(start_table_index + init_length);
-
+    fn init_range_val(table: *TableInstance, module: *ModuleInstance, elems: []const Val, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
         if (table.refs.items.len < start_table_index + init_length) {
             return error.TrapOutOfBoundsTableAccess;
         }
@@ -963,12 +970,22 @@ pub const TableInstance = struct {
         }
 
         var elem_range = elems[start_elem_index .. start_elem_index + init_length];
-        try table.refs.replaceRange(start_table_index, init_length, elem_range);
+        var table_range = table.refs.items[start_table_index .. start_table_index + init_length];
+
+        var index: u32 = 0;
+        while (index < elem_range.len) : (index += 1) {
+            var val: Val = elem_range[index];
+            std.debug.assert(std.meta.activeTag(val) == table.reftype);
+
+            if (table.reftype == .FuncRef) {
+                val.FuncRef.module_instance = module;
+            }
+
+            table_range[index] = val;
+        }
     }
 
-    fn init_range_expr(table: *TableInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32, store: *Store) !void {
-        try table.ensureMinSize(start_table_index + init_length);
-
+    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32, store: *Store) !void {
         if (start_table_index < 0 or table.refs.items.len < start_table_index + init_length) {
             return error.TrapOutOfBoundsTableAccess;
         }
@@ -983,8 +1000,10 @@ pub const TableInstance = struct {
         var index: u32 = 0;
         while (index < elem_range.len) : (index += 1) {
             var val: Val = try elem_range[index].resolve(store);
-            if (std.meta.activeTag(val) != table.reftype) {
-                return error.ValidationTypeMismatch;
+            std.debug.assert(std.meta.activeTag(val) == table.reftype);
+
+            if (table.reftype == .FuncRef) {
+                val.FuncRef.module_instance = module;
             }
 
             table_range[index] = val;
@@ -1196,6 +1215,11 @@ const CallIndirectImmediates = struct {
 const BranchTableImmediates = struct {
     label_ids: std.ArrayList(u32),
     fallback_id: u32,
+};
+
+const TablePairImmediates = struct {
+    index_x: u32,
+    index_y: u32,
 };
 
 const Instruction = struct {
@@ -1528,6 +1552,27 @@ const Instruction = struct {
                     return error.MalformedMissingZeroByte;
                 }
             },
+            .Table_Copy => {
+                const dest_table_index = try decodeLEB128(u32, reader);
+                const src_table_index = try decodeLEB128(u32, reader);
+
+                var pair = TablePairImmediates{
+                    .index_x = dest_table_index,
+                    .index_y = src_table_index,
+                };
+
+                for (module.code.table_pairs.items) |*item, i| {
+                    if (std.meta.eql(item, &pair)) {
+                        immediate = @intCast(u32, i);
+                        break;
+                    }
+                }
+
+                if (immediate == k_invalid_immediate) {
+                    immediate = @intCast(u32, module.code.table_pairs.items.len);
+                    try module.code.table_pairs.append(pair);
+                }
+            },
             .Table_Grow, .Table_Size => {
                 immediate = try decodeLEB128(u32, reader); // tableidx
             },
@@ -1591,6 +1636,13 @@ const ModuleValidator = struct {
             .Memory_Fill => {
                 try validateMemoryIndex(module);
             },
+            .Table_Copy => {
+                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+                const dest_table_index = pair.index_x;
+                const src_table_index = pair.index_y;
+                try validateTableIndex(dest_table_index, module);
+                try validateTableIndex(src_table_index, module);
+            },
             .Table_Grow, .Table_Size => {
                 try validateTableIndex(instruction.immediate, module);
             },
@@ -1607,6 +1659,7 @@ pub const ModuleDefinition = struct {
         block_type_values: std.ArrayList(BlockTypeValue),
         call_indirect: std.ArrayList(CallIndirectImmediates),
         branch_table: std.ArrayList(BranchTableImmediates),
+        table_pairs: std.ArrayList(TablePairImmediates),
         i64_const: std.ArrayList(i64),
         f64_const: std.ArrayList(f64),
     };
@@ -1655,6 +1708,7 @@ pub const ModuleDefinition = struct {
                 .block_type_values = std.ArrayList(BlockTypeValue).init(allocator),
                 .call_indirect = std.ArrayList(CallIndirectImmediates).init(allocator),
                 .branch_table = std.ArrayList(BranchTableImmediates).init(allocator),
+                .table_pairs = std.ArrayList(TablePairImmediates).init(allocator),
                 .i64_const = std.ArrayList(i64).init(allocator),
                 .f64_const = std.ArrayList(f64).init(allocator),
             },
@@ -1703,7 +1757,7 @@ pub const ModuleDefinition = struct {
                 switch (valtype) {
                     .FuncRef => {
                         const func_index = try decodeLEB128(u32, reader);
-                        return Val{ .FuncRef = func_index };
+                        return Val{ .FuncRef = .{ .index = func_index, .module_instance = null } };
                     },
                     .ExternRef => {
                         unreachable; // TODO
@@ -2264,12 +2318,13 @@ pub const ModuleDefinition = struct {
         self.code.instructions.deinit();
         self.code.block_type_values.deinit();
         self.code.call_indirect.deinit();
+        self.code.i64_const.deinit();
+        self.code.f64_const.deinit();
         for (self.code.branch_table.items) |*item| {
             item.label_ids.deinit();
         }
-        self.code.i64_const.deinit();
-        self.code.f64_const.deinit();
         self.code.branch_table.deinit();
+        self.code.table_pairs.deinit();
 
         for (self.imports.functions.items) |*item| {
             self.allocator.free(item.names.module_name);
@@ -2514,7 +2569,111 @@ pub const Store = struct {
         globals: std.ArrayList(GlobalImport),
     },
 
-    fn init(module_def: *const ModuleDefinition, imports: []const ModuleImports, allocator: std.mem.Allocator) !Store {
+    fn init(allocator: std.mem.Allocator) Store {
+        var store = Store{
+            .imports = .{
+                .functions = std.ArrayList(FunctionImport).init(allocator),
+                .tables = std.ArrayList(TableImport).init(allocator),
+                .memories = std.ArrayList(MemoryImport).init(allocator),
+                .globals = std.ArrayList(GlobalImport).init(allocator),
+            },
+            .functions = std.ArrayList(FunctionInstance).init(allocator),
+            .tables = std.ArrayList(TableInstance).init(allocator),
+            .memories = std.ArrayList(MemoryInstance).init(allocator),
+            .globals = std.ArrayList(GlobalInstance).init(allocator),
+            .elements = std.ArrayList(ElementInstance).init(allocator),
+        };
+
+        return store;
+    }
+
+    fn deinit(self: *Store) void {
+        self.functions.deinit();
+
+        for (self.tables.items) |*item| {
+            item.deinit();
+        }
+        self.tables.deinit();
+
+        for (self.memories.items) |*item| {
+            item.deinit();
+        }
+        self.memories.deinit();
+
+        self.globals.deinit();
+        self.elements.deinit();
+    }
+
+    fn getTable(self: *Store, index: u32) *TableInstance {
+        if (self.imports.tables.items.len <= index) {
+            var instance_index = index - self.imports.tables.items.len;
+            return &self.tables.items[instance_index];
+        } else {
+            var import: *TableImport = &self.imports.tables.items[index];
+            return switch (import.data) {
+                .Host => |data| data,
+                .Wasm => |data| data.module_instance.store.getTable(data.index),
+            };
+        }
+    }
+
+    fn getMemory(self: *Store, index: u32) *MemoryInstance {
+        if (self.imports.memories.items.len <= index) {
+            var instance_index = index - self.imports.memories.items.len;
+            return &self.memories.items[instance_index];
+        } else {
+            var import: *MemoryImport = &self.imports.memories.items[index];
+            return switch (import.data) {
+                .Host => |data| data,
+                .Wasm => |data| data.module_instance.store.getMemory(data.index),
+            };
+        }
+    }
+
+    fn getGlobal(self: *Store, index: u32) *GlobalInstance {
+        if (self.imports.globals.items.len <= index) {
+            var instance_index = index - self.imports.globals.items.len;
+            return &self.globals.items[instance_index];
+        } else {
+            var import: *GlobalImport = &self.imports.globals.items[index];
+            return switch (import.data) {
+                .Host => |data| data,
+                .Wasm => |data| data.module_instance.store.getGlobal(data.index),
+            };
+        }
+    }
+};
+
+pub const ModuleInstance = struct {
+    allocator: std.mem.Allocator,
+    stack: Stack,
+    store: Store,
+    module_def: *const ModuleDefinition,
+
+    const CallContext = struct {
+        module: *ModuleInstance,
+        module_def: *const ModuleDefinition,
+        stack: *Stack,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+    };
+
+    pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
+        return ModuleInstance{
+            .allocator = allocator,
+            .stack = Stack.init(allocator),
+            .store = Store.init(allocator),
+            .module_def = module_def,
+        };
+    }
+
+    pub fn deinit(self: *ModuleInstance) void {
+        self.stack.deinit();
+        self.store.deinit();
+        self.allocator.free(self);
+    }
+
+    pub fn instantiate(inst: *ModuleInstance, imports: []const ModuleImports) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
                 if (def.max != null and instance.max == null) {
@@ -2616,20 +2775,9 @@ pub const Store = struct {
             }
         };
 
-        var store = Store{
-            .imports = .{
-                .functions = std.ArrayList(FunctionImport).init(allocator),
-                .tables = std.ArrayList(TableImport).init(allocator),
-                .memories = std.ArrayList(MemoryImport).init(allocator),
-                .globals = std.ArrayList(GlobalImport).init(allocator),
-            },
-            .functions = std.ArrayList(FunctionInstance).init(allocator),
-            .tables = std.ArrayList(TableInstance).init(allocator),
-            .memories = std.ArrayList(MemoryInstance).init(allocator),
-            .globals = std.ArrayList(GlobalInstance).init(allocator),
-            .elements = std.ArrayList(ElementInstance).init(allocator),
-        };
-        errdefer store.deinit();
+        var store: *Store = &inst.store;
+        var module_def: *const ModuleDefinition = inst.module_def;
+        var allocator = inst.allocator;
 
         for (module_def.imports.functions.items) |*func_import_def| {
             var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, imports);
@@ -2754,14 +2902,13 @@ pub const Store = struct {
         for (module_def.globals.items) |*def_global| {
             var global = GlobalInstance{
                 .mut = def_global.mut,
-                .value = try def_global.expr.resolve(&store),
+                .value = try def_global.expr.resolve(store),
             };
             try store.globals.append(global);
         }
 
         // iterate over elements and init the ones needed
         for (module_def.elements.items) |*def_elem| {
-            // std.debug.print("def_elem.table_index: {}, store.imports.tables.items.len: {}\n", .{ def_elem.table_index, store.imports.tables.items.len });
             if (store.imports.tables.items.len + store.tables.items.len <= def_elem.table_index) {
                 return error.AssertUnknownTable;
             }
@@ -2770,19 +2917,19 @@ pub const Store = struct {
 
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_elem.mode == .Active) {
-                var start_table_index_i32: i32 = if (def_elem.offset) |offset| (try offset.resolveTo(&store, i32)) else 0;
+                var start_table_index_i32: i32 = if (def_elem.offset) |offset| (try offset.resolveTo(store, i32)) else 0;
                 if (start_table_index_i32 < 0) {
-                    return error.OutOfBounds;
+                    return error.UninstantiableOutOfBoundsTableAccess;
                 }
 
                 var start_table_index = @intCast(u32, start_table_index_i32);
 
                 if (def_elem.elems_value.items.len > 0) {
                     var elems = def_elem.elems_value.items;
-                    try table.init_range_val(elems, @intCast(u32, elems.len), 0, start_table_index);
+                    try table.init_range_val(inst, elems, @intCast(u32, elems.len), 0, start_table_index);
                 } else {
                     var elems = def_elem.elems_expr.items;
-                    try table.init_range_expr(elems, @intCast(u32, elems.len), 0, start_table_index, &store);
+                    try table.init_range_expr(inst, elems, @intCast(u32, elems.len), 0, start_table_index, store);
                 }
             }
         }
@@ -2799,7 +2946,7 @@ pub const Store = struct {
 
                 const num_bytes: usize = def_data.bytes.items.len;
                 if (num_bytes > 0) {
-                    const offset_begin: usize = try (def_data.offset.?).resolveTo(&store, u32);
+                    const offset_begin: usize = try (def_data.offset.?).resolveTo(store, u32);
                     const offset_end: usize = offset_begin + num_bytes;
                     // std.debug.print("memory.limits: {}, offset_begin: {}, num_bytes: {}, offset_end: {}\n", .{ memory.limits, offset_begin, num_bytes, offset_end });
 
@@ -2810,89 +2957,6 @@ pub const Store = struct {
                 }
             }
         }
-
-        return store;
-    }
-
-    fn deinit(self: *Store) void {
-        self.functions.deinit();
-
-        for (self.tables.items) |*item| {
-            item.deinit();
-        }
-        self.tables.deinit();
-
-        for (self.memories.items) |*item| {
-            item.deinit();
-        }
-        self.memories.deinit();
-
-        self.globals.deinit();
-        self.elements.deinit();
-    }
-
-    fn getTable(self: *Store, index: u32) *TableInstance {
-        if (self.imports.tables.items.len <= index) {
-            var instance_index = index - self.imports.tables.items.len;
-            return &self.tables.items[instance_index];
-        } else {
-            var import: *TableImport = &self.imports.tables.items[index];
-            return switch (import.data) {
-                .Host => |data| data,
-                .Wasm => |data| data.module_instance.store.getTable(data.index),
-            };
-        }
-    }
-
-    fn getMemory(self: *Store, index: u32) *MemoryInstance {
-        if (self.imports.memories.items.len <= index) {
-            var instance_index = index - self.imports.memories.items.len;
-            return &self.memories.items[instance_index];
-        } else {
-            var import: *MemoryImport = &self.imports.memories.items[index];
-            return switch (import.data) {
-                .Host => |data| data,
-                .Wasm => |data| data.module_instance.store.getMemory(data.index),
-            };
-        }
-    }
-
-    fn getGlobal(self: *Store, index: u32) *GlobalInstance {
-        if (self.imports.globals.items.len <= index) {
-            var instance_index = index - self.imports.globals.items.len;
-            return &self.globals.items[instance_index];
-        } else {
-            var import: *GlobalImport = &self.imports.globals.items[index];
-            return switch (import.data) {
-                .Host => |data| data,
-                .Wasm => |data| data.module_instance.store.getGlobal(data.index),
-            };
-        }
-    }
-};
-
-pub const ModuleInstance = struct {
-    allocator: std.mem.Allocator,
-    stack: Stack,
-    store: Store,
-    module_def: *const ModuleDefinition,
-
-    const CallContext = struct {
-        module: *ModuleInstance,
-        module_def: *const ModuleDefinition,
-        stack: *Stack,
-        allocator: std.mem.Allocator,
-        scratch_allocator: std.mem.Allocator,
-    };
-
-    pub fn init(module_def: *const ModuleDefinition, imports: []const ModuleImports, allocator: std.mem.Allocator) !ModuleInstance {
-        var inst = ModuleInstance{
-            .allocator = allocator,
-            .stack = Stack.init(allocator),
-            .store = try Store.init(module_def, imports, allocator),
-            .module_def = module_def,
-        };
-        errdefer inst.deinit();
 
         if (module_def.start_func_index) |func_index| {
             const params = &[0]Val{};
@@ -2906,13 +2970,6 @@ pub const ModuleInstance = struct {
                 try inst.invokeImportInternal(func_index, params, returns);
             }
         }
-
-        return inst;
-    }
-
-    pub fn deinit(self: *ModuleInstance) void {
-        self.stack.deinit();
-        self.store.deinit();
     }
 
     pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImports {
@@ -3387,25 +3444,56 @@ pub const ModuleInstance = struct {
                         return error.TrapUninitializedElement;
                     }
 
-                    const func_index = ref.FuncRef;
-                    if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
+                    std.debug.assert(ref.FuncRef.module_instance != null); // Should have been set in module instantiation
+
+                    const func_index = ref.FuncRef.index;
+                    var call_context = CallContext{
+                        .module = ref.FuncRef.module_instance.?,
+                        .module_def = (ref.FuncRef.module_instance.?).module_def,
+                        .stack = context.stack,
+                        .allocator = context.allocator,
+                        .scratch_allocator = context.scratch_allocator,
+                    };
+                    var call_store = &call_context.module.store;
+
+                    if (call_store.imports.functions.items.len + call_store.functions.items.len <= func_index) {
                         return error.ValidationUnknownFunction;
                     }
 
-                    if (func_index >= current_store.imports.functions.items.len) {
-                        const func: *const FunctionInstance = &current_store.functions.items[func_index - current_store.imports.functions.items.len];
+                    if (func_index >= call_store.imports.functions.items.len) {
+                        const func: *const FunctionInstance = &call_store.functions.items[func_index - call_store.imports.functions.items.len];
                         if (func.type_def_index != immediates.type_index) {
                             return error.TrapIndirectCallTypeMismatch;
                         }
-                        next_instruction = try call(&context, func, next_instruction);
+                        next_instruction = try call(&call_context, func, next_instruction);
                     } else {
-                        var func_import: *const FunctionImport = &current_store.imports.functions.items[func_index];
-                        var func_type_def: *const FunctionTypeDefinition = &context.module_def.types.items[immediates.type_index];
+                        var func_import: *const FunctionImport = &call_store.imports.functions.items[func_index];
+                        var func_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[immediates.type_index];
                         if (func_import.isTypeSignatureEql(func_type_def) == false) {
                             return error.TrapIndirectCallTypeMismatch;
                         }
-                        next_instruction = try callImport(&context, func_import, next_instruction);
+                        next_instruction = try callImport(&call_context, func_import, next_instruction);
                     }
+
+                    // const func_index = ref.FuncRef;
+                    // if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
+                    //     return error.ValidationUnknownFunction;
+                    // }
+
+                    // if (func_index >= current_store.imports.functions.items.len) {
+                    //     const func: *const FunctionInstance = &current_store.functions.items[func_index - current_store.imports.functions.items.len];
+                    //     if (func.type_def_index != immediates.type_index) {
+                    //         return error.TrapIndirectCallTypeMismatch;
+                    //     }
+                    //     next_instruction = try call(&context, func, next_instruction);
+                    // } else {
+                    //     var func_import: *const FunctionImport = &current_store.imports.functions.items[func_index];
+                    //     var func_type_def: *const FunctionTypeDefinition = &context.module_def.types.items[immediates.type_index];
+                    //     if (func_import.isTypeSignatureEql(func_type_def) == false) {
+                    //         return error.TrapIndirectCallTypeMismatch;
+                    //     }
+                    //     next_instruction = try callImport(&context, func_import, next_instruction);
+                    // }
                 },
                 Opcode.Drop => {
                     _ = try stack.popValue();
@@ -4419,7 +4507,7 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Ref_Func => {
                     const func_index = instruction.immediate;
-                    const val = Val{ .FuncRef = func_index };
+                    const val = Val{ .FuncRef = .{ .index = func_index, .module_instance = context.module } };
                     try stack.pushValue(val);
                 },
                 Opcode.I32_Trunc_Sat_F32_S => {
@@ -4545,13 +4633,43 @@ pub const ModuleInstance = struct {
 
                     std.mem.set(u8, destination, value);
                 },
+                Opcode.Table_Copy => {
+                    const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];
+                    const dest_table_index = pair.index_x;
+                    const src_table_index = pair.index_y;
+
+                    const dest_table: *TableInstance = current_store.getTable(dest_table_index);
+                    const src_table: *const TableInstance = current_store.getTable(src_table_index);
+
+                    const length_i32 = try stack.popI32();
+                    const src_start_index = try stack.popI32();
+                    const dest_start_index = try stack.popI32();
+
+                    if (src_start_index + length_i32 >= src_table.refs.items.len or src_start_index < 0) {
+                        return error.TrapOutOfBoundsTableAccess;
+                    }
+                    if (dest_start_index + length_i32 >= dest_table.refs.items.len or dest_start_index < 0) {
+                        return error.TrapOutOfBoundsTableAccess;
+                    }
+                    if (length_i32 < 0) {
+                        return error.TrapOutOfBoundsTableAccess;
+                    }
+                    if (std.meta.eql(dest_table.reftype, src_table.reftype) == false) {
+                        return error.ValidationTypeMismatch;
+                    }
+
+                    const dest_begin = @intCast(usize, dest_start_index);
+                    const src_begin = @intCast(usize, src_start_index);
+                    const length = @intCast(usize, length_i32);
+
+                    var dest: []Val = dest_table.refs.items[dest_begin .. dest_begin + length];
+                    var src: []const Val = src_table.refs.items[src_begin .. src_begin + length];
+                    std.mem.copy(Val, dest, src);
+                },
                 Opcode.Table_Grow => {
                     const table_index: u32 = instruction.immediate;
                     const table: *TableInstance = current_store.getTable(table_index);
                     const length = @bitCast(u32, try stack.popI32());
-                    // if (length < 0) {
-                    //     return error.TrapOutOfBoundsTableAccess;
-                    // }
                     const init_value = try stack.popValue();
                     if (init_value.isRefType() == false) {
                         return error.ValidationTypeMismatch;

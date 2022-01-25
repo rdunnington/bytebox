@@ -165,7 +165,7 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
             return Val.nullRef(ValType.FuncRef);
         } else {
             const int = try std.fmt.parseInt(u32, json_value.String, 10);
-            return Val{ .FuncRef = int };
+            return Val{ .FuncRef = .{ .index = int, .module_instance = null } };
         }
     } else {
         print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
@@ -640,7 +640,8 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 else => {},
             }
 
-            module.inst = wasm.ModuleInstance.init(&module.def.?, imports.items, scratch_allocator) catch |e| {
+            module.inst = wasm.ModuleInstance.init(&module.def.?, scratch_allocator);
+            (module.inst.?).instantiate(imports.items) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
                         log_verbose("\tSuccess!\n", .{});
@@ -855,7 +856,7 @@ pub fn main() !void {
         "conversions",
         "custom",
         // "data",
-        // "elem",
+        "elem",
         "endianness",
         // "exports",
         "f32",
