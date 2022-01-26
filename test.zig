@@ -296,17 +296,19 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             try commands.append(command);
         } else if (strcmp("register", json_command_type.String)) {
             const json_as = json_command.Object.getPtr("as").?;
-            var json_import_name = json_as;
-            var json_module_name = json_as;
+            var json_import_name: []const u8 = json_as.String;
+            var json_module_name: []const u8 = fallback_module;
             if (json_command.Object.getPtr("name")) |json_name| {
-                json_module_name = json_name;
+                json_module_name = json_name.String;
             }
+
+            // print("json_module_name: {s}, json_import_name: {s}\n", .{ json_module_name, json_import_name });
 
             var command = Command{
                 .Register = CommandRegister{
                     .module_filename = try allocator.dupe(u8, fallback_module),
-                    .module_name = try allocator.dupe(u8, json_module_name.String),
-                    .import_name = try allocator.dupe(u8, json_import_name.String),
+                    .module_name = try allocator.dupe(u8, json_module_name),
+                    .import_name = try allocator.dupe(u8, json_import_name),
                 },
             };
             try commands.append(command);
@@ -575,7 +577,10 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
         switch (command.*) {
             .Register => |c| {
                 if (module.inst == null) {
-                    print("Register: module instance {s}|{s} was not found in the cache. Is the wast malformed?\n", .{ c.module_name, module.filename });
+                    print(
+                        "Register: module instance {s}|{s} was not found in the cache by the name '{s}'. Is the wast malformed?\n",
+                        .{ c.module_name, module_filename, module_name },
+                    );
                     continue;
                 }
 
