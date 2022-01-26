@@ -2940,6 +2940,9 @@ pub const ModuleInstance = struct {
                 .mut = def_global.mut,
                 .value = try def_global.expr.resolve(store),
             };
+            if (std.meta.activeTag(global.value) == .FuncRef) {
+                global.value.FuncRef.module_instance = inst;
+            }
             try store.globals.append(global);
         }
 
@@ -2975,12 +2978,22 @@ pub const ModuleInstance = struct {
                 }
             } else { // Passive
                 if (def_elem.elems_value.items.len > 0) {
-                    try elem.refs.appendSlice(def_elem.elems_value.items);
+                    try elem.refs.resize(def_elem.elems_value.items.len);
+                    var index: usize = 0;
+                    while (index < elem.refs.items.len) : (index += 1) {
+                        elem.refs.items[index] = def_elem.elems_value.items[index];
+                        if (elem.reftype == .FuncRef) {
+                            elem.refs.items[index].FuncRef.module_instance = inst;
+                        }
+                    }
                 } else {
                     try elem.refs.resize(def_elem.elems_expr.items.len);
                     var index: usize = 0;
                     while (index < elem.refs.items.len) : (index += 1) {
                         elem.refs.items[index] = try def_elem.elems_expr.items[index].resolve(store);
+                        if (elem.reftype == .FuncRef) {
+                            elem.refs.items[index].FuncRef.module_instance = inst;
+                        }
                     }
                 }
             }
