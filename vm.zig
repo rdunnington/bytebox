@@ -57,10 +57,11 @@ pub const AssertError = error{
 
 pub const ValidationError = error{
     ValidationTypeMismatch,
+    ValidationUnknownFunction,
     ValidationUnknownTable,
     ValidationUnknownMemory,
+    ValidationUnknownElement,
     ValidationUnknownData,
-    ValidationUnknownFunction,
 };
 
 pub const TrapError = error{
@@ -273,7 +274,7 @@ const Opcode = enum(u16) {
     Data_Drop = 0xFC09,
     Memory_Copy = 0xFC0A,
     Memory_Fill = 0xFC0B,
-    // Table_Init = 0xFC0C,
+    Table_Init = 0xFC0C,
     // Elem_Drop = 0xFC0D,
     Table_Copy = 0xFC0E,
     Table_Grow = 0xFC0F,
@@ -1262,6 +1263,26 @@ const Instruction = struct {
                 try _module.code.block_type_values.append(value);
                 return @intCast(u32, immediate_index);
             }
+
+            fn decodeTablePair(_reader: anytype, _module: *ModuleDefinition) !u32 {
+                const elem_index = try decodeLEB128(u32, _reader);
+                const table_index = try decodeLEB128(u32, _reader);
+
+                var pair = TablePairImmediates{
+                    .index_x = elem_index,
+                    .index_y = table_index,
+                };
+
+                for (_module.code.table_pairs.items) |*item, i| {
+                    if (std.meta.eql(item, &pair)) {
+                        return @intCast(u32, i);
+                    }
+                }
+
+                var immediate_index = _module.code.table_pairs.items.len;
+                try _module.code.table_pairs.append(pair);
+                return @intCast(u32, immediate_index);
+            }
         };
 
         var byte = try reader.readByte();
@@ -1552,28 +1573,16 @@ const Instruction = struct {
                     return error.MalformedMissingZeroByte;
                 }
             },
-            .Table_Copy => {
-                const dest_table_index = try decodeLEB128(u32, reader);
-                const src_table_index = try decodeLEB128(u32, reader);
-
-                var pair = TablePairImmediates{
-                    .index_x = dest_table_index,
-                    .index_y = src_table_index,
-                };
-
-                for (module.code.table_pairs.items) |*item, i| {
-                    if (std.meta.eql(item, &pair)) {
-                        immediate = @intCast(u32, i);
-                        break;
-                    }
-                }
-
-                if (immediate == k_invalid_immediate) {
-                    immediate = @intCast(u32, module.code.table_pairs.items.len);
-                    try module.code.table_pairs.append(pair);
-                }
+            .Table_Init => {
+                immediate = try Helpers.decodeTablePair(reader, module);
             },
-            .Table_Grow, .Table_Size => {
+            .Table_Copy => {
+                immediate = try Helpers.decodeTablePair(reader, module);
+            },
+            .Table_Grow => {
+                immediate = try decodeLEB128(u32, reader); // tableidx
+            },
+            .Table_Size => {
                 immediate = try decodeLEB128(u32, reader); // tableidx
             },
             else => {},
@@ -1611,6 +1620,12 @@ const ModuleValidator = struct {
         }
     }
 
+    fn validateElementIndex(index: u32, module: *const ModuleDefinition) !void {
+        if (module.elements.items.len <= index) {
+            return error.ValidationUnknownElement;
+        }
+    }
+
     fn validateDataIndex(index: u32, module: *const ModuleDefinition) !void {
         if (module.data_count == null) {
             return error.MalformedMissingDataCountSection;
@@ -1636,12 +1651,33 @@ const ModuleValidator = struct {
             .Memory_Fill => {
                 try validateMemoryIndex(module);
             },
+            .Table_Init => {
+                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+                const elem_index = pair.index_x;
+                const table_index = pair.index_y;
+                try validateElementIndex(elem_index, module);
+                try validateTableIndex(table_index, module);
+
+                const elem_reftype: ValType = module.elements.items[elem_index].reftype;
+                const table_reftype: ValType = module.tables.items[table_index].reftype;
+
+                if (elem_reftype != table_reftype) {
+                    return error.ValidationTypeMismatch;
+                }
+            },
             .Table_Copy => {
                 const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
                 const dest_table_index = pair.index_x;
                 const src_table_index = pair.index_y;
                 try validateTableIndex(dest_table_index, module);
                 try validateTableIndex(src_table_index, module);
+
+                const dest_reftype: ValType = module.tables.items[dest_table_index].reftype;
+                const src_reftype: ValType = module.tables.items[src_table_index].reftype;
+
+                if (dest_reftype != src_reftype) {
+                    return error.ValidationTypeMismatch;
+                }
             },
             .Table_Grow, .Table_Size => {
                 try validateTableIndex(instruction.immediate, module);
@@ -2908,12 +2944,18 @@ pub const ModuleInstance = struct {
         }
 
         // iterate over elements and init the ones needed
+        try store.elements.ensureTotalCapacity(module_def.elements.items.len);
         for (module_def.elements.items) |*def_elem| {
             if (store.imports.tables.items.len + store.tables.items.len <= def_elem.table_index) {
                 return error.AssertUnknownTable;
             }
 
             var table: *TableInstance = store.getTable(def_elem.table_index);
+
+            var elem = ElementInstance{
+                .refs = std.ArrayList(Val).init(allocator),
+                .reftype = def_elem.reftype,
+            };
 
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_elem.mode == .Active) {
@@ -2931,7 +2973,19 @@ pub const ModuleInstance = struct {
                     var elems = def_elem.elems_expr.items;
                     try table.init_range_expr(inst, elems, @intCast(u32, elems.len), 0, start_table_index, store);
                 }
+            } else { // Passive
+                if (def_elem.elems_value.items.len > 0) {
+                    try elem.refs.appendSlice(def_elem.elems_value.items);
+                } else {
+                    try elem.refs.resize(def_elem.elems_expr.items.len);
+                    var index: usize = 0;
+                    while (index < elem.refs.items.len) : (index += 1) {
+                        elem.refs.items[index] = try def_elem.elems_expr.items[index].resolve(store);
+                    }
+                }
             }
+
+            store.elements.appendAssumeCapacity(elem);
         }
 
         for (module_def.datas.items) |*def_data| {
@@ -4633,6 +4687,36 @@ pub const ModuleInstance = struct {
 
                     std.mem.set(u8, destination, value);
                 },
+                Opcode.Table_Init => {
+                    const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];
+                    const elem_index = pair.index_x;
+                    const table_index = pair.index_y;
+
+                    const elem: *const ElementInstance = &current_store.elements.items[elem_index];
+                    const table: *TableInstance = current_store.getTable(table_index);
+
+                    const length_i32 = try stack.popI32();
+                    const elem_start_index = try stack.popI32();
+                    const table_start_index = try stack.popI32();
+
+                    if (elem_start_index + length_i32 >= elem.refs.items.len or elem_start_index < 0) {
+                        return error.TrapOutOfBoundsTableAccess;
+                    }
+                    if (table_start_index + length_i32 >= table.refs.items.len or table_start_index < 0) {
+                        return error.TrapOutOfBoundsTableAccess;
+                    }
+                    if (length_i32 < 0) {
+                        return error.TrapOutOfBoundsTableAccess;
+                    }
+
+                    const elem_begin = @intCast(usize, elem_start_index);
+                    const table_begin = @intCast(usize, table_start_index);
+                    const length = @intCast(usize, length_i32);
+
+                    var dest: []Val = table.refs.items[table_begin .. table_begin + length];
+                    var src: []const Val = elem.refs.items[elem_begin .. elem_begin + length];
+                    std.mem.copy(Val, dest, src);
+                },
                 Opcode.Table_Copy => {
                     const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];
                     const dest_table_index = pair.index_x;
@@ -4653,9 +4737,6 @@ pub const ModuleInstance = struct {
                     }
                     if (length_i32 < 0) {
                         return error.TrapOutOfBoundsTableAccess;
-                    }
-                    if (std.meta.eql(dest_table.reftype, src_table.reftype) == false) {
-                        return error.ValidationTypeMismatch;
                     }
 
                     const dest_begin = @intCast(usize, dest_start_index);
