@@ -32,6 +32,7 @@ pub const UnlinkableError = error{
 
 pub const UninstantiableError = error{
     UninstantiableOutOfBoundsTableAccess,
+    UninstantiableOutOfBoundsMemoryAccess,
 };
 
 pub const AssertError = error{
@@ -3012,16 +3013,15 @@ pub const ModuleInstance = struct {
                 var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
-                if (num_bytes > 0) {
-                    const offset_begin: usize = try (def_data.offset.?).resolveTo(store, u32);
-                    const offset_end: usize = offset_begin + num_bytes;
-                    // std.debug.print("memory.limits: {}, offset_begin: {}, num_bytes: {}, offset_end: {}\n", .{ memory.limits, offset_begin, num_bytes, offset_end });
+                const offset_begin: usize = try (def_data.offset.?).resolveTo(store, u32);
+                const offset_end: usize = offset_begin + num_bytes;
 
-                    try memory.ensureMinSize(offset_end);
-
-                    var destination = memory.mem[offset_begin..offset_end];
-                    std.mem.copy(u8, destination, def_data.bytes.items);
+                if (memory.mem.len < offset_end) {
+                    return error.UninstantiableOutOfBoundsMemoryAccess;
                 }
+
+                var destination = memory.mem[offset_begin..offset_end];
+                std.mem.copy(u8, destination, def_data.bytes.items);
             }
         }
 

@@ -212,6 +212,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
 
         wasm.UninstantiableError.UninstantiableOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
+        wasm.UninstantiableError.UninstantiableOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
 
         wasm.TrapError.TrapIntegerDivisionByZero => strcmp(err_string, "integer divide by zero"),
         wasm.TrapError.TrapIntegerOverflow => strcmp(err_string, "integer overflow"),
@@ -860,7 +861,7 @@ pub fn main() !void {
         "const",
         "conversions",
         "custom",
-        // "data",
+        "data",
         "elem",
         "endianness",
         // "exports",
