@@ -276,7 +276,7 @@ const Opcode = enum(u16) {
     Memory_Copy = 0xFC0A,
     Memory_Fill = 0xFC0B,
     Table_Init = 0xFC0C,
-    // Elem_Drop = 0xFC0D,
+    Elem_Drop = 0xFC0D,
     Table_Copy = 0xFC0E,
     Table_Grow = 0xFC0F,
     Table_Size = 0xFC10,
@@ -743,8 +743,8 @@ const ConstantExpression = union(enum) {
 
     fn decode(reader: anytype) !ConstantExpression {
         const opcode_value = try reader.readByte();
-        // std.debug.print("opcode_value: 0x{X}\n", .{opcode_value});
         const opcode = std.meta.intToEnum(Opcode, opcode_value) catch {
+            // std.debug.print("\topcode_value: 0x{X}\n", .{opcode_value});
             return error.MalformedIllegalOpcode;
         };
         const expr = switch (opcode) {
@@ -1294,13 +1294,13 @@ const Instruction = struct {
             extended = extended << 8;
             extended |= byte2;
 
-            // std.debug.print(">>>>>> opcode extended_byte: 0x{X}\n", .{extended});
             opcode = std.meta.intToEnum(Opcode, extended) catch {
+                // std.debug.print("\topcode extended_byte: 0x{X}\n", .{extended});
                 return error.MalformedIllegalOpcode;
             };
         } else {
-            // std.debug.print(">>>>>> opcode byte: 0x{X}\n", .{byte});
             opcode = std.meta.intToEnum(Opcode, byte) catch {
+                // std.debug.print("\topcode byte: 0x{X}\n", .{byte});
                 return error.MalformedIllegalOpcode;
             };
         }
@@ -1577,6 +1577,9 @@ const Instruction = struct {
             .Table_Init => {
                 immediate = try Helpers.decodeTablePair(reader, module);
             },
+            .Elem_Drop => {
+                immediate = try decodeLEB128(u32, reader); // elemidx
+            },
             .Table_Copy => {
                 immediate = try Helpers.decodeTablePair(reader, module);
             },
@@ -1665,6 +1668,9 @@ const ModuleValidator = struct {
                 if (elem_reftype != table_reftype) {
                     return error.ValidationTypeMismatch;
                 }
+            },
+            .Elem_Drop => {
+                try validateElementIndex(instruction.immediate, module);
             },
             .Table_Copy => {
                 const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
@@ -2977,7 +2983,7 @@ pub const ModuleInstance = struct {
                     var elems = def_elem.elems_expr.items;
                     try table.init_range_expr(inst, elems, @intCast(u32, elems.len), 0, start_table_index, store);
                 }
-            } else { // Passive
+            } else if (def_elem.mode == .Passive) {
                 if (def_elem.elems_value.items.len > 0) {
                     try elem.refs.resize(def_elem.elems_value.items.len);
                     var index: usize = 0;
@@ -2997,6 +3003,7 @@ pub const ModuleInstance = struct {
                         }
                     }
                 }
+            } else { // Declarative
             }
 
             store.elements.appendAssumeCapacity(elem);
@@ -4712,10 +4719,10 @@ pub const ModuleInstance = struct {
                     const elem_start_index = try stack.popI32();
                     const table_start_index = try stack.popI32();
 
-                    if (elem_start_index + length_i32 >= elem.refs.items.len or elem_start_index < 0) {
+                    if (elem_start_index + length_i32 > elem.refs.items.len or elem_start_index < 0) {
                         return error.TrapOutOfBoundsTableAccess;
                     }
-                    if (table_start_index + length_i32 >= table.refs.items.len or table_start_index < 0) {
+                    if (table_start_index + length_i32 > table.refs.items.len or table_start_index < 0) {
                         return error.TrapOutOfBoundsTableAccess;
                     }
                     if (length_i32 < 0) {
@@ -4729,6 +4736,11 @@ pub const ModuleInstance = struct {
                     var dest: []Val = table.refs.items[table_begin .. table_begin + length];
                     var src: []const Val = elem.refs.items[elem_begin .. elem_begin + length];
                     std.mem.copy(Val, dest, src);
+                },
+                Opcode.Elem_Drop => {
+                    const elem_index: u32 = instruction.immediate;
+                    var elem: *ElementInstance = &current_store.elements.items[elem_index];
+                    elem.refs.clearAndFree();
                 },
                 Opcode.Table_Copy => {
                     const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];

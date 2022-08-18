@@ -921,7 +921,7 @@ pub fn main() !void {
         // "table_fill",
         "table_get",
         "table_grow",
-        // "table_init",
+        "table_init",
         "table_set",
         "table_size",
         "token",
