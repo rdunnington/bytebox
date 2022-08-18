@@ -3153,7 +3153,7 @@ pub const ModuleInstance = struct {
         };
 
         if (self.stack.size() != returns.len) {
-            std.debug.print("stack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
+            // std.debug.print("\tstack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
             return error.ValidationTypeMismatch;
         }
 
@@ -4742,10 +4742,10 @@ pub const ModuleInstance = struct {
                     const src_start_index = try stack.popI32();
                     const dest_start_index = try stack.popI32();
 
-                    if (src_start_index + length_i32 >= src_table.refs.items.len or src_start_index < 0) {
+                    if (src_start_index + length_i32 > src_table.refs.items.len or src_start_index < 0) {
                         return error.TrapOutOfBoundsTableAccess;
                     }
-                    if (dest_start_index + length_i32 >= dest_table.refs.items.len or dest_start_index < 0) {
+                    if (dest_start_index + length_i32 > dest_table.refs.items.len or dest_start_index < 0) {
                         return error.TrapOutOfBoundsTableAccess;
                     }
                     if (length_i32 < 0) {
@@ -4758,7 +4758,11 @@ pub const ModuleInstance = struct {
 
                     var dest: []Val = dest_table.refs.items[dest_begin .. dest_begin + length];
                     var src: []const Val = src_table.refs.items[src_begin .. src_begin + length];
-                    std.mem.copy(Val, dest, src);
+                    if (dest_start_index <= src_start_index) {
+                        std.mem.copy(Val, dest, src);
+                    } else {
+                        std.mem.copyBackwards(Val, dest, src);
+                    }
                 },
                 Opcode.Table_Grow => {
                     const table_index: u32 = instruction.immediate;
