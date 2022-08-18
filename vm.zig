@@ -280,7 +280,7 @@ const Opcode = enum(u16) {
     Table_Copy = 0xFC0E,
     Table_Grow = 0xFC0F,
     Table_Size = 0xFC10,
-    // Table_Fill = 0xFC11,
+    Table_Fill = 0xFC11,
 
     fn expectsEnd(opcode: Opcode) bool {
         return switch (opcode) {
@@ -1589,6 +1589,9 @@ const Instruction = struct {
             .Table_Size => {
                 immediate = try decodeLEB128(u32, reader); // tableidx
             },
+            .Table_Fill => {
+                immediate = try decodeLEB128(u32, reader); // tableidx
+            },
             else => {},
         }
 
@@ -1649,10 +1652,7 @@ const ModuleValidator = struct {
             .Data_Drop => {
                 try validateDataIndex(instruction.immediate, module);
             },
-            .Memory_Copy => {
-                try validateMemoryIndex(module);
-            },
-            .Memory_Fill => {
+            .Memory_Copy, .Memory_Fill => {
                 try validateMemoryIndex(module);
             },
             .Table_Init => {
@@ -1686,7 +1686,7 @@ const ModuleValidator = struct {
                     return error.ValidationTypeMismatch;
                 }
             },
-            .Table_Grow, .Table_Size => {
+            .Table_Grow, .Table_Size, .Table_Fill => {
                 try validateTableIndex(instruction.immediate, module);
             },
             else => {},
@@ -4793,6 +4793,29 @@ pub const ModuleInstance = struct {
                     const table: *TableInstance = current_store.getTable(table_index);
                     const length = @intCast(i32, table.refs.items.len);
                     try stack.pushI32(length);
+                },
+                Opcode.Table_Fill => {
+                    const table_index: u32 = instruction.immediate;
+                    const table: *TableInstance = current_store.getTable(table_index);
+
+                    const length_i32 = try stack.popI32();
+                    const funcref = try stack.popValue();
+                    const dest_table_index = try stack.popI32();
+
+                    if (funcref.isRefType() == false) {
+                        return error.ValidationTypeMismatch;
+                    }
+
+                    if (dest_table_index + length_i32 > table.refs.items.len or length_i32 < 0) {
+                        return error.TrapOutOfBoundsTableAccess;
+                    }
+
+                    const dest_begin = @intCast(usize, dest_table_index);
+                    const length = @intCast(usize, length_i32);
+
+                    var dest: []Val = table.refs.items[dest_begin .. dest_begin + length];
+
+                    std.mem.set(Val, dest, funcref);
                 },
             }
 

@@ -918,7 +918,7 @@ pub fn main() !void {
         "table",
         "table-sub",
         "table_copy",
-        // "table_fill",
+        "table_fill",
         "table_get",
         "table_grow",
         "table_init",
