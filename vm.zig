@@ -23,6 +23,7 @@ pub const MalformedError = error{
     MalformedElementType,
     MalformedUTF8Encoding,
     MalformedMutability,
+    MalformedSelectInstruction,
 };
 
 pub const UnlinkableError = error{
@@ -96,6 +97,7 @@ const Opcode = enum(u16) {
     Call_Indirect = 0x11,
     Drop = 0x1A,
     Select = 0x1B,
+    Select_T = 0x1C,
     Local_Get = 0x20,
     Local_Set = 0x21,
     Local_Tee = 0x22,
@@ -1307,6 +1309,14 @@ const Instruction = struct {
         var immediate: u32 = k_invalid_immediate;
 
         switch (opcode) {
+            .Select_T => {
+                const num_types = try decodeLEB128(u32, reader);
+                if (num_types != 1) {
+                    return error.MalformedSelectInstruction;
+                }
+                const valtype = try ValType.decode(reader);
+                immediate = @enumToInt(valtype);
+            },
             .Local_Get => {
                 immediate = try decodeLEB128(u32, reader); // locals index
             },
@@ -3573,11 +3583,31 @@ pub const ModuleInstance = struct {
                     _ = try stack.popValue();
                 },
                 Opcode.Select => {
-                    var boolean = try stack.popI32();
-                    var v2 = try stack.popValue();
-                    var v1 = try stack.popValue();
+                    var boolean: i32 = try stack.popI32();
+                    var v2: Val = try stack.popValue();
+                    var v1: Val = try stack.popValue();
 
                     if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
+                        return error.ValidationTypeMismatch;
+                    }
+
+                    if (boolean != 0) {
+                        try stack.pushValue(v1);
+                    } else {
+                        try stack.pushValue(v2);
+                    }
+                },
+                Opcode.Select_T => {
+                    var boolean: i32 = try stack.popI32();
+                    var v2: Val = try stack.popValue();
+                    var v1: Val = try stack.popValue();
+
+                    if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
+                        return error.ValidationTypeMismatch;
+                    }
+
+                    var valtype: ValType = @intToEnum(ValType, instruction.immediate);
+                    if (std.meta.activeTag(v1) != valtype) {
                         return error.ValidationTypeMismatch;
                     }
 

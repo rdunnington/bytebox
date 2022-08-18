@@ -909,7 +909,7 @@ pub fn main() !void {
         "ref_is_null",
         "ref_null",
         "return",
-        // "select",
+        "select",
         // "skip-stack-guard-page",
         // "stack",
         "start",
