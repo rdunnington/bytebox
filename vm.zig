@@ -3110,6 +3110,17 @@ pub const ModuleInstance = struct {
         return imports;
     }
 
+    pub fn getGlobal(self: *ModuleInstance, global_name: []const u8) anyerror!Val {
+        for (self.module_def.exports.globals.items) |*global_export| {
+            if (std.mem.eql(u8, global_name, global_export.name)) {
+                var index: usize = global_export.index - self.module_def.imports.globals.items.len;
+                return self.store.globals.items[index].value;
+            }
+        }
+
+        return error.AssertUnknownExport;
+    }
+
     pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) anyerror!void {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name)) {

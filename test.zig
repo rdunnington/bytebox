@@ -28,7 +28,13 @@ const CommandType = enum {
     AssertUninstantiable,
 };
 
-const Invocation = struct {
+const ActionType = enum {
+    Invocation,
+    Get,
+};
+
+const Action = struct {
+    type: ActionType,
     module: []const u8,
     field: []const u8,
     args: std.ArrayList(Val),
@@ -51,12 +57,12 @@ const CommandRegister = struct {
 };
 
 const CommandAssertReturn = struct {
-    invocation: Invocation,
+    action: Action,
     expected_returns: ?std.ArrayList(Val),
 };
 
 const CommandAssertTrap = struct {
-    invocation: Invocation,
+    action: Action,
     expected_error: []const u8,
 };
 
@@ -111,8 +117,8 @@ const Command = union(CommandType) {
         return switch (self.*) {
             .DecodeModule => |c| c.module_name,
             .Register => |c| c.module_name,
-            .AssertReturn => |c| c.invocation.module,
-            .AssertTrap => |c| c.invocation.module,
+            .AssertReturn => |c| c.action.module,
+            .AssertTrap => |c| c.action.module,
             .AssertMalformed => |c| c.err.module,
             .AssertInvalid => |c| c.err.module,
             .AssertUnlinkable => |c| c.err.module,
@@ -229,7 +235,17 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
 
 fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.ArrayList(Command) {
     const Helpers = struct {
-        fn parseInvocation(json_action: *std.json.Value, fallback_module: []const u8, _allocator: std.mem.Allocator) !Invocation {
+        fn parseAction(json_action: *std.json.Value, fallback_module: []const u8, _allocator: std.mem.Allocator) !Action {
+            const json_type = json_action.Object.getPtr("type").?;
+            var action_type: ActionType = undefined;
+            if (strcmp("invoke", json_type.String)) {
+                action_type = .Invocation;
+            } else if (strcmp("get", json_type.String)) {
+                action_type = .Get;
+            } else {
+                unreachable;
+            }
+
             const json_field = json_action.Object.getPtr("field").?;
 
             const json_args_or_null = json_action.Object.getPtr("args");
@@ -247,7 +263,8 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 module = try _allocator.dupe(u8, json_module.String);
             }
 
-            return Invocation{
+            return Action{
+                .type = action_type,
                 .module = module,
                 .field = try _allocator.dupe(u8, json_field.String),
                 .args = args,
@@ -316,7 +333,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         } else if (strcmp("assert_return", json_command_type.String) or strcmp("action", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
-            var invocation = try Helpers.parseInvocation(json_action, fallback_module, allocator);
+            var action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
             var expected_returns_or_null: ?std.ArrayList(Val) = null;
             const json_expected_or_null = json_command.Object.getPtr("expected");
@@ -330,7 +347,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
             var command = Command{
                 .AssertReturn = CommandAssertReturn{
-                    .invocation = invocation,
+                    .action = action,
                     .expected_returns = expected_returns_or_null,
                 },
             };
@@ -338,13 +355,13 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         } else if (strcmp("assert_trap", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
-            var invocation = try Helpers.parseInvocation(json_action, fallback_module, allocator);
+            var action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
             const json_text = json_command.Object.getPtr("text").?;
 
             var command = Command{
                 .AssertTrap = CommandAssertTrap{
-                    .invocation = invocation,
+                    .action = action,
                     .expected_error = try allocator.dupe(u8, json_text.String),
                 },
             };
@@ -685,7 +702,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 }
 
                 if (opts.test_filter_or_null) |filter| {
-                    if (strcmp(filter, c.invocation.field) == false) {
+                    if (strcmp(filter, c.action.field) == false) {
                         log_verbose("\tskipped...\n", .{});
                         continue;
                     }
@@ -695,18 +712,34 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..num_expected_returns];
 
-                log_verbose("assert_return: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
+                log_verbose("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
 
-                var invoke_succeeded = true;
-                (module.inst.?).invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
-                    if (!g_verbose_logging) {
-                        print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
-                    }
-                    print("\tFail with error: {}\n", .{e});
-                    invoke_succeeded = false;
-                };
+                var action_succeeded = true;
+                switch (c.action.type) {
+                    .Invocation => {
+                        (module.inst.?).invoke(c.action.field, c.action.args.items, returns) catch |e| {
+                            if (!g_verbose_logging) {
+                                print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                            }
+                            print("\tInvoke fail with error: {}\n", .{e});
+                            action_succeeded = false;
+                        };
+                    },
+                    .Get => {
+                        var val_or_error: anyerror!wasm.Val = (module.inst.?).getGlobal(c.action.field);
+                        if (val_or_error) |value| {
+                            returns[0] = value;
+                        } else |e| {
+                            if (!g_verbose_logging) {
+                                print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                            }
+                            print("\tGet fail with error: {}\n", .{e});
+                            action_succeeded = false;
+                        }
+                    },
+                }
 
-                if (invoke_succeeded) {
+                if (action_succeeded) {
                     if (c.expected_returns) |expected| {
                         for (returns) |r, i| {
                             var pass = false;
@@ -717,22 +750,19 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                                 pass = std.meta.activeTag(r) == .F64 and std.math.isNan(r.F64);
                             } else {
                                 pass = std.meta.eql(r, expected.items[i]);
-                                if (!pass) {
-                                    // std.debug.print(">>>>>>>>>>>> fail. expected: {e:0.16}, actual: {e:0.16}\n", .{ expected.items[i].F32, r.F32 });
-                                }
                             }
 
                             if (pass == false) {
                                 if (!g_verbose_logging) {
-                                    print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
+                                    print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
                                 }
                                 print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
-                                invoke_succeeded = false;
+                                action_succeeded = false;
                             }
                         }
                     }
 
-                    if (invoke_succeeded) {
+                    if (action_succeeded) {
                         log_verbose("\tSuccess!\n", .{});
                     }
                 }
@@ -745,37 +775,54 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 }
 
                 if (opts.test_filter_or_null) |filter| {
-                    if (strcmp(filter, c.invocation.field) == false) {
-                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module.filename, c.invocation.field });
+                    if (strcmp(filter, c.action.field) == false) {
+                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module.filename, c.action.field });
                         continue;
                     }
                 }
 
-                log_verbose("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
+                log_verbose("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
 
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..];
 
-                var invoke_failed = false;
-                var invoke_failed_with_correct_trap = false;
+                var action_failed = false;
+                var action_failed_with_correct_trap = false;
                 var caught_error: ?anyerror = null;
-                (module.inst.?).invoke(c.invocation.field, c.invocation.args.items, returns) catch |e| {
-                    invoke_failed = true;
-                    caught_error = e;
 
-                    if (isSameError(e, c.expected_error)) {
-                        invoke_failed_with_correct_trap = true;
-                    }
-                };
+                switch (c.action.type) {
+                    .Invocation => {
+                        (module.inst.?).invoke(c.action.field, c.action.args.items, returns) catch |e| {
+                            action_failed = true;
+                            caught_error = e;
 
-                if (invoke_failed and invoke_failed_with_correct_trap) {
+                            if (isSameError(e, c.expected_error)) {
+                                action_failed_with_correct_trap = true;
+                            }
+                        };
+                    },
+                    .Get => {
+                        var val_or_error: anyerror!wasm.Val = (module.inst.?).getGlobal(c.action.field);
+                        if (val_or_error) |value| {
+                            returns[0] = value;
+                        } else |e| {
+                            action_failed = true;
+                            caught_error = e;
+
+                            if (isSameError(e, c.expected_error)) {
+                                action_failed_with_correct_trap = true;
+                            }
+                        }
+                    },
+                }
+
+                if (action_failed and action_failed_with_correct_trap) {
                     log_verbose("\tSuccess!\n", .{});
                 } else {
                     if (!g_verbose_logging) {
-                        print("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
+                        print("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
                     }
-                    // print("assert_trap: {s}:{s}({s}):\n", .{ module.filename, c.invocation.field, c.invocation.args.items });
-                    if (invoke_failed_with_correct_trap == false) {
+                    if (action_failed_with_correct_trap == false) {
                         print("\tInvoke trapped, but got error '{s}'' instead of expected '{s}':\n", .{ caught_error.?, c.expected_error });
                     } else {
                         print("\tInvoke succeeded instead of trapping on expected {s}:\n", .{c.expected_error});
@@ -864,7 +911,7 @@ pub fn main() !void {
         "data",
         "elem",
         "endianness",
-        // "exports",
+        "exports",
         "f32",
         "f32_bitwise",
         "f32_cmp",
