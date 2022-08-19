@@ -3568,7 +3568,13 @@ pub const ModuleInstance = struct {
                     if (func_index >= call_store.imports.functions.items.len) {
                         const func: *const FunctionInstance = &call_store.functions.items[func_index - call_store.imports.functions.items.len];
                         if (func.type_def_index != immediates.type_index) {
-                            return error.TrapIndirectCallTypeMismatch;
+                            const func_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[func.type_def_index];
+                            const immediate_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[immediates.type_index];
+
+                            var type_comparer = FunctionTypeContext{};
+                            if (type_comparer.eql(func_type_def, immediate_type_def) == false) {
+                                return error.TrapIndirectCallTypeMismatch;
+                            }
                         }
                         next_instruction = try call(&call_context, func, next_instruction);
                     } else {

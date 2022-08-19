@@ -222,6 +222,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
 
         wasm.TrapError.TrapIntegerDivisionByZero => strcmp(err_string, "integer divide by zero"),
         wasm.TrapError.TrapIntegerOverflow => strcmp(err_string, "integer overflow"),
+        wasm.TrapError.TrapIndirectCallTypeMismatch => strcmp(err_string, "indirect call type mismatch"),
         wasm.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
         wasm.TrapError.TrapOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
         wasm.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
@@ -904,7 +905,7 @@ pub fn main() !void {
         "br_table",
         // "bulk",
         "call",
-        // "call_indirect",
+        "call_indirect",
         "comments",
         "const",
         "conversions",
