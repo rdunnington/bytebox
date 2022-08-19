@@ -227,6 +227,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
         wasm.TrapError.TrapUninitializedElement => strcmp(err_string, "uninitialized element"),
         wasm.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
+        wasm.TrapError.TrapStackExhausted => strcmp(err_string, "call stack exhausted"),
         wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
 
         else => false,
@@ -352,7 +353,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_trap", json_command_type.String)) {
+        } else if (strcmp("assert_trap", json_command_type.String) or strcmp("assert_exhaustion", json_command_type.String)) {
             const json_action = json_command.Object.getPtr("action").?;
 
             var action = try Helpers.parseAction(json_action, fallback_module, allocator);
@@ -902,7 +903,7 @@ pub fn main() !void {
         "br_if",
         "br_table",
         // "bulk",
-        // "call",
+        "call",
         // "call_indirect",
         "comments",
         "const",

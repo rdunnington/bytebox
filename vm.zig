@@ -76,6 +76,7 @@ pub const TrapError = error{
     TrapUndefinedElement,
     TrapUninitializedElement,
     TrapOutOfBoundsTableAccess,
+    TrapStackExhausted,
     TrapUnknown,
 };
 
@@ -483,11 +484,23 @@ const Stack = struct {
         self.stack.deinit();
     }
 
+    fn reserveStackSpace(self: *Self, num_bytes: usize) !void {
+        const num_items = num_bytes / @sizeOf(StackItem);
+        try self.stack.ensureTotalCapacityPrecise(num_items);
+    }
+
     fn top(self: *const Self) !*const StackItem {
         if (self.stack.items.len > 0) {
             return &self.stack.items[self.stack.items.len - 1];
         }
         return error.OutOfBounds;
+    }
+
+    fn push(self: *Self, item: StackItem) !void {
+        if (self.stack.items.len == self.stack.capacity) {
+            return error.TrapStackExhausted;
+        }
+        self.stack.appendAssumeCapacity(item);
     }
 
     fn pop(self: *Self) !StackItem {
@@ -508,10 +521,7 @@ const Stack = struct {
     }
 
     fn pushValue(self: *Self, v: Val) !void {
-        var item = StackItem{ .Val = v };
-        try self.stack.append(item);
-
-        // std.debug.print("\tpush value: {}\n", .{v});
+        try self.push(StackItem{ .Val = v });
     }
 
     fn popValue(self: *Self) !Val {
@@ -527,12 +537,11 @@ const Stack = struct {
 
     fn pushLabel(self: *Self, blocktype: BlockTypeValue, continuation: u32) !void {
         // std.debug.print("\t>> push label: ({}, {})\n", .{ blocktype, continuation });
-        var item = StackItem{ .Label = .{
+        try self.push(StackItem{ .Label = .{
             .blocktype = blocktype,
             .continuation = continuation,
             .last_label_index = self.last_label_index,
-        } };
-        try self.stack.append(item);
+        } });
 
         self.last_label_index = @intCast(i32, self.stack.items.len) - 1;
     }
@@ -585,8 +594,7 @@ const Stack = struct {
     }
 
     fn pushFrame(self: *Self, frame: CallFrame) !void {
-        var item = StackItem{ .Frame = frame };
-        try self.stack.append(item);
+        try self.push(StackItem{ .Frame = frame });
 
         // frames reset the label index since you can't jump to labels in a different function
         self.last_label_index = -1;
@@ -2827,6 +2835,8 @@ pub const ModuleInstance = struct {
                 return null;
             }
         };
+
+        try inst.stack.reserveStackSpace(1024 * 1024 * 1); // 1MB
 
         var store: *Store = &inst.store;
         var module_def: *const ModuleDefinition = inst.module_def;
