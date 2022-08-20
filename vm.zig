@@ -5008,7 +5008,9 @@ pub const ModuleInstance = struct {
 
             const return_types: []const ValType = getReturnTypesFromBlocktype(context.module_def, label.blocktype);
             // std.debug.print("looking for return types: {any}", .{return_types});
-            try popValues(&args, context.stack, return_types);
+            if (is_loop_continuation == false) {
+                try popValues(&args, context.stack, return_types);
+            }
 
             var stack_label_id: u32 = 0;
             while (true) {
@@ -5034,7 +5036,9 @@ pub const ModuleInstance = struct {
                 }
             }
 
-            try pushValues(args.items, context.stack);
+            if (is_loop_continuation == false) {
+                try pushValues(args.items, context.stack);
+            }
         }
 
         // std.debug.print("\tbranching to continuation: {}, context.stack state:\n\t{any}\n", .{ continuation, context.stack.stack.items });

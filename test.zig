@@ -936,7 +936,7 @@ pub fn main() !void {
         "inline-module",
         "int_exprs",
         "int_literals",
-        // "labels",
+        "labels",
         // "left-to-right",
         // "linking",
         "load",
