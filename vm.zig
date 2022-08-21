@@ -4351,12 +4351,19 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.F32_Trunc => {
                     var f = try stack.popF32();
-                    var value = @trunc(f);
+                    var value = std.math.trunc(f);
                     try stack.pushF32(value);
                 },
                 Opcode.F32_Nearest => {
                     var f = try stack.popF32();
-                    var value: f32 = @trunc(f);
+                    var value: f32 = undefined;
+                    var ceil = @ceil(f);
+                    var floor = @floor(f);
+                    if (ceil - f == f - floor) {
+                        value = if (@mod(ceil, 2) == 0) ceil else floor;
+                    } else {
+                        value = @round(f);
+                    }
                     try stack.pushF32(value);
                 },
                 Opcode.F32_Sqrt => {
@@ -4432,7 +4439,14 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.F64_Nearest => {
                     var f = try stack.popF64();
-                    var value: f64 = @trunc(f);
+                    var value: f64 = undefined;
+                    var ceil = @ceil(f);
+                    var floor = @floor(f);
+                    if (ceil - f == f - floor) {
+                        value = if (@mod(ceil, 2) == 0) ceil else floor;
+                    } else {
+                        value = @round(f);
+                    }
                     try stack.pushF64(value);
                 },
                 Opcode.F64_Sqrt => {

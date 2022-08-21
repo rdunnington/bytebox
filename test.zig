@@ -706,7 +706,7 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
                 if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.action.field) == false) {
-                        log_verbose("\tskipped...\n", .{});
+                        log_verbose("\tskipped {s}...\n", .{c.action.field});
                         continue;
                     }
                 }
@@ -923,10 +923,10 @@ pub fn main() !void {
         "f64_bitwise",
         "f64_cmp",
         "fac",
-        // "float_exprs",
+        "float_exprs",
         "float_literals",
-        // "float_memory",
-        // "float_misc",
+        "float_memory",
+        "float_misc",
         "forward",
         "func",
         "func_ptrs",
