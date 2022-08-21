@@ -1372,7 +1372,7 @@ const Instruction = struct {
                 var value = try decodeFloat(f64, reader);
 
                 for (module.code.f64_const.items) |item, i| {
-                    if (value == item) {
+                    if (value == item and std.math.signbit(value) == std.math.signbit(item)) {
                         immediate = @intCast(u32, i);
                         break;
                     }

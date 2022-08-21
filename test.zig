@@ -924,7 +924,7 @@ pub fn main() !void {
         "f64_cmp",
         "fac",
         // "float_exprs",
-        // "float_literals",
+        "float_literals",
         // "float_memory",
         // "float_misc",
         "forward",
