@@ -226,7 +226,8 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
         wasm.TrapError.TrapOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
         wasm.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
-        wasm.TrapError.TrapUninitializedElement => strcmp(err_string, "uninitialized element"),
+        wasm.TrapError.TrapUninitializedElement => strcmp(err_string, "uninitialized element") or
+            strcmp(err_string, "uninitialized element 2"), // bit of a hack to deal with a weird expected assert in the bulk test suite
         wasm.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
         wasm.TrapError.TrapStackExhausted => strcmp(err_string, "call stack exhausted"),
         wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
@@ -904,7 +905,7 @@ pub fn main() !void {
         "br",
         "br_if",
         "br_table",
-        // "bulk",
+        "bulk",
         "call",
         "call_indirect",
         "comments",

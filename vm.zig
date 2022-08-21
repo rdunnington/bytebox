@@ -2976,12 +2976,6 @@ pub const ModuleInstance = struct {
         // iterate over elements and init the ones needed
         try store.elements.ensureTotalCapacity(module_def.elements.items.len);
         for (module_def.elements.items) |*def_elem| {
-            if (store.imports.tables.items.len + store.tables.items.len <= def_elem.table_index) {
-                return error.AssertUnknownTable;
-            }
-
-            var table: *TableInstance = store.getTable(def_elem.table_index);
-
             var elem = ElementInstance{
                 .refs = std.ArrayList(Val).init(allocator),
                 .reftype = def_elem.reftype,
@@ -2989,6 +2983,12 @@ pub const ModuleInstance = struct {
 
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_elem.mode == .Active) {
+                if (store.imports.tables.items.len + store.tables.items.len <= def_elem.table_index) {
+                    return error.AssertUnknownTable;
+                }
+
+                var table: *TableInstance = store.getTable(def_elem.table_index);
+
                 var start_table_index_i32: i32 = if (def_elem.offset) |offset| (try offset.resolveTo(store, i32)) else 0;
                 if (start_table_index_i32 < 0) {
                     return error.UninstantiableOutOfBoundsTableAccess;
