@@ -960,7 +960,7 @@ pub fn main() !void {
         "return",
         "select",
         // "skip-stack-guard-page",
-        // "stack",
+        "stack",
         "start",
         "store",
         "switch",
