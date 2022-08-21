@@ -711,8 +711,9 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 }
 
                 const num_expected_returns = if (c.expected_returns) |returns| returns.items.len else 0;
-                var returns_placeholder: [8]Val = undefined;
-                var returns = returns_placeholder[0..num_expected_returns];
+                var returns_placeholder = std.ArrayList(wasm.Val).init(scratch_allocator);
+                try returns_placeholder.resize(num_expected_returns);
+                var returns = returns_placeholder.items;
 
                 log_verbose("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
 
@@ -926,8 +927,8 @@ pub fn main() !void {
         // "float_memory",
         // "float_misc",
         "forward",
-        // "func",
-        // "func_ptrs",
+        "func",
+        "func_ptrs",
         "global",
         "i32",
         "i64",
