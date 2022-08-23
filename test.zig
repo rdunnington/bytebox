@@ -940,7 +940,7 @@ pub fn main() !void {
         "int_literals",
         "labels",
         "left-to-right",
-        // "linking",
+        "linking",
         "load",
         "local_get",
         "local_set",

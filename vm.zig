@@ -2495,8 +2495,7 @@ pub const FunctionImport = struct {
                 return type_comparer.eql(&data.func_def, type_signature);
             },
             .Wasm => |data| {
-                var func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
-                var func_type_def: *const FunctionTypeDefinition = &data.module_instance.module_def.types.items[func_instance.type_def_index];
+                var func_type_def: *const FunctionTypeDefinition = data.module_instance.findFuncTypeDef(data.index);
                 return type_comparer.eql(func_type_def, type_signature);
             },
         }
@@ -3123,8 +3122,7 @@ pub const ModuleInstance = struct {
     pub fn getGlobal(self: *ModuleInstance, global_name: []const u8) anyerror!Val {
         for (self.module_def.exports.globals.items) |*global_export| {
             if (std.mem.eql(u8, global_name, global_export.name)) {
-                var index: usize = global_export.index - self.module_def.imports.globals.items.len;
-                return self.store.globals.items[index].value;
+                return self.getGlobalWithIndex(global_export.index);
             }
         }
 
@@ -3134,9 +3132,14 @@ pub const ModuleInstance = struct {
     pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val) anyerror!void {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name)) {
-                var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
-                try self.invokeInternal(func_index, params, returns);
-                return;
+                if (func_export.index >= self.module_def.imports.functions.items.len) {
+                    var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
+                    try self.invokeInternal(func_index, params, returns);
+                    return;
+                } else {
+                    try self.invokeImportInternal(func_export.index, params, returns);
+                    return;
+                }
             }
         }
 
@@ -3237,7 +3240,41 @@ pub const ModuleInstance = struct {
                 instance.invoke(func_import.name, params, returns) catch {
                     return error.OutOfBounds;
                 };
+                try instance.invoke(func_import.name, params, returns);
             },
+        }
+    }
+
+    fn findFuncTypeDef(self: *ModuleInstance, index: usize) *const FunctionTypeDefinition {
+        const num_imports: usize = self.store.imports.functions.items.len;
+        if (index >= num_imports) {
+            var local_func_index: usize = index - num_imports;
+            var func_instance: *const FunctionInstance = &self.store.functions.items[local_func_index];
+            var func_type_def: *const FunctionTypeDefinition = &self.module_def.types.items[func_instance.type_def_index];
+            return func_type_def;
+        } else {
+            var import: *const FunctionImport = &self.store.imports.functions.items[index];
+            var func_type_def: *const FunctionTypeDefinition = switch (import.data) {
+                .Host => |data| &data.func_def,
+                .Wasm => |data| data.module_instance.findFuncTypeDef(data.index),
+            };
+            return func_type_def;
+        }
+    }
+
+    fn getGlobalWithIndex(self: *ModuleInstance, index: usize) Val {
+        const num_imports: usize = self.module_def.imports.globals.items.len;
+        if (index >= num_imports) {
+            var local_global_index: usize = index - self.module_def.imports.globals.items.len;
+            var value: Val = self.store.globals.items[local_global_index].value;
+            return value;
+        } else {
+            var import: *const GlobalImport = &self.store.imports.globals.items[index];
+            var value: Val = switch (import.data) {
+                .Host => |data| data.value,
+                .Wasm => |data| data.module_instance.getGlobalWithIndex(data.index),
+            };
+            return value;
         }
     }
 
