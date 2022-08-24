@@ -1661,7 +1661,7 @@ const ModuleValidator = struct {
         }
     }
 
-    fn validate(instruction: Instruction, module: *const ModuleDefinition) !void {
+    fn validate_instruction(instruction: Instruction, module: *const ModuleDefinition) !void {
         switch (instruction.opcode) {
             .Memory_Init => {
                 try validateMemoryIndex(module);
@@ -1810,6 +1810,12 @@ pub const ModuleDefinition = struct {
         };
 
         return module;
+    }
+
+    pub fn validate(self: *const ModuleDefinition) !void {
+        for (self.code.instructions.items) |instruction| {
+            try ModuleValidator.validate_instruction(instruction, self);
+        }
     }
 
     fn decode(wasm: []const u8, module: *ModuleDefinition, allocator: std.mem.Allocator) anyerror!void {
@@ -2297,7 +2303,6 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
                             var instruction = try Instruction.decode(reader, module);
-                            try ModuleValidator.validate(instruction, module);
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
@@ -2733,7 +2738,7 @@ pub const ModuleInstance = struct {
         self.allocator.free(self);
     }
 
-    pub fn instantiate(inst: *ModuleInstance, imports: []const ModuleImports) !void {
+    pub fn instantiate(self: *ModuleInstance, imports: []const ModuleImports) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
                 if (def.max != null and instance.max == null) {
@@ -2835,11 +2840,11 @@ pub const ModuleInstance = struct {
             }
         };
 
-        try inst.stack.reserveStackSpace(1024 * 1024 * 1); // 1MB
+        try self.stack.reserveStackSpace(1024 * 1024 * 1); // 1MB
 
-        var store: *Store = &inst.store;
-        var module_def: *const ModuleDefinition = inst.module_def;
-        var allocator = inst.allocator;
+        var store: *Store = &self.store;
+        var module_def: *const ModuleDefinition = self.module_def;
+        var allocator = self.allocator;
 
         for (module_def.imports.functions.items) |*func_import_def| {
             var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, imports);
@@ -2967,7 +2972,7 @@ pub const ModuleInstance = struct {
                 .value = try def_global.expr.resolve(store),
             };
             if (std.meta.activeTag(global.value) == .FuncRef) {
-                global.value.FuncRef.module_instance = inst;
+                global.value.FuncRef.module_instance = self;
             }
             try store.globals.append(global);
         }
@@ -2997,10 +3002,10 @@ pub const ModuleInstance = struct {
 
                 if (def_elem.elems_value.items.len > 0) {
                     var elems = def_elem.elems_value.items;
-                    try table.init_range_val(inst, elems, @intCast(u32, elems.len), 0, start_table_index);
+                    try table.init_range_val(self, elems, @intCast(u32, elems.len), 0, start_table_index);
                 } else {
                     var elems = def_elem.elems_expr.items;
-                    try table.init_range_expr(inst, elems, @intCast(u32, elems.len), 0, start_table_index, store);
+                    try table.init_range_expr(self, elems, @intCast(u32, elems.len), 0, start_table_index, store);
                 }
             } else if (def_elem.mode == .Passive) {
                 if (def_elem.elems_value.items.len > 0) {
@@ -3009,7 +3014,7 @@ pub const ModuleInstance = struct {
                     while (index < elem.refs.items.len) : (index += 1) {
                         elem.refs.items[index] = def_elem.elems_value.items[index];
                         if (elem.reftype == .FuncRef) {
-                            elem.refs.items[index].FuncRef.module_instance = inst;
+                            elem.refs.items[index].FuncRef.module_instance = self;
                         }
                     }
                 } else {
@@ -3018,7 +3023,7 @@ pub const ModuleInstance = struct {
                     while (index < elem.refs.items.len) : (index += 1) {
                         elem.refs.items[index] = try def_elem.elems_expr.items[index].resolve(store);
                         if (elem.reftype == .FuncRef) {
-                            elem.refs.items[index].FuncRef.module_instance = inst;
+                            elem.refs.items[index].FuncRef.module_instance = self;
                         }
                     }
                 }
@@ -3058,9 +3063,9 @@ pub const ModuleInstance = struct {
             const num_imports = module_def.imports.functions.items.len;
             if (func_index >= num_imports) {
                 var instance_index = func_index - num_imports;
-                try inst.invokeInternal(instance_index, params, returns);
+                try self.invokeInternal(instance_index, params, returns);
             } else {
-                try inst.invokeImportInternal(func_index, params, returns);
+                try self.invokeImportInternal(func_index, params, returns);
             }
         }
     }

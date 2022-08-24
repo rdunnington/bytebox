@@ -13,6 +13,98 @@ fn log_verbose(comptime msg: []const u8, params: anytype) void {
     }
 }
 
+const k_assert_invalid_suite_allowlist = [_][]const u8{
+    // "address",
+    // "align",
+    // "binary",
+    // "binary-leb128",
+    // "block",
+    // "br",
+    // "br_if",
+    // "br_table",
+    // "bulk",
+    // "call",
+    // "call_indirect",
+    // "comments",
+    // "const",
+    // "conversions",
+    // "custom",
+    // "data",
+    // "elem",
+    // "endianness",
+    // "exports",
+    // "f32",
+    // "f32_bitwise",
+    // "f32_cmp",
+    // "f64",
+    // "f64_bitwise",
+    // "f64_cmp",
+    // "fac",
+    // "float_exprs",
+    // "float_literals",
+    // "float_memory",
+    // "float_misc",
+    // "forward",
+    // "func",
+    // "func_ptrs",
+    // "global",
+    // "i32",
+    // "i64",
+    // "if",
+    // "imports",
+    // "inline-module",
+    // "int_exprs",
+    // "int_literals",
+    // "labels",
+    // "left-to-right",
+    // "linking",
+    // "load",
+    // "local_get",
+    // "local_set",
+    // "local_tee",
+    // "loop",
+    // "memory",
+    // "memory_copy",
+    // "memory_fill",
+    // "memory_grow",
+    // "memory_init",
+    // "memory_redundancy",
+    // "memory_size",
+    // "memory_trap",
+    // "names",
+    // "nop",
+    // "ref_func",
+    // "ref_is_null",
+    // "ref_null",
+    // "return",
+    // "select",
+    // "skip-stack-guard-page",
+    // "stack",
+    // "start",
+    // "store",
+    // "switch",
+    // "table",
+    // "table-sub",
+    // "table_copy",
+    // "table_fill",
+    // "table_get",
+    // "table_grow",
+    // "table_init",
+    // "table_set",
+    // "table_size",
+    // "token",
+    // "traps",
+    // "type",
+    // "unreachable",
+    // "unreached-invalid",
+    // "unreached-valid",
+    // "unwind",
+    // "utf8-custom-section-id",
+    // "utf8-import-field",
+    // "utf8-import-module",
+    // "utf8-invalid-encoding",
+};
+
 const TestSuiteError = error{
     Fail,
 };
@@ -541,7 +633,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     return imports;
 }
 
-fn run(suite_path: []const u8, opts: *const TestOpts) !void {
+fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !void {
     var did_fail_any_test: bool = false;
 
     var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -565,11 +657,21 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
 
     try imports.append(try makeSpectestImports(std.testing.allocator));
 
+    var is_assert_invalid_allowed: bool = false;
+    for (k_assert_invalid_suite_allowlist) |allowed_suite_name| {
+        if (strcmp(suite_name, allowed_suite_name)) {
+            is_assert_invalid_allowed = true;
+            break;
+        }
+    }
+
     for (commands.items) |*command| {
         switch (command.*) {
             .AssertInvalid => |c| {
-                log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
-                continue;
+                if (is_assert_invalid_allowed == false) {
+                    log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
+                    continue;
+                }
             },
             else => {},
         }
@@ -655,6 +757,35 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 print("\tFail: decode succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
 
+            var validate_expected_error: ?[]const u8 = null;
+            switch (command.*) {
+                .AssertInvalid => |c| {
+                    validate_expected_error = c.err.expected_error;
+                },
+                else => {},
+            }
+
+            (module.def.?).validate() catch |e| {
+                if (validate_expected_error) |expected_str| {
+                    if (isSameError(e, expected_str)) {
+                        log_verbose("\tSuccess!\n", .{});
+                    } else {
+                        if (!g_verbose_logging) {
+                            print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
+                        }
+                        print("\tFail: validate failed with error {}, but expected '{s}'\n", .{ e, expected_str });
+                    }
+                }
+                continue;
+            };
+
+            if (validate_expected_error) |expected_str| {
+                if (!g_verbose_logging) {
+                    print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
+                }
+                print("\tFail: validate succeeded, but it should have failed with error '{s}'\n", .{expected_str});
+            }
+
             var instantiate_expected_error: ?[]const u8 = null;
             switch (command.*) {
                 .AssertUninstantiable => |c| {
@@ -686,11 +817,11 @@ fn run(suite_path: []const u8, opts: *const TestOpts) !void {
                 continue;
             };
 
-            if (instantiate_expected_error) |expected| {
+            if (instantiate_expected_error) |expected_str| {
                 if (!g_verbose_logging) {
                     print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
-                print("\tFail: instantiate succeeded, but it should have failed with error '{s}'\n", .{expected});
+                print("\tFail: instantiate succeeded, but it should have failed with error '{s}'\n", .{expected_str});
             }
         }
 
@@ -1003,6 +1134,6 @@ pub fn main() !void {
         var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
-        try run(suite_path, &opts);
+        try run(suite, suite_path, &opts);
     }
 }
