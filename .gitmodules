@@ -1,0 +1,3 @@
+[submodule "zig-stable-array"]
+	path = zig-stable-array
+	url = https://github.com/rdunnington/zig-stable-array.git
