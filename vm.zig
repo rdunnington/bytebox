@@ -1653,7 +1653,7 @@ const ModuleValidator = struct {
         };
     }
 
-    fn deinit(self: *ModuleValidator) {
+    fn deinit(self: *ModuleValidator) void {
         self.type_stack.clearAndFree();
         while (self.control_stack.items.len > 0) {
             try self.popControl() catch unreachable;
@@ -1663,7 +1663,7 @@ const ModuleValidator = struct {
 
     fn validate(self: *ModuleValidator, module: *const ModuleDefinition) !void {
         for (module.functions.items) |func_def| {
-            validateFunction(func_def);
+            try self.validateFunction(module, &func_def);
         }
     }
 
@@ -1705,69 +1705,71 @@ const ModuleValidator = struct {
     }
 
     fn validateFunction(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition) !void {
-        if (func_def.type_index >= module.types.items) {
+        if (func.type_index >= module.types.items.len) {
             return error.ValidationUnknownType;
         }
 
-        const func_type_def: *const FunctionTypeDefinition = module.types.items[func_def.type_index];
+        const func_type_def: *const FunctionTypeDefinition = &module.types.items[func.type_index];
         var params: []const ValType = func_type_def.getParams();
-        if (std.mem.eql(ValType, params, func_def.locals.items) == false) {
+        if (std.mem.eql(ValType, params, func.locals.items) == false) {
             return error.ValidationTypeMismatch;
         }
 
-        switch (instruction.opcode) {
-            .I32_Eqz => {
-                // var v1: i32 = try stack.popI32();
-                // var result: i32 = if (v1 == 0) 1 else 0;
-                // try stack.pushI32(result);
-            },
+        _ = self;
 
-            .Memory_Init => {
-                try validateMemoryIndex(module);
-                try validateDataIndex(instruction.immediate, module);
-            },
-            .Data_Drop => {
-                try validateDataIndex(instruction.immediate, module);
-            },
-            .Memory_Copy, .Memory_Fill => {
-                try validateMemoryIndex(module);
-            },
-            .Table_Init => {
-                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
-                const elem_index = pair.index_x;
-                const table_index = pair.index_y;
-                try validateElementIndex(elem_index, module);
-                try validateTableIndex(table_index, module);
-
-                const elem_reftype: ValType = module.elements.items[elem_index].reftype;
-                const table_reftype: ValType = module.tables.items[table_index].reftype;
-
-                if (elem_reftype != table_reftype) {
-                    return error.ValidationTypeMismatch;
-                }
-            },
-            .Elem_Drop => {
-                try validateElementIndex(instruction.immediate, module);
-            },
-            .Table_Copy => {
-                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
-                const dest_table_index = pair.index_x;
-                const src_table_index = pair.index_y;
-                try validateTableIndex(dest_table_index, module);
-                try validateTableIndex(src_table_index, module);
-
-                const dest_reftype: ValType = module.tables.items[dest_table_index].reftype;
-                const src_reftype: ValType = module.tables.items[src_table_index].reftype;
-
-                if (dest_reftype != src_reftype) {
-                    return error.ValidationTypeMismatch;
-                }
-            },
-            .Table_Grow, .Table_Size, .Table_Fill => {
-                try validateTableIndex(instruction.immediate, module);
-            },
-            else => {},
-        }
+        //        switch (instruction.opcode) {
+        //            .I32_Eqz => {
+        //                // var v1: i32 = try stack.popI32();
+        //                // var result: i32 = if (v1 == 0) 1 else 0;
+        //                // try stack.pushI32(result);
+        //            },
+        //
+        //            .Memory_Init => {
+        //                try validateMemoryIndex(module);
+        //                try validateDataIndex(instruction.immediate, module);
+        //            },
+        //            .Data_Drop => {
+        //                try validateDataIndex(instruction.immediate, module);
+        //            },
+        //            .Memory_Copy, .Memory_Fill => {
+        //                try validateMemoryIndex(module);
+        //            },
+        //            .Table_Init => {
+        //                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+        //                const elem_index = pair.index_x;
+        //                const table_index = pair.index_y;
+        //                try validateElementIndex(elem_index, module);
+        //                try validateTableIndex(table_index, module);
+        //
+        //                const elem_reftype: ValType = module.elements.items[elem_index].reftype;
+        //                const table_reftype: ValType = module.tables.items[table_index].reftype;
+        //
+        //                if (elem_reftype != table_reftype) {
+        //                    return error.ValidationTypeMismatch;
+        //                }
+        //            },
+        //            .Elem_Drop => {
+        //                try validateElementIndex(instruction.immediate, module);
+        //            },
+        //            .Table_Copy => {
+        //                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+        //                const dest_table_index = pair.index_x;
+        //                const src_table_index = pair.index_y;
+        //                try validateTableIndex(dest_table_index, module);
+        //                try validateTableIndex(src_table_index, module);
+        //
+        //                const dest_reftype: ValType = module.tables.items[dest_table_index].reftype;
+        //                const src_reftype: ValType = module.tables.items[src_table_index].reftype;
+        //
+        //                if (dest_reftype != src_reftype) {
+        //                    return error.ValidationTypeMismatch;
+        //                }
+        //            },
+        //            .Table_Grow, .Table_Size, .Table_Fill => {
+        //                try validateTableIndex(instruction.immediate, module);
+        //            },
+        //            else => {},
+        //        }
     }
 };
 
@@ -1872,9 +1874,8 @@ pub const ModuleDefinition = struct {
     }
 
     pub fn validate(self: *const ModuleDefinition) !void {
-        for (self.code.instructions.items) |instruction| {
-            try ModuleValidator.validate_instruction(instruction, self);
-        }
+        var validator = ModuleValidator.init(self.allocator);
+        try validator.validate(self);
     }
 
     fn decode(wasm: []const u8, module: *ModuleDefinition, allocator: std.mem.Allocator) anyerror!void {
