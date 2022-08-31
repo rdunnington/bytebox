@@ -59,6 +59,7 @@ pub const AssertError = error{
 
 pub const ValidationError = error{
     ValidationTypeMismatch,
+    ValidationUnknownType,
     ValidationUnknownFunction,
     ValidationUnknownTable,
     ValidationUnknownMemory,
@@ -1633,6 +1634,48 @@ const CustomSection = struct {
 };
 
 const ModuleValidator = struct {
+    // TODO could optimize start/end types by having them be slices in an infinitely growing array instead of their own dynamic allocations
+    const ControlFrame = struct {
+        opcode: Opcode,
+        start_types: std.ArrayList(ValType),
+        end_types: std.ArrayList(ValType),
+        types_stack_height: usize,
+        is_unreachable: bool,
+    };
+
+    type_stack: std.ArrayList(ValType),
+    control_stack: std.ArrayList(ControlFrame),
+
+    fn init(allocator: std.mem.Allocator) ModuleValidator {
+        return ModuleValidator{
+            .type_stack = std.ArrayList(ValType).init(allocator),
+            .control_stack = std.ArrayList(ControlFrame).init(allocator),
+        };
+    }
+
+    fn deinit(self: *ModuleValidator) {
+        self.type_stack.clearAndFree();
+        while (self.control_stack.items.len > 0) {
+            try self.popControl() catch unreachable;
+        }
+        self.control_stack.clearAndFree();
+    }
+
+    fn validate(self: *ModuleValidator, module: *const ModuleDefinition) !void {
+        for (module.functions.items) |func_def| {
+            validateFunction(func_def);
+        }
+    }
+
+    fn popControl(self: *ModuleValidator) !void {
+        if (self.control_stack.items.len == 0) {
+            return error.OutOfBounds;
+        }
+        var frame: ControlFrame = self.control_stack.pop();
+        frame.start_types.deinit();
+        frame.end_types.deinit();
+    }
+
     fn validateTableIndex(index: u32, module: *const ModuleDefinition) !void {
         if (module.imports.tables.items.len + module.tables.items.len <= index) {
             return error.ValidationUnknownTable;
@@ -1661,8 +1704,24 @@ const ModuleValidator = struct {
         }
     }
 
-    fn validate_instruction(instruction: Instruction, module: *const ModuleDefinition) !void {
+    fn validateFunction(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition) !void {
+        if (func_def.type_index >= module.types.items) {
+            return error.ValidationUnknownType;
+        }
+
+        const func_type_def: *const FunctionTypeDefinition = module.types.items[func_def.type_index];
+        var params: []const ValType = func_type_def.getParams();
+        if (std.mem.eql(ValType, params, func_def.locals.items) == false) {
+            return error.ValidationTypeMismatch;
+        }
+
         switch (instruction.opcode) {
+            .I32_Eqz => {
+                // var v1: i32 = try stack.popI32();
+                // var result: i32 = if (v1 == 0) 1 else 0;
+                // try stack.pushI32(result);
+            },
+
             .Memory_Init => {
                 try validateMemoryIndex(module);
                 try validateDataIndex(instruction.immediate, module);

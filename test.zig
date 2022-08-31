@@ -48,7 +48,7 @@ const k_assert_invalid_suite_allowlist = [_][]const u8{
     // "func",
     // "func_ptrs",
     // "global",
-    // "i32",
+    "i32",
     // "i64",
     // "if",
     // "imports",
