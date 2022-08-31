@@ -6,8 +6,10 @@ pub fn build(b: *std.build.Builder) void {
 
     const exe = b.addExecutable("wasmtest", "test.zig");
 
-    exe.addLibPath("C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.19041.0\\um\\x64");
-    exe.linkSystemLibrary("kernel32");
+    if (std.os.tag == .windows) {
+        exe.addLibPath("C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.19041.0\\um\\x64");
+        exe.linkSystemLibrary("kernel32");
+    }
 
     exe.setTarget(target);
     exe.setBuildMode(mode);
