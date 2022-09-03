@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
@@ -6,7 +7,7 @@ pub fn build(b: *std.build.Builder) void {
 
     const exe = b.addExecutable("wasmtest", "test.zig");
 
-    if (std.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         exe.addLibPath("C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.19041.0\\um\\x64");
         exe.linkSystemLibrary("kernel32");
     }

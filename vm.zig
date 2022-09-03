@@ -60,8 +60,10 @@ pub const AssertError = error{
 
 pub const ValidationError = error{
     ValidationTypeMismatch,
+    ValidationTypeMustBeNumeric,
     ValidationUnknownType,
     ValidationUnknownFunction,
+    ValidationUnknownGlobal,
     ValidationUnknownTable,
     ValidationUnknownMemory,
     ValidationUnknownElement,
@@ -1612,22 +1614,24 @@ const CustomSection = struct {
 };
 
 const ModuleValidator = struct {
-    // TODO could optimize start/end types by having them be slices in an infinitely growing array instead of their own dynamic allocations
     const ControlFrame = struct {
         opcode: Opcode,
-        start_types: std.ArrayList(ValType),
-        end_types: std.ArrayList(ValType),
+        start_types: []const ValType,
+        end_types: []const ValType,
         types_stack_height: usize,
+        is_function: bool,
         is_unreachable: bool,
     };
 
     type_stack: std.ArrayList(ValType),
     control_stack: std.ArrayList(ControlFrame),
+    control_types: StableArray(ValType),
 
     fn init(allocator: std.mem.Allocator) ModuleValidator {
         return ModuleValidator{
             .type_stack = std.ArrayList(ValType).init(allocator),
             .control_stack = std.ArrayList(ControlFrame).init(allocator),
+            .control_types = StableArray(ValType).init(1 * 1024 * 1024),
         };
     }
 
@@ -1645,18 +1649,61 @@ const ModuleValidator = struct {
         }
     }
 
+    fn pushType(self: *ModuleValidator, valtype: ValType) !void {
+        try self.type_stack.append(valtype);
+    }
+
+    fn popAnyType(self: *ModuleValidator) !ValType {
+        if (self.type_stack.items.len == 0) {
+            return error.ValidationOutOfBounds;
+        }
+        return self.type_stack.pop();
+    }
+
+    fn popType(self: *ModuleValidator, valtype: ValType) !void {
+        const popped = try self.popAnyType();
+        if (popped != valtype) {
+            return error.ValidationTypeMismatch;
+        }
+    }
+
+    fn pushControl(self: *ModuleValidator, opcode: Opcode, func_type: *const FunctionTypeDefinition) !void {
+        const control_types_start_index: usize = self.control_types.items.len;
+        try self.control_types.appendSlice(func_type.getParams());
+        var start_types: []const ValType = self.control_types.items[control_types_start_index..self.control_types.items.len];
+
+        const control_types_end_index: usize = self.control_types.items.len;
+        try self.control_types.appendSlice(func_type.getReturns());
+        var end_types: []const ValType = self.control_types.items[control_types_end_index..self.control_types.items.len];
+
+        try self.control_stack.append(ControlFrame{
+            .opcode = opcode,
+            .start_types = start_types,
+            .end_types = end_types,
+            .types_stack_height = self.type_stack.items.len,
+            .is_function = true,
+            .is_unreachable = false,
+        });
+    }
+
     fn popControl(self: *ModuleValidator) !void {
         if (self.control_stack.items.len == 0) {
-            return error.OutOfBounds;
+            return error.ValidationOutOfBounds;
         }
         var frame: ControlFrame = self.control_stack.pop();
-        frame.start_types.deinit();
-        frame.end_types.deinit();
+        var num_used_types: usize = frame.start_types.len + frame.end_types.len;
+        self.control_types.resize(self.control_types.items.len - num_used_types);
     }
 
     fn validateTableIndex(index: u32, module: *const ModuleDefinition) !void {
         if (module.imports.tables.items.len + module.tables.items.len <= index) {
             return error.ValidationUnknownTable;
+        }
+    }
+
+    fn validateFunctionIndex(index: u32, module: *const ModuleDefinition) !void {
+        if (module.imports.functions.items.len + module.functions.items.len <= index) {
+            return error.ValidationUnknownFunction;
         }
     }
 
@@ -1683,6 +1730,67 @@ const ModuleValidator = struct {
     }
 
     fn validateFunction(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition) !void {
+        const Helpers = struct {
+            fn getLocalValtype(validator: *const ModuleValidator, locals_index: u32) !ValType {
+                var i = validator.control_stack.items.len - 1;
+                while (i >= 0) : (i -= 1) {
+                    const frame: *const ControlFrame = &validator.control_stack.items[i];
+                    if (frame.is_function) {
+                        const locals: []const ValType = frame.start_types;
+                        if (locals.len <= locals_index) {
+                            return error.ValidationOutOfBounds;
+                        }
+                        const valtype = locals[locals_index];
+                        return valtype;
+                    }
+                }
+                unreachable;
+            }
+
+            fn getGlobalValtype(module_: *const ModuleDefinition, global_index: u32) !ValType {
+                if (global_index < module_.imports.globals.items.len) {
+                    return module_.imports.globals.items[global_index].valtype;
+                }
+
+                const module_global_index = global_index - module_.imports.globals.items.len;
+                if (module_global_index < module_.globals.items.len) {
+                    return module_.globals.items[module_global_index].valtype;
+                }
+
+                return error.ValidationUnknownGlobal;
+            }
+
+            fn getTableReftype(module_: *const ModuleDefinition, table_index: u32) !ValType {
+                if (table_index < module_.imports.tables.items.len) {
+                    return module_.imports.tables.items[table_index].reftype;
+                }
+
+                const module_table_index = table_index - module_.imports.tables.items.len;
+                if (module_table_index < module_.tables.items.len) {
+                    return module_.tables.items[module_table_index].reftype;
+                }
+
+                return error.ValidationUnknownTable;
+            }
+
+            fn validateNumericUnaryOp(validator: *ModuleValidator, pop_type: ValType, push_type: ValType) !void {
+                try validator.popType(pop_type);
+                try validator.pushType(push_type);
+            }
+
+            fn validateNumericBinaryOp(validator: *ModuleValidator, pop_type: ValType, push_type: ValType) !void {
+                try validator.popType(pop_type);
+                try validator.popType(pop_type);
+                try validator.pushType(push_type);
+            }
+
+            fn validateStoreOp(validator: *ModuleValidator, module_: *const ModuleDefinition, store_type: ValType) !void {
+                try validateMemoryIndex(module_);
+                try validator.popType(store_type);
+                try validator.popType(.I32);
+            }
+        };
+
         if (func.type_index >= module.types.items.len) {
             return error.ValidationUnknownType;
         }
@@ -1693,61 +1801,273 @@ const ModuleValidator = struct {
             return error.ValidationTypeMismatch;
         }
 
-        _ = self;
+        var instruction_index: u32 = func.offset_into_instructions;
+        if (instruction_index >= module.code.instructions.items.len) {
+            return error.ValidationOutOfBounds;
+        }
 
-        //        switch (instruction.opcode) {
-        //            .I32_Eqz => {
-        //                // var v1: i32 = try stack.popI32();
-        //                // var result: i32 = if (v1 == 0) 1 else 0;
-        //                // try stack.pushI32(result);
-        //            },
-        //
-        //            .Memory_Init => {
-        //                try validateMemoryIndex(module);
-        //                try validateDataIndex(instruction.immediate, module);
-        //            },
-        //            .Data_Drop => {
-        //                try validateDataIndex(instruction.immediate, module);
-        //            },
-        //            .Memory_Copy, .Memory_Fill => {
-        //                try validateMemoryIndex(module);
-        //            },
-        //            .Table_Init => {
-        //                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
-        //                const elem_index = pair.index_x;
-        //                const table_index = pair.index_y;
-        //                try validateElementIndex(elem_index, module);
-        //                try validateTableIndex(table_index, module);
-        //
-        //                const elem_reftype: ValType = module.elements.items[elem_index].reftype;
-        //                const table_reftype: ValType = module.tables.items[table_index].reftype;
-        //
-        //                if (elem_reftype != table_reftype) {
-        //                    return error.ValidationTypeMismatch;
-        //                }
-        //            },
-        //            .Elem_Drop => {
-        //                try validateElementIndex(instruction.immediate, module);
-        //            },
-        //            .Table_Copy => {
-        //                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
-        //                const dest_table_index = pair.index_x;
-        //                const src_table_index = pair.index_y;
-        //                try validateTableIndex(dest_table_index, module);
-        //                try validateTableIndex(src_table_index, module);
-        //
-        //                const dest_reftype: ValType = module.tables.items[dest_table_index].reftype;
-        //                const src_reftype: ValType = module.tables.items[src_table_index].reftype;
-        //
-        //                if (dest_reftype != src_reftype) {
-        //                    return error.ValidationTypeMismatch;
-        //                }
-        //            },
-        //            .Table_Grow, .Table_Size, .Table_Fill => {
-        //                try validateTableIndex(instruction.immediate, module);
-        //            },
-        //            else => {},
-        //        }
+        try self.pushControl(Opcode.Call, func_type_def);
+
+        const instructions = module.code.instructions.items;
+        while (instruction_index < instructions.len and instructions[instruction_index].opcode != .End) : (instruction_index += 1) {
+            const instruction: Instruction = instructions[instruction_index];
+            switch (instruction.opcode) {
+                .Noop => {},
+                .Drop => {
+                    _ = try self.popAnyType();
+                },
+                .Select => {
+                    try self.popType(.I32);
+                    const valtype1 = try self.popAnyType();
+                    const valtype2 = try self.popAnyType();
+                    if (valtype1 != valtype2) {
+                        return error.ValidationTypeMismatch;
+                    }
+                    if (valtype1.isRefType()) {
+                        return error.ValidationTypeMustBeNumeric;
+                    }
+                    try self.pushType(valtype1);
+                },
+                .Select_T => {
+                    const valtype: ValType = @intToEnum(ValType, instruction.immediate);
+                    try self.popType(.I32);
+                    try self.popType(valtype);
+                    try self.popType(valtype);
+                    try self.pushType(valtype);
+                },
+                .Local_Get => {
+                    const valtype = try Helpers.getLocalValtype(self, instruction.immediate);
+                    try self.pushType(valtype);
+                },
+                .Local_Set => {
+                    const valtype = try Helpers.getLocalValtype(self, instruction.immediate);
+                    try self.popType(valtype);
+                },
+                .Local_Tee => {
+                    const valtype = try Helpers.getLocalValtype(self, instruction.immediate);
+                    try self.popType(valtype);
+                    try self.pushType(valtype);
+                },
+                .Global_Get => {
+                    const valtype = try Helpers.getGlobalValtype(module, instruction.immediate);
+                    try self.pushType(valtype);
+                },
+                .Global_Set => {
+                    const valtype = try Helpers.getGlobalValtype(module, instruction.immediate);
+                    try self.popType(valtype);
+                },
+                .Table_Get => {
+                    const reftype = try Helpers.getTableReftype(module, instruction.immediate);
+                    try self.pushType(reftype);
+                },
+                .Table_Set => {
+                    const reftype = try Helpers.getTableReftype(module, instruction.immediate);
+                    try self.popType(reftype);
+                },
+                .I32_Load, .I32_Load8_S, .I32_Load8_U, .I32_Load16_S, .I32_Load16_U => {
+                    try validateMemoryIndex(module);
+                    try self.pushType(.I32);
+                },
+                .I64_Load, .I64_Load8_S, .I64_Load8_U, .I64_Load16_S, .I64_Load16_U, .I64_Load32_S, .I64_Load32_U => {
+                    try validateMemoryIndex(module);
+                    try self.pushType(.I64);
+                },
+                .F32_Load => {
+                    try validateMemoryIndex(module);
+                    try self.pushType(.F32);
+                },
+                .F64_Load => {
+                    try validateMemoryIndex(module);
+                    try self.pushType(.F32);
+                },
+                .I32_Store, .I32_Store8, .I32_Store16 => {
+                    try Helpers.validateStoreOp(self, module, .I32);
+                },
+                .I64_Store, .I64_Store8, .I64_Store16, .I64_Store32 => {
+                    try Helpers.validateStoreOp(self, module, .I64);
+                },
+                .F32_Store => {
+                    try Helpers.validateStoreOp(self, module, .F32);
+                },
+                .F64_Store => {
+                    try Helpers.validateStoreOp(self, module, .F64);
+                },
+                .Memory_Size => {
+                    try validateMemoryIndex(module);
+                    try self.pushType(.I32);
+                },
+                .Memory_Grow => {
+                    try validateMemoryIndex(module);
+                    try self.popType(.I32);
+                    try self.pushType(.I32);
+                },
+                .I32_Const => {
+                    try self.pushType(.I32);
+                },
+                .I64_Const => {
+                    try self.pushType(.I64);
+                },
+                .F32_Const => {
+                    try self.pushType(.F32);
+                },
+                .F64_Const => {
+                    try self.pushType(.F64);
+                },
+                .I32_Eq, .I32_NE, .I32_LT_S, .I32_LT_U, .I32_GT_S, .I32_GT_U, .I32_LE_S, .I32_LE_U, .I32_GE_S, .I32_GE_U, .I32_Add, .I32_Sub, .I32_Mul, .I32_Div_S, .I32_Div_U, .I32_Rem_S, .I32_Rem_U, .I32_And, .I32_Or, .I32_Xor, .I32_Shl, .I32_Shr_S, .I32_Shr_U, .I32_Rotl, .I32_Rotr => {
+                    try Helpers.validateNumericBinaryOp(self, .I32, .I32);
+                },
+                .I32_Eqz, .I32_Clz, .I32_Ctz, .I32_Popcnt => {
+                    try Helpers.validateNumericUnaryOp(self, .I32, .I32);
+                },
+                .I64_Eqz, .I64_Clz, .I64_Ctz, .I64_Popcnt => {
+                    try Helpers.validateNumericUnaryOp(self, .I64, .I64);
+                },
+                .I64_Eq, .I64_NE, .I64_LT_S, .I64_LT_U, .I64_GT_S, .I64_GT_U, .I64_LE_S, .I64_LE_U, .I64_GE_S, .I64_GE_U, .I64_Add, .I64_Sub, .I64_Mul, .I64_Div_S, .I64_Div_U, .I64_Rem_S, .I64_Rem_U, .I64_And, .I64_Or, .I64_Xor, .I64_Shl, .I64_Shr_S, .I64_Shr_U, .I64_Rotl, .I64_Rotr => {
+                    try Helpers.validateNumericBinaryOp(self, .I64, .I32);
+                },
+                .F32_EQ, .F32_NE, .F32_LT, .F32_GT, .F32_LE, .F32_GE => {
+                    try Helpers.validateNumericBinaryOp(self, .F32, .I32);
+                },
+                .F32_Add, .F32_Sub, .F32_Mul, .F32_Div, .F32_Min, .F32_Max, .F32_Copysign => {
+                    try Helpers.validateNumericBinaryOp(self, .F32, .F32);
+                },
+                .F32_Abs, .F32_Neg, .F32_Ceil, .F32_Floor, .F32_Trunc, .F32_Nearest, .F32_Sqrt, .F64_Abs, .F64_Neg, .F64_Ceil, .F64_Floor, .F64_Trunc, .F64_Nearest, .F64_Sqrt => {
+                    try Helpers.validateNumericUnaryOp(self, .F32, .F32);
+                },
+                .F64_EQ, .F64_NE, .F64_LT, .F64_GT, .F64_LE, .F64_GE => {
+                    try Helpers.validateNumericBinaryOp(self, .F64, .I32);
+                },
+                .F64_Add, .F64_Sub, .F64_Mul, .F64_Div, .F64_Min, .F64_Max, .F64_Copysign => {
+                    try Helpers.validateNumericBinaryOp(self, .F64, .I64);
+                },
+                .I32_Wrap_I64 => {
+                    try Helpers.validateNumericUnaryOp(self, .I64, .I32);
+                },
+                .I32_Trunc_F32_S, .I32_Trunc_F32_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F32, .I32);
+                },
+                .I32_Trunc_F64_S, .I32_Trunc_F64_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F64, .I32);
+                },
+                .I64_Extend_I32_S, .I64_Extend_I32_U => {
+                    try Helpers.validateNumericUnaryOp(self, .I32, .I64);
+                },
+                .I64_Trunc_F32_S, .I64_Trunc_F32_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F32, .I64);
+                },
+                .I64_Trunc_F64_S, .I64_Trunc_F64_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F64, .I64);
+                },
+                .F32_Convert_I32_S, .F32_Convert_I32_U => {
+                    try Helpers.validateNumericUnaryOp(self, .I32, .F32);
+                },
+                .F32_Convert_I64_S, .F32_Convert_I64_U => {
+                    try Helpers.validateNumericUnaryOp(self, .I64, .F32);
+                },
+                .F32_Demote_F64 => {
+                    try Helpers.validateNumericUnaryOp(self, .F64, .F32);
+                },
+                .F64_Convert_I32_S, .F64_Convert_I32_U => {
+                    try Helpers.validateNumericUnaryOp(self, .I32, .F64);
+                },
+                .F64_Convert_I64_S, .F64_Convert_I64_U => {
+                    try Helpers.validateNumericUnaryOp(self, .I64, .F64);
+                },
+                .F64_Promote_F32 => {
+                    try Helpers.validateNumericUnaryOp(self, .F32, .F64);
+                },
+                .I32_Reinterpret_F32 => {
+                    try Helpers.validateNumericUnaryOp(self, .F32, .I32);
+                },
+                .I64_Reinterpret_F64 => {
+                    try Helpers.validateNumericUnaryOp(self, .F64, .I64);
+                },
+                .F32_Reinterpret_I32 => {
+                    try Helpers.validateNumericUnaryOp(self, .I32, .F32);
+                },
+                .F64_Reinterpret_I64 => {
+                    try Helpers.validateNumericUnaryOp(self, .I64, .F64);
+                },
+                .I32_Extend8_S, .I32_Extend16_S => {
+                    try Helpers.validateNumericUnaryOp(self, .I32, .I32);
+                },
+                .I64_Extend8_S, .I64_Extend16_S, .I64_Extend32_S => {
+                    try Helpers.validateNumericUnaryOp(self, .I64, .I64);
+                },
+                .Ref_Null => {
+                    var valtype = @intToEnum(ValType, instruction.immediate);
+                    try self.pushType(valtype);
+                },
+                .Ref_Is_Null => {
+                    var valtype = try self.popAnyType();
+                    if (valtype.isRefType() == false) {
+                        return error.ValidationTypeMismatch;
+                    }
+                    try self.pushType(.I32);
+                },
+                .Ref_Func => {
+                    try validateFunctionIndex(instruction.immediate, module);
+                    try self.pushType(.FuncRef);
+                },
+                .I32_Trunc_Sat_F32_S, .I32_Trunc_Sat_F32_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F32, .I32);
+                },
+                .I32_Trunc_Sat_F64_S, .I32_Trunc_Sat_F64_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F64, .I32);
+                },
+                .I64_Trunc_Sat_F32_S, .I64_Trunc_Sat_F32_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F32, .I64);
+                },
+                .I64_Trunc_Sat_F64_S, .I64_Trunc_Sat_F64_U => {
+                    try Helpers.validateNumericUnaryOp(self, .F64, .I64);
+                },
+                .Memory_Init => {
+                    try validateMemoryIndex(module);
+                    try validateDataIndex(instruction.immediate, module);
+                },
+                .Data_Drop => {
+                    try validateDataIndex(instruction.immediate, module);
+                },
+                .Memory_Copy, .Memory_Fill => {
+                    try validateMemoryIndex(module);
+                },
+                .Table_Init => {
+                    const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+                    const elem_index = pair.index_x;
+                    const table_index = pair.index_y;
+                    try validateElementIndex(elem_index, module);
+                    try validateTableIndex(table_index, module);
+
+                    const elem_reftype: ValType = module.elements.items[elem_index].reftype;
+                    const table_reftype: ValType = module.tables.items[table_index].reftype;
+
+                    if (elem_reftype != table_reftype) {
+                        return error.ValidationTypeMismatch;
+                    }
+                },
+                .Elem_Drop => {
+                    try validateElementIndex(instruction.immediate, module);
+                },
+                .Table_Copy => {
+                    const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+                    const dest_table_index = pair.index_x;
+                    const src_table_index = pair.index_y;
+                    try validateTableIndex(dest_table_index, module);
+                    try validateTableIndex(src_table_index, module);
+
+                    const dest_reftype: ValType = module.tables.items[dest_table_index].reftype;
+                    const src_reftype: ValType = module.tables.items[src_table_index].reftype;
+
+                    if (dest_reftype != src_reftype) {
+                        return error.ValidationTypeMismatch;
+                    }
+                },
+                .Table_Grow, .Table_Size, .Table_Fill => {
+                    try validateTableIndex(instruction.immediate, module);
+                },
+                else => {},
+            }
+        }
     }
 };
 
