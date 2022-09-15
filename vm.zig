@@ -1638,7 +1638,8 @@ const ModuleValidator = struct {
     fn deinit(self: *ModuleValidator) void {
         self.type_stack.clearAndFree();
         while (self.control_stack.items.len > 0) {
-            try self.popControl() catch unreachable;
+            var frame = self.popControl() catch unreachable;
+            try self.freeControlTypes(&frame);
         }
         self.control_stack.clearAndFree();
     }
@@ -1667,32 +1668,50 @@ const ModuleValidator = struct {
         }
     }
 
-    fn pushControl(self: *ModuleValidator, opcode: Opcode, func_type: *const FunctionTypeDefinition) !void {
+    fn pushControl(self: *ModuleValidator, opcode: Opcode, start_types: []const ValType, end_types: []const ValType) !void {
         const control_types_start_index: usize = self.control_types.items.len;
-        try self.control_types.appendSlice(func_type.getParams());
-        var start_types: []const ValType = self.control_types.items[control_types_start_index..self.control_types.items.len];
+        try self.control_types.appendSlice(start_types);
+        var control_start_types: []const ValType = self.control_types.items[control_types_start_index..self.control_types.items.len];
 
         const control_types_end_index: usize = self.control_types.items.len;
-        try self.control_types.appendSlice(func_type.getReturns());
-        var end_types: []const ValType = self.control_types.items[control_types_end_index..self.control_types.items.len];
+        try self.control_types.appendSlice(end_types);
+        var control_end_types: []const ValType = self.control_types.items[control_types_end_index..self.control_types.items.len];
 
         try self.control_stack.append(ControlFrame{
             .opcode = opcode,
-            .start_types = start_types,
-            .end_types = end_types,
+            .start_types = control_start_types,
+            .end_types = control_end_types,
             .types_stack_height = self.type_stack.items.len,
             .is_function = true,
             .is_unreachable = false,
         });
+
+        for (start_types) |valtype| {
+            try self.pushType(valtype);
+        }
     }
 
-    fn popControl(self: *ModuleValidator) !void {
+    fn popControl(self: *ModuleValidator) !ControlFrame {
         if (self.control_stack.items.len == 0) {
             return error.ValidationOutOfBounds;
         }
         var frame: ControlFrame = self.control_stack.pop();
+
+        var i = frame.end_types.len - 1;
+        while (i >= 0) : (i -= 1) {
+            try self.popType(frame.end_types[i]);
+        }
+
+        if (self.type_stack.len != frame.types_stack_height) {
+            return error.ValidationTypeStackHeightMismatch;
+        }
+
+        return frame;
+    }
+
+    fn freeControlTypes(self: *ModuleValidator, frame: *const ControlFrame) !void {
         var num_used_types: usize = frame.start_types.len + frame.end_types.len;
-        self.control_types.resize(self.control_types.items.len - num_used_types);
+        try self.control_types.resize(self.control_types.items.len - num_used_types);
     }
 
     fn validateTableIndex(index: u32, module: *const ModuleDefinition) !void {
@@ -1731,6 +1750,30 @@ const ModuleValidator = struct {
 
     fn validateFunction(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition) !void {
         const Helpers = struct {
+            fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction: Instruction) !void {
+                var start_types: []const ValType = &[0]ValType{};
+                var end_types: []const ValType = &[0]ValType{};
+
+                const block_type_value: BlockTypeValue = module_.code.block_type_values.items[instruction.immediate];
+                switch (block_type_value) {
+                    .TypeIndex => {
+                        const type_index = block_type_value.TypeIndex;
+                        const func_type: *const FunctionTypeDefinition = &module_.types.items[type_index];
+                        start_types = func_type.getParams();
+                        end_types = func_type.getReturns();
+                    },
+                    else => {},
+                }
+
+                var start_types_index = start_types.len - 1;
+                while (start_types_index >= 0) : (start_types_index -= 1) {
+                    const valtype: ValType = start_types[start_types_index];
+                    try validator.popType(valtype);
+                }
+
+                try validator.pushControl(instruction.opcode, start_types, end_types);
+            }
+
             fn getLocalValtype(validator: *const ModuleValidator, locals_index: u32) !ValType {
                 var i = validator.control_stack.items.len - 1;
                 while (i >= 0) : (i -= 1) {
@@ -1797,25 +1840,66 @@ const ModuleValidator = struct {
 
         const func_type_def: *const FunctionTypeDefinition = &module.types.items[func.type_index];
         var params: []const ValType = func_type_def.getParams();
-        if (std.mem.eql(ValType, params, func.locals.items) == false) {
-            return error.ValidationTypeMismatch;
+        for (params) |valtype| {
+            try self.pushType(valtype);
         }
+
+        //if (std.mem.eql(ValType, params, func.locals.items) == false) {
+        //    return error.ValidationTypeMismatch;
+        //}
 
         var instruction_index: u32 = func.offset_into_instructions;
         if (instruction_index >= module.code.instructions.items.len) {
             return error.ValidationOutOfBounds;
         }
 
-        try self.pushControl(Opcode.Call, func_type_def);
+        try self.pushControl(Opcode.Call, func_type_def.getParams(), func_type_def.getReturns());
 
         const instructions = module.code.instructions.items;
         while (instruction_index < instructions.len and instructions[instruction_index].opcode != .End) : (instruction_index += 1) {
             const instruction: Instruction = instructions[instruction_index];
             switch (instruction.opcode) {
+                //.Unreachable => {},
                 .Noop => {},
                 .Drop => {
                     _ = try self.popAnyType();
                 },
+                .Block => {
+                    try Helpers.enterBlock(self, module, instruction);
+                },
+                .Loop => {
+                    try Helpers.enterBlock(self, module, instruction);
+                },
+                .If => {
+                    try self.popType(.I32);
+                    try Helpers.enterBlock(self, module, instruction);
+                },
+                .Else => {
+                    const frame: ControlFrame = try self.popControl();
+                    if (frame.opcode != .If) {
+                        return error.ValidationIfElseMismatch;
+                    }
+                    try self.pushControl(.Else, frame.start_types, frame.end_types);
+                },
+                .End => {
+                    const frame: ControlFrame = try self.popControl();
+                    for (frame.end_types) |valtype| {
+                        try self.pushType(valtype);
+                    }
+                    try self.freeControlTypes(&frame);
+                },
+
+                //.Branch => {},
+                //.Branch_If => {},
+                //.Branch_Table => {},
+                //.Return => {},
+                .Call => {
+                    // TODO look up function to call and ensure it exists
+                    // pop param types
+                    // push return types
+                },
+                //.Call_Indirect => {},
+
                 .Select => {
                     try self.popType(.I32);
                     const valtype1 = try self.popAnyType();
@@ -5382,7 +5466,7 @@ pub const ModuleInstance = struct {
     }
 
     fn enterBlock(context: *CallContext, instruction: Instruction, label_offset: u32) !void {
-        var block_type_value = context.module_def.code.block_type_values.items[instruction.immediate];
+        var block_type_value: BlockTypeValue = context.module_def.code.block_type_values.items[instruction.immediate];
 
         var params = std.ArrayList(Val).init(context.scratch_allocator);
         defer params.deinit();
