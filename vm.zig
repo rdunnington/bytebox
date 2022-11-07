@@ -3687,10 +3687,6 @@ pub const ModuleInstance = struct {
             },
             .Wasm => |data| {
                 var instance: *ModuleInstance = data.module_instance;
-                // std.debug.print("module instructions len: {}\n", .{instance.module_def.code.instructions.items.len});
-                instance.invoke(func_import.name, params, returns) catch {
-                    return error.OutOfBounds;
-                };
                 try instance.invoke(func_import.name, params, returns);
             },
         }
