@@ -13,10 +13,10 @@ fn log_verbose(comptime msg: []const u8, params: anytype) void {
     }
 }
 
-const k_assert_invalid_suite_allowlist = [_][]const u8{
-    // "address",
+const k_validation_suite_allowlist = [_][]const u8{
+    "address",
     // "align",
-    // "binary",
+    "binary",
     // "binary-leb128",
     // "block",
     // "br",
@@ -48,7 +48,7 @@ const k_assert_invalid_suite_allowlist = [_][]const u8{
     // "func",
     // "func_ptrs",
     // "global",
-    "i32",
+    // "i32",
     // "i64",
     // "if",
     // "imports",
@@ -657,10 +657,10 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
 
     try imports.append(try makeSpectestImports(std.testing.allocator));
 
-    var is_assert_invalid_allowed: bool = false;
-    for (k_assert_invalid_suite_allowlist) |allowed_suite_name| {
+    var is_validation_allowed: bool = false;
+    for (k_validation_suite_allowlist) |allowed_suite_name| {
         if (strcmp(suite_name, allowed_suite_name)) {
-            is_assert_invalid_allowed = true;
+            is_validation_allowed = true;
             break;
         }
     }
@@ -668,7 +668,7 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
     for (commands.items) |*command| {
         switch (command.*) {
             .AssertInvalid => |c| {
-                if (is_assert_invalid_allowed == false) {
+                if (is_validation_allowed == false) {
                     log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
                     continue;
                 }
@@ -765,19 +765,21 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
                 else => {},
             }
 
-            (module.def.?).validate() catch |e| {
-                if (validate_expected_error) |expected_str| {
-                    if (isSameError(e, expected_str)) {
-                        log_verbose("\tSuccess!\n", .{});
-                    } else {
-                        if (!g_verbose_logging) {
-                            print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
+            if (is_validation_allowed) {
+                (module.def.?).validate() catch |e| {
+                    if (validate_expected_error) |expected_str| {
+                        if (isSameError(e, expected_str)) {
+                            log_verbose("\tSuccess!\n", .{});
+                        } else {
+                            if (!g_verbose_logging) {
+                                print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
+                            }
+                            print("\tFail: validate failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                         }
-                        print("\tFail: validate failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                     }
-                }
-                continue;
-            };
+                    continue;
+                };
+            }
 
             if (validate_expected_error) |expected_str| {
                 if (!g_verbose_logging) {

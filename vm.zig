@@ -1537,6 +1537,10 @@ const Instruction = struct {
                 }
             },
             .Memory_Init => {
+                if (module.data_count == null) {
+                    return error.MalformedMissingDataCountSection;
+                }
+
                 immediate = try decodeLEB128(u32, reader); // dataidx
                 var reserved = try reader.readByte();
                 if (reserved != 0x00) {
@@ -1555,6 +1559,10 @@ const Instruction = struct {
                 immediate = try decodeLEB128(u32, reader); // funcidx
             },
             .Data_Drop => {
+                if (module.data_count == null) {
+                    return error.MalformedMissingDataCountSection;
+                }
+
                 immediate = try decodeLEB128(u32, reader); // dataidx
             },
             .Memory_Copy => {
@@ -1697,12 +1705,12 @@ const ModuleValidator = struct {
         }
         var frame: ControlFrame = self.control_stack.pop();
 
-        var i = frame.end_types.len - 1;
-        while (i >= 0) : (i -= 1) {
-            try self.popType(frame.end_types[i]);
+        var i = frame.end_types.len;
+        while (i > 0) : (i -= 1) {
+            try self.popType(frame.end_types[i - 1]);
         }
 
-        if (self.type_stack.len != frame.types_stack_height) {
+        if (self.type_stack.items.len != frame.types_stack_height) {
             return error.ValidationTypeStackHeightMismatch;
         }
 
@@ -1739,10 +1747,6 @@ const ModuleValidator = struct {
     }
 
     fn validateDataIndex(index: u32, module: *const ModuleDefinition) !void {
-        if (module.data_count == null) {
-            return error.MalformedMissingDataCountSection;
-        }
-
         if (module.data_count.? <= index) {
             return error.ValidationUnknownData;
         }
@@ -1765,9 +1769,9 @@ const ModuleValidator = struct {
                     else => {},
                 }
 
-                var start_types_index = start_types.len - 1;
-                while (start_types_index >= 0) : (start_types_index -= 1) {
-                    const valtype: ValType = start_types[start_types_index];
+                var start_types_index = start_types.len;
+                while (start_types_index > 0) : (start_types_index -= 1) {
+                    const valtype: ValType = start_types[start_types_index - 1];
                     try validator.popType(valtype);
                 }
 
