@@ -70,6 +70,7 @@ pub const ValidationError = error{
     ValidationUnknownData,
     ValidationOutOfBounds,
     ValidationTypeStackHeightMismatch,
+    ValidationBadAlignment,
 };
 
 pub const TrapError = error{
@@ -1234,11 +1235,17 @@ const MemArg = struct {
     alignment: u32,
     offset: u32,
 
-    fn decode(reader: anytype) !MemArg {
-        return MemArg{
+    fn decode(reader: anytype, comptime bitwidth: u32) !MemArg {
+        std.debug.assert(bitwidth % 8 == 0);
+        var memarg = MemArg{
             .alignment = try decodeLEB128(u32, reader),
             .offset = try decodeLEB128(u32, reader),
         };
+        const bit_alignment = std.math.powi(u32, 2, memarg.alignment) catch return error.ValidationBadAlignment;
+        if (bit_alignment > bitwidth / 8) {
+            return error.ValidationBadAlignment;
+        }
+        return memarg;
     }
 };
 
@@ -1475,95 +1482,95 @@ const Instruction = struct {
                 }
             },
             .I32_Load => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = memarg.offset;
             },
             .I64_Load => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 64);
                 immediate = memarg.offset;
             },
             .F32_Load => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = memarg.offset;
             },
             .F64_Load => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 64);
                 immediate = memarg.offset;
             },
             .I32_Load8_S => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 8);
                 immediate = memarg.offset;
             },
             .I32_Load8_U => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 8);
                 immediate = memarg.offset;
             },
             .I32_Load16_S => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 16);
                 immediate = memarg.offset;
             },
             .I32_Load16_U => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 16);
                 immediate = memarg.offset;
             },
             .I64_Load8_S => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 8);
                 immediate = memarg.offset;
             },
             .I64_Load8_U => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 8);
                 immediate = memarg.offset;
             },
             .I64_Load16_S => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 16);
                 immediate = memarg.offset;
             },
             .I64_Load16_U => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 16);
                 immediate = memarg.offset;
             },
             .I64_Load32_S => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = memarg.offset;
             },
             .I64_Load32_U => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = memarg.offset;
             },
             .I32_Store => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = memarg.offset;
             },
             .I64_Store => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 64);
                 immediate = memarg.offset;
             },
             .F32_Store => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = memarg.offset;
             },
             .F64_Store => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 64);
                 immediate = memarg.offset;
             },
             .I32_Store8 => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 8);
                 immediate = memarg.offset;
             },
             .I32_Store16 => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 16);
                 immediate = memarg.offset;
             },
             .I64_Store8 => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 8);
                 immediate = memarg.offset;
             },
             .I64_Store16 => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 16);
                 immediate = memarg.offset;
             },
             .I64_Store32 => {
-                var memarg = try MemArg.decode(reader);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = memarg.offset;
             },
             .Memory_Size => {

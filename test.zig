@@ -15,7 +15,7 @@ fn log_verbose(comptime msg: []const u8, params: anytype) void {
 
 const k_validation_suite_allowlist = [_][]const u8{
     "address",
-    // "align",
+    "align",
     "binary",
     // "binary-leb128",
     // "block",
@@ -306,6 +306,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationUnknownTable => strcmp(err_string, "unknown table"),
         wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory"),
         wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data"),
+        wasm.ValidationError.ValidationBadAlignment => strcmp(err_string, "alignment must not be larger than natural"),
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
@@ -730,10 +731,28 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
                 else => {},
             }
 
+            var validate_expected_error: ?[]const u8 = null;
+            switch (command.*) {
+                .AssertInvalid => |c| {
+                    validate_expected_error = c.err.expected_error;
+                },
+                else => {},
+            }
+
             module.filename = try scratch_allocator.dupe(u8, module_filename);
 
             module.def = wasm.ModuleDefinition.init(module_data, scratch_allocator) catch |e| {
-                if (decode_expected_error) |expected_str| {
+                var expected_str_or_null: ?[]const u8 = null;
+                if (decode_expected_error) |unwrapped_expected| {
+                    expected_str_or_null = unwrapped_expected;
+                }
+                if (expected_str_or_null == null) {
+                    if (validate_expected_error) |unwrapped_expected| {
+                        expected_str_or_null = unwrapped_expected;
+                    }
+                }
+
+                if (expected_str_or_null) |expected_str| {
                     if (isSameError(e, expected_str)) {
                         log_verbose("\tSuccess!\n", .{});
                     } else {
@@ -756,14 +775,6 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
                     print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
                 print("\tFail: decode succeeded, but it should have failed with error '{s}'\n", .{expected});
-            }
-
-            var validate_expected_error: ?[]const u8 = null;
-            switch (command.*) {
-                .AssertInvalid => |c| {
-                    validate_expected_error = c.err.expected_error;
-                },
-                else => {},
             }
 
             if (is_validation_allowed) {
