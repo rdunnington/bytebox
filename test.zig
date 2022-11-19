@@ -48,7 +48,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     // "func",
     // "func_ptrs",
     // "global",
-    // "i32",
+    "i32",
     // "i64",
     // "if",
     // "imports",
@@ -302,6 +302,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
 
         wasm.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch"),
+        wasm.ValidationError.ValidationTypeStackHeightMismatch => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationUnknownTable => strcmp(err_string, "unknown table"),
         wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory"),
         wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data"),

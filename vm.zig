@@ -68,6 +68,8 @@ pub const ValidationError = error{
     ValidationUnknownMemory,
     ValidationUnknownElement,
     ValidationUnknownData,
+    ValidationOutOfBounds,
+    ValidationTypeStackHeightMismatch,
 };
 
 pub const TrapError = error{
@@ -443,6 +445,46 @@ const BlockTypeValue = union(BlockType) {
     Void: void,
     ValType: ValType,
     TypeIndex: u32,
+
+    fn getBlocktypeParamTypes(blocktype: BlockTypeValue, module_def: *const ModuleDefinition) []const ValType {
+        switch (blocktype) {
+            .Void => return &BlockTypeStatics.empty,
+            .ValType => |v| return switch (v) {
+                .I32 => &BlockTypeStatics.valtype_i32,
+                .I64 => &BlockTypeStatics.valtype_i64,
+                .F32 => &BlockTypeStatics.valtype_f32,
+                .F64 => &BlockTypeStatics.valtype_f64,
+                .FuncRef => &BlockTypeStatics.reftype_funcref,
+                .ExternRef => &BlockTypeStatics.reftype_externref,
+            },
+            .TypeIndex => |index| return module_def.types.items[index].getParams(),
+        }
+    }
+
+    fn getBlocktypeReturnTypes(blocktype: BlockTypeValue, module_def: *const ModuleDefinition) []const ValType {
+        switch (blocktype) {
+            .Void => return &BlockTypeStatics.empty,
+            .ValType => |v| return switch (v) {
+                .I32 => &BlockTypeStatics.valtype_i32,
+                .I64 => &BlockTypeStatics.valtype_i64,
+                .F32 => &BlockTypeStatics.valtype_f32,
+                .F64 => &BlockTypeStatics.valtype_f64,
+                .FuncRef => &BlockTypeStatics.reftype_funcref,
+                .ExternRef => &BlockTypeStatics.reftype_externref,
+            },
+            .TypeIndex => |index| return module_def.types.items[index].getReturns(),
+        }
+    }
+};
+
+const BlockTypeStatics = struct {
+    const empty = [_]ValType{};
+    const valtype_i32 = [_]ValType{.I32};
+    const valtype_i64 = [_]ValType{.I64};
+    const valtype_f32 = [_]ValType{.F32};
+    const valtype_f64 = [_]ValType{.F64};
+    const reftype_funcref = [_]ValType{.FuncRef};
+    const reftype_externref = [_]ValType{.ExternRef};
 };
 
 const Label = struct {
@@ -1666,14 +1708,23 @@ const ModuleValidator = struct {
         if (self.type_stack.items.len == 0) {
             return error.ValidationOutOfBounds;
         }
+        const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
+        if (self.type_stack.items.len <= top_frame.types_stack_height) {
+            return error.ValidationTypeMismatch;
+        }
         return self.type_stack.pop();
     }
 
     fn popType(self: *ModuleValidator, valtype: ValType) !void {
-        const popped = try self.popAnyType();
-        if (popped != valtype) {
+        const types: []ValType = self.type_stack.items;
+        if (types.len == 0 or types[types.len - 1] != valtype) {
             return error.ValidationTypeMismatch;
         }
+        const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
+        if (self.type_stack.items.len <= top_frame.types_stack_height) {
+            return error.ValidationTypeMismatch;
+        }
+        _ = self.type_stack.pop();
     }
 
     fn pushControl(self: *ModuleValidator, opcode: Opcode, start_types: []const ValType, end_types: []const ValType) !void {
@@ -1755,19 +1806,10 @@ const ModuleValidator = struct {
     fn validateFunction(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition) !void {
         const Helpers = struct {
             fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction: Instruction) !void {
-                var start_types: []const ValType = &[0]ValType{};
-                var end_types: []const ValType = &[0]ValType{};
-
                 const block_type_value: BlockTypeValue = module_.code.block_type_values.items[instruction.immediate];
-                switch (block_type_value) {
-                    .TypeIndex => {
-                        const type_index = block_type_value.TypeIndex;
-                        const func_type: *const FunctionTypeDefinition = &module_.types.items[type_index];
-                        start_types = func_type.getParams();
-                        end_types = func_type.getReturns();
-                    },
-                    else => {},
-                }
+
+                var start_types: []const ValType = block_type_value.getBlocktypeParamTypes(module_);
+                var end_types: []const ValType = block_type_value.getBlocktypeReturnTypes(module_);
 
                 var start_types_index = start_types.len;
                 while (start_types_index > 0) : (start_types_index -= 1) {
@@ -3940,7 +3982,7 @@ pub const ModuleInstance = struct {
                     // id 0 means this is the end of a function, otherwise it's the end of a block
                     const label_ptr: *const Label = stack.topLabel();
                     if (label_ptr.isFirstInCallFrame() == false) {
-                        try popValues(&returns, stack, getReturnTypesFromBlocktype(context.module_def, label_ptr.blocktype));
+                        try popValues(&returns, stack, label_ptr.blocktype.getBlocktypeReturnTypes(context.module_def));
                         _ = try stack.popLabel();
                         try pushValues(returns.items, stack);
                     } else {
@@ -5504,7 +5546,7 @@ pub const ModuleInstance = struct {
             var args = std.ArrayList(Val).init(context.allocator);
             defer args.deinit();
 
-            const return_types: []const ValType = getReturnTypesFromBlocktype(context.module_def, label.blocktype);
+            const return_types: []const ValType = label.blocktype.getBlocktypeReturnTypes(context.module_def);
             // std.debug.print("looking for return types: {any}", .{return_types});
             if (is_loop_continuation == false) {
                 try popValues(&args, context.stack, return_types);
@@ -5595,31 +5637,6 @@ pub const ModuleInstance = struct {
             return Label.k_invalid_continuation;
         } else {
             return last_label.continuation;
-        }
-    }
-
-    fn getReturnTypesFromBlocktype(module_def: *const ModuleDefinition, blocktype: BlockTypeValue) []const ValType {
-        const Statics = struct {
-            const empty = [_]ValType{};
-            const valtype_i32 = [_]ValType{.I32};
-            const valtype_i64 = [_]ValType{.I64};
-            const valtype_f32 = [_]ValType{.F32};
-            const valtype_f64 = [_]ValType{.F64};
-            const reftype_funcref = [_]ValType{.FuncRef};
-            const reftype_externref = [_]ValType{.ExternRef};
-        };
-
-        switch (blocktype) {
-            .Void => return &Statics.empty,
-            .ValType => |v| return switch (v) {
-                .I32 => &Statics.valtype_i32,
-                .I64 => &Statics.valtype_i64,
-                .F32 => &Statics.valtype_f32,
-                .F64 => &Statics.valtype_f64,
-                .FuncRef => &Statics.reftype_funcref,
-                .ExternRef => &Statics.reftype_externref,
-            },
-            .TypeIndex => |index| return module_def.types.items[index].getReturns(),
         }
     }
 
