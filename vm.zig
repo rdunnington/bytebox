@@ -1761,7 +1761,8 @@ const ModuleValidator = struct {
         if (self.control_stack.items.len == 0) {
             return error.ValidationOutOfBounds;
         }
-        var frame: ControlFrame = self.control_stack.pop();
+
+        const frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
 
         var i = frame.end_types.len;
         while (i > 0) : (i -= 1) {
@@ -1772,7 +1773,9 @@ const ModuleValidator = struct {
             return error.ValidationTypeStackHeightMismatch;
         }
 
-        return frame;
+        _ = self.control_stack.pop();
+
+        return frame.*;
     }
 
     fn freeControlTypes(self: *ModuleValidator, frame: *const ControlFrame) !void {
@@ -1817,6 +1820,8 @@ const ModuleValidator = struct {
 
                 var start_types: []const ValType = block_type_value.getBlocktypeParamTypes(module_);
                 var end_types: []const ValType = block_type_value.getBlocktypeReturnTypes(module_);
+
+                // std.debug.print(">> start_types: {s}, end_types: {s}\n", .{ start_types, end_types });
 
                 var start_types_index = start_types.len;
                 while (start_types_index > 0) : (start_types_index -= 1) {
@@ -1909,7 +1914,7 @@ const ModuleValidator = struct {
         try self.pushControl(Opcode.Call, func_type_def.getParams(), func_type_def.getReturns());
 
         const instructions = module.code.instructions.items;
-        while (instruction_index < instructions.len and instructions[instruction_index].opcode != .End) : (instruction_index += 1) {
+        while (instruction_index < instructions.len and self.control_stack.items.len > 0) : (instruction_index += 1) {
             const instruction: Instruction = instructions[instruction_index];
             switch (instruction.opcode) {
                 //.Unreachable => {},
