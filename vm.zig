@@ -71,6 +71,7 @@ pub const ValidationError = error{
     ValidationOutOfBounds,
     ValidationTypeStackHeightMismatch,
     ValidationBadAlignment,
+    ValidationUnknownControlFrame,
 };
 
 pub const TrapError = error{
@@ -1680,13 +1681,15 @@ const ModuleValidator = struct {
         is_unreachable: bool,
     };
 
-    type_stack: std.ArrayList(ValType),
+    // Note that we use a nullable ValType here to map to the "Unknown" value type as described in the wasm spec
+    // validation algorithm: https://webassembly.github.io/spec/core/appendix/algorithm.html
+    type_stack: std.ArrayList(?ValType),
     control_stack: std.ArrayList(ControlFrame),
     control_types: StableArray(ValType),
 
     fn init(allocator: std.mem.Allocator) ModuleValidator {
         return ModuleValidator{
-            .type_stack = std.ArrayList(ValType).init(allocator),
+            .type_stack = std.ArrayList(?ValType).init(allocator),
             .control_stack = std.ArrayList(ControlFrame).init(allocator),
             .control_types = StableArray(ValType).init(1 * 1024 * 1024),
         };
@@ -1707,15 +1710,18 @@ const ModuleValidator = struct {
         }
     }
 
-    fn pushType(self: *ModuleValidator, valtype: ValType) !void {
+    fn pushType(self: *ModuleValidator, valtype: ?ValType) !void {
         try self.type_stack.append(valtype);
     }
 
-    fn popAnyType(self: *ModuleValidator) !ValType {
+    fn popAnyType(self: *ModuleValidator) !?ValType {
         if (self.type_stack.items.len == 0) {
             return error.ValidationOutOfBounds;
         }
         const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
+        if (self.type_stack.items.len == top_frame.types_stack_height and top_frame.is_unreachable) {
+            return null;
+        }
         if (self.type_stack.items.len <= top_frame.types_stack_height) {
             return error.ValidationTypeMismatch;
         }
@@ -1723,11 +1729,14 @@ const ModuleValidator = struct {
     }
 
     fn popType(self: *ModuleValidator, valtype: ValType) !void {
-        const types: []ValType = self.type_stack.items;
+        const types: []?ValType = self.type_stack.items;
         if (types.len == 0 or types[types.len - 1] != valtype) {
             return error.ValidationTypeMismatch;
         }
         const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
+        if (self.type_stack.items.len == top_frame.types_stack_height and top_frame.is_unreachable) {
+            return;
+        }
         if (self.type_stack.items.len <= top_frame.types_stack_height) {
             return error.ValidationTypeMismatch;
         }
@@ -1890,6 +1899,21 @@ const ModuleValidator = struct {
                 try validator.popType(store_type);
                 try validator.popType(.I32);
             }
+
+            fn getControlTypes(validator: *ModuleValidator, control_index: usize) ![]const ValType {
+                if (validator.control_stack.items.len < control_index) {
+                    return error.ValidationUnknownControlFrame;
+                }
+                const stack_index = validator.control_stack.items.len - control_index - 1;
+                var frame: *ControlFrame = &validator.control_stack.items[stack_index];
+                return if (frame.opcode != .Loop) frame.end_types else frame.start_types;
+            }
+
+            fn markFrameInstructionsUnreachable(validator: *ModuleValidator) !void {
+                var frame: *ControlFrame = &validator.control_stack.items[validator.control_stack.items.len - 1];
+                try validator.type_stack.resize(frame.types_stack_height);
+                frame.is_unreachable = true;
+            }
         };
 
         if (func.type_index >= module.types.items.len) {
@@ -1946,8 +1970,14 @@ const ModuleValidator = struct {
                     }
                     try self.freeControlTypes(&frame);
                 },
-
-                //.Branch => {},
+                .Branch => {
+                    const control_index: u32 = instruction.immediate;
+                    const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
+                    for (block_return_types) |valtype| {
+                        try self.popType(valtype);
+                    }
+                    try Helpers.markFrameInstructionsUnreachable(self);
+                },
                 //.Branch_If => {},
                 //.Branch_Table => {},
                 //.Return => {},
@@ -1957,18 +1987,25 @@ const ModuleValidator = struct {
                     // push return types
                 },
                 //.Call_Indirect => {},
-
                 .Select => {
                     try self.popType(.I32);
-                    const valtype1 = try self.popAnyType();
-                    const valtype2 = try self.popAnyType();
-                    if (valtype1 != valtype2) {
-                        return error.ValidationTypeMismatch;
+                    const valtype1_or_null: ?ValType = try self.popAnyType();
+                    const valtype2_or_null: ?ValType = try self.popAnyType();
+                    if (valtype1_or_null == null) {
+                        try self.pushType(valtype2_or_null);
+                    } else if (valtype2_or_null == null) {
+                        try self.pushType(valtype1_or_null);
+                    } else {
+                        const valtype1 = valtype1_or_null.?;
+                        const valtype2 = valtype2_or_null.?;
+                        if (valtype1 != valtype2) {
+                            return error.ValidationTypeMismatch;
+                        }
+                        if (valtype1.isRefType()) {
+                            return error.ValidationTypeMustBeNumeric;
+                        }
+                        try self.pushType(valtype1);
                     }
-                    if (valtype1.isRefType()) {
-                        return error.ValidationTypeMustBeNumeric;
-                    }
-                    try self.pushType(valtype1);
                 },
                 .Select_T => {
                     const valtype: ValType = @intToEnum(ValType, instruction.immediate);
@@ -2141,11 +2178,13 @@ const ModuleValidator = struct {
                     try self.pushType(valtype);
                 },
                 .Ref_Is_Null => {
-                    var valtype = try self.popAnyType();
-                    if (valtype.isRefType() == false) {
-                        return error.ValidationTypeMismatch;
+                    var valtype_or_null: ?ValType = try self.popAnyType();
+                    if (valtype_or_null) |valtype| {
+                        if (valtype.isRefType() == false) {
+                            return error.ValidationTypeMismatch;
+                        }
+                        try self.pushType(.I32);
                     }
-                    try self.pushType(.I32);
                 },
                 .Ref_Func => {
                     try validateFunctionIndex(instruction.immediate, module);

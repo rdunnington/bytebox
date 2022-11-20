@@ -18,7 +18,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "align",
     "binary",
     "binary-leb128",
-    // "block",
+    "block",
     // "br",
     // "br_if",
     // "br_table",
