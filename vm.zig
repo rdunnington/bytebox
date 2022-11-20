@@ -71,7 +71,7 @@ pub const ValidationError = error{
     ValidationOutOfBounds,
     ValidationTypeStackHeightMismatch,
     ValidationBadAlignment,
-    ValidationUnknownControlFrame,
+    ValidationUnknownLabel,
 };
 
 pub const TrapError = error{
@@ -1906,8 +1906,8 @@ const ModuleValidator = struct {
             }
 
             fn getControlTypes(validator: *ModuleValidator, control_index: usize) ![]const ValType {
-                if (validator.control_stack.items.len < control_index) {
-                    return error.ValidationUnknownControlFrame;
+                if (validator.control_stack.items.len <= control_index) {
+                    return error.ValidationUnknownLabel;
                 }
                 const stack_index = validator.control_stack.items.len - control_index - 1;
                 var frame: *ControlFrame = &validator.control_stack.items[stack_index];
@@ -1983,7 +1983,17 @@ const ModuleValidator = struct {
                     }
                     try Helpers.markFrameInstructionsUnreachable(self);
                 },
-                //.Branch_If => {},
+                .Branch_If => {
+                    const control_index: u32 = instruction.immediate;
+                    const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
+                    try self.popType(.I32);
+                    for (block_return_types) |valtype| {
+                        try self.popType(valtype);
+                    }
+                    for (block_return_types) |valtype| {
+                        try self.pushType(valtype);
+                    }
+                },
                 //.Branch_Table => {},
                 //.Return => {},
                 .Call => {

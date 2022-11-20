@@ -19,8 +19,8 @@ const k_validation_suite_allowlist = [_][]const u8{
     "binary",
     "binary-leb128",
     "block",
-    // "br",
-    // "br_if",
+    "br",
+    "br_if",
     // "br_table",
     "bulk",
     // "call",
@@ -307,6 +307,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory"),
         wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data"),
         wasm.ValidationError.ValidationBadAlignment => strcmp(err_string, "alignment must not be larger than natural"),
+        wasm.ValidationError.ValidationUnknownLabel => strcmp(err_string, "unknown label"),
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
