@@ -795,7 +795,12 @@ fn decodeFloat(comptime T: type, reader: anytype) !T {
     };
 }
 
-const ConstantExpression = union(enum) {
+const ConstantExpressionType = enum {
+    Value,
+    Global,
+};
+
+const ConstantExpression = union(ConstantExpressionType) {
     Value: Val,
     Global: u32, // global index
 
@@ -2994,7 +2999,7 @@ const ImportType = enum(u8) {
     Wasm,
 };
 
-const HostFunctionCallback = fn (userdata: ?*anyopaque, params: []const Val, returns: []Val) void;
+const HostFunctionCallback = *const fn (userdata: ?*anyopaque, params: []const Val, returns: []Val) void;
 
 const HostFunction = struct {
     userdata: ?*anyopaque,
@@ -4631,17 +4636,17 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.I32_Clz => {
                     var v: i32 = try stack.popI32();
-                    var num_zeroes = @clz(i32, v);
+                    var num_zeroes = @clz(v);
                     try stack.pushI32(num_zeroes);
                 },
                 Opcode.I32_Ctz => {
                     var v: i32 = try stack.popI32();
-                    var num_zeroes = @ctz(i32, v);
+                    var num_zeroes = @ctz(v);
                     try stack.pushI32(num_zeroes);
                 },
                 Opcode.I32_Popcnt => {
                     var v: i32 = try stack.popI32();
-                    var num_bits_set = @popCount(i32, v);
+                    var num_bits_set = @popCount(v);
                     try stack.pushI32(num_bits_set);
                 },
                 Opcode.I32_Add => {
@@ -4770,17 +4775,17 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.I64_Clz => {
                     var v: i64 = try stack.popI64();
-                    var num_zeroes = @clz(i64, v);
+                    var num_zeroes = @clz(v);
                     try stack.pushI64(num_zeroes);
                 },
                 Opcode.I64_Ctz => {
                     var v: i64 = try stack.popI64();
-                    var num_zeroes = @ctz(i64, v);
+                    var num_zeroes = @ctz(v);
                     try stack.pushI64(num_zeroes);
                 },
                 Opcode.I64_Popcnt => {
                     var v: i64 = try stack.popI64();
-                    var num_bits_set = @popCount(i64, v);
+                    var num_bits_set = @popCount(v);
                     try stack.pushI64(num_bits_set);
                 },
                 Opcode.I64_Add => {
@@ -4987,7 +4992,7 @@ pub const ModuleInstance = struct {
                 Opcode.F32_Copysign => {
                     var v2 = try stack.popF32();
                     var v1 = try stack.popF32();
-                    var value = std.math.copysign(f32, v1, v2);
+                    var value = std.math.copysign(v1, v2);
                     try stack.pushF32(value);
                 },
                 Opcode.F64_Abs => {
@@ -5070,7 +5075,7 @@ pub const ModuleInstance = struct {
                 Opcode.F64_Copysign => {
                     var v2 = try stack.popF64();
                     var v1 = try stack.popF64();
-                    var value = std.math.copysign(f64, v1, v2);
+                    var value = std.math.copysign(v1, v2);
                     try stack.pushF64(value);
                 },
                 Opcode.I32_Wrap_I64 => {
@@ -5699,7 +5704,7 @@ pub const ModuleInstance = struct {
             // std.debug.print("returns.items.len < types.len: {}, {}\n", .{returns.items.len, types.len});
             var item = try stack.popValue();
             if (types[types.len - returns.items.len - 1] != std.meta.activeTag(item)) {
-                std.debug.print("popValues mismatch: required: {s}, got {}\n", .{ types, item });
+                // std.debug.print("popValues mismatch: required: {any}, got {}\n", .{ types, item });
                 return error.ValidationTypeMismatch;
             }
             try returns.append(item);

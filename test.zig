@@ -635,10 +635,10 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     return imports;
 }
 
-fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !void {
+fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !void {
     var did_fail_any_test: bool = false;
 
-    var arena_commands = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var arena_commands = std.heap.ArenaAllocator.init(allocator);
     defer arena_commands.deinit();
 
     var scratch_allocator = arena_commands.allocator();
@@ -647,7 +647,7 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
 
     const suite_dir = std.fs.path.dirname(suite_path).?;
 
-    var name_to_module = std.StringHashMap(Module).init(std.testing.allocator);
+    var name_to_module = std.StringHashMap(Module).init(allocator);
     defer name_to_module.deinit();
 
     // this should be enough to avoid resizing, just bump it up if it's not
@@ -655,9 +655,9 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
     name_to_module.ensureTotalCapacity(256) catch unreachable;
 
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
-    var imports = std.ArrayList(wasm.ModuleImports).init(std.testing.allocator);
+    var imports = std.ArrayList(wasm.ModuleImports).init(allocator);
 
-    try imports.append(try makeSpectestImports(std.testing.allocator));
+    try imports.append(try makeSpectestImports(allocator));
 
     var is_validation_allowed: bool = false;
     for (k_validation_suite_allowlist) |allowed_suite_name| {
@@ -861,14 +861,14 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
                 try returns_placeholder.resize(num_expected_returns);
                 var returns = returns_placeholder.items;
 
-                log_verbose("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                log_verbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
 
                 var action_succeeded = true;
                 switch (c.action.type) {
                     .Invocation => {
                         (module.inst.?).invoke(c.action.field, c.action.args.items, returns) catch |e| {
                             if (!g_verbose_logging) {
-                                print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                             }
                             print("\tInvoke fail with error: {}\n", .{e});
                             action_succeeded = false;
@@ -880,7 +880,7 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
                             returns[0] = value;
                         } else |e| {
                             if (!g_verbose_logging) {
-                                print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                             }
                             print("\tGet fail with error: {}\n", .{e});
                             action_succeeded = false;
@@ -903,7 +903,7 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
 
                             if (pass == false) {
                                 if (!g_verbose_logging) {
-                                    print("assert_return: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                    print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                                 }
                                 print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
                                 action_succeeded = false;
@@ -930,7 +930,7 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
                     }
                 }
 
-                log_verbose("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                log_verbose("assert_trap: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
 
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..];
@@ -969,10 +969,10 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
                     log_verbose("\tSuccess!\n", .{});
                 } else {
                     if (!g_verbose_logging) {
-                        print("assert_trap: {s}:{s}({s})\n", .{ module.filename, c.action.field, c.action.args.items });
+                        print("assert_trap: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                     }
                     if (action_failed_with_correct_trap == false) {
-                        print("\tInvoke trapped, but got error '{s}'' instead of expected '{s}':\n", .{ caught_error.?, c.expected_error });
+                        print("\tInvoke trapped, but got error '{}'' instead of expected '{s}':\n", .{ caught_error.?, c.expected_error });
                     } else {
                         print("\tInvoke succeeded instead of trapping on expected {s}:\n", .{c.expected_error});
                     }
@@ -984,18 +984,18 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
 
     var spectest_imports = imports.items[0];
     for (spectest_imports.tables.items) |*item| {
-        std.testing.allocator.free(item.name);
+        allocator.free(item.name);
         item.data.Host.deinit();
-        std.testing.allocator.destroy(item.data.Host);
+        allocator.destroy(item.data.Host);
     }
     for (spectest_imports.memories.items) |*item| {
-        std.testing.allocator.free(item.name);
+        allocator.free(item.name);
         item.data.Host.deinit();
-        std.testing.allocator.destroy(item.data.Host);
+        allocator.destroy(item.data.Host);
     }
     for (spectest_imports.globals.items) |*item| {
-        std.testing.allocator.free(item.name);
-        std.testing.allocator.destroy(item.data.Host);
+        allocator.free(item.name);
+        allocator.destroy(item.data.Host);
     }
 
     for (imports.items[1..]) |*item| {
@@ -1009,7 +1009,8 @@ fn run(suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !v
 }
 
 pub fn main() !void {
-    var allocator = std.testing.allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var allocator: std.mem.Allocator = gpa.allocator();
 
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -1148,6 +1149,6 @@ pub fn main() !void {
         var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
-        try run(suite, suite_path, &opts);
+        try run(allocator, suite, suite_path, &opts);
     }
 }
