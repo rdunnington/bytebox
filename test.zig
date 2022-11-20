@@ -21,7 +21,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "block",
     "br",
     "br_if",
-    // "br_table",
+    "br_table",
     "bulk",
     // "call",
     // "call_indirect",

@@ -1994,7 +1994,28 @@ const ModuleValidator = struct {
                         try self.pushType(valtype);
                     }
                 },
-                //.Branch_Table => {},
+                .Branch_Table => {
+                    var immediates: *const BranchTableImmediates = &module.code.branch_table.items[instruction.immediate];
+
+                    const fallback_block_return_types: []const ValType = try Helpers.getControlTypes(self, immediates.fallback_id);
+
+                    try self.popType(.I32);
+
+                    for (immediates.label_ids.items) |control_index| {
+                        const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
+
+                        if (fallback_block_return_types.len != block_return_types.len) {
+                            return error.ValidationTypeMismatch;
+                        }
+
+                        for (block_return_types) |valtype| {
+                            try self.popType(valtype);
+                        }
+                        for (block_return_types) |valtype| {
+                            try self.pushType(valtype);
+                        }
+                    }
+                },
                 //.Return => {},
                 .Call => {
                     // TODO look up function to call and ensure it exists
