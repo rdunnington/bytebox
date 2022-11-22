@@ -1962,9 +1962,12 @@ const ModuleValidator = struct {
 
         try self.pushControl(Opcode.Call, func_type_def.getParams(), func_type_def.getReturns());
 
+        // std.debug.print(">> control frame: {}\n", .{self.control_stack.items[0]});
+
         const instructions = module.code.instructions.items;
         while (instruction_index < instructions.len and self.control_stack.items.len > 0) : (instruction_index += 1) {
             const instruction: Instruction = instructions[instruction_index];
+            // std.debug.print(">> opcode: {}\n", .{instruction.opcode});
             switch (instruction.opcode) {
                 //.Unreachable => {},
                 .Noop => {},
@@ -1983,6 +1986,7 @@ const ModuleValidator = struct {
                 },
                 .Else => {
                     const frame: ControlFrame = try self.popControl();
+                    // std.debug.print(">> frame: {}\n", .{frame});
                     if (frame.opcode != .If) {
                         return error.ValidationIfElseMismatch;
                     }
@@ -1990,8 +1994,16 @@ const ModuleValidator = struct {
                 },
                 .End => {
                     const frame: ControlFrame = try self.popControl();
-                    for (frame.end_types) |valtype| {
-                        try self.pushType(valtype);
+
+                    // if must have matching else block when returns are expected
+                    if (frame.opcode == .If and frame.end_types.len > 0) {
+                        return error.ValidationTypeMismatch;
+                    }
+
+                    if (self.control_stack.items.len > 0) {
+                        for (frame.end_types) |valtype| {
+                            try self.pushType(valtype);
+                        }
                     }
                     try self.freeControlTypes(&frame);
                 },
