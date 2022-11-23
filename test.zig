@@ -23,7 +23,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "br_if",
     "br_table",
     "bulk",
-    // "call",
+    "call",
     // "call_indirect",
     "comments",
     "const",
@@ -303,6 +303,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
 
         wasm.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationTypeStackHeightMismatch => strcmp(err_string, "type mismatch"),
+        wasm.ValidationError.ValidationUnknownFunction => strcmp(err_string, "unknown function"),
         wasm.ValidationError.ValidationUnknownTable => strcmp(err_string, "unknown table"),
         wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory"),
         wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data"),

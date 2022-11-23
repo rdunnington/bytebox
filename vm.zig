@@ -2050,9 +2050,28 @@ const ModuleValidator = struct {
                 },
                 //.Return => {},
                 .Call => {
-                    // TODO look up function to call and ensure it exists
-                    // pop param types
-                    // push return types
+                    const func_index: u32 = instruction.immediate;
+                    if (module.imports.functions.items.len + module.functions.items.len <= func_index) {
+                        return error.ValidationUnknownFunction;
+                    }
+
+                    var type_index: u32 = undefined;
+                    if (func_index < module.imports.functions.items.len) {
+                        const func_def: *const FunctionImportDefinition = &module.imports.functions.items[func_index];
+                        type_index = func_def.type_index;
+                    } else {
+                        const module_func_index = func_index - module.imports.functions.items.len;
+                        const func_def: *const FunctionDefinition = &module.functions.items[module_func_index];
+                        type_index = func_def.type_index;
+                    }
+
+                    const func_type: *const FunctionTypeDefinition = &module.types.items[type_index];
+                    for (func_type.getParams()) |valtype| {
+                        try self.popType(valtype);
+                    }
+                    for (func_type.getReturns()) |valtype| {
+                        try self.pushType(valtype);
+                    }
                 },
                 //.Call_Indirect => {},
                 .Select => {
@@ -4174,11 +4193,7 @@ pub const ModuleInstance = struct {
                     next_instruction = try Helpers.seek(continuation, instructions.len);
                 },
                 Opcode.Call => {
-                    const func_index = instruction.immediate;
-                    if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
-                        return error.ValidationUnknownFunction;
-                    }
-
+                    const func_index: u32 = instruction.immediate;
                     if (func_index >= current_store.imports.functions.items.len) {
                         const func_instance_index = func_index - current_store.imports.functions.items.len;
                         const func: *const FunctionInstance = &current_store.functions.items[@intCast(usize, func_instance_index)];
