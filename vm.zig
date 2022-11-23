@@ -63,6 +63,7 @@ pub const ValidationError = error{
     ValidationUnknownType,
     ValidationUnknownFunction,
     ValidationUnknownGlobal,
+    ValidationUnknownLocal,
     ValidationUnknownTable,
     ValidationUnknownMemory,
     ValidationUnknownElement,
@@ -1728,7 +1729,7 @@ const ModuleValidator = struct {
 
     fn popAnyType(self: *ModuleValidator) !?ValType {
         if (self.type_stack.items.len == 0) {
-            return error.ValidationOutOfBounds;
+            return error.ValidationTypeMismatch;
         }
         const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
         if (self.type_stack.items.len == top_frame.types_stack_height and top_frame.is_unreachable) {
@@ -1740,9 +1741,12 @@ const ModuleValidator = struct {
         return self.type_stack.pop();
     }
 
-    fn popType(self: *ModuleValidator, valtype: ValType) !void {
+    fn popType(self: *ModuleValidator, valtype: ?ValType) !void {
         const types: []?ValType = self.type_stack.items;
-        if (types.len == 0 or types[types.len - 1] != valtype) {
+        if (types.len == 0) {
+            return error.ValidationTypeMismatch;
+        }
+        if (valtype != null and types[types.len - 1] != valtype) {
             return error.ValidationTypeMismatch;
         }
         const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
@@ -1804,6 +1808,12 @@ const ModuleValidator = struct {
         try self.control_types.resize(self.control_types.items.len - num_used_types);
     }
 
+    fn validateTypeIndex(index: u32, module: *const ModuleDefinition) !void {
+        if (module.types.items.len <= index) {
+            return error.ValidationUnknownType;
+        }
+    }
+
     fn validateTableIndex(index: u32, module: *const ModuleDefinition) !void {
         if (module.imports.tables.items.len + module.tables.items.len <= index) {
             return error.ValidationUnknownTable;
@@ -1853,16 +1863,15 @@ const ModuleValidator = struct {
                 try validator.pushControl(instruction.opcode, start_types, end_types);
             }
 
-            fn getLocalValtype(validator: *const ModuleValidator, locals_index: u32) !ValType {
+            fn getLocalValtype(validator: *const ModuleValidator, func_: *const FunctionDefinition, locals_index: u32) !ValType {
                 var i = validator.control_stack.items.len - 1;
                 while (i >= 0) : (i -= 1) {
                     const frame: *const ControlFrame = &validator.control_stack.items[i];
                     if (frame.is_function) {
-                        const locals: []const ValType = frame.start_types;
-                        if (locals.len <= locals_index) {
-                            return error.ValidationOutOfBounds;
+                        if (func_.locals.items.len <= locals_index) {
+                            return error.ValidationUnknownLocal;
                         }
-                        const valtype = locals[locals_index];
+                        const valtype = func_.locals.items[locals_index];
                         return valtype;
                     }
                 }
@@ -1939,11 +1948,22 @@ const ModuleValidator = struct {
                 try validator.type_stack.resize(frame.types_stack_height);
                 frame.is_unreachable = true;
             }
+
+            fn popPushFuncTypes(validator: *ModuleValidator, type_index: u32, module_: *const ModuleDefinition) !void {
+                const func_type: *const FunctionTypeDefinition = &module_.types.items[type_index];
+                const param_types: []const ValType = func_type.getParams();
+                var i = param_types.len;
+                while (i > 0) {
+                    i -= 1;
+                    try validator.popType(param_types[i]);
+                }
+                for (func_type.getReturns()) |valtype| {
+                    try validator.pushType(valtype);
+                }
+            }
         };
 
-        if (func.type_index >= module.types.items.len) {
-            return error.ValidationUnknownType;
-        }
+        try validateTypeIndex(func.type_index, module);
 
         const func_type_def: *const FunctionTypeDefinition = &module.types.items[func.type_index];
         var params: []const ValType = func_type_def.getParams();
@@ -1969,7 +1989,9 @@ const ModuleValidator = struct {
             const instruction: Instruction = instructions[instruction_index];
             // std.debug.print(">> opcode: {}\n", .{instruction.opcode});
             switch (instruction.opcode) {
-                //.Unreachable => {},
+                .Unreachable => {
+                    try Helpers.markFrameInstructionsUnreachable(self);
+                },
                 .Noop => {},
                 .Drop => {
                     _ = try self.popAnyType();
@@ -2065,15 +2087,18 @@ const ModuleValidator = struct {
                         type_index = func_def.type_index;
                     }
 
-                    const func_type: *const FunctionTypeDefinition = &module.types.items[type_index];
-                    for (func_type.getParams()) |valtype| {
-                        try self.popType(valtype);
-                    }
-                    for (func_type.getReturns()) |valtype| {
-                        try self.pushType(valtype);
-                    }
+                    try Helpers.popPushFuncTypes(self, type_index, module);
                 },
-                //.Call_Indirect => {},
+                .Call_Indirect => {
+                    const immediates: *const CallIndirectImmediates = &module.code.call_indirect.items[instruction.immediate];
+
+                    try validateTypeIndex(immediates.type_index, module);
+                    try validateTableIndex(immediates.table_index, module);
+
+                    try self.popType(.I32);
+
+                    try Helpers.popPushFuncTypes(self, immediates.type_index, module);
+                },
                 .Select => {
                     try self.popType(.I32);
                     const valtype1_or_null: ?ValType = try self.popAnyType();
@@ -2102,15 +2127,15 @@ const ModuleValidator = struct {
                     try self.pushType(valtype);
                 },
                 .Local_Get => {
-                    const valtype = try Helpers.getLocalValtype(self, instruction.immediate);
+                    const valtype = try Helpers.getLocalValtype(self, func, instruction.immediate);
                     try self.pushType(valtype);
                 },
                 .Local_Set => {
-                    const valtype = try Helpers.getLocalValtype(self, instruction.immediate);
+                    const valtype = try Helpers.getLocalValtype(self, func, instruction.immediate);
                     try self.popType(valtype);
                 },
                 .Local_Tee => {
-                    const valtype = try Helpers.getLocalValtype(self, instruction.immediate);
+                    const valtype = try Helpers.getLocalValtype(self, func, instruction.immediate);
                     try self.popType(valtype);
                     try self.pushType(valtype);
                 },
