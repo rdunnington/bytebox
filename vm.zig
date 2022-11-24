@@ -1863,16 +1863,20 @@ const ModuleValidator = struct {
                 try validator.pushControl(instruction.opcode, start_types, end_types);
             }
 
-            fn getLocalValtype(validator: *const ModuleValidator, func_: *const FunctionDefinition, locals_index: u32) !ValType {
+            fn getLocalValtype(validator: *const ModuleValidator, module_: *const ModuleDefinition, func_: *const FunctionDefinition, locals_index: u32) !ValType {
                 var i = validator.control_stack.items.len - 1;
                 while (i >= 0) : (i -= 1) {
                     const frame: *const ControlFrame = &validator.control_stack.items[i];
                     if (frame.is_function) {
-                        if (func_.locals.items.len <= locals_index) {
-                            return error.ValidationUnknownLocal;
+                        const func_type: *const FunctionTypeDefinition = &module_.types.items[func_.type_index];
+                        if (locals_index < func_type.num_params) {
+                            return func_type.getParams()[locals_index];
+                        } else {
+                            if (func_.locals.items.len <= locals_index - func_type.num_params) {
+                                return error.ValidationUnknownLocal;
+                            }
+                            return func_.locals.items[locals_index - func_type.num_params];
                         }
-                        const valtype = func_.locals.items[locals_index];
-                        return valtype;
                     }
                 }
                 unreachable;
@@ -2127,15 +2131,15 @@ const ModuleValidator = struct {
                     try self.pushType(valtype);
                 },
                 .Local_Get => {
-                    const valtype = try Helpers.getLocalValtype(self, func, instruction.immediate);
+                    const valtype = try Helpers.getLocalValtype(self, module, func, instruction.immediate);
                     try self.pushType(valtype);
                 },
                 .Local_Set => {
-                    const valtype = try Helpers.getLocalValtype(self, func, instruction.immediate);
+                    const valtype = try Helpers.getLocalValtype(self, module, func, instruction.immediate);
                     try self.popType(valtype);
                 },
                 .Local_Tee => {
-                    const valtype = try Helpers.getLocalValtype(self, func, instruction.immediate);
+                    const valtype = try Helpers.getLocalValtype(self, module, func, instruction.immediate);
                     try self.popType(valtype);
                     try self.pushType(valtype);
                 },
@@ -2970,6 +2974,7 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
                             var instruction = try Instruction.decode(reader, module);
+                            // std.debug.print(">> decoded opcode: {}\n", .{instruction.opcode});
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
