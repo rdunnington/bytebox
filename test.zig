@@ -30,7 +30,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "conversions",
     "custom",
     // "data",
-    // "elem",
+    "elem",
     "endianness",
     // "exports",
     "f32",
@@ -316,6 +316,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationImmutableGlobal => strcmp(err_string, "global is immutable"),
         wasm.ValidationError.ValidationBadConstantExpression => strcmp(err_string, "constant expression required") or strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationGlobalReferencingMutableGlobal => strcmp(err_string, "constant expression required"),
+        wasm.ValidationError.ValidationUnknownBlockTypeIndex => strcmp(err_string, "type mismatch") or strcmp(err_string, "unexpected end"), // bit of a hack for binary.166.wasm
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
@@ -750,12 +751,13 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
 
             module.filename = try scratch_allocator.dupe(u8, module_filename);
 
+            // module.def = try wasm.ModuleDefinition.init(module_data, scratch_allocator);
             module.def = wasm.ModuleDefinition.init(module_data, scratch_allocator) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
                     expected_str_or_null = unwrapped_expected;
                 }
-                if (expected_str_or_null == null) {
+                if (expected_str_or_null == null and is_validation_allowed) {
                     if (validate_expected_error) |unwrapped_expected| {
                         expected_str_or_null = unwrapped_expected;
                     }
@@ -768,7 +770,7 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
                         if (!g_verbose_logging) {
                             print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                         }
-                        print("\tFail: decode failed with error {}, but expected '{s}'\n", .{ e, expected_str });
+                        print("\tFail: module init failed with error {}, but expected '{s}'\n", .{ e, expected_str });
                     }
                 } else {
                     if (!g_verbose_logging) {
@@ -783,30 +785,16 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
                 if (!g_verbose_logging) {
                     print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
-                print("\tFail: decode succeeded, but it should have failed with error '{s}'\n", .{expected});
+                print("\tFail: module init succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
 
             if (is_validation_allowed) {
-                (module.def.?).validate() catch |e| {
-                    if (validate_expected_error) |expected_str| {
-                        if (isSameError(e, expected_str)) {
-                            log_verbose("\tSuccess!\n", .{});
-                        } else {
-                            if (!g_verbose_logging) {
-                                print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
-                            }
-                            print("\tFail: validate failed with error {}, but expected '{s}'\n", .{ e, expected_str });
-                        }
+                if (validate_expected_error) |expected| {
+                    if (!g_verbose_logging) {
+                        print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                     }
-                    continue;
-                };
-            }
-
-            if (validate_expected_error) |expected_str| {
-                if (!g_verbose_logging) {
-                    print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
+                    print("\tFail: module init succeeded, but it should have failed with error '{s}'\n", .{expected});
                 }
-                print("\tFail: validate succeeded, but it should have failed with error '{s}'\n", .{expected_str});
             }
 
             var instantiate_expected_error: ?[]const u8 = null;
