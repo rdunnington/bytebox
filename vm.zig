@@ -2103,17 +2103,17 @@ const ModuleValidator = struct {
             .F64_Const => {
                 try self.pushType(.F64);
             },
-            .I32_Eq, .I32_NE, .I32_LT_S, .I32_LT_U, .I32_GT_S, .I32_GT_U, .I32_LE_S, .I32_LE_U, .I32_GE_S, .I32_GE_U, .I32_Add, .I32_Sub, .I32_Mul, .I32_Div_S, .I32_Div_U, .I32_Rem_S, .I32_Rem_U, .I32_And, .I32_Or, .I32_Xor, .I32_Shl, .I32_Shr_S, .I32_Shr_U, .I32_Rotl, .I32_Rotr => {
-                try Helpers.validateNumericBinaryOp(self, .I32, .I32);
-            },
             .I32_Eqz, .I32_Clz, .I32_Ctz, .I32_Popcnt => {
                 try Helpers.validateNumericUnaryOp(self, .I32, .I32);
             },
-            .I64_Eqz => {
-                try Helpers.validateNumericUnaryOp(self, .I64, .I32);
+            .I32_Eq, .I32_NE, .I32_LT_S, .I32_LT_U, .I32_GT_S, .I32_GT_U, .I32_LE_S, .I32_LE_U, .I32_GE_S, .I32_GE_U, .I32_Add, .I32_Sub, .I32_Mul, .I32_Div_S, .I32_Div_U, .I32_Rem_S, .I32_Rem_U, .I32_And, .I32_Or, .I32_Xor, .I32_Shl, .I32_Shr_S, .I32_Shr_U, .I32_Rotl, .I32_Rotr => {
+                try Helpers.validateNumericBinaryOp(self, .I32, .I32);
             },
             .I64_Clz, .I64_Ctz, .I64_Popcnt => {
                 try Helpers.validateNumericUnaryOp(self, .I64, .I64);
+            },
+            .I64_Eqz => {
+                try Helpers.validateNumericUnaryOp(self, .I64, .I32);
             },
             .I64_Eq, .I64_NE, .I64_LT_S, .I64_LT_U, .I64_GT_S, .I64_GT_U, .I64_LE_S, .I64_LE_U, .I64_GE_S, .I64_GE_U => {
                 try Helpers.validateNumericBinaryOp(self, .I64, .I32);
