@@ -1754,19 +1754,6 @@ const ModuleValidator = struct {
         try validateTypeIndex(func.type_index, module);
 
         const func_type_def: *const FunctionTypeDefinition = &module.types.items[func.type_index];
-        // var params: []const ValType = func_type_def.getParams();
-        // for (params) |valtype| {
-        //     try self.pushType(valtype);
-        // }
-
-        //if (std.mem.eql(ValType, params, func.locals.items) == false) {
-        //    return error.ValidationTypeMismatch;
-        //}
-
-        // var instruction_index: u32 = func.offset_into_instructions;
-        // if (instruction_index >= module.code.instructions.items.len) {
-        //     return error.ValidationOutOfBounds;
-        // }
 
         try self.pushControl(Opcode.Call, func_type_def.getParams(), func_type_def.getReturns());
     }
@@ -1789,12 +1776,6 @@ const ModuleValidator = struct {
 
                 // std.debug.print(">> start_types: {s}, end_types: {s}\n", .{ start_types, end_types });
                 try popReturnTypes(validator, start_types);
-
-                // var start_types_index = start_types.len;
-                // while (start_types_index > 0) : (start_types_index -= 1) {
-                //     const valtype: ValType = start_types[start_types_index - 1];
-                //     try validator.popType(valtype);
-                // }
 
                 try validator.pushControl(instruction_.opcode, start_types, end_types);
             }
@@ -1893,7 +1874,6 @@ const ModuleValidator = struct {
                 const func_type: *const FunctionTypeDefinition = &module_.types.items[type_index];
 
                 try popReturnTypes(validator, func_type.getParams());
-                // const param_types: []const ValType = func_type.getParams();
                 for (func_type.getReturns()) |valtype| {
                     try validator.pushType(valtype);
                 }
@@ -1921,7 +1901,6 @@ const ModuleValidator = struct {
             },
             .Else => {
                 const frame: ControlFrame = try self.popControl();
-                // std.debug.print(">> frame: {}\n", .{frame});
                 if (frame.opcode != .If) {
                     return error.ValidationIfElseMismatch;
                 }
@@ -1947,9 +1926,6 @@ const ModuleValidator = struct {
                 const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
 
                 try Helpers.popReturnTypes(self, block_return_types);
-                // for (block_return_types) |valtype| {
-                //     try self.popType(valtype);
-                // }
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
             .Branch_If => {
@@ -1958,9 +1934,6 @@ const ModuleValidator = struct {
                 try self.popType(.I32);
 
                 try Helpers.popReturnTypes(self, block_return_types);
-                // for (block_return_types) |valtype| {
-                //     try self.popType(valtype);
-                // }
                 for (block_return_types) |valtype| {
                     try self.pushType(valtype);
                 }
@@ -1980,10 +1953,6 @@ const ModuleValidator = struct {
                     }
 
                     try Helpers.popReturnTypes(self, block_return_types);
-
-                    // for (block_return_types) |valtype| {
-                    //     try self.popType(valtype);
-                    // }
                     for (block_return_types) |valtype| {
                         try self.pushType(valtype);
                     }
@@ -2143,8 +2112,11 @@ const ModuleValidator = struct {
             .I64_Eqz, .I64_Clz, .I64_Ctz, .I64_Popcnt => {
                 try Helpers.validateNumericUnaryOp(self, .I64, .I64);
             },
-            .I64_Eq, .I64_NE, .I64_LT_S, .I64_LT_U, .I64_GT_S, .I64_GT_U, .I64_LE_S, .I64_LE_U, .I64_GE_S, .I64_GE_U, .I64_Add, .I64_Sub, .I64_Mul, .I64_Div_S, .I64_Div_U, .I64_Rem_S, .I64_Rem_U, .I64_And, .I64_Or, .I64_Xor, .I64_Shl, .I64_Shr_S, .I64_Shr_U, .I64_Rotl, .I64_Rotr => {
+            .I64_Eq, .I64_NE, .I64_LT_S, .I64_LT_U, .I64_GT_S, .I64_GT_U, .I64_LE_S, .I64_LE_U, .I64_GE_S, .I64_GE_U => {
                 try Helpers.validateNumericBinaryOp(self, .I64, .I32);
+            },
+            .I64_Add, .I64_Sub, .I64_Mul, .I64_Div_S, .I64_Div_U, .I64_Rem_S, .I64_Rem_U, .I64_And, .I64_Or, .I64_Xor, .I64_Shl, .I64_Shr_S, .I64_Shr_U, .I64_Rotl, .I64_Rotr => {
+                try Helpers.validateNumericBinaryOp(self, .I64, .I64);
             },
             .F32_EQ, .F32_NE, .F32_LT, .F32_GT, .F32_LE, .F32_GE => {
                 try Helpers.validateNumericBinaryOp(self, .F32, .I32);
@@ -2162,7 +2134,7 @@ const ModuleValidator = struct {
                 try Helpers.validateNumericBinaryOp(self, .F64, .I32);
             },
             .F64_Add, .F64_Sub, .F64_Mul, .F64_Div, .F64_Min, .F64_Max, .F64_Copysign => {
-                try Helpers.validateNumericBinaryOp(self, .F64, .I64);
+                try Helpers.validateNumericBinaryOp(self, .F64, .F64);
             },
             .I32_Wrap_I64 => {
                 try Helpers.validateNumericUnaryOp(self, .I64, .I32);
@@ -2305,43 +2277,27 @@ const ModuleValidator = struct {
     }
 
     fn popAnyType(self: *ModuleValidator) !?ValType {
-        if (self.type_stack.items.len == 0) {
-            return error.ValidationTypeMismatch;
-        }
         const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
-        if (self.type_stack.items.len == top_frame.types_stack_height and top_frame.is_unreachable) {
+        const types: []?ValType = self.type_stack.items;
+
+        if (top_frame.is_unreachable and types.len == top_frame.types_stack_height) {
+            // if (types.len > 0) {
+            //     _ = self.type_stack.pop();
+            // }
             return null;
         }
+
         if (self.type_stack.items.len <= top_frame.types_stack_height) {
             return error.ValidationTypeMismatch;
         }
         return self.type_stack.pop();
     }
 
-    fn popType(self: *ModuleValidator, valtype: ?ValType) !void {
-        const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
-        const types: []?ValType = self.type_stack.items;
-
-        if (top_frame.is_unreachable and types.len == top_frame.types_stack_height) {
-            if (types.len > 0) {
-                _ = self.type_stack.pop();
-            }
-            return;
-        }
-
-        if (types.len == 0) {
+    fn popType(self: *ModuleValidator, expected_or_null: ?ValType) !void {
+        const valtype_or_null = try self.popAnyType();
+        if (valtype_or_null != expected_or_null and valtype_or_null != null and expected_or_null != null) {
             return error.ValidationTypeMismatch;
         }
-        if (valtype != null and types[types.len - 1] != valtype) {
-            return error.ValidationTypeMismatch;
-        }
-        // if (self.type_stack.items.len == top_frame.types_stack_height and top_frame.is_unreachable) {
-        //     return;
-        // }
-        if (self.type_stack.items.len <= top_frame.types_stack_height) {
-            return error.ValidationTypeMismatch;
-        }
-        _ = self.type_stack.pop();
     }
 
     fn pushControl(self: *ModuleValidator, opcode: Opcode, start_types: []const ValType, end_types: []const ValType) !void {
