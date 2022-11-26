@@ -2152,8 +2152,11 @@ const ModuleValidator = struct {
             .F32_Add, .F32_Sub, .F32_Mul, .F32_Div, .F32_Min, .F32_Max, .F32_Copysign => {
                 try Helpers.validateNumericBinaryOp(self, .F32, .F32);
             },
-            .F32_Abs, .F32_Neg, .F32_Ceil, .F32_Floor, .F32_Trunc, .F32_Nearest, .F32_Sqrt, .F64_Abs, .F64_Neg, .F64_Ceil, .F64_Floor, .F64_Trunc, .F64_Nearest, .F64_Sqrt => {
+            .F32_Abs, .F32_Neg, .F32_Ceil, .F32_Floor, .F32_Trunc, .F32_Nearest, .F32_Sqrt => {
                 try Helpers.validateNumericUnaryOp(self, .F32, .F32);
+            },
+            .F64_Abs, .F64_Neg, .F64_Ceil, .F64_Floor, .F64_Trunc, .F64_Nearest, .F64_Sqrt => {
+                try Helpers.validateNumericUnaryOp(self, .F64, .F64);
             },
             .F64_EQ, .F64_NE, .F64_LT, .F64_GT, .F64_LE, .F64_GE => {
                 try Helpers.validateNumericBinaryOp(self, .F64, .I32);
