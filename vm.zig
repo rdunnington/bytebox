@@ -454,15 +454,7 @@ const BlockTypeValue = union(BlockType) {
 
     fn getBlocktypeParamTypes(blocktype: BlockTypeValue, module_def: *const ModuleDefinition) []const ValType {
         switch (blocktype) {
-            .Void => return &BlockTypeStatics.empty,
-            .ValType => |v| return switch (v) {
-                .I32 => &BlockTypeStatics.valtype_i32,
-                .I64 => &BlockTypeStatics.valtype_i64,
-                .F32 => &BlockTypeStatics.valtype_f32,
-                .F64 => &BlockTypeStatics.valtype_f64,
-                .FuncRef => &BlockTypeStatics.reftype_funcref,
-                .ExternRef => &BlockTypeStatics.reftype_externref,
-            },
+            else => return &BlockTypeStatics.empty,
             .TypeIndex => |index| return module_def.types.items[index].getParams(),
         }
     }
@@ -1762,10 +1754,10 @@ const ModuleValidator = struct {
         try validateTypeIndex(func.type_index, module);
 
         const func_type_def: *const FunctionTypeDefinition = &module.types.items[func.type_index];
-        var params: []const ValType = func_type_def.getParams();
-        for (params) |valtype| {
-            try self.pushType(valtype);
-        }
+        // var params: []const ValType = func_type_def.getParams();
+        // for (params) |valtype| {
+        //     try self.pushType(valtype);
+        // }
 
         //if (std.mem.eql(ValType, params, func.locals.items) == false) {
         //    return error.ValidationTypeMismatch;
@@ -1781,6 +1773,14 @@ const ModuleValidator = struct {
 
     fn validateCode(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition, instruction: Instruction) !void {
         const Helpers = struct {
+            fn popReturnTypes(validator: *ModuleValidator, types: []const ValType) !void {
+                var i = types.len;
+                while (i > 0) {
+                    i -= 1;
+                    try validator.popType(types[i]);
+                }
+            }
+
             fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction) !void {
                 const block_type_value: BlockTypeValue = module_.code.block_type_values.items[instruction_.immediate];
 
@@ -1788,12 +1788,13 @@ const ModuleValidator = struct {
                 var end_types: []const ValType = block_type_value.getBlocktypeReturnTypes(module_);
 
                 // std.debug.print(">> start_types: {s}, end_types: {s}\n", .{ start_types, end_types });
+                try popReturnTypes(validator, start_types);
 
-                var start_types_index = start_types.len;
-                while (start_types_index > 0) : (start_types_index -= 1) {
-                    const valtype: ValType = start_types[start_types_index - 1];
-                    try validator.popType(valtype);
-                }
+                // var start_types_index = start_types.len;
+                // while (start_types_index > 0) : (start_types_index -= 1) {
+                //     const valtype: ValType = start_types[start_types_index - 1];
+                //     try validator.popType(valtype);
+                // }
 
                 try validator.pushControl(instruction_.opcode, start_types, end_types);
             }
@@ -1890,12 +1891,9 @@ const ModuleValidator = struct {
 
             fn popPushFuncTypes(validator: *ModuleValidator, type_index: u32, module_: *const ModuleDefinition) !void {
                 const func_type: *const FunctionTypeDefinition = &module_.types.items[type_index];
-                const param_types: []const ValType = func_type.getParams();
-                var i = param_types.len;
-                while (i > 0) {
-                    i -= 1;
-                    try validator.popType(param_types[i]);
-                }
+
+                try popReturnTypes(validator, func_type.getParams());
+                // const param_types: []const ValType = func_type.getParams();
                 for (func_type.getReturns()) |valtype| {
                     try validator.pushType(valtype);
                 }
@@ -1947,18 +1945,22 @@ const ModuleValidator = struct {
             .Branch => {
                 const control_index: u32 = instruction.immediate;
                 const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
-                for (block_return_types) |valtype| {
-                    try self.popType(valtype);
-                }
+
+                try Helpers.popReturnTypes(self, block_return_types);
+                // for (block_return_types) |valtype| {
+                //     try self.popType(valtype);
+                // }
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
             .Branch_If => {
                 const control_index: u32 = instruction.immediate;
                 const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
                 try self.popType(.I32);
-                for (block_return_types) |valtype| {
-                    try self.popType(valtype);
-                }
+
+                try Helpers.popReturnTypes(self, block_return_types);
+                // for (block_return_types) |valtype| {
+                //     try self.popType(valtype);
+                // }
                 for (block_return_types) |valtype| {
                     try self.pushType(valtype);
                 }
@@ -1977,15 +1979,24 @@ const ModuleValidator = struct {
                         return error.ValidationTypeMismatch;
                     }
 
-                    for (block_return_types) |valtype| {
-                        try self.popType(valtype);
-                    }
+                    try Helpers.popReturnTypes(self, block_return_types);
+
+                    // for (block_return_types) |valtype| {
+                    //     try self.popType(valtype);
+                    // }
                     for (block_return_types) |valtype| {
                         try self.pushType(valtype);
                     }
                 }
+
+                try Helpers.popReturnTypes(self, fallback_block_return_types);
+                try Helpers.markFrameInstructionsUnreachable(self);
             },
-            //.Return => {},
+            .Return => {
+                const block_return_types: []const ValType = try Helpers.getControlTypes(self, 0);
+                try Helpers.popReturnTypes(self, block_return_types);
+                try Helpers.markFrameInstructionsUnreachable(self);
+            },
             .Call => {
                 const func_index: u32 = instruction.immediate;
                 if (module.imports.functions.items.len + module.functions.items.len <= func_index) {
@@ -2277,7 +2288,6 @@ const ModuleValidator = struct {
             .Table_Grow, .Table_Size, .Table_Fill => {
                 try validateTableIndex(instruction.immediate, module);
             },
-            else => {},
         }
     }
 
@@ -2306,17 +2316,25 @@ const ModuleValidator = struct {
     }
 
     fn popType(self: *ModuleValidator, valtype: ?ValType) !void {
+        const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
         const types: []?ValType = self.type_stack.items;
+
+        if (top_frame.is_unreachable and types.len == top_frame.types_stack_height) {
+            if (types.len > 0) {
+                _ = self.type_stack.pop();
+            }
+            return;
+        }
+
         if (types.len == 0) {
             return error.ValidationTypeMismatch;
         }
         if (valtype != null and types[types.len - 1] != valtype) {
             return error.ValidationTypeMismatch;
         }
-        const top_frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
-        if (self.type_stack.items.len == top_frame.types_stack_height and top_frame.is_unreachable) {
-            return;
-        }
+        // if (self.type_stack.items.len == top_frame.types_stack_height and top_frame.is_unreachable) {
+        //     return;
+        // }
         if (self.type_stack.items.len <= top_frame.types_stack_height) {
             return error.ValidationTypeMismatch;
         }
@@ -2341,9 +2359,11 @@ const ModuleValidator = struct {
             .is_unreachable = false,
         });
 
-        // for (start_types) |valtype| {
-        //     try self.pushType(valtype);
-        // }
+        if (opcode != .Call) {
+            for (start_types) |valtype| {
+                try self.pushType(valtype);
+            }
+        }
     }
 
     fn popControl(self: *ModuleValidator) !ControlFrame {
@@ -2355,6 +2375,9 @@ const ModuleValidator = struct {
 
         var i = frame.end_types.len;
         while (i > 0) : (i -= 1) {
+            if (frame.is_unreachable and self.type_stack.items.len == frame.types_stack_height) {
+                break;
+            }
             try self.popType(frame.end_types[i - 1]);
         }
 
@@ -2923,7 +2946,7 @@ pub const ModuleDefinition = struct {
 
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
-                        std.debug.print(">>> parsing code index {}\n", .{code_index});
+                        // std.debug.print(">>> parsing code index {}\n", .{code_index});
                         const code_size = try decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
@@ -2978,7 +3001,7 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
                             var instruction = try Instruction.decode(reader, module);
-                            std.debug.print(">> decoded opcode: {}\n", .{instruction.opcode});
+                            // std.debug.print(">> decoded opcode: {}\n", .{instruction.opcode});
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
