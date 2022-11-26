@@ -2222,12 +2222,18 @@ const ModuleValidator = struct {
             .Memory_Init => {
                 try validateMemoryIndex(module);
                 try validateDataIndex(instruction.immediate, module);
+                try self.popType(.I32);
+                try self.popType(.I32);
+                try self.popType(.I32);
             },
             .Data_Drop => {
                 try validateDataIndex(instruction.immediate, module);
             },
             .Memory_Copy, .Memory_Fill => {
                 try validateMemoryIndex(module);
+                try self.popType(.I32);
+                try self.popType(.I32);
+                try self.popType(.I32);
             },
             .Table_Init => {
                 const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
@@ -2242,6 +2248,10 @@ const ModuleValidator = struct {
                 if (elem_reftype != table_reftype) {
                     return error.ValidationTypeMismatch;
                 }
+
+                try self.popType(.I32);
+                try self.popType(.I32);
+                try self.popType(.I32);
             },
             .Elem_Drop => {
                 try validateElementIndex(instruction.immediate, module);
@@ -2259,9 +2269,32 @@ const ModuleValidator = struct {
                 if (dest_reftype != src_reftype) {
                     return error.ValidationTypeMismatch;
                 }
+
+                try self.popType(.I32);
+                try self.popType(.I32);
+                try self.popType(.I32);
             },
-            .Table_Grow, .Table_Size, .Table_Fill => {
+            .Table_Grow => {
                 try validateTableIndex(instruction.immediate, module);
+
+                try self.popType(.I32);
+                if (try self.popAnyType()) |init_type| {
+                    if (init_type.isRefType() == false) {
+                        return error.ValidationTypeMismatch;
+                    }
+                }
+
+                try self.pushType(.I32);
+            },
+            .Table_Size => {
+                try validateTableIndex(instruction.immediate, module);
+                try self.pushType(.I32);
+            },
+            .Table_Fill => {
+                try validateTableIndex(instruction.immediate, module);
+                try self.popType(.I32);
+                try self.popType(.I32);
+                try self.popType(.I32);
             },
         }
     }
@@ -2444,7 +2477,6 @@ pub const ModuleDefinition = struct {
         errdefer module.deinit();
 
         decode(wasm, &module, allocator) catch |e| {
-            // std.debug.print(">>>>>caught error {}\n", .{e});
             var any: anyerror = switch (e) {
                 error.EndOfStream => error.MalformedUnexpectedEnd,
                 else => e,
@@ -2905,7 +2937,7 @@ pub const ModuleDefinition = struct {
 
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
-                        // std.debug.print(">>> parsing code index {}\n", .{code_index});
+                        // std.debug.print(">>>>> parsing code index {}\n", .{code_index});
                         const code_size = try decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
@@ -2960,7 +2992,7 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
                             var instruction = try Instruction.decode(reader, module);
-                            // std.debug.print(">> decoded opcode: {}\n", .{instruction.opcode});
+                            // std.debug.print(">>>>>> decoded opcode: {}\n", .{instruction.opcode});
 
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
@@ -5548,9 +5580,6 @@ pub const ModuleInstance = struct {
                     const table: *TableInstance = current_store.getTable(table_index);
                     const length = @bitCast(u32, try stack.popI32());
                     const init_value = try stack.popValue();
-                    if (init_value.isRefType() == false) {
-                        return error.ValidationTypeMismatch;
-                    }
                     const old_length = @intCast(i32, table.refs.items.len);
                     const return_value: i32 = if (table.grow(length, init_value)) old_length else -1;
                     try stack.pushI32(return_value);
