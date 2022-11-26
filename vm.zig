@@ -2109,7 +2109,10 @@ const ModuleValidator = struct {
             .I32_Eqz, .I32_Clz, .I32_Ctz, .I32_Popcnt => {
                 try Helpers.validateNumericUnaryOp(self, .I32, .I32);
             },
-            .I64_Eqz, .I64_Clz, .I64_Ctz, .I64_Popcnt => {
+            .I64_Eqz => {
+                try Helpers.validateNumericUnaryOp(self, .I64, .I32);
+            },
+            .I64_Clz, .I64_Ctz, .I64_Popcnt => {
                 try Helpers.validateNumericUnaryOp(self, .I64, .I64);
             },
             .I64_Eq, .I64_NE, .I64_LT_S, .I64_LT_U, .I64_GT_S, .I64_GT_U, .I64_LE_S, .I64_LE_U, .I64_GE_S, .I64_GE_U => {
