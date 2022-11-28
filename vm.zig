@@ -1733,7 +1733,7 @@ const ModuleValidator = struct {
     }
 
     fn validateMemoryIndex(module: *const ModuleDefinition) !void {
-        if (module.memories.items.len < 1) {
+        if (module.imports.memories.items.len + module.memories.items.len < 1) {
             return error.ValidationUnknownMemory;
         }
     }
@@ -1909,8 +1909,8 @@ const ModuleValidator = struct {
             .End => {
                 const frame: ControlFrame = try self.popControl();
 
-                // if must have matching else block when returns are expected
-                if (frame.opcode == .If and frame.end_types.len > 0) {
+                // if must have matching else block when returns are expected and the params don't match
+                if (frame.opcode == .If and !std.mem.eql(ValType, frame.start_types, frame.end_types)) {
                     return error.ValidationTypeMismatch;
                 }
 
@@ -2362,10 +2362,6 @@ const ModuleValidator = struct {
     }
 
     fn popControl(self: *ModuleValidator) !ControlFrame {
-        if (self.control_stack.items.len == 0) {
-            return error.ValidationOutOfBounds;
-        }
-
         const frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
 
         var i = frame.end_types.len;
