@@ -2044,11 +2044,13 @@ const ModuleValidator = struct {
             },
             .Table_Get => {
                 const reftype = try Helpers.getTableReftype(module, instruction.immediate);
+                try self.popType(.I32);
                 try self.pushType(reftype);
             },
             .Table_Set => {
                 const reftype = try Helpers.getTableReftype(module, instruction.immediate);
                 try self.popType(reftype);
+                try self.popType(.I32);
             },
             .I32_Load, .I32_Load8_S, .I32_Load8_U, .I32_Load16_S, .I32_Load16_U => {
                 try self.popType(.I32);
@@ -2203,8 +2205,8 @@ const ModuleValidator = struct {
                     if (valtype.isRefType() == false) {
                         return error.ValidationTypeMismatch;
                     }
-                    try self.pushType(.I32);
                 }
+                try self.pushType(.I32);
             },
             .Ref_Func => {
                 try validateFunctionIndex(instruction.immediate, module);
@@ -2296,7 +2298,11 @@ const ModuleValidator = struct {
             .Table_Fill => {
                 try validateTableIndex(instruction.immediate, module);
                 try self.popType(.I32);
-                try self.popType(.I32);
+                if (try self.popAnyType()) |valtype| {
+                    if (valtype.isRefType() == false) {
+                        return error.ValidationTypeMismatch;
+                    }
+                }
                 try self.popType(.I32);
             },
         }
@@ -5371,9 +5377,6 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Ref_Is_Null => {
                     const val: Val = try stack.popValue();
-                    if (val.isRefType() == false) {
-                        return error.ValidationTypeMismatch;
-                    }
                     const boolean: i32 = if (val.isNull()) 1 else 0;
                     try stack.pushI32(boolean);
                 },
