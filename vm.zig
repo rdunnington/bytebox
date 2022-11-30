@@ -1952,9 +1952,19 @@ const ModuleValidator = struct {
                         return error.ValidationTypeMismatch;
                     }
 
-                    try Helpers.popReturnTypes(self, block_return_types);
-                    for (block_return_types) |valtype| {
-                        try self.pushType(valtype);
+                    // Seems like the wabt validation code for br_table is implemented by "peeking" at types on the stack
+                    // instead of actually popping/pushing them. This allows certain block type mismatches to be considered
+                    // valid when the current block is marked unreachable.
+                    const frame: *const ControlFrame = &self.control_stack.items[control_index];
+                    const type_stack: []const ?ValType = self.type_stack.items[frame.types_stack_height..];
+
+                    var i: usize = block_return_types.len;
+                    while (i > 0) : (i -= 1) {
+                        if (!frame.is_unreachable and frame.types_stack_height < type_stack.len) {
+                            if (type_stack[type_stack.len - i] != block_return_types[block_return_types.len - i]) {
+                                return error.ValidationTypeMismatch;
+                            }
+                        }
                     }
                 }
 
