@@ -29,7 +29,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "const",
     "conversions",
     "custom",
-    // "data",
+    "data",
     // "elem",
     "endianness",
     // "exports",
@@ -64,10 +64,10 @@ const k_validation_suite_allowlist = [_][]const u8{
     "local_tee",
     "loop",
     "memory",
-    // "memory_copy",
-    // "memory_fill",
-    // "memory_grow",
-    // "memory_init",
+    "memory_copy",
+    "memory_fill",
+    "memory_grow",
+    "memory_init",
     // "memory_redundancy",
     // "memory_size",
     // "memory_trap",
@@ -306,12 +306,12 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationUnknownType => strcmp(err_string, "unknown type"),
         wasm.ValidationError.ValidationUnknownFunction => strcmp(err_string, "unknown function"),
-        wasm.ValidationError.ValidationUnknownGlobal => strcmp(err_string, "unknown global"),
+        wasm.ValidationError.ValidationUnknownGlobal => strcmp(err_string, "unknown global") or strcmp(err_string, "unknown global 0") or strcmp(err_string, "unknown global 1"),
         wasm.ValidationError.ValidationUnknownLocal => strcmp(err_string, "unknown local"),
         wasm.ValidationError.ValidationUnknownTable => strcmp(err_string, "unknown table"),
-        wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory"),
+        wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory") or strcmp(err_string, "unknown memory 0") or strcmp(err_string, "unknown memory 1"),
         wasm.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element"),
-        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data"),
+        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or strcmp(err_string, "unknown data segment"),
         wasm.ValidationError.ValidationTypeStackHeightMismatch => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationBadAlignment => strcmp(err_string, "alignment must not be larger than natural"),
         wasm.ValidationError.ValidationUnknownLabel => strcmp(err_string, "unknown label"),
@@ -323,6 +323,9 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationMultipleMemories => strcmp(err_string, "multiple memories"),
         wasm.ValidationError.ValidationMemoryInvalidMaxLimit => strcmp(err_string, "size minimum must not be greater than maximum"),
         wasm.ValidationError.ValidationMemoryMaxPagesExceeded => strcmp(err_string, "memory size must be at most 65536 pages (4GiB)"),
+        wasm.ValidationError.ValidationDataOffsetMustBeI32 => strcmp(err_string, "type mismatch"),
+        // wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImport => strcmp(err_string, "uncomment this when we find a test case for it"),
+        wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImmutable => strcmp(err_string, "constant expression required"),
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
@@ -815,6 +818,7 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
             }
 
             module.inst = wasm.ModuleInstance.init(&module.def.?, scratch_allocator);
+            // try (module.inst.?).instantiate(imports.items);
             (module.inst.?).instantiate(imports.items) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {

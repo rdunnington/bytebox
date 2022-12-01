@@ -76,6 +76,9 @@ pub const ValidationError = error{
     ValidationMultipleMemories,
     ValidationMemoryInvalidMaxLimit,
     ValidationMemoryMaxPagesExceeded,
+    ValidationDataOffsetMustBeI32,
+    ValidationConstantExpressionGlobalMustBeImport,
+    ValidationConstantExpressionGlobalMustBeImmutable,
 };
 
 pub const TrapError = error{
@@ -800,7 +803,17 @@ const ConstantExpression = union(ConstantExpressionType) {
     Value: Val,
     Global: u32, // global index
 
-    fn decode(reader: anytype, module_def: *const ModuleDefinition) !ConstantExpression {
+    const ExpectedGlobalDef = enum {
+        Any,
+        Import,
+    };
+
+    const ExpectedGlobalMut = enum {
+        Any,
+        Immutable,
+    };
+
+    fn decode(reader: anytype, module_def: *const ModuleDefinition, comptime expected_global_def: ExpectedGlobalDef, comptime expected_global_mut: ExpectedGlobalMut) !ConstantExpression {
         const opcode_value = try reader.readByte();
         const opcode = std.meta.intToEnum(Opcode, opcode_value) catch {
             // std.debug.print("\topcode_value: 0x{X}\n", .{opcode_value});
@@ -821,6 +834,25 @@ const ConstantExpression = union(ConstantExpressionType) {
         if (opcode == .Global_Get) {
             if (module_def.imports.globals.items.len + module_def.globals.items.len <= expr.Global) {
                 return error.ValidationUnknownGlobal;
+            }
+
+            if (expected_global_def == .Import) {
+                if (module_def.imports.globals.items.len <= expr.Global) {
+                    return error.ValidationConstantExpressionGlobalMustBeImport;
+                }
+            }
+
+            if (expected_global_mut == .Immutable) {
+                if (expr.Global < module_def.imports.globals.items.len) {
+                    if (module_def.imports.globals.items[expr.Global].mut != .Immutable) {
+                        return error.ValidationConstantExpressionGlobalMustBeImmutable;
+                    }
+                } else {
+                    const local_index: usize = module_def.imports.globals.items.len - expr.Global;
+                    if (module_def.globals.items[local_index].mut != .Immutable) {
+                        return error.ValidationConstantExpressionGlobalMustBeImmutable;
+                    }
+                }
             }
         }
 
@@ -846,6 +878,23 @@ const ConstantExpression = union(ConstantExpressionType) {
     fn resolveTo(self: *const ConstantExpression, store: *Store, comptime T: type) !T {
         const val: Val = try self.resolve(store);
         return val.get(T);
+    }
+
+    fn resolveType(self: *const ConstantExpression, module_def: *const ModuleDefinition) ValType {
+        switch (self.*) {
+            .Value => |val| return std.meta.activeTag(val),
+            .Global => |index| {
+                if (index < module_def.imports.globals.items.len) {
+                    const global_import_def: *const GlobalImportDefinition = &module_def.imports.globals.items[index];
+                    return global_import_def.valtype;
+                } else {
+                    const local_index: usize = module_def.imports.globals.items.len - index;
+                    const global_def: *const GlobalDefinition = &module_def.globals.items[local_index];
+                    return global_def.valtype;
+                }
+                unreachable;
+            },
+        }
     }
 };
 
@@ -1191,7 +1240,11 @@ const DataDefinition = struct {
         var offset: ?ConstantExpression = null;
         if (data_type == 0x00 or data_type == 0x02) {
             mode = DataMode.Active;
-            offset = try ConstantExpression.decode(reader, module_def);
+            offset = try ConstantExpression.decode(reader, module_def, .Import, .Immutable);
+
+            if ((offset.?).resolveType(module_def) != .I32) {
+                return error.ValidationDataOffsetMustBeI32;
+            }
         }
 
         var num_bytes = try decodeLEB128(u32, reader);
@@ -1625,10 +1678,6 @@ const Instruction = struct {
                 immediate = try decodeLEB128(u32, reader); // funcidx
             },
             .Data_Drop => {
-                if (module.data_count == null) {
-                    return error.MalformedMissingDataCountSection;
-                }
-
                 immediate = try decodeLEB128(u32, reader); // dataidx
             },
             .Memory_Copy => {
@@ -2248,7 +2297,16 @@ const ModuleValidator = struct {
                 try self.popType(.I32);
             },
             .Data_Drop => {
-                try validateDataIndex(instruction.immediate, module);
+                if (module.data_count) |count| {
+                    if (count <= instruction.immediate) {
+                        return error.ValidationUnknownData;
+                    }
+                } else {
+                    return error.ValidationUnknownData;
+                    // return error.MalformedMissingDataCountSection;
+                }
+
+                // try validateDataIndex(instruction.immediate, module);
             },
             .Memory_Copy, .Memory_Fill => {
                 try validateMemoryIndex(module);
@@ -2769,7 +2827,7 @@ pub const ModuleDefinition = struct {
                         var mut = try GlobalMut.decode(reader);
 
                         // TODO validate global references are for imports only
-                        const expr = try ConstantExpression.decode(reader, module);
+                        const expr = try ConstantExpression.decode(reader, module, .Any, .Any);
                         switch (expr) {
                             .Value => |expr_value| {
                                 if (std.meta.activeTag(expr_value) != valtype) {
@@ -2863,7 +2921,7 @@ pub const ModuleDefinition = struct {
 
                             var elem_index: u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
-                                var expr = try ConstantExpression.decode(_reader, _module);
+                                var expr = try ConstantExpression.decode(_reader, _module, .Import, .Any);
                                 try elems.append(expr);
                             }
                         }
@@ -2897,7 +2955,7 @@ pub const ModuleDefinition = struct {
 
                         switch (flags) {
                             0x00 => {
-                                def.offset = try ConstantExpression.decode(reader, module);
+                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x01 => {
@@ -2907,7 +2965,7 @@ pub const ModuleDefinition = struct {
                             },
                             0x02 => {
                                 def.table_index = try decodeLEB128(u32, reader);
-                                def.offset = try ConstantExpression.decode(reader, module);
+                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
                                 try ElementHelpers.readNullElemkind(reader);
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
@@ -2917,7 +2975,7 @@ pub const ModuleDefinition = struct {
                                 try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
                             },
                             0x04 => {
-                                def.offset = try ConstantExpression.decode(reader, module);
+                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module);
                             },
                             0x05 => {
@@ -2927,7 +2985,7 @@ pub const ModuleDefinition = struct {
                             },
                             0x06 => {
                                 def.table_index = try decodeLEB128(u32, reader);
-                                def.offset = try ConstantExpression.decode(reader, module);
+                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
                                 def.reftype = try ValType.decodeReftype(reader);
                                 try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module);
                             },
