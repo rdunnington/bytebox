@@ -30,7 +30,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "conversions",
     "custom",
     // "data",
-    "elem",
+    // "elem",
     "endianness",
     // "exports",
     "f32",
@@ -45,7 +45,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "float_memory",
     "float_misc",
     "forward",
-    // "func",
+    "func",
     // "func_ptrs",
     "global",
     "i32",
@@ -77,7 +77,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     // "ref_is_null",
     "ref_null",
     // "return",
-    // "select",
+    "select",
     "skip-stack-guard-page",
     "stack",
     // "start",
@@ -301,7 +301,9 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
         wasm.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
 
-        wasm.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch"),
+        // ValidationTypeMismatch: result arity handles select.2.wasm which is the exact same binary as select.1.wasm but the test expects a different error :/
+        wasm.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "invalid result arity"),
+        wasm.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationUnknownType => strcmp(err_string, "unknown type"),
         wasm.ValidationError.ValidationUnknownFunction => strcmp(err_string, "unknown function"),
         wasm.ValidationError.ValidationUnknownGlobal => strcmp(err_string, "unknown global"),
@@ -317,6 +319,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationBadConstantExpression => strcmp(err_string, "constant expression required") or strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationGlobalReferencingMutableGlobal => strcmp(err_string, "constant expression required"),
         wasm.ValidationError.ValidationUnknownBlockTypeIndex => strcmp(err_string, "type mismatch") or strcmp(err_string, "unexpected end"), // bit of a hack for binary.166.wasm
+        wasm.ValidationError.ValidationSelectArity => strcmp(err_string, "invalid result arity"),
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),

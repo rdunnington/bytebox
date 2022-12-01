@@ -76,6 +76,7 @@ pub const ValidationError = error{
     ValidationBadConstantExpression,
     ValidationGlobalReferencingMutableGlobal,
     ValidationUnknownBlockTypeIndex,
+    ValidationSelectArity,
 };
 
 pub const TrapError = error{
@@ -1361,7 +1362,7 @@ const Instruction = struct {
             .Select_T => {
                 const num_types = try decodeLEB128(u32, reader);
                 if (num_types != 1) {
-                    return error.MalformedSelectInstruction;
+                    return error.ValidationSelectArity;
                 }
                 const valtype = try ValType.decode(reader);
                 immediate = @enumToInt(valtype);
@@ -2006,8 +2007,8 @@ const ModuleValidator = struct {
             },
             .Select => {
                 try self.popType(.I32);
-                const valtype1_or_null: ?ValType = try self.popAnyType();
-                const valtype2_or_null: ?ValType = try self.popAnyType();
+                const valtype1_or_null: ?ValType = try self.popAnyType(); //catch return error.ValidationSelectArity;
+                const valtype2_or_null: ?ValType = try self.popAnyType(); //catch return error.ValidationSelectArity;
                 if (valtype1_or_null == null) {
                     try self.pushType(valtype2_or_null);
                 } else if (valtype2_or_null == null) {
@@ -2333,9 +2334,6 @@ const ModuleValidator = struct {
         const types: []?ValType = self.type_stack.items;
 
         if (top_frame.is_unreachable and types.len == top_frame.types_stack_height) {
-            // if (types.len > 0) {
-            //     _ = self.type_stack.pop();
-            // }
             return null;
         }
 
