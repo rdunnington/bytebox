@@ -68,9 +68,9 @@ const k_validation_suite_allowlist = [_][]const u8{
     "memory_fill",
     "memory_grow",
     "memory_init",
-    // "memory_redundancy",
-    // "memory_size",
-    // "memory_trap",
+    "memory_redundancy",
+    "memory_size",
+    "memory_trap",
     "names",
     "nop",
     // "ref_func",
@@ -285,7 +285,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero byte expected"),
         wasm.MalformedError.MalformedTooManyLocals => strcmp(err_string, "too many locals"),
         wasm.MalformedError.MalformedFunctionCodeSectionMismatch => strcmp(err_string, "function and code section have inconsistent lengths"),
-        wasm.MalformedError.MalformedMissingDataCountSection => strcmp(err_string, "data count section required"),
+        wasm.MalformedError.MalformedMissingDataCountSection => strcmp(err_string, "data count section required") or strcmp(err_string, "unknown data segment"),
         wasm.MalformedError.MalformedDataCountMismatch => strcmp(err_string, "data count and data section have inconsistent lengths"),
         wasm.MalformedError.MalformedDataType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         wasm.MalformedError.MalformedIllegalOpcode => strcmp(err_string, "illegal opcode") or strcmp(err_string, "integer representation too long"),
@@ -306,19 +306,26 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationUnknownType => strcmp(err_string, "unknown type"),
         wasm.ValidationError.ValidationUnknownFunction => strcmp(err_string, "unknown function"),
-        wasm.ValidationError.ValidationUnknownGlobal => strcmp(err_string, "unknown global") or strcmp(err_string, "unknown global 0") or strcmp(err_string, "unknown global 1"),
+        wasm.ValidationError.ValidationUnknownGlobal => strcmp(err_string, "unknown global") or
+            strcmp(err_string, "unknown global 0") or
+            strcmp(err_string, "unknown global 1"),
         wasm.ValidationError.ValidationUnknownLocal => strcmp(err_string, "unknown local"),
         wasm.ValidationError.ValidationUnknownTable => strcmp(err_string, "unknown table"),
-        wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory") or strcmp(err_string, "unknown memory 0") or strcmp(err_string, "unknown memory 1"),
+        wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory") or
+            strcmp(err_string, "unknown memory 0") or
+            strcmp(err_string, "unknown memory 1"),
         wasm.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element"),
-        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or strcmp(err_string, "unknown data segment"),
+        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or
+            strcmp(err_string, "unknown data segment") or
+            strcmp(err_string, "unknown data segment 1"),
         wasm.ValidationError.ValidationTypeStackHeightMismatch => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationBadAlignment => strcmp(err_string, "alignment must not be larger than natural"),
         wasm.ValidationError.ValidationUnknownLabel => strcmp(err_string, "unknown label"),
         wasm.ValidationError.ValidationImmutableGlobal => strcmp(err_string, "global is immutable"),
         wasm.ValidationError.ValidationBadConstantExpression => strcmp(err_string, "constant expression required") or strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationGlobalReferencingMutableGlobal => strcmp(err_string, "constant expression required"),
-        wasm.ValidationError.ValidationUnknownBlockTypeIndex => strcmp(err_string, "type mismatch") or strcmp(err_string, "unexpected end"), // bit of a hack for binary.166.wasm
+        wasm.ValidationError.ValidationUnknownBlockTypeIndex => strcmp(err_string, "type mismatch") or
+            strcmp(err_string, "unexpected end"), // bit of a hack for binary.166.wasm
         wasm.ValidationError.ValidationSelectArity => strcmp(err_string, "invalid result arity"),
         wasm.ValidationError.ValidationMultipleMemories => strcmp(err_string, "multiple memories"),
         wasm.ValidationError.ValidationMemoryInvalidMaxLimit => strcmp(err_string, "size minimum must not be greater than maximum"),

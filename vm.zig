@@ -1656,6 +1656,8 @@ const Instruction = struct {
                 }
             },
             .Memory_Init => {
+                try ModuleValidator.validateMemoryIndex(module);
+
                 if (module.data_count == null) {
                     return error.MalformedMissingDataCountSection;
                 }
@@ -2297,16 +2299,11 @@ const ModuleValidator = struct {
                 try self.popType(.I32);
             },
             .Data_Drop => {
-                if (module.data_count) |count| {
-                    if (count <= instruction.immediate) {
-                        return error.ValidationUnknownData;
-                    }
+                if (module.data_count != null) {
+                    try validateDataIndex(instruction.immediate, module);
                 } else {
-                    return error.ValidationUnknownData;
-                    // return error.MalformedMissingDataCountSection;
+                    return error.MalformedMissingDataCountSection;
                 }
-
-                // try validateDataIndex(instruction.immediate, module);
             },
             .Memory_Copy, .Memory_Fill => {
                 try validateMemoryIndex(module);
@@ -4394,26 +4391,6 @@ pub const ModuleInstance = struct {
                         }
                         next_instruction = try callImport(&call_context, func_import, next_instruction);
                     }
-
-                    // const func_index = ref.FuncRef;
-                    // if (current_store.imports.functions.items.len + current_store.functions.items.len <= func_index) {
-                    //     return error.ValidationUnknownFunction;
-                    // }
-
-                    // if (func_index >= current_store.imports.functions.items.len) {
-                    //     const func: *const FunctionInstance = &current_store.functions.items[func_index - current_store.imports.functions.items.len];
-                    //     if (func.type_def_index != immediates.type_index) {
-                    //         return error.TrapIndirectCallTypeMismatch;
-                    //     }
-                    //     next_instruction = try call(&context, func, next_instruction);
-                    // } else {
-                    //     var func_import: *const FunctionImport = &current_store.imports.functions.items[func_index];
-                    //     var func_type_def: *const FunctionTypeDefinition = &context.module_def.types.items[immediates.type_index];
-                    //     if (func_import.isTypeSignatureEql(func_type_def) == false) {
-                    //         return error.TrapIndirectCallTypeMismatch;
-                    //     }
-                    //     next_instruction = try callImport(&context, func_import, next_instruction);
-                    // }
                 },
                 Opcode.Drop => {
                     _ = try stack.popValue();
