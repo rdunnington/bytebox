@@ -24,7 +24,6 @@ pub const MalformedError = error{
     MalformedElementType,
     MalformedUTF8Encoding,
     MalformedMutability,
-    MalformedSelectInstruction,
 };
 
 pub const UnlinkableError = error{
@@ -44,9 +43,6 @@ pub const AssertError = error{
     AssertInvalidLabel,
     AssertInvalidElement,
     AssertTableMaxExceeded,
-    AssertMultipleMemories,
-    AssertMemoryMaxPagesExceeded,
-    AssertMemoryInvalidMaxLimit,
     AssertUnknownTable,
     AssertUnknownType,
     AssertIncompleteInstruction,
@@ -77,6 +73,9 @@ pub const ValidationError = error{
     ValidationGlobalReferencingMutableGlobal,
     ValidationUnknownBlockTypeIndex,
     ValidationSelectArity,
+    ValidationMultipleMemories,
+    ValidationMemoryInvalidMaxLimit,
+    ValidationMemoryMaxPagesExceeded,
 };
 
 pub const TrapError = error{
@@ -1201,6 +1200,12 @@ const DataDefinition = struct {
         var num_read = try reader.read(bytes.items);
         if (num_read != num_bytes) {
             return error.MalformedUnexpectedEnd;
+        }
+
+        if (memory_index) |index| {
+            if (module_def.imports.memories.items.len + module_def.memories.items.len <= index) {
+                return error.ValidationUnknownMemory;
+            }
         }
 
         return DataDefinition{
@@ -2725,7 +2730,7 @@ pub const ModuleDefinition = struct {
                     const num_memories = try decodeLEB128(u32, reader);
 
                     if (num_memories > 1) {
-                        return error.AssertMultipleMemories;
+                        return error.ValidationMultipleMemories;
                     }
 
                     try module.memories.ensureTotalCapacity(num_memories);
@@ -2733,12 +2738,17 @@ pub const ModuleDefinition = struct {
                     var memory_index: u32 = 0;
                     while (memory_index < num_memories) : (memory_index += 1) {
                         var limits = try Limits.decode(reader);
+
+                        if (limits.min > MemoryInstance.k_max_pages) {
+                            return error.ValidationMemoryMaxPagesExceeded;
+                        }
+
                         if (limits.max) |max| {
                             if (max < limits.min) {
-                                return error.AssertMemoryInvalidMaxLimit;
+                                return error.ValidationMemoryInvalidMaxLimit;
                             }
                             if (max > MemoryInstance.k_max_pages) {
-                                return error.AssertMemoryMaxPagesExceeded;
+                                return error.ValidationMemoryMaxPagesExceeded;
                             }
                         }
 
@@ -3084,6 +3094,10 @@ pub const ModuleDefinition = struct {
 
         if (module.function_continuations.count() != module.functions.items.len) {
             return error.MalformedFunctionCodeSectionMismatch;
+        }
+
+        if (module.imports.memories.items.len + module.memories.items.len > 1) {
+            return error.ValidationMultipleMemories;
         }
     }
 
@@ -3666,7 +3680,7 @@ pub const ModuleInstance = struct {
         for (module_def.memories.items) |*def_memory| {
             var memory = MemoryInstance.init(def_memory.limits);
             if (memory.grow(def_memory.limits.min) == false) {
-                return error.AssertMemoryMaxPagesExceeded;
+                unreachable;
             }
             try store.memories.append(memory);
         }
@@ -3744,10 +3758,6 @@ pub const ModuleInstance = struct {
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_data.mode == .Active) {
                 var memory_index: u32 = def_data.memory_index.?;
-                if (store.imports.memories.items.len + store.memories.items.len <= memory_index) {
-                    return error.ValidationUnknownMemory;
-                }
-
                 var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
