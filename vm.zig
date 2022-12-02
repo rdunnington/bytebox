@@ -2320,8 +2320,8 @@ const ModuleValidator = struct {
                 const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
                 const elem_index = pair.index_x;
                 const table_index = pair.index_y;
-                try validateElementIndex(elem_index, module);
                 try validateTableIndex(table_index, module);
+                try validateElementIndex(elem_index, module);
 
                 const elem_reftype: ValType = module.elements.items[elem_index].reftype;
                 const table_reftype: ValType = module.tables.items[table_index].reftype;
@@ -2360,7 +2360,8 @@ const ModuleValidator = struct {
 
                 try self.popType(.I32);
                 if (try self.popAnyType()) |init_type| {
-                    if (init_type.isRefType() == false) {
+                    var table_reftype: ValType = try Helpers.getTableReftype(module, instruction.immediate);
+                    if (init_type != table_reftype) {
                         return error.ValidationTypeMismatch;
                     }
                 }
@@ -2375,7 +2376,8 @@ const ModuleValidator = struct {
                 try validateTableIndex(instruction.immediate, module);
                 try self.popType(.I32);
                 if (try self.popAnyType()) |valtype| {
-                    if (valtype.isRefType() == false) {
+                    var table_reftype: ValType = try Helpers.getTableReftype(module, instruction.immediate);
+                    if (valtype != table_reftype) {
                         return error.ValidationTypeMismatch;
                     }
                 }
@@ -3014,10 +3016,6 @@ pub const ModuleDefinition = struct {
                             },
                         }
 
-                        if (module.imports.tables.items.len + module.tables.items.len <= def.table_index) {
-                            return error.ValidationUnknownTable;
-                        }
-
                         try module.elements.append(def);
                     }
                 },
@@ -3175,6 +3173,12 @@ pub const ModuleDefinition = struct {
 
         if (module.imports.memories.items.len + module.memories.items.len > 1) {
             return error.ValidationMultipleMemories;
+        }
+
+        for (module.elements.items) |elem_def| {
+            if (elem_def.mode == .Active and module.imports.tables.items.len + module.tables.items.len <= elem_def.table_index) {
+                return error.ValidationUnknownTable;
+            }
         }
     }
 

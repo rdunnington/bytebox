@@ -84,14 +84,14 @@ const k_validation_suite_allowlist = [_][]const u8{
     "store",
     "switch",
     "table",
-    // "table-sub",
-    // "table_copy",
-    // "table_fill",
-    // "table_get",
-    // "table_grow",
-    // "table_init",
-    // "table_set",
-    // "table_size",
+    "table-sub",
+    "table_copy",
+    "table_fill",
+    "table_get",
+    "table_grow",
+    "table_init",
+    "table_set",
+    "table_size",
     "token",
     "traps",
     "type",
@@ -306,18 +306,12 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationUnknownType => strcmp(err_string, "unknown type"),
         wasm.ValidationError.ValidationUnknownFunction => strcmp(err_string, "unknown function"),
-        wasm.ValidationError.ValidationUnknownGlobal => strcmp(err_string, "unknown global") or
-            strcmp(err_string, "unknown global 0") or
-            strcmp(err_string, "unknown global 1"),
+        wasm.ValidationError.ValidationUnknownGlobal => std.mem.startsWith(u8, err_string, "unknown global"),
         wasm.ValidationError.ValidationUnknownLocal => strcmp(err_string, "unknown local"),
-        wasm.ValidationError.ValidationUnknownTable => strcmp(err_string, "unknown table"),
-        wasm.ValidationError.ValidationUnknownMemory => strcmp(err_string, "unknown memory") or
-            strcmp(err_string, "unknown memory 0") or
-            strcmp(err_string, "unknown memory 1"),
-        wasm.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element"),
-        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or
-            strcmp(err_string, "unknown data segment") or
-            strcmp(err_string, "unknown data segment 1"),
+        wasm.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table"),
+        wasm.ValidationError.ValidationUnknownMemory => std.mem.startsWith(u8, err_string, "unknown memory"),
+        wasm.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element") or std.mem.startsWith(u8, err_string, "unknown elem segment"),
+        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or std.mem.startsWith(u8, err_string, "unknown data segment"),
         wasm.ValidationError.ValidationTypeStackHeightMismatch => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationBadAlignment => strcmp(err_string, "alignment must not be larger than natural"),
         wasm.ValidationError.ValidationUnknownLabel => strcmp(err_string, "unknown label"),
@@ -348,8 +342,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
         wasm.TrapError.TrapOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
         wasm.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
-        wasm.TrapError.TrapUninitializedElement => strcmp(err_string, "uninitialized element") or
-            strcmp(err_string, "uninitialized element 2"), // bit of a hack to deal with a weird expected assert in the bulk test suite
+        wasm.TrapError.TrapUninitializedElement => std.mem.startsWith(u8, err_string, "uninitialized element"),
         wasm.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
         wasm.TrapError.TrapStackExhausted => strcmp(err_string, "call stack exhausted"),
         wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
