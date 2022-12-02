@@ -79,6 +79,7 @@ pub const ValidationError = error{
     ValidationDataOffsetMustBeI32,
     ValidationConstantExpressionGlobalMustBeImport,
     ValidationConstantExpressionGlobalMustBeImmutable,
+    ValidationStartFunctionType,
 };
 
 pub const TrapError = error{
@@ -2898,6 +2899,19 @@ pub const ModuleDefinition = struct {
 
                     if (module.imports.functions.items.len + module.functions.items.len <= module.start_func_index.?) {
                         return error.ValidationUnknownFunction;
+                    }
+
+                    var func_type_index: usize = undefined;
+                    if (module.start_func_index.? < module.imports.functions.items.len) {
+                        func_type_index = module.imports.functions.items[module.start_func_index.?].type_index;
+                    } else {
+                        var local_func_index = module.start_func_index.? - module.imports.functions.items.len;
+                        func_type_index = module.functions.items[local_func_index].type_index;
+                    }
+
+                    const func_type: *const FunctionTypeDefinition = &module.types.items[func_type_index];
+                    if (func_type.types.items.len > 0) {
+                        return error.ValidationStartFunctionType;
                     }
                 },
                 .Element => {

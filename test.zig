@@ -80,7 +80,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "select",
     "skip-stack-guard-page",
     "stack",
-    // "start",
+    "start",
     // "store",
     // "switch",
     // "table",
@@ -333,6 +333,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationDataOffsetMustBeI32 => strcmp(err_string, "type mismatch"),
         // wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImport => strcmp(err_string, "uncomment this when we find a test case for it"),
         wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImmutable => strcmp(err_string, "constant expression required"),
+        wasm.ValidationError.ValidationStartFunctionType => strcmp(err_string, "start function"),
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
