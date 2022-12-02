@@ -2029,7 +2029,7 @@ const ModuleValidator = struct {
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
             .Return => {
-                const block_return_types: []const ValType = try Helpers.getControlTypes(self, 0);
+                const block_return_types: []const ValType = try Helpers.getControlTypes(self, self.control_stack.items.len - 1);
                 try Helpers.popReturnTypes(self, block_return_types);
                 try Helpers.markFrameInstructionsUnreachable(self);
             },

@@ -76,7 +76,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     // "ref_func",
     "ref_is_null",
     "ref_null",
-    // "return",
+    "return",
     "select",
     "skip-stack-guard-page",
     "stack",
