@@ -57,7 +57,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "int_literals",
     "labels",
     "left-to-right",
-    // "linking",
+    "linking",
     "load",
     "local_get",
     "local_set",
@@ -81,8 +81,8 @@ const k_validation_suite_allowlist = [_][]const u8{
     "skip-stack-guard-page",
     "stack",
     "start",
-    // "store",
-    // "switch",
+    "store",
+    "switch",
     // "table",
     // "table-sub",
     // "table_copy",
@@ -92,7 +92,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     // "table_init",
     // "table_set",
     // "table_size",
-    // "token",
+    "token",
     "traps",
     "type",
     "unreachable",
@@ -102,7 +102,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "utf8-custom-section-id",
     "utf8-import-field",
     "utf8-import-module",
-    // "utf8-invalid-encoding",
+    "utf8-invalid-encoding",
 };
 
 const TestSuiteError = error{
