@@ -83,7 +83,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "start",
     "store",
     "switch",
-    // "table",
+    "table",
     // "table-sub",
     // "table_copy",
     // "table_fill",
@@ -334,6 +334,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         // wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImport => strcmp(err_string, "uncomment this when we find a test case for it"),
         wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImmutable => strcmp(err_string, "constant expression required"),
         wasm.ValidationError.ValidationStartFunctionType => strcmp(err_string, "start function"),
+        wasm.ValidationError.ValidationLimitsMinMustNotBeLargerThanMax => strcmp(err_string, "size minimum must not be greater than maximum"),
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),

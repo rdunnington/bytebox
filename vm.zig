@@ -80,6 +80,7 @@ pub const ValidationError = error{
     ValidationConstantExpressionGlobalMustBeImport,
     ValidationConstantExpressionGlobalMustBeImmutable,
     ValidationStartFunctionType,
+    ValidationLimitsMinMustNotBeLargerThanMax,
 };
 
 pub const TrapError = error{
@@ -915,6 +916,9 @@ pub const Limits = struct {
             0 => {},
             1 => {
                 max = try decodeLEB128(u32, reader);
+                if (max.? < min) {
+                    return error.ValidationLimitsMinMustNotBeLargerThanMax;
+                }
             },
             else => unreachable,
         }
@@ -3008,6 +3012,10 @@ pub const ModuleDefinition = struct {
                             else => {
                                 return error.MalformedElementType;
                             },
+                        }
+
+                        if (module.imports.tables.items.len + module.tables.items.len <= def.table_index) {
+                            return error.ValidationUnknownTable;
                         }
 
                         try module.elements.append(def);
