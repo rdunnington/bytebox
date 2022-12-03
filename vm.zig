@@ -76,11 +76,11 @@ pub const ValidationError = error{
     ValidationMultipleMemories,
     ValidationMemoryInvalidMaxLimit,
     ValidationMemoryMaxPagesExceeded,
-    ValidationDataOffsetMustBeI32,
     ValidationConstantExpressionGlobalMustBeImport,
     ValidationConstantExpressionGlobalMustBeImmutable,
     ValidationStartFunctionType,
     ValidationLimitsMinMustNotBeLargerThanMax,
+    ValidationConstantExpressionTypeMismatch,
 };
 
 pub const TrapError = error{
@@ -436,13 +436,6 @@ pub const Val = union(ValType) {
                 unreachable;
             },
         };
-    }
-
-    fn assignModuleToFuncRef(val: *Val, module_instance: *ModuleInstance) void {
-        switch (val) {
-            .FuncRef => |*s| s.module_instance = module_instance,
-            else => unreachable,
-        }
     }
 };
 
@@ -815,7 +808,7 @@ const ConstantExpression = union(ConstantExpressionType) {
         Immutable,
     };
 
-    fn decode(reader: anytype, module_def: *const ModuleDefinition, comptime expected_global_def: ExpectedGlobalDef, comptime expected_global_mut: ExpectedGlobalMut) !ConstantExpression {
+    fn decode(reader: anytype, module_def: *const ModuleDefinition, comptime expected_global_def: ExpectedGlobalDef, comptime expected_global_mut: ExpectedGlobalMut, expected_valtype: ValType) !ConstantExpression {
         const opcode_value = try reader.readByte();
         const opcode = std.meta.intToEnum(Opcode, opcode_value) catch {
             // std.debug.print("\topcode_value: 0x{X}\n", .{opcode_value});
@@ -855,6 +848,24 @@ const ConstantExpression = union(ConstantExpressionType) {
                         return error.ValidationConstantExpressionGlobalMustBeImmutable;
                     }
                 }
+            }
+
+            var global_valtype: ValType = undefined;
+            if (expr.Global < module_def.imports.globals.items.len) {
+                const global_import_def: *const GlobalImportDefinition = &module_def.imports.globals.items[expr.Global];
+                global_valtype = global_import_def.valtype;
+            } else {
+                const local_index: usize = module_def.imports.globals.items.len - expr.Global;
+                const global_def: *const GlobalDefinition = &module_def.globals.items[local_index];
+                global_valtype = global_def.valtype;
+            }
+
+            if (global_valtype != expected_valtype) {
+                return error.ValidationConstantExpressionTypeMismatch;
+            }
+        } else {
+            if (std.meta.activeTag(expr.Value) != expected_valtype) {
+                return error.ValidationConstantExpressionTypeMismatch;
             }
         }
 
@@ -1245,11 +1256,7 @@ const DataDefinition = struct {
         var offset: ?ConstantExpression = null;
         if (data_type == 0x00 or data_type == 0x02) {
             mode = DataMode.Active;
-            offset = try ConstantExpression.decode(reader, module_def, .Import, .Immutable);
-
-            if ((offset.?).resolveType(module_def) != .I32) {
-                return error.ValidationDataOffsetMustBeI32;
-            }
+            offset = try ConstantExpression.decode(reader, module_def, .Import, .Immutable, .I32);
         }
 
         var num_bytes = try decodeLEB128(u32, reader);
@@ -2068,8 +2075,8 @@ const ModuleValidator = struct {
             },
             .Select => {
                 try self.popType(.I32);
-                const valtype1_or_null: ?ValType = try self.popAnyType(); //catch return error.ValidationSelectArity;
-                const valtype2_or_null: ?ValType = try self.popAnyType(); //catch return error.ValidationSelectArity;
+                const valtype1_or_null: ?ValType = try self.popAnyType();
+                const valtype2_or_null: ?ValType = try self.popAnyType();
                 if (valtype1_or_null == null) {
                     try self.pushType(valtype2_or_null);
                 } else if (valtype2_or_null == null) {
@@ -2569,7 +2576,7 @@ pub const ModuleDefinition = struct {
 
     fn decode(wasm: []const u8, module: *ModuleDefinition, allocator: std.mem.Allocator) anyerror!void {
         const DecodeHelpers = struct {
-            fn readRefType(valtype: ValType, reader: anytype) !Val {
+            fn readRefValue(valtype: ValType, reader: anytype) !Val {
                 switch (valtype) {
                     .FuncRef => {
                         const func_index = try decodeLEB128(u32, reader);
@@ -2831,24 +2838,7 @@ pub const ModuleDefinition = struct {
                         var mut = try GlobalMut.decode(reader);
 
                         // TODO validate global references are for imports only
-                        const expr = try ConstantExpression.decode(reader, module, .Any, .Any);
-                        switch (expr) {
-                            .Value => |expr_value| {
-                                if (std.meta.activeTag(expr_value) != valtype) {
-                                    return error.ValidationTypeMismatch;
-                                }
-                            },
-                            .Global => |expr_global| {
-                                const global_import: *const GlobalImportDefinition = &module.imports.globals.items[expr_global];
-                                if (global_import.valtype != valtype) {
-                                    return error.ValidationTypeMismatch;
-                                }
-                                if (global_import.mut == .Mutable) {
-                                    return error.ValidationGlobalReferencingMutableGlobal;
-                                }
-                            },
-                        }
-
+                        const expr = try ConstantExpression.decode(reader, module, .Any, .Immutable, valtype);
                         try module.globals.append(GlobalDefinition{
                             .valtype = valtype,
                             .expr = expr,
@@ -2922,23 +2912,32 @@ pub const ModuleDefinition = struct {
                 },
                 .Element => {
                     const ElementHelpers = struct {
-                        fn readElemsVal(elems: *std.ArrayList(Val), valtype: ValType, _reader: anytype) !void {
+                        fn readOffsetExpr(_reader: anytype, _module: *const ModuleDefinition) !ConstantExpression {
+                            var expr = try ConstantExpression.decode(_reader, _module, .Import, .Immutable, .I32);
+                            return expr;
+                        }
+
+                        fn readElemsVal(elems: *std.ArrayList(Val), valtype: ValType, _reader: anytype, _module: *const ModuleDefinition) !void {
                             const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
                             var elem_index: u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
-                                try elems.append(try DecodeHelpers.readRefType(valtype, _reader));
+                                const ref: Val = try DecodeHelpers.readRefValue(valtype, _reader);
+                                if (valtype == .FuncRef) {
+                                    try ModuleValidator.validateFunctionIndex(ref.FuncRef.index, _module);
+                                }
+                                try elems.append(ref);
                             }
                         }
 
-                        fn readElemsExpr(elems: *std.ArrayList(ConstantExpression), _reader: anytype, _module: *const ModuleDefinition) !void {
+                        fn readElemsExpr(elems: *std.ArrayList(ConstantExpression), _reader: anytype, _module: *const ModuleDefinition, expected_reftype: ValType) !void {
                             const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
                             var elem_index: u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
-                                var expr = try ConstantExpression.decode(_reader, _module, .Import, .Any);
+                                var expr = try ConstantExpression.decode(_reader, _module, .Import, .Any, expected_reftype);
                                 try elems.append(expr);
                             }
                         }
@@ -2972,44 +2971,44 @@ pub const ModuleDefinition = struct {
 
                         switch (flags) {
                             0x00 => {
-                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
                             },
                             0x01 => {
                                 def.mode = .Passive;
                                 try ElementHelpers.readNullElemkind(reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
                             },
                             0x02 => {
                                 def.table_index = try decodeLEB128(u32, reader);
-                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
                                 try ElementHelpers.readNullElemkind(reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
                             },
                             0x03 => {
                                 def.mode = .Declarative;
                                 try ElementHelpers.readNullElemkind(reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
                             },
                             0x04 => {
-                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
                             },
                             0x05 => {
                                 def.mode = .Passive;
                                 def.reftype = try ValType.decodeReftype(reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
                             },
                             0x06 => {
                                 def.table_index = try decodeLEB128(u32, reader);
-                                def.offset = try ConstantExpression.decode(reader, module, .Import, .Any);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
                                 def.reftype = try ValType.decodeReftype(reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
                             },
                             0x07 => {
                                 def.mode = .Declarative;
                                 def.reftype = try ValType.decodeReftype(reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
                             },
                             else => {
                                 return error.MalformedElementType;
