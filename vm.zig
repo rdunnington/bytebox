@@ -82,6 +82,7 @@ pub const ValidationError = error{
     ValidationLimitsMinMustNotBeLargerThanMax,
     ValidationConstantExpressionTypeMismatch,
     ValidationDuplicateExportName,
+    ValidationFuncRefUndeclared,
 };
 
 pub const TrapError = error{
@@ -828,9 +829,7 @@ const ConstantExpression = union(ConstantExpressionType) {
         };
 
         if (opcode == .Global_Get) {
-            if (module_def.imports.globals.items.len + module_def.globals.items.len <= expr.Global) {
-                return error.ValidationUnknownGlobal;
-            }
+            try ModuleValidator.validateGlobalIndex(expr.Global, module_def);
 
             if (expected_global_def == .Import) {
                 if (module_def.imports.globals.items.len <= expr.Global) {
@@ -1790,6 +1789,12 @@ const ModuleValidator = struct {
         }
     }
 
+    fn validateGlobalIndex(index: u32, module: *const ModuleDefinition) !void {
+        if (module.imports.globals.items.len + module.globals.items.len <= index) {
+            return error.ValidationUnknownGlobal;
+        }
+    }
+
     fn validateTableIndex(index: u32, module: *const ModuleDefinition) !void {
         if (module.imports.tables.items.len + module.tables.items.len <= index) {
             return error.ValidationUnknownTable;
@@ -2290,6 +2295,40 @@ const ModuleValidator = struct {
             },
             .Ref_Func => {
                 try validateFunctionIndex(instruction.immediate, module);
+
+                const is_referencing_current_function: bool = module.imports.functions.items.len <= instruction.immediate and
+                    &module.functions.items[instruction.immediate - module.imports.functions.items.len] == func;
+
+                // references to the current function must be declared in element segments
+                if (is_referencing_current_function) {
+                    var needs_declaration: bool = true;
+                    skip_outer: for (module.elements.items) |elem_def| {
+                        if (elem_def.mode == .Declarative and elem_def.reftype == .FuncRef) {
+                            if (elem_def.elems_value.items.len > 0) {
+                                for (elem_def.elems_value.items) |val| {
+                                    if (val.FuncRef.index == instruction.immediate) {
+                                        needs_declaration = false;
+                                        break :skip_outer;
+                                    }
+                                }
+                            } else {
+                                for (elem_def.elems_expr.items) |expr| {
+                                    if (std.meta.activeTag(expr) == .Value) {
+                                        if (expr.Value.FuncRef.index == instruction.immediate) {
+                                            needs_declaration = false;
+                                            break :skip_outer;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (needs_declaration) {
+                        return error.ValidationFuncRefUndeclared;
+                    }
+                }
+
                 try self.pushType(.FuncRef);
             },
             .I32_Trunc_Sat_F32_S, .I32_Trunc_Sat_F32_U => {
@@ -2839,8 +2878,17 @@ pub const ModuleDefinition = struct {
                         var valtype = try ValType.decode(reader);
                         var mut = try GlobalMut.decode(reader);
 
-                        // TODO validate global references are for imports only
                         const expr = try ConstantExpression.decode(reader, module, .Any, .Immutable, valtype);
+
+                        if (std.meta.activeTag(expr) == .Value) {
+                            if (std.meta.activeTag(expr.Value) == .FuncRef) {
+                                if (expr.Value.isNull() == false) {
+                                    const index: u32 = expr.Value.FuncRef.index;
+                                    try ModuleValidator.validateFunctionIndex(index, module);
+                                }
+                            }
+                        }
+
                         try module.globals.append(GlobalDefinition{
                             .valtype = valtype,
                             .expr = expr,
@@ -2886,9 +2934,7 @@ pub const ModuleDefinition = struct {
                                 try module.exports.memories.append(def);
                             },
                             .Global => {
-                                if (module.imports.globals.items.len + module.globals.items.len <= item_index) {
-                                    return error.ValidationUnknownGlobal;
-                                }
+                                try ModuleValidator.validateGlobalIndex(item_index, module);
                                 try module.exports.globals.append(def);
                             },
                         }
@@ -3174,18 +3220,18 @@ pub const ModuleDefinition = struct {
             }
         }
 
-        if (module.function_continuations.count() != module.functions.items.len) {
-            return error.MalformedFunctionCodeSectionMismatch;
+        for (module.elements.items) |elem_def| {
+            if (elem_def.mode == .Active and module.imports.tables.items.len + module.tables.items.len <= elem_def.table_index) {
+                return error.ValidationUnknownTable;
+            }
         }
 
         if (module.imports.memories.items.len + module.memories.items.len > 1) {
             return error.ValidationMultipleMemories;
         }
 
-        for (module.elements.items) |elem_def| {
-            if (elem_def.mode == .Active and module.imports.tables.items.len + module.tables.items.len <= elem_def.table_index) {
-                return error.ValidationUnknownTable;
-            }
+        if (module.function_continuations.count() != module.functions.items.len) {
+            return error.MalformedFunctionCodeSectionMismatch;
         }
     }
 
@@ -3836,7 +3882,6 @@ pub const ModuleInstance = struct {
                         }
                     }
                 }
-            } else { // Declarative
             }
 
             store.elements.appendAssumeCapacity(elem);
