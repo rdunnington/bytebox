@@ -46,7 +46,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "float_misc",
     "forward",
     "func",
-    // "func_ptrs",
+    "func_ptrs",
     "global",
     "i32",
     "i64",
