@@ -32,7 +32,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "data",
     "elem",
     "endianness",
-    // "exports",
+    "exports",
     "f32",
     "f32_bitwise",
     "f32_cmp",
@@ -331,6 +331,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         wasm.ValidationError.ValidationLimitsMinMustNotBeLargerThanMax => strcmp(err_string, "size minimum must not be greater than maximum"),
         // wasm.ValidationError.ValidationElemOffsetExprTypeMustBeI32 => strcmp(err_string, "type mismatch"),
         wasm.ValidationError.ValidationConstantExpressionTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "constant expression required"),
+        wasm.ValidationError.ValidationDuplicateExportName => strcmp(err_string, "duplicate export name"),
 
         wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),

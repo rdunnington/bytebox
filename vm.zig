@@ -81,6 +81,7 @@ pub const ValidationError = error{
     ValidationStartFunctionType,
     ValidationLimitsMinMustNotBeLargerThanMax,
     ValidationConstantExpressionTypeMismatch,
+    ValidationDuplicateExportName,
 };
 
 pub const TrapError = error{
@@ -2850,10 +2851,20 @@ pub const ModuleDefinition = struct {
                 .Export => {
                     const num_exports = try decodeLEB128(u32, reader);
 
+                    var export_names = std.StringHashMap(void).init(allocator);
+                    defer export_names.deinit();
+
                     var export_index: u32 = 0;
                     while (export_index < num_exports) : (export_index += 1) {
                         var name: []const u8 = try DecodeHelpers.readName(reader, allocator);
                         errdefer allocator.free(name);
+
+                        {
+                            var getOrPutResult = try export_names.getOrPut(name);
+                            if (getOrPutResult.found_existing == true) {
+                                return error.ValidationDuplicateExportName;
+                            }
+                        }
 
                         const exportType = @intToEnum(ExportType, try reader.readByte());
                         const item_index = try decodeLEB128(u32, reader);
@@ -2861,26 +2872,22 @@ pub const ModuleDefinition = struct {
 
                         switch (exportType) {
                             .Function => {
-                                if (item_index >= module.imports.functions.items.len + module.functions.items.len) {
-                                    return error.AssertInvalidExport;
-                                }
+                                try ModuleValidator.validateFunctionIndex(item_index, module);
                                 try module.exports.functions.append(def);
                             },
                             .Table => {
-                                if (item_index >= module.imports.tables.items.len + module.tables.items.len) {
-                                    return error.AssertInvalidExport;
-                                }
+                                try ModuleValidator.validateTableIndex(item_index, module);
                                 try module.exports.tables.append(def);
                             },
                             .Memory => {
-                                if (item_index >= module.imports.memories.items.len + module.memories.items.len) {
-                                    return error.AssertInvalidExport;
+                                if (module.imports.memories.items.len + module.memories.items.len <= item_index) {
+                                    return error.ValidationUnknownMemory;
                                 }
                                 try module.exports.memories.append(def);
                             },
                             .Global => {
-                                if (item_index >= module.imports.globals.items.len + module.globals.items.len) {
-                                    return error.AssertInvalidExport;
+                                if (module.imports.globals.items.len + module.globals.items.len <= item_index) {
+                                    return error.ValidationUnknownGlobal;
                                 }
                                 try module.exports.globals.append(def);
                             },
