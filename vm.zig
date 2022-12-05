@@ -2718,6 +2718,7 @@ pub const ModuleDefinition = struct {
                         switch (desc) {
                             0x00 => {
                                 const type_index = try decodeLEB128(u32, reader);
+                                try ModuleValidator.validateTypeIndex(type_index, module);
                                 try module.imports.functions.append(FunctionImportDefinition{
                                     .names = names,
                                     .type_index = type_index,

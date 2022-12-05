@@ -51,7 +51,7 @@ const k_validation_suite_allowlist = [_][]const u8{
     "i32",
     "i64",
     "if",
-    // "imports",
+    "imports",
     "inline-module",
     "int_exprs",
     "int_literals",
