@@ -13,98 +13,6 @@ fn log_verbose(comptime msg: []const u8, params: anytype) void {
     }
 }
 
-const k_validation_suite_allowlist = [_][]const u8{
-    "address",
-    "align",
-    "binary",
-    "binary-leb128",
-    "block",
-    "br",
-    "br_if",
-    "br_table",
-    "bulk",
-    "call",
-    "call_indirect",
-    "comments",
-    "const",
-    "conversions",
-    "custom",
-    "data",
-    "elem",
-    "endianness",
-    "exports",
-    "f32",
-    "f32_bitwise",
-    "f32_cmp",
-    "f64",
-    "f64_bitwise",
-    "f64_cmp",
-    "fac",
-    "float_exprs",
-    "float_literals",
-    "float_memory",
-    "float_misc",
-    "forward",
-    "func",
-    "func_ptrs",
-    "global",
-    "i32",
-    "i64",
-    "if",
-    "imports",
-    "inline-module",
-    "int_exprs",
-    "int_literals",
-    "labels",
-    "left-to-right",
-    "linking",
-    "load",
-    "local_get",
-    "local_set",
-    "local_tee",
-    "loop",
-    "memory",
-    "memory_copy",
-    "memory_fill",
-    "memory_grow",
-    "memory_init",
-    "memory_redundancy",
-    "memory_size",
-    "memory_trap",
-    "names",
-    "nop",
-    "ref_func",
-    "ref_is_null",
-    "ref_null",
-    "return",
-    "select",
-    "skip-stack-guard-page",
-    "stack",
-    "start",
-    "store",
-    "switch",
-    "table",
-    "table-sub",
-    "table_copy",
-    "table_fill",
-    "table_get",
-    "table_grow",
-    "table_init",
-    "table_set",
-    "table_size",
-    "token",
-    "traps",
-    "type",
-    "unreachable",
-    "unreached-invalid",
-    "unreached-valid",
-    "unwind",
-    "utf8-custom-section-id",
-    "utf8-import-field",
-    "utf8-import-module",
-    "utf8-invalid-encoding",
-};
-
 const TestSuiteError = error{
     Fail,
 };
@@ -660,7 +568,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     return imports;
 }
 
-fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const u8, opts: *const TestOpts) !void {
+fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOpts) !void {
     var did_fail_any_test: bool = false;
 
     var arena_commands = std.heap.ArenaAllocator.init(allocator);
@@ -684,25 +592,7 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
 
     try imports.append(try makeSpectestImports(allocator));
 
-    var is_validation_allowed: bool = false;
-    for (k_validation_suite_allowlist) |allowed_suite_name| {
-        if (strcmp(suite_name, allowed_suite_name)) {
-            is_validation_allowed = true;
-            break;
-        }
-    }
-
     for (commands.items) |*command| {
-        switch (command.*) {
-            .AssertInvalid => |c| {
-                if (is_validation_allowed == false) {
-                    log_verbose("Skipping assert_invalid: {s}\n", .{c.err.module});
-                    continue;
-                }
-            },
-            else => {},
-        }
-
         const module_filename = command.getModuleFilename();
         const module_name = command.getModuleName();
         if (opts.module_filter_or_null) |filter| {
@@ -772,7 +662,7 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
                 if (decode_expected_error) |unwrapped_expected| {
                     expected_str_or_null = unwrapped_expected;
                 }
-                if (expected_str_or_null == null and is_validation_allowed) {
+                if (expected_str_or_null == null) {
                     if (validate_expected_error) |unwrapped_expected| {
                         expected_str_or_null = unwrapped_expected;
                     }
@@ -803,13 +693,11 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
                 print("\tFail: module init succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
 
-            if (is_validation_allowed) {
-                if (validate_expected_error) |expected| {
-                    if (!g_verbose_logging) {
-                        print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
-                    }
-                    print("\tFail: module init succeeded, but it should have failed with error '{s}'\n", .{expected});
+            if (validate_expected_error) |expected| {
+                if (!g_verbose_logging) {
+                    print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
+                print("\tFail: module init succeeded, but it should have failed with error '{s}'\n", .{expected});
             }
 
             var instantiate_expected_error: ?[]const u8 = null;
@@ -824,7 +712,6 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
             }
 
             module.inst = wasm.ModuleInstance.init(&module.def.?, scratch_allocator);
-            // try (module.inst.?).instantiate(imports.items);
             (module.inst.?).instantiate(imports.items) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
@@ -851,8 +738,6 @@ fn run(allocator: std.mem.Allocator, suite_name: []const u8, suite_path: []const
                 print("\tFail: instantiate succeeded, but it should have failed with error '{s}'\n", .{expected_str});
             }
         }
-
-        // print("module_path: {s}\n", .{module_path});
 
         switch (command.*) {
             .AssertReturn => |c| {
@@ -1162,6 +1047,6 @@ pub fn main() !void {
         var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
-        try run(allocator, suite, suite_path, &opts);
+        try run(allocator, suite_path, &opts);
     }
 }
