@@ -434,7 +434,6 @@ pub const Val = union(ValType) {
             .FuncRef => |s| s.index == k_null_funcref,
             .ExternRef => |index| index == k_null_funcref,
             else => {
-                // std.debug.print("called isNull on value {}\n", .{v});
                 unreachable;
             },
         };
@@ -570,8 +569,6 @@ const Stack = struct {
 
     fn popValue(self: *Self) !Val {
         var item = try self.pop();
-        // std.debug.print("\tpop value: {}\n", .{item});
-        // std.debug.print("\tstack: {any}\n", .{self.stack.items});
         switch (item) {
             .Val => |v| return v,
             .Label => return error.ValidationTypeMismatch,
@@ -580,7 +577,6 @@ const Stack = struct {
     }
 
     fn pushLabel(self: *Self, blocktype: BlockTypeValue, continuation: u32) !void {
-        // std.debug.print("\t>> push label: ({}, {})\n", .{ blocktype, continuation });
         try self.push(StackItem{ .Label = .{
             .blocktype = blocktype,
             .continuation = continuation,
@@ -597,8 +593,6 @@ const Stack = struct {
             .Label => |label| label,
             .Frame => return error.ValidationTypeMismatch,
         };
-
-        // std.debug.print("\t>> pop label: {}\n", .{label});
 
         self.last_label_index = label.last_label_index;
 
@@ -813,7 +807,6 @@ const ConstantExpression = union(ConstantExpressionType) {
     fn decode(reader: anytype, module_def: *const ModuleDefinition, comptime expected_global_def: ExpectedGlobalDef, comptime expected_global_mut: ExpectedGlobalMut, expected_valtype: ValType) !ConstantExpression {
         const opcode_value = try reader.readByte();
         const opcode = std.meta.intToEnum(Opcode, opcode_value) catch {
-            // std.debug.print("\topcode_value: 0x{X}\n", .{opcode_value});
             return error.MalformedIllegalOpcode;
         };
 
@@ -1417,12 +1410,10 @@ const Instruction = struct {
             extended |= byte2;
 
             opcode = std.meta.intToEnum(Opcode, extended) catch {
-                // std.debug.print("\topcode extended_byte: 0x{X}\n", .{extended});
                 return error.MalformedIllegalOpcode;
             };
         } else {
             opcode = std.meta.intToEnum(Opcode, byte) catch {
-                // std.debug.print("\topcode byte: 0x{X}\n", .{byte});
                 return error.MalformedIllegalOpcode;
             };
         }
@@ -1848,8 +1839,6 @@ const ModuleValidator = struct {
 
                 var start_types: []const ValType = block_type_value.getBlocktypeParamTypes(module_);
                 var end_types: []const ValType = block_type_value.getBlocktypeReturnTypes(module_);
-
-                // std.debug.print(">> start_types: {s}, end_types: {s}\n", .{ start_types, end_types });
                 try popReturnTypes(validator, start_types);
 
                 try validator.pushControl(instruction_.opcode, start_types, end_types);
@@ -1954,8 +1943,6 @@ const ModuleValidator = struct {
                 }
             }
         };
-
-        // std.debug.print(">> opcode: {}\n", .{instruction.opcode});
         switch (instruction.opcode) {
             .Unreachable => {
                 try Helpers.markFrameInstructionsUnreachable(self);
@@ -2674,8 +2661,6 @@ pub const ModuleDefinition = struct {
             const section_size_bytes: usize = try decodeLEB128(u32, reader);
             const section_start_pos = stream.pos;
 
-            // std.debug.print("\tparseWasm: section: {}: {} bytes, pos: {}\n", .{ section_id, section_size_bytes, stream.pos });
-
             switch (section_id) {
                 .Custom => {
                     if (section_size_bytes == 0) {
@@ -2696,8 +2681,6 @@ pub const ModuleDefinition = struct {
                     if (data_length != data_length_read) {
                         return error.MalformedUnexpectedEnd;
                     }
-
-                    // std.debug.print("\tparsed custom section: '{s}'\n", .{section.name.items});
 
                     try module.custom_sections.append(section);
                 },
@@ -3088,7 +3071,6 @@ pub const ModuleDefinition = struct {
 
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
-                        // std.debug.print(">>>>> parsing code index {}\n", .{code_index});
                         const code_size = try decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
@@ -3143,8 +3125,6 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, module.code.instructions.items.len);
 
                             var instruction = try Instruction.decode(reader, module);
-                            // std.debug.print(">>>>>> decoded opcode: {}\n", .{instruction.opcode});
-
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
                                     .offset = parsing_offset,
@@ -3157,24 +3137,18 @@ pub const ModuleDefinition = struct {
                             } else if (instruction.opcode == .End) {
                                 const block: BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
                                 if (block_stack.items.len == 0) {
-                                    // std.debug.print("found the end\n", .{});
                                     parsing_code = false;
 
                                     try module.function_continuations.putNoClobber(block.offset, parsing_offset);
                                     block_stack.clearRetainingCapacity();
-                                    // std.debug.print("adding function continuation for offset {}: {}\n", .{block.offset, parsing_offset});
                                 } else {
                                     if (block.opcode == .Loop) {
                                         try module.label_continuations.putNoClobber(block.offset, block.offset);
-                                        // std.debug.print("adding loop continuation for offset {}: {}\n", .{ block.offset, block.offset });
                                     } else {
                                         try module.label_continuations.putNoClobber(block.offset, parsing_offset);
-                                        // std.debug.print("adding block continuation for offset {}: {}\n", .{block.offset, parsing_offset});
-
                                         var else_offset_or_null = module.if_to_else_offsets.get(block.offset);
                                         if (else_offset_or_null) |else_offset| {
                                             try module.label_continuations.putNoClobber(else_offset, parsing_offset);
-                                            // std.debug.print("adding block continuation for offset {}: {}\n", .{else_offset, parsing_offset});
                                         }
                                     }
                                 }
@@ -3187,8 +3161,6 @@ pub const ModuleDefinition = struct {
 
                         const code_actual_size = stream.pos - code_begin_pos;
                         if (code_actual_size != code_size) {
-                            // std.debug.print("expected code_size: {}, code_actual_size: {}\n", .{code_size, code_actual_size});
-                            // std.debug.print("stream.pos: {}, code_begin_pos: {}, code_begin_pos + code_size: {}\n", .{stream.pos, code_begin_pos, code_begin_pos + code_size});
                             return error.AssertInvalidBytecode;
                         }
 
@@ -4012,8 +3984,6 @@ pub const ModuleInstance = struct {
         const func_type_params: []const ValType = self.module_def.types.items[func.type_def_index].getParams();
 
         if (params.len != func_type_params.len) {
-            // std.debug.print("params.len: {}, func_type_params.len: {}\n", .{params.len, func_type_params.len});
-            // std.debug.print("params: {s}, func_type_params: {s}\n", .{params, func_type_params});
             return error.ValidationTypeMismatch;
         }
 
@@ -4049,14 +4019,12 @@ pub const ModuleInstance = struct {
         };
 
         if (self.stack.size() != returns.len) {
-            // std.debug.print("\tstack size: {}, returns.len: {}\n", .{ self.stack.size(), returns.len });
             return error.ValidationTypeMismatch;
         }
 
         if (returns.len > 0) {
             var index: i32 = @intCast(i32, returns.len - 1);
             while (index >= 0) {
-                // std.debug.print("stack size: {}, index: {}\n", .{self.stack.size(), index});
                 returns[@intCast(usize, index)] = try self.stack.popValue();
                 index -= 1;
             }
@@ -4224,8 +4192,6 @@ pub const ModuleInstance = struct {
                 const memory: *const MemoryInstance = store.getMemory(0);
                 const offset: usize = offset_from_memarg + @intCast(usize, offset_from_stack);
 
-                // std.debug.print("memory.mem.len: {}, ptr: {*},. offset: {}\n", .{ memory.mem.len, memory.mem.ptr, offset });
-
                 const bit_count = std.meta.bitCount(T);
                 const read_type = switch (bit_count) {
                     8 => u8,
@@ -4236,8 +4202,6 @@ pub const ModuleInstance = struct {
                 };
 
                 const end = offset + (bit_count / 8);
-
-                // std.debug.print("memory.mem.len: {}, offset: {}, bit_count: {}, T: {}\n", .{ memory.mem.len, offset, bit_count, T });
 
                 if (memory.mem.items.len < end) {
                     return error.TrapOutOfBoundsMemoryAccess;
@@ -4300,8 +4264,6 @@ pub const ModuleInstance = struct {
             var instruction: Instruction = instructions[instruction_offset];
             var next_instruction: u32 = instruction_offset + 1;
 
-            // std.debug.print("\tfound opcode: {} (immediate {}, pos {})\n", .{ instruction.opcode, instruction.immediate, instruction_offset });
-
             switch (instruction.opcode) {
                 Opcode.Unreachable => {
                     return error.TrapUnreachable;
@@ -4319,16 +4281,12 @@ pub const ModuleInstance = struct {
                 Opcode.If => {
                     var condition = try stack.popI32();
                     if (condition != 0) {
-                        // std.debug.print("\t>>> entering block at {}\n", .{instruction_offset});
                         try enterBlock(&context, instruction, instruction_offset);
-                    } else if (context.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| {
-                        // std.debug.print("\t>>> else case hit at {}\n", .{else_offset});
-                        // +1 to skip the else opcode, since it's treated as an End for the If block.
+                    } else if (context.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| { // +1 to skip the else opcode, since it's treated as an End for the If block.
                         try enterBlock(&context, instruction, else_offset);
                         next_instruction = try Helpers.seek(else_offset + 1, instructions.len);
                     } else {
                         const continuation = context.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
-                        // std.debug.print("\t>>> skipping to next_instruction at {}\n", .{continuation + 1});
                         next_instruction = try Helpers.seek(continuation + 1, instructions.len);
                     }
                 },
@@ -4357,10 +4315,7 @@ pub const ModuleInstance = struct {
                         var label = try stack.popLabel();
                         try stack.popFrame();
                         const is_root_function = (stack.size() == 0);
-                        // std.debug.print("Opcode.end, stack: {any}\n", .{stack.stack.items});
                         try pushValues(returns.items, stack);
-
-                        // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
                         if (is_root_function) {
                             return;
                         } else {
@@ -4378,7 +4333,6 @@ pub const ModuleInstance = struct {
                 Opcode.Branch_If => {
                     const label_id: u32 = instruction.immediate;
                     const v = try stack.popI32();
-                    // std.debug.print("branch_if stack value: {}, target id: {}\n", .{v, label_id});
                     if (v != 0) {
                         const branch_to_instruction = try branch(&context, label_id);
                         next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
@@ -4391,8 +4345,6 @@ pub const ModuleInstance = struct {
                     const label_index = try stack.popI32();
                     const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
                     const branch_to_instruction = try branch(&context, label_id);
-
-                    // std.debug.print("branch_table) label_index: {}, label_ids: {any}, label_id: {}\n", .{ label_index, immediates.label_ids.items, label_id });
 
                     next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
                 },
@@ -5807,7 +5759,6 @@ pub const ModuleInstance = struct {
                     if (std.meta.activeTag(v) != param_types[param_types.len - i - 1]) {
                         return error.ValidationTypeMismatch;
                     }
-                    // std.debug.print("\tcallImport host: setting param {} to {}\n", .{ i, v });
                     params[params.len - i - 1] = v;
                 }
 
@@ -5863,14 +5814,11 @@ pub const ModuleInstance = struct {
     }
 
     fn branch(context: *CallContext, label_id: u32) !u32 {
-        // std.debug.print("\tbranching to label {}\n", .{label_id});
         const label: *const Label = try context.stack.findLabel(label_id);
         if (label.isFirstInCallFrame()) {
             return try returnFromFunc(context);
         }
         const continuation = label.continuation;
-
-        // std.debug.print("found label: {}\n", .{label});
 
         const is_loop_continuation = context.module_def.code.instructions.items[continuation].opcode == .Loop;
 
@@ -5879,7 +5827,6 @@ pub const ModuleInstance = struct {
             defer args.deinit();
 
             const return_types: []const ValType = label.blocktype.getBlocktypeReturnTypes(context.module_def);
-            // std.debug.print("looking for return types: {any}", .{return_types});
             if (is_loop_continuation == false) {
                 try popValues(&args, context.stack, return_types);
             }
@@ -5912,8 +5859,6 @@ pub const ModuleInstance = struct {
                 try pushValues(args.items, context.stack);
             }
         }
-
-        // std.debug.print("\tbranching to continuation: {}, context.stack state:\n\t{any}\n", .{ continuation, context.stack.stack.items });
         return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
     }
 
@@ -5924,8 +5869,6 @@ pub const ModuleInstance = struct {
         var returns = std.ArrayList(Val).init(context.scratch_allocator);
         defer returns.deinit();
         try returns.ensureTotalCapacity(return_types.len);
-
-        // std.debug.print("stack: {any}, expected: {any}\n", .{ stack.stack.items, return_types });
 
         while (returns.items.len < return_types.len) {
             var value = try context.stack.popValue();
@@ -5955,16 +5898,11 @@ pub const ModuleInstance = struct {
 
         const is_root_function = (context.stack.size() == 0);
 
-        // std.debug.print("is_root_function: {}\n", .{is_root_function});
-        // std.debug.print("stack: {s}\n", .{stack.stack.items});
-
-        // std.debug.print("pushing returns: {s}\n", .{returns});
         while (returns.items.len > 0) {
             var value = returns.orderedRemove(returns.items.len - 1);
             try context.stack.pushValue(value);
         }
 
-        // std.debug.print("returning from func call... is root: {}\n", .{is_root_function});
         if (is_root_function) {
             return Label.k_invalid_continuation;
         } else {
@@ -5973,14 +5911,10 @@ pub const ModuleInstance = struct {
     }
 
     fn popValues(returns: *std.ArrayList(Val), stack: *Stack, types: []const ValType) !void {
-        // std.debug.print("popValues: required: {any} ({})\n", .{types, types.len});
-
         try returns.ensureTotalCapacity(types.len);
         while (returns.items.len < types.len) {
-            // std.debug.print("returns.items.len < types.len: {}, {}\n", .{returns.items.len, types.len});
             var item = try stack.popValue();
             if (types[types.len - returns.items.len - 1] != std.meta.activeTag(item)) {
-                // std.debug.print("popValues mismatch: required: {any}, got {}\n", .{ types, item });
                 return error.ValidationTypeMismatch;
             }
             try returns.append(item);
