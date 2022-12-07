@@ -2,3 +2,7 @@ zig-cache
 zig-out
 test/wasm
 .vs
+*.sublime-project
+*.sublime-workspace
+*.sln
+*.rdbg
