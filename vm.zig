@@ -36,6 +36,7 @@ pub const UninstantiableError = error{
     UninstantiableOutOfBoundsMemoryAccess,
 };
 
+// todo remove these?
 pub const AssertError = error{
     AssertInvalidValType,
     AssertInvalidBytecode,
@@ -3565,7 +3566,7 @@ pub const ModuleInstance = struct {
         self.allocator.free(self);
     }
 
-    pub fn instantiate(self: *ModuleInstance, imports: []const ModuleImports) !void {
+    pub fn instantiate(self: *ModuleInstance, imports: ?[]const ModuleImports) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
                 if (def.max != null and instance.max == null) {
@@ -3579,69 +3580,71 @@ pub const ModuleInstance = struct {
             }
 
             // TODO probably should change the imports search to a hashed lookup of module_name+item_name -> array of items to make this faster
-            fn findImportInMultiple(comptime T: type, names: *const ImportNames, _imports: []const ModuleImports) UnlinkableError!*const T {
-                for (_imports) |*module_imports| {
-                    if (std.mem.eql(u8, names.module_name, module_imports.name)) {
-                        switch (T) {
-                            FunctionImport => {
-                                if (findImportInSingle(FunctionImport, names, module_imports)) |import| {
-                                    return import;
-                                }
-                                if (findImportInSingle(TableImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                            },
-                            TableImport => {
-                                if (findImportInSingle(TableImport, names, module_imports)) |import| {
-                                    return import;
-                                }
-                                if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                            },
-                            MemoryImport => {
-                                if (findImportInSingle(MemoryImport, names, module_imports)) |import| {
-                                    return import;
-                                }
-                                if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(TableImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                            },
-                            GlobalImport => {
-                                if (findImportInSingle(GlobalImport, names, module_imports)) |import| {
-                                    return import;
-                                }
-                                if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(TableImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                                if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
-                                    return error.UnlinkableIncompatibleImportType;
-                                }
-                            },
-                            else => unreachable,
+            fn findImportInMultiple(comptime T: type, names: *const ImportNames, imports_or_null: ?[]const ModuleImports) UnlinkableError!*const T {
+                if (imports_or_null) |_imports| {
+                    for (_imports) |*module_imports| {
+                        if (std.mem.eql(u8, names.module_name, module_imports.name)) {
+                            switch (T) {
+                                FunctionImport => {
+                                    if (findImportInSingle(FunctionImport, names, module_imports)) |import| {
+                                        return import;
+                                    }
+                                    if (findImportInSingle(TableImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                },
+                                TableImport => {
+                                    if (findImportInSingle(TableImport, names, module_imports)) |import| {
+                                        return import;
+                                    }
+                                    if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                },
+                                MemoryImport => {
+                                    if (findImportInSingle(MemoryImport, names, module_imports)) |import| {
+                                        return import;
+                                    }
+                                    if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(TableImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                },
+                                GlobalImport => {
+                                    if (findImportInSingle(GlobalImport, names, module_imports)) |import| {
+                                        return import;
+                                    }
+                                    if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(TableImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                    if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
+                                        return error.UnlinkableIncompatibleImportType;
+                                    }
+                                },
+                                else => unreachable,
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
 

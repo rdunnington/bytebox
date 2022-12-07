@@ -1,5 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
 const wasm = @import("vm.zig");
 const ValType = wasm.ValType;
 const Val = wasm.Val;
@@ -7,7 +6,7 @@ const print = std.debug.print;
 
 var g_verbose_logging = false;
 
-fn log_verbose(comptime msg: []const u8, params: anytype) void {
+fn logVerbose(comptime msg: []const u8, params: anytype) void {
     if (g_verbose_logging) {
         print(msg, params);
     }
@@ -611,7 +610,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         switch (command.*) {
             .AssertReturn => {},
             .AssertTrap => {},
-            else => log_verbose("{s}: {s}|{s}\n", .{ command.getCommandName(), module_name, module_filename }),
+            else => logVerbose("{s}: {s}|{s}\n", .{ command.getCommandName(), module_name, module_filename }),
         }
 
         switch (command.*) {
@@ -624,7 +623,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                     continue;
                 }
 
-                log_verbose("\tSetting export module name to {s}\n", .{c.import_name});
+                logVerbose("\tSetting export module name to {s}\n", .{c.import_name});
 
                 var module_imports: wasm.ModuleImports = try (module.inst.?).exports(c.import_name);
                 try imports.append(module_imports);
@@ -656,7 +655,6 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
             module.filename = try scratch_allocator.dupe(u8, module_filename);
 
-            // module.def = try wasm.ModuleDefinition.init(module_data, scratch_allocator);
             module.def = wasm.ModuleDefinition.init(module_data, scratch_allocator) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
@@ -670,7 +668,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 if (expected_str_or_null) |expected_str| {
                     if (isSameError(e, expected_str)) {
-                        log_verbose("\tSuccess!\n", .{});
+                        logVerbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
                             print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
@@ -715,7 +713,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
             (module.inst.?).instantiate(imports.items) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
-                        log_verbose("\tSuccess!\n", .{});
+                        logVerbose("\tSuccess!\n", .{});
                     } else {
                         if (!g_verbose_logging) {
                             print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
@@ -749,7 +747,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.action.field) == false) {
-                        log_verbose("\tskipped {s}...\n", .{c.action.field});
+                        logVerbose("\tskipped {s}...\n", .{c.action.field});
                         continue;
                     }
                 }
@@ -759,7 +757,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 try returns_placeholder.resize(num_expected_returns);
                 var returns = returns_placeholder.items;
 
-                log_verbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                logVerbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
 
                 var action_succeeded = true;
                 switch (c.action.type) {
@@ -810,7 +808,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                     }
 
                     if (action_succeeded) {
-                        log_verbose("\tSuccess!\n", .{});
+                        logVerbose("\tSuccess!\n", .{});
                     }
                 }
             },
@@ -823,12 +821,12 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 if (opts.test_filter_or_null) |filter| {
                     if (strcmp(filter, c.action.field) == false) {
-                        log_verbose("assert_return: skipping {s}:{s}\n", .{ module.filename, c.action.field });
+                        logVerbose("assert_return: skipping {s}:{s}\n", .{ module.filename, c.action.field });
                         continue;
                     }
                 }
 
-                log_verbose("assert_trap: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                logVerbose("assert_trap: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
 
                 var returns_placeholder: [8]Val = undefined;
                 var returns = returns_placeholder[0..];
@@ -864,7 +862,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 }
 
                 if (action_failed and action_failed_with_correct_trap) {
-                    log_verbose("\tSuccess!\n", .{});
+                    logVerbose("\tSuccess!\n", .{});
                 } else {
                     if (!g_verbose_logging) {
                         print("assert_trap: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
@@ -1039,7 +1037,7 @@ pub fn main() !void {
             }
         }
 
-        log_verbose("Running test suite: {s}\n", .{suite});
+        logVerbose("Running test suite: {s}\n", .{suite});
 
         var suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite, suite });
         defer allocator.free(suite_path_no_extension);
