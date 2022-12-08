@@ -2676,7 +2676,8 @@ pub const ModuleDefinition = struct {
                         .data = std.ArrayList(u8).init(allocator),
                     };
 
-                    const data_length = section_size_bytes - name.len;
+                    const name_length: usize = stream.pos - section_start_pos;
+                    const data_length: usize = section_size_bytes - name_length;
                     try section.data.resize(data_length);
                     const data_length_read = try reader.read(section.data.items);
                     if (data_length != data_length_read) {
