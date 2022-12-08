@@ -1,6 +1,8 @@
 zig-cache
 zig-out
 test/wasm
+*.wasm
+*.wasm.o
 .vs
 *.sublime-project
 *.sublime-workspace

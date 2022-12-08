@@ -1,5 +1,5 @@
 const std = @import("std");
-const wasm = @import("vm.zig");
+const wasm = @import("wasm");
 const ValType = wasm.ValType;
 const Val = wasm.Val;
 const print = std.debug.print;

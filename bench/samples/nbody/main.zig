@@ -1,0 +1,1 @@
+https://github.com/ifyouseewendy/wasm-runtime-benchmark/blob/master/wasm-sample/nbody/src/lib.rs

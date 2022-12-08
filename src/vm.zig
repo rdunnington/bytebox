@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
+const StableArray = @import("stable-array").StableArray;
 
 pub const MalformedError = error{
     MalformedMagicSignature,
