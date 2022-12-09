@@ -7,9 +7,3 @@ export fn run(n: u32) u32 {
         return a + b;
     }
 }
-
-// pub fn main() !void {
-//     _ = run(7);
-// }
-
-// build this with: zig build-lib .\fib.zig -target wasm32-freestanding -dynamic

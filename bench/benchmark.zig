@@ -11,7 +11,7 @@ const Benchmark = struct {
 
 fn elapsedMilliseconds(timer: *std.time.Timer) f64 {
     var ns_elapsed: f64 = @intToFloat(f64, timer.read());
-    const ms_elapsed = ns_elapsed / 1000.0;
+    const ms_elapsed = ns_elapsed / 1000000.0;
     return ms_elapsed;
 }
 
@@ -30,7 +30,7 @@ fn run(allocator: std.mem.Allocator, benchmark: Benchmark) !void {
     try module_instance.invoke("run", &input, &output);
 
     const ms_elapsed: f64 = elapsedMilliseconds(&timer);
-    std.log.info("{s} 'run' invocation took {}ms\n", .{ benchmark.name, ms_elapsed });
+    std.log.info("{s} decode+instantiate+run took {d}ms\n", .{ benchmark.name, ms_elapsed });
 }
 
 pub fn main() !void {
@@ -39,8 +39,8 @@ pub fn main() !void {
 
     const benchmarks = [_]Benchmark{.{
         .name = "fibonacci",
-        .filename = "bench/samples/fib/fib.wasm",
-        .param = 10,
+        .filename = "zig-out/lib/fib.wasm",
+        .param = 20,
     }};
 
     for (benchmarks) |benchmark| {
