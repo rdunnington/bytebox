@@ -1228,8 +1228,8 @@ const DataDefinition = struct {
     mode: DataMode,
 
     fn decode(reader: anytype, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) !DataDefinition {
-        var data_type = try reader.readByte();
-        if (data_type & ~@as(u8, 0b111) != 0) { // data_type may only be 0, 1, or 2
+        var data_type: u32 = try decodeLEB128(u32, reader);
+        if (data_type > 2) {
             return error.MalformedDataType;
         }
 
@@ -1399,7 +1399,11 @@ const Instruction = struct {
         var byte = try reader.readByte();
         var opcode: Opcode = undefined;
         if (byte == 0xFC) {
-            var byte2 = try reader.readByte();
+            var type_opcode = try decodeLEB128(u32, reader);
+            if (type_opcode > std.math.maxInt(u8)) {
+                return error.MalformedIllegalOpcode;
+            }
+            var byte2 = @intCast(u8, type_opcode);
             var extended: u16 = byte;
             extended = extended << 8;
             extended |= byte2;
@@ -2989,7 +2993,7 @@ pub const ModuleDefinition = struct {
 
                     var segment_index: u32 = 0;
                     while (segment_index < num_segments) : (segment_index += 1) {
-                        var flags = try reader.readByte();
+                        var flags = try decodeLEB128(u32, reader);
 
                         var def = ElementDefinition{
                             .mode = ElementMode.Active,
