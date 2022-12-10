@@ -796,17 +796,12 @@ const ConstantExpression = union(ConstantExpressionType) {
     Value: Val,
     Global: u32, // global index
 
-    const ExpectedGlobalDef = enum {
-        Any,
-        Import,
-    };
-
     const ExpectedGlobalMut = enum {
         Any,
         Immutable,
     };
 
-    fn decode(reader: anytype, module_def: *const ModuleDefinition, comptime expected_global_def: ExpectedGlobalDef, comptime expected_global_mut: ExpectedGlobalMut, expected_valtype: ValType) !ConstantExpression {
+    fn decode(reader: anytype, module_def: *const ModuleDefinition, comptime expected_global_mut: ExpectedGlobalMut, expected_valtype: ValType) !ConstantExpression {
         const opcode_value = try reader.readByte();
         const opcode = std.meta.intToEnum(Opcode, opcode_value) catch {
             return error.MalformedIllegalOpcode;
@@ -826,10 +821,8 @@ const ConstantExpression = union(ConstantExpressionType) {
         if (opcode == .Global_Get) {
             try ModuleValidator.validateGlobalIndex(expr.Global, module_def);
 
-            if (expected_global_def == .Import) {
-                if (module_def.imports.globals.items.len <= expr.Global) {
-                    return error.ValidationConstantExpressionGlobalMustBeImport;
-                }
+            if (module_def.imports.globals.items.len <= expr.Global) {
+                return error.ValidationConstantExpressionGlobalMustBeImport;
             }
 
             if (expected_global_mut == .Immutable) {
@@ -1251,7 +1244,7 @@ const DataDefinition = struct {
         var offset: ?ConstantExpression = null;
         if (data_type == 0x00 or data_type == 0x02) {
             mode = DataMode.Active;
-            offset = try ConstantExpression.decode(reader, module_def, .Import, .Immutable, .I32);
+            offset = try ConstantExpression.decode(reader, module_def, .Immutable, .I32);
         }
 
         var num_bytes = try decodeLEB128(u32, reader);
@@ -2864,7 +2857,7 @@ pub const ModuleDefinition = struct {
                         var valtype = try ValType.decode(reader);
                         var mut = try GlobalMut.decode(reader);
 
-                        const expr = try ConstantExpression.decode(reader, module, .Any, .Immutable, valtype);
+                        const expr = try ConstantExpression.decode(reader, module, .Immutable, valtype);
 
                         if (std.meta.activeTag(expr) == .Value) {
                             if (std.meta.activeTag(expr.Value) == .FuncRef) {
@@ -2953,7 +2946,7 @@ pub const ModuleDefinition = struct {
                 .Element => {
                     const ElementHelpers = struct {
                         fn readOffsetExpr(_reader: anytype, _module: *const ModuleDefinition) !ConstantExpression {
-                            var expr = try ConstantExpression.decode(_reader, _module, .Import, .Immutable, .I32);
+                            var expr = try ConstantExpression.decode(_reader, _module, .Immutable, .I32);
                             return expr;
                         }
 
@@ -2977,7 +2970,7 @@ pub const ModuleDefinition = struct {
 
                             var elem_index: u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
-                                var expr = try ConstantExpression.decode(_reader, _module, .Import, .Any, expected_reftype);
+                                var expr = try ConstantExpression.decode(_reader, _module, .Any, expected_reftype);
                                 try elems.append(expr);
                             }
                         }
