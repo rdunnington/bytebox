@@ -3080,37 +3080,19 @@ pub const ModuleDefinition = struct {
                         def.offset_into_instructions = @intCast(u32, code_begin_pos);
                         def.size = code_size;
 
-                        var local_type_counts: [ValType.count()]u32 = std.enums.directEnumArrayDefault(ValType, u32, 0, 0, .{});
-
-                        const k_unused_type_sentinel: i32 = -1;
-                        var local_type_order: [ValType.count()]i32 = std.enums.directEnumArrayDefault(ValType, i32, k_unused_type_sentinel, 0, .{});
-
                         const num_locals = try decodeLEB128(u32, reader);
                         var locals_total: usize = 0;
                         var locals_index: u32 = 0;
+                        try def.locals.ensureTotalCapacity(num_locals);
                         while (locals_index < num_locals) : (locals_index += 1) {
                             const n = try decodeLEB128(u32, reader);
                             const local_type = try ValType.decode(reader);
-                            local_type_order[locals_index] = @enumToInt(local_type);
-                            local_type_counts[@enumToInt(local_type)] = n;
 
                             locals_total += n;
                             if (locals_total >= std.math.maxInt(u32)) {
                                 return error.MalformedTooManyLocals;
                             }
-                        }
-
-                        try def.locals.ensureTotalCapacity(locals_total);
-                        for (local_type_order) |counts_index_or_sentinel| {
-                            if (counts_index_or_sentinel == k_unused_type_sentinel) {
-                                continue;
-                            }
-
-                            var valtype = @intToEnum(ValType, counts_index_or_sentinel);
-                            var index = @intCast(usize, counts_index_or_sentinel);
-
-                            const count = local_type_counts[index];
-                            def.locals.appendNTimesAssumeCapacity(valtype, count);
+                            try def.locals.appendNTimes(local_type, n);
                         }
 
                         const instruction_begin_offset = @intCast(u32, module.code.instructions.items.len);
