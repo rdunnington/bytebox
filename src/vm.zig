@@ -84,6 +84,7 @@ pub const ValidationError = error{
     ValidationConstantExpressionTypeMismatch,
     ValidationDuplicateExportName,
     ValidationFuncRefUndeclared,
+    ValidationIfElseMismatch,
 };
 
 pub const TrapError = error{
@@ -1793,6 +1794,19 @@ const ModuleValidator = struct {
         }
     }
 
+    fn getTableReftype(module: *const ModuleDefinition, index: u32) !ValType {
+        if (index < module.imports.tables.items.len) {
+            return module.imports.tables.items[index].reftype;
+        }
+
+        const local_index = index - module.imports.tables.items.len;
+        if (local_index < module.tables.items.len) {
+            return module.tables.items[local_index].reftype;
+        }
+
+        return error.ValidationUnknownTable;
+    }
+
     fn validateFunctionIndex(index: u32, module: *const ModuleDefinition) !void {
         if (module.imports.functions.items.len + module.functions.items.len <= index) {
             return error.ValidationUnknownFunction;
@@ -1888,19 +1902,6 @@ const ModuleValidator = struct {
                 }
 
                 return error.ValidationUnknownGlobal;
-            }
-
-            fn getTableReftype(module_: *const ModuleDefinition, table_index: u32) !ValType {
-                if (table_index < module_.imports.tables.items.len) {
-                    return module_.imports.tables.items[table_index].reftype;
-                }
-
-                const module_table_index = table_index - module_.imports.tables.items.len;
-                if (module_table_index < module_.tables.items.len) {
-                    return module_.tables.items[module_table_index].reftype;
-                }
-
-                return error.ValidationUnknownTable;
             }
 
             fn validateNumericUnaryOp(validator: *ModuleValidator, pop_type: ValType, push_type: ValType) !void {
@@ -2116,12 +2117,12 @@ const ModuleValidator = struct {
                 try self.popType(valtype);
             },
             .Table_Get => {
-                const reftype = try Helpers.getTableReftype(module, instruction.immediate);
+                const reftype = try getTableReftype(module, instruction.immediate);
                 try self.popType(.I32);
                 try self.pushType(reftype);
             },
             .Table_Set => {
-                const reftype = try Helpers.getTableReftype(module, instruction.immediate);
+                const reftype = try getTableReftype(module, instruction.immediate);
                 try self.popType(reftype);
                 try self.popType(.I32);
             },
@@ -2395,7 +2396,7 @@ const ModuleValidator = struct {
 
                 try self.popType(.I32);
                 if (try self.popAnyType()) |init_type| {
-                    var table_reftype: ValType = try Helpers.getTableReftype(module, instruction.immediate);
+                    var table_reftype: ValType = try getTableReftype(module, instruction.immediate);
                     if (init_type != table_reftype) {
                         return error.ValidationTypeMismatch;
                     }
@@ -2411,7 +2412,7 @@ const ModuleValidator = struct {
                 try validateTableIndex(instruction.immediate, module);
                 try self.popType(.I32);
                 if (try self.popAnyType()) |valtype| {
-                    var table_reftype: ValType = try Helpers.getTableReftype(module, instruction.immediate);
+                    var table_reftype: ValType = try getTableReftype(module, instruction.immediate);
                     if (valtype != table_reftype) {
                         return error.ValidationTypeMismatch;
                     }
@@ -3145,7 +3146,7 @@ pub const ModuleDefinition = struct {
 
                         const code_actual_size = stream.pos - code_begin_pos;
                         if (code_actual_size != code_size) {
-                            return error.AssertInvalidBytecode;
+                            return error.MalformedSectionSizeMismatch;
                         }
 
                         code_index += 1;
@@ -3177,8 +3178,11 @@ pub const ModuleDefinition = struct {
         }
 
         for (module.elements.items) |elem_def| {
-            if (elem_def.mode == .Active and module.imports.tables.items.len + module.tables.items.len <= elem_def.table_index) {
-                return error.ValidationUnknownTable;
+            if (elem_def.mode == .Active) {
+                const valtype = try ModuleValidator.getTableReftype(module, elem_def.table_index);
+                if (elem_def.reftype != valtype) {
+                    return error.ValidationTypeMismatch;
+                }
             }
         }
 
