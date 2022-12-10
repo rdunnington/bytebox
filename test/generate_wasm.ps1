@@ -1,4 +1,4 @@
-$wasts = Get-ChildItem "specmirror" -Filter *.wast
+$wasts = Get-ChildItem "testsuite" -Filter *.wast
 
 if ((Test-Path 'wasm') -eq $false) {
     mkdir 'wasm'

@@ -1,3 +1,6 @@
 [submodule "zig-stable-array"]
 	path = zig-stable-array
 	url = https://github.com/rdunnington/zig-stable-array.git
+[submodule "test/testsuite"]
+	path = test/testsuite
+	url = https://github.com/WebAssembly/testsuite.git
