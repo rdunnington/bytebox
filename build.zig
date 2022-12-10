@@ -18,7 +18,8 @@ const ExeOpts = struct {
 pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
 
-    var bench_fib_step: *LibExeObjStep = buildWasm(b, "bench/samples/fib.zig");
+    var bench_fibonacci_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/fibonacci.zig");
+    var bench_mandelbrot_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/mandelbrot.zig");
 
     hookExeWithStep(b, target, .{
         .exe_name = "host",
@@ -39,7 +40,10 @@ pub fn build(b: *Builder) void {
         .step_name = "bench",
         .description = "Run the benchmark suite",
         .needs_root_package = true,
-        .step_dependencies = &[_]*std.build.Step{&bench_fib_step.step},
+        .step_dependencies = &[_]*std.build.Step{
+            &bench_fibonacci_step.step,
+            &bench_mandelbrot_step.step,
+        },
     });
 }
 
@@ -88,7 +92,7 @@ fn hookExeWithStep(b: *Builder, target: CrossTarget, opts: ExeOpts) void {
     step.dependOn(&run.step);
 }
 
-fn buildWasm(b: *Builder, filepath: []const u8) *LibExeObjStep {
+fn buildWasmLib(b: *Builder, filepath: []const u8) *LibExeObjStep {
     var filename: []const u8 = std.fs.path.basename(filepath);
     var filename_no_extension: []const u8 = filename[0 .. filename.len - 4];
 

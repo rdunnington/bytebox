@@ -37,11 +37,15 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    const benchmarks = [_]Benchmark{.{
+    const benchmarks = [_]Benchmark{ .{
         .name = "fibonacci",
-        .filename = "zig-out/lib/fib.wasm",
+        .filename = "zig-out/lib/fibonacci.wasm",
         .param = 20,
-    }};
+    }, .{
+        .name = "mandelbrot",
+        .filename = "zig-out/lib/mandelbrot.wasm",
+        .param = 20,
+    } };
 
     for (benchmarks) |benchmark| {
         run(allocator, benchmark) catch |e| {
