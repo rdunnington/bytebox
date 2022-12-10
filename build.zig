@@ -18,6 +18,7 @@ const ExeOpts = struct {
 pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
 
+    var bench_add_one_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/add-one.zig");
     var bench_fibonacci_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/fibonacci.zig");
     var bench_mandelbrot_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/mandelbrot.zig");
 
@@ -41,6 +42,7 @@ pub fn build(b: *Builder) void {
         .description = "Run the benchmark suite",
         .needs_root_package = true,
         .step_dependencies = &[_]*std.build.Step{
+            &bench_add_one_step.step,
             &bench_fibonacci_step.step,
             &bench_mandelbrot_step.step,
         },

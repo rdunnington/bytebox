@@ -1,4 +1,4 @@
-export fn run(n: u32) u32 {
+export fn run(n: i32) i32 {
     if (n < 2) {
         return 1;
     } else {

@@ -38,6 +38,10 @@ pub fn main() !void {
     var allocator: std.mem.Allocator = gpa.allocator();
 
     const benchmarks = [_]Benchmark{ .{
+        .name = "add-one",
+        .filename = "zig-out/lib/add-one.wasm",
+        .param = 123456789,
+    }, .{
         .name = "fibonacci",
         .filename = "zig-out/lib/fibonacci.wasm",
         .param = 20,
