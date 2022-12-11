@@ -19,4 +19,8 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.10.0
+      - name: Use wabt 1.0.31
+        uses: mwilliamson/setup-wabt-action@v1
+        with:
+          wabt-version: "1.0.31"
       - run: zig build test
