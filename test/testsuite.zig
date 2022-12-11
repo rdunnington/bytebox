@@ -444,6 +444,7 @@ const TestOpts = struct {
     test_filter_or_null: ?[]const u8 = null,
     command_filter_or_null: ?[]const u8 = null,
     module_filter_or_null: ?[]const u8 = null,
+    force_wasm_regen_only: bool = false,
 };
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
@@ -915,22 +916,57 @@ pub fn main() !void {
     var args_index: u32 = 1; // skip program name
     while (args_index < args.len) : (args_index += 1) {
         var arg = args[args_index];
-        if (strcmp("--suite", arg)) {
+        if (strcmp("--help", arg) or strcmp("-h", arg) or strcmp("help", arg)) {
+            const help_text =
+                \\
+                \\Usage: {s} [OPTION]...
+                \\
+                \\    --suite <suitename>
+                \\      Only run tests belonging to the given suite. Examples: i32, br_if,
+                \\      utf8-import-field, unwind
+                \\
+                \\    --module <filename>
+                \\      Only decode and initialize the given module. Only tests belonging to the
+                \\      given module file are run.
+                \\
+                \\    --command <type>
+                \\      Only run tests with the given command type. Examples: assert_return
+                \\      assert_trap, assert_invalid
+                \\
+                \\    --test <testname>
+                \\      Run all tests where the 'field' in the json driver matches this filter.
+                \\
+                \\    --force-wasm-regen-only
+                \\      By default, if a given testsuite can't find its' .json file driver, it will
+                \\      regenerate the wasm files and json driver, then run the test. This command
+                \\      will force regeneration of said files and skip running all tests.
+                \\
+                \\    --verbose
+                \\      Turn on verbose logging for each step of the test suite run.
+                \\
+                \\
+            ;
+            print(help_text, .{args[0]});
+            return;
+        } else if (strcmp("--suite", arg)) {
             args_index += 1;
             opts.suite_filter_or_null = args[args_index];
             print("found suite filter: {s}\n", .{opts.suite_filter_or_null.?});
-        } else if (strcmp("--test", arg)) {
-            args_index += 1;
-            opts.test_filter_or_null = args[args_index];
-            print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
-        } else if (strcmp("--command", arg)) {
-            args_index += 1;
-            opts.command_filter_or_null = args[args_index];
-            print("found command filter: {s}\n", .{opts.command_filter_or_null.?});
         } else if (strcmp("--module", arg)) {
             args_index += 1;
             opts.module_filter_or_null = args[args_index];
             print("found module filter: {s}\n", .{opts.module_filter_or_null.?});
+        } else if (strcmp("--command", arg)) {
+            args_index += 1;
+            opts.command_filter_or_null = args[args_index];
+            print("found command filter: {s}\n", .{opts.command_filter_or_null.?});
+        } else if (strcmp("--test", arg)) {
+            args_index += 1;
+            opts.test_filter_or_null = args[args_index];
+            print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
+        } else if (strcmp("--force-wasm-regen-only", arg)) {
+            opts.force_wasm_regen_only = true;
+            print("Force-regenerating wasm files and driver .json, skipping test run\n", .{});
         } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
             g_verbose_logging = true;
             print("verbose logging: on\n", .{});
@@ -1036,14 +1072,59 @@ pub fn main() !void {
             }
         }
 
-        logVerbose("Running test suite: {s}\n", .{suite});
-
         var suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite, suite });
         defer allocator.free(suite_path_no_extension);
 
         var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
-        try run(allocator, suite_path, &opts);
+        var needs_regen: bool = false;
+        if (opts.force_wasm_regen_only) {
+            needs_regen = true;
+        } else {
+            std.fs.cwd().access(suite_path, .{ .mode = .read_only }) catch |e| {
+                if (e == std.os.AccessError.FileNotFound) {
+                    needs_regen = true;
+                }
+            };
+        }
+
+        if (needs_regen) {
+            logVerbose("Regenerating wasm and json driver for suite {s}\n", .{suite});
+
+            // var suite_wast_path_no_extension = try std.fs.path.join(allocator, &[_][]const u8{ "test", "testsuite", suite });
+            var suite_wast_path_no_extension = try std.fs.path.join(allocator, &[_][]const u8{ "../../testsuite", suite });
+            defer allocator.free(suite_wast_path_no_extension);
+
+            var suite_wast_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_path_no_extension, ".wast" });
+            defer allocator.free(suite_wast_path);
+
+            var suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite });
+            defer allocator.free(suite_wasm_folder);
+
+            std.fs.cwd().makeDir("test/wasm") catch |e| {
+                if (e != error.PathAlreadyExists) {
+                    return e;
+                }
+            };
+
+            std.fs.cwd().makeDir(suite_wasm_folder) catch |e| {
+                if (e != error.PathAlreadyExists) {
+                    return e;
+                }
+            };
+
+            var process = std.ChildProcess.init(&[_][]const u8{ "wast2json", suite_wast_path }, allocator);
+
+            process.cwd = suite_wasm_folder;
+
+            _ = try process.spawnAndWait();
+        }
+
+        if (opts.force_wasm_regen_only == false) {
+            logVerbose("Running test suite: {s}\n", .{suite});
+
+            try run(allocator, suite_path, &opts);
+        }
     }
 }
