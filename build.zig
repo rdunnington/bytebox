@@ -22,20 +22,20 @@ pub fn build(b: *Builder) void {
     var bench_fibonacci_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/fibonacci.zig");
     var bench_mandelbrot_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/mandelbrot.zig");
 
-    _ = hookExeWithStep(b, target, .{
+    hookExeWithStep(b, target, .{
         .exe_name = "host",
         .root_src = "src/main.zig",
         .step_name = "run",
         .description = "Run a wasm program",
     });
-    _ = hookExeWithStep(b, target, .{
+    hookExeWithStep(b, target, .{
         .exe_name = "testsuite",
         .root_src = "test/testsuite.zig",
         .step_name = "test",
         .description = "Run the test suite",
         .needs_root_package = true,
     });
-    _ = hookExeWithStep(b, target, .{
+    hookExeWithStep(b, target, .{
         .exe_name = "benchmark",
         .root_src = "bench/benchmark.zig",
         .step_name = "bench",

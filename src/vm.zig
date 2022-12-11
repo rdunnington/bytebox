@@ -3078,19 +3078,37 @@ pub const ModuleDefinition = struct {
                         def.offset_into_instructions = @intCast(u32, code_begin_pos);
                         def.size = code_size;
 
-                        const num_locals = try decodeLEB128(u32, reader);
-                        var locals_total: usize = 0;
-                        var locals_index: u32 = 0;
-                        try def.locals.ensureTotalCapacity(num_locals);
-                        while (locals_index < num_locals) : (locals_index += 1) {
-                            const n = try decodeLEB128(u32, reader);
-                            const local_type = try ValType.decode(reader);
+                        // parse locals
+                        {
+                            const num_locals = try decodeLEB128(u32, reader);
 
-                            locals_total += n;
-                            if (locals_total >= std.math.maxInt(u32)) {
-                                return error.MalformedTooManyLocals;
+                            const TypeCount = struct {
+                                valtype: ValType,
+                                count: u32,
+                            };
+                            var local_types = std.ArrayList(TypeCount).init(allocator);
+                            defer local_types.deinit();
+                            try local_types.ensureTotalCapacity(num_locals);
+
+                            var locals_total: usize = 0;
+                            var locals_index: u32 = 0;
+                            try def.locals.ensureTotalCapacity(num_locals);
+                            while (locals_index < num_locals) : (locals_index += 1) {
+                                const n = try decodeLEB128(u32, reader);
+                                const local_type = try ValType.decode(reader);
+
+                                locals_total += n;
+                                if (locals_total >= std.math.maxInt(u32)) {
+                                    return error.MalformedTooManyLocals;
+                                }
+                                local_types.appendAssumeCapacity(TypeCount{ .valtype = local_type, .count = n });
                             }
-                            try def.locals.appendNTimes(local_type, n);
+
+                            try def.locals.ensureTotalCapacity(locals_total);
+
+                            for (local_types.items) |type_count| {
+                                def.locals.appendNTimesAssumeCapacity(type_count.valtype, type_count.count);
+                            }
                         }
 
                         const instruction_begin_offset = @intCast(u32, module.code.instructions.items.len);
