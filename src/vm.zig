@@ -2730,7 +2730,7 @@ pub const ModuleDefinition = struct {
                         errdefer allocator.free(module_name);
 
                         var import_name: []const u8 = try DecodeHelpers.readName(reader, allocator);
-                        errdefer allocator.free(module_name);
+                        errdefer allocator.free(import_name);
 
                         const names = ImportNames{
                             .module_name = module_name,
@@ -3565,7 +3565,6 @@ pub const ModuleInstance = struct {
     pub fn deinit(self: *ModuleInstance) void {
         self.stack.deinit();
         self.store.deinit();
-        self.allocator.free(self);
     }
 
     pub fn instantiate(self: *ModuleInstance, imports: ?[]const ModuleImports) !void {
