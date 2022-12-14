@@ -615,7 +615,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     return imports;
 }
 
-fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOpts) !void {
+fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOpts) !bool {
     var did_fail_any_test: bool = false;
 
     var commands: std.ArrayList(Command) = try parseCommands(suite_path, allocator);
@@ -631,8 +631,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     var name_to_module = std.StringHashMap(Module).init(allocator);
     defer {
         var name_to_module_iter = name_to_module.iterator();
-        while (name_to_module_iter.next()) |kv|
-        {
+        while (name_to_module_iter.next()) |kv| {
             // key memory is owned by commands list, so no need to free
 
             allocator.free(kv.value_ptr.filename); // ^^^
@@ -706,6 +705,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         "Register: module instance {s}|{s} was not found in the cache by the name '{s}'. Is the wast malformed?\n",
                         .{ c.module_name, module_filename, module_name },
                     );
+                    did_fail_any_test = true;
                     continue;
                 }
 
@@ -761,12 +761,14 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                         }
                         print("\tFail: module init failed with error {}, but expected '{s}'\n", .{ e, expected_str });
+                        did_fail_any_test = true;
                     }
                 } else {
                     if (!g_verbose_logging) {
                         print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                     }
                     print("\tDecode failed with error: {}\n", .{e});
+                    did_fail_any_test = true;
                 }
                 continue;
             };
@@ -776,6 +778,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                     print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
                 print("\tFail: module init succeeded, but it should have failed with error '{s}'\n", .{expected});
+                did_fail_any_test = true;
+                continue;
             }
 
             if (validate_expected_error) |expected| {
@@ -783,6 +787,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                     print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
                 print("\tFail: module init succeeded, but it should have failed with error '{s}'\n", .{expected});
+                did_fail_any_test = true;
+                continue;
             }
 
             var instantiate_expected_error: ?[]const u8 = null;
@@ -806,12 +812,14 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                         }
                         print("\tFail: instantiate failed with error {}, but expected '{s}'\n", .{ e, expected_str });
+                        did_fail_any_test = true;
                     }
                 } else {
                     if (!g_verbose_logging) {
                         print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                     }
                     print("\tInstantiate failed with error: {}\n", .{e});
+                    did_fail_any_test = true;
                 }
                 continue;
             };
@@ -821,6 +829,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                     print("{s}: {s}\n", .{ command.getCommandName(), module.filename });
                 }
                 print("\tFail: instantiate succeeded, but it should have failed with error '{s}'\n", .{expected_str});
+                did_fail_any_test = true;
+                continue;
             }
         }
 
@@ -898,6 +908,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                     if (action_succeeded) {
                         logVerbose("\tSuccess!\n", .{});
+                    } else {
+                        did_fail_any_test = true;
                     }
                 }
             },
@@ -958,8 +970,10 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                     }
                     if (action_failed_with_correct_trap == false) {
                         print("\tInvoke trapped, but got error '{}'' instead of expected '{s}':\n", .{ caught_error.?, c.expected_error });
+                        did_fail_any_test = true;
                     } else {
                         print("\tInvoke succeeded instead of trapping on expected {s}:\n", .{c.expected_error});
+                        did_fail_any_test = true;
                     }
                 }
             },
@@ -967,16 +981,14 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         }
     }
 
-    if (did_fail_any_test) {
-        return TestSuiteError.Fail;
-    }
+    return !did_fail_any_test;
 }
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    // var allocator: std.mem.Allocator = std.heap.c_allocator; 
+    // var allocator: std.mem.Allocator = std.heap.c_allocator;
 
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -1194,7 +1206,10 @@ pub fn main() !void {
         if (opts.force_wasm_regen_only == false) {
             logVerbose("Running test suite: {s}\n", .{suite});
 
-            try run(allocator, suite_path, &opts);
+            const succeeded = try run(allocator, suite_path, &opts);
+            if (succeeded == false) {
+                std.os.exit(1);
+            }
         }
     }
 }
