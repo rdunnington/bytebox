@@ -1765,12 +1765,9 @@ const ModuleValidator = struct {
     }
 
     fn deinit(self: *ModuleValidator) void {
-        self.type_stack.clearAndFree();
-        while (self.control_stack.items.len > 0) {
-            var frame = self.popControl() catch unreachable;
-            try self.freeControlTypes(&frame);
-        }
-        self.control_stack.clearAndFree();
+        self.type_stack.deinit();
+        self.control_stack.deinit();
+        self.control_types.deinit();
     }
 
     fn validateTypeIndex(index: u32, module: *const ModuleDefinition) !void {
@@ -2634,6 +2631,7 @@ pub const ModuleDefinition = struct {
         };
 
         var validator = ModuleValidator.init(allocator);
+        defer validator.deinit();
 
         // first block type is always void for quick decoding
         try module.code.block_type_values.append(BlockTypeValue{ .Void = {} });
