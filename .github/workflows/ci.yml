@@ -19,7 +19,7 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.10.0
-      - uses: rdunnington/setup-wabt-action@v1.0
+      - uses: rdunnington/setup-wabt-action@master
         with:
           wabt-version: "1.0.31"
       - run: zig build test
