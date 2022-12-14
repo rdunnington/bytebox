@@ -124,6 +124,53 @@ const Command = union(CommandType) {
             .AssertUninstantiable => |c| c.err.module,
         };
     }
+
+    fn deinitAction(action: *Action, allocator: std.mem.Allocator) void {
+        allocator.free(action.module);
+        allocator.free(action.field);
+        action.args.deinit();
+    }
+
+    fn deinitBadModuleError(err: *BadModuleError, allocator: std.mem.Allocator) void {
+        allocator.free(err.module);
+        allocator.free(err.expected_error);
+    }
+
+    fn deinit(self: *Command, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .DecodeModule => |*v| {
+                allocator.free(v.module_filename);
+                allocator.free(v.module_name);
+            },
+            .Register => |*v| {
+                allocator.free(v.module_filename);
+                allocator.free(v.module_name);
+                allocator.free(v.import_name);
+            },
+            .AssertReturn => |*v| {
+                deinitAction(&v.action, allocator);
+                if (v.expected_returns) |returns| {
+                    returns.deinit();
+                }
+            },
+            .AssertTrap => |*v| {
+                deinitAction(&v.action, allocator);
+                allocator.free(v.expected_error);
+            },
+            .AssertMalformed => |*v| {
+                deinitBadModuleError(&v.err, allocator);
+            },
+            .AssertInvalid => |*v| {
+                deinitBadModuleError(&v.err, allocator);
+            },
+            .AssertUnlinkable => |*v| {
+                deinitBadModuleError(&v.err, allocator);
+            },
+            .AssertUninstantiable => |*v| {
+                deinitBadModuleError(&v.err, allocator);
+            },
+        }
+    }
 };
 
 fn strcmp(a: []const u8, b: []const u8) bool {
@@ -285,7 +332,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 }
             }
 
-            var module: []const u8 = fallback_module;
+            var module: []const u8 = try _allocator.dupe(u8, fallback_module);
             const json_module_or_null = json_action.Object.getPtr("module");
             if (json_module_or_null) |json_module| {
                 module = try _allocator.dupe(u8, json_module.String);
@@ -316,6 +363,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
     var tree = try parser.parse(json_data);
 
     var fallback_module: []const u8 = "";
+    defer allocator.free(fallback_module);
 
     var commands = std.ArrayList(Command).init(allocator);
 
@@ -328,14 +376,14 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             var filename: []const u8 = try allocator.dupe(u8, json_filename.String);
             fallback_module = filename;
 
-            var name = filename;
+            var name = try allocator.dupe(u8, filename);
             if (json_command.Object.getPtr("name")) |json_module_name| {
                 name = try allocator.dupe(u8, json_module_name.String);
             }
 
             var command = Command{
                 .DecodeModule = CommandDecodeModule{
-                    .module_filename = filename,
+                    .module_filename = try allocator.dupe(u8, filename),
                     .module_name = name,
                 },
             };
@@ -570,17 +618,33 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
 fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOpts) !void {
     var did_fail_any_test: bool = false;
 
-    var arena_commands = std.heap.ArenaAllocator.init(allocator);
-    defer arena_commands.deinit();
-
-    var scratch_allocator = arena_commands.allocator();
-
-    var commands: std.ArrayList(Command) = try parseCommands(suite_path, scratch_allocator);
+    var commands: std.ArrayList(Command) = try parseCommands(suite_path, allocator);
+    defer {
+        for (commands.items) |*command| {
+            command.deinit(allocator);
+        }
+        commands.deinit();
+    }
 
     const suite_dir = std.fs.path.dirname(suite_path).?;
 
     var name_to_module = std.StringHashMap(Module).init(allocator);
-    defer name_to_module.deinit();
+    defer {
+        var name_to_module_iter = name_to_module.iterator();
+        while (name_to_module_iter.next()) |kv|
+        {
+            // key memory is owned by commands list, so no need to free
+
+            allocator.free(kv.value_ptr.filename); // ^^^
+            if (kv.value_ptr.def) |*def| {
+                def.deinit();
+            }
+            if (kv.value_ptr.inst) |*inst| {
+                inst.deinit();
+            }
+        }
+        name_to_module.deinit();
+    }
 
     // this should be enough to avoid resizing, just bump it up if it's not
     // note that module instance uses the pointer to the stored struct so it's important that the stored instances never move
@@ -588,6 +652,28 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
     var imports = std.ArrayList(wasm.ModuleImports).init(allocator);
+    defer {
+        var spectest_imports = imports.items[0];
+        for (spectest_imports.tables.items) |*item| {
+            allocator.free(item.name);
+            item.data.Host.deinit();
+            allocator.destroy(item.data.Host);
+        }
+        for (spectest_imports.memories.items) |*item| {
+            allocator.free(item.name);
+            item.data.Host.deinit();
+            allocator.destroy(item.data.Host);
+        }
+        for (spectest_imports.globals.items) |*item| {
+            allocator.free(item.name);
+            allocator.destroy(item.data.Host);
+        }
+
+        for (imports.items[1..]) |*item| {
+            item.deinit();
+        }
+        imports.deinit();
+    }
 
     try imports.append(try makeSpectestImports(allocator));
 
@@ -633,9 +719,10 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         }
 
         if (module.inst == null) {
-            var module_path = try std.fs.path.join(scratch_allocator, &[_][]const u8{ suite_dir, module_filename });
+            var module_path = try std.fs.path.join(allocator, &[_][]const u8{ suite_dir, module_filename });
+
             var cwd = std.fs.cwd();
-            var module_data = try cwd.readFileAlloc(scratch_allocator, module_path, 1024 * 1024 * 8);
+            var module_data = try cwd.readFileAlloc(allocator, module_path, 1024 * 1024 * 8);
 
             var decode_expected_error: ?[]const u8 = null;
             switch (command.*) {
@@ -653,9 +740,9 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 else => {},
             }
 
-            module.filename = try scratch_allocator.dupe(u8, module_filename);
+            module.filename = try allocator.dupe(u8, module_filename);
 
-            module.def = wasm.ModuleDefinition.init(module_data, scratch_allocator) catch |e| {
+            module.def = wasm.ModuleDefinition.init(module_data, allocator) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
                     expected_str_or_null = unwrapped_expected;
@@ -709,7 +796,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 else => {},
             }
 
-            module.inst = wasm.ModuleInstance.init(&module.def.?, scratch_allocator);
+            module.inst = wasm.ModuleInstance.init(&module.def.?, allocator);
             (module.inst.?).instantiate(imports.items) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
@@ -753,7 +840,9 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 }
 
                 const num_expected_returns = if (c.expected_returns) |returns| returns.items.len else 0;
-                var returns_placeholder = std.ArrayList(wasm.Val).init(scratch_allocator);
+                var returns_placeholder = std.ArrayList(wasm.Val).init(allocator);
+                defer returns_placeholder.deinit();
+
                 try returns_placeholder.resize(num_expected_returns);
                 var returns = returns_placeholder.items;
 
@@ -878,27 +967,6 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         }
     }
 
-    var spectest_imports = imports.items[0];
-    for (spectest_imports.tables.items) |*item| {
-        allocator.free(item.name);
-        item.data.Host.deinit();
-        allocator.destroy(item.data.Host);
-    }
-    for (spectest_imports.memories.items) |*item| {
-        allocator.free(item.name);
-        item.data.Host.deinit();
-        allocator.destroy(item.data.Host);
-    }
-    for (spectest_imports.globals.items) |*item| {
-        allocator.free(item.name);
-        allocator.destroy(item.data.Host);
-    }
-
-    for (imports.items[1..]) |*item| {
-        item.deinit();
-    }
-    imports.deinit();
-
     if (did_fail_any_test) {
         return TestSuiteError.Fail;
     }
@@ -907,6 +975,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
+
+    // var allocator: std.mem.Allocator = std.heap.c_allocator; 
 
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
