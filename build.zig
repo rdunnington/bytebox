@@ -1,9 +1,7 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const CrossTarget = std.zig.CrossTarget;
 const Builder = std.build.Builder;
-const Pkg = std.build.Pkg;
 const LibExeObjStep = std.build.LibExeObjStep;
 
 const ExeOpts = struct {
@@ -11,7 +9,6 @@ const ExeOpts = struct {
     root_src: []const u8,
     step_name: []const u8,
     description: []const u8,
-    needs_root_package: bool = false,
     step_dependencies: ?[]*std.build.Step = null,
 };
 
@@ -22,26 +19,23 @@ pub fn build(b: *Builder) void {
     var bench_fibonacci_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/fibonacci.zig");
     var bench_mandelbrot_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/mandelbrot.zig");
 
-    hookExeWithStep(b, target, .{
+    buildExeWithStep(b, target, .{
         .exe_name = "run",
         .root_src = "run/main.zig",
         .step_name = "run",
         .description = "Run a wasm program",
-        .needs_root_package = true,
     });
-    hookExeWithStep(b, target, .{
+    buildExeWithStep(b, target, .{
         .exe_name = "testsuite",
         .root_src = "test/main.zig",
         .step_name = "test",
         .description = "Run the test suite",
-        .needs_root_package = true,
     });
-    hookExeWithStep(b, target, .{
+    buildExeWithStep(b, target, .{
         .exe_name = "benchmark",
         .root_src = "bench/main.zig",
         .step_name = "bench",
         .description = "Run the benchmark suite",
-        .needs_root_package = true,
         .step_dependencies = &[_]*std.build.Step{
             &bench_add_one_step.step,
             &bench_fibonacci_step.step,
@@ -50,28 +44,13 @@ pub fn build(b: *Builder) void {
     });
 }
 
-fn hookExeWithStep(b: *Builder, target: CrossTarget, opts: ExeOpts) void {
+fn buildExeWithStep(b: *Builder, target: CrossTarget, opts: ExeOpts) void {
     const exe = b.addExecutable(opts.exe_name, opts.root_src);
 
-    if (builtin.os.tag == .windows) {
-        exe.addLibraryPath("C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.19041.0\\um\\x64");
-        exe.linkSystemLibrary("kernel32");
-    }
-
-    const pkg_stable_array = Pkg{
-        .name = "stable-array",
-        .source = .{ .path = "zig-stable-array/stable_array.zig" },
-    };
-
-    exe.addPackage(pkg_stable_array);
-    if (opts.needs_root_package) {
-        const root_pkg = Pkg{
-            .name = "bytebox",
-            .source = .{ .path = "src/core.zig" },
-            .dependencies = &[_]Pkg{pkg_stable_array},
-        };
-        exe.addPackage(root_pkg);
-    }
+    exe.addPackage(std.build.Pkg{
+        .name = "bytebox",
+        .source = .{ .path = "src/core.zig" },
+    });
 
     const mode = b.standardReleaseOptions();
 
