@@ -2547,7 +2547,7 @@ pub const ModuleDefinition = struct {
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
 
-    pub fn init(wasm: []const u8, allocator: std.mem.Allocator) anyerror!ModuleDefinition {
+    pub fn init(allocator: std.mem.Allocator) ModuleDefinition {
         var module = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
@@ -2584,20 +2584,21 @@ pub const ModuleDefinition = struct {
             .label_continuations = std.AutoHashMap(u32, u32).init(allocator),
             .if_to_else_offsets = std.AutoHashMap(u32, u32).init(allocator),
         };
-        errdefer module.deinit();
-
-        decode(wasm, &module, allocator) catch |e| {
-            var any: anyerror = switch (e) {
-                error.EndOfStream => error.MalformedUnexpectedEnd,
-                else => e,
-            };
-            return any;
-        };
 
         return module;
     }
 
-    fn decode(wasm: []const u8, module: *ModuleDefinition, allocator: std.mem.Allocator) anyerror!void {
+    pub fn decode(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
+        self.decode_internal(wasm) catch |e| {
+            var wrapped_error: anyerror = switch (e) {
+                error.EndOfStream => error.MalformedUnexpectedEnd,
+                else => e,
+            };
+            return wrapped_error;
+        };
+    }
+
+    fn decode_internal(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
         const DecodeHelpers = struct {
             fn readRefValue(valtype: ValType, reader: anytype) !Val {
                 switch (valtype) {
@@ -2630,11 +2631,12 @@ pub const ModuleDefinition = struct {
             }
         };
 
+        var allocator = self.allocator;
         var validator = ModuleValidator.init(allocator);
         defer validator.deinit();
 
         // first block type is always void for quick decoding
-        try module.code.block_type_values.append(BlockTypeValue{ .Void = {} });
+        try self.code.block_type_values.append(BlockTypeValue{ .Void = {} });
 
         var stream = std.io.fixedBufferStream(wasm);
         var reader = stream.reader();
@@ -2680,12 +2682,12 @@ pub const ModuleDefinition = struct {
                         return error.MalformedUnexpectedEnd;
                     }
 
-                    try module.custom_sections.append(section);
+                    try self.custom_sections.append(section);
                 },
                 .FunctionType => {
                     const num_types = try decodeLEB128(u32, reader);
 
-                    try module.types.ensureTotalCapacity(num_types);
+                    try self.types.ensureTotalCapacity(num_types);
 
                     var types_index: u32 = 0;
                     while (types_index < num_types) : (types_index += 1) {
@@ -2716,7 +2718,7 @@ pub const ModuleDefinition = struct {
                             try func.types.append(return_type);
                         }
 
-                        try module.types.append(func);
+                        try self.types.append(func);
                     }
                 },
                 .Import => {
@@ -2739,8 +2741,8 @@ pub const ModuleDefinition = struct {
                         switch (desc) {
                             0x00 => {
                                 const type_index = try decodeLEB128(u32, reader);
-                                try ModuleValidator.validateTypeIndex(type_index, module);
-                                try module.imports.functions.append(FunctionImportDefinition{
+                                try ModuleValidator.validateTypeIndex(type_index, self);
+                                try self.imports.functions.append(FunctionImportDefinition{
                                     .names = names,
                                     .type_index = type_index,
                                 });
@@ -2751,7 +2753,7 @@ pub const ModuleDefinition = struct {
                                     return error.MalformedInvalidImport;
                                 }
                                 const limits = try Limits.decode(reader);
-                                try module.imports.tables.append(TableImportDefinition{
+                                try self.imports.tables.append(TableImportDefinition{
                                     .names = names,
                                     .reftype = valtype,
                                     .limits = limits,
@@ -2759,7 +2761,7 @@ pub const ModuleDefinition = struct {
                             },
                             0x02 => {
                                 const limits = try Limits.decode(reader);
-                                try module.imports.memories.append(MemoryImportDefinition{
+                                try self.imports.memories.append(MemoryImportDefinition{
                                     .names = names,
                                     .limits = limits,
                                 });
@@ -2768,7 +2770,7 @@ pub const ModuleDefinition = struct {
                                 const valtype = try ValType.decode(reader);
                                 const mut = try GlobalMut.decode(reader);
 
-                                try module.imports.globals.append(GlobalImportDefinition{
+                                try self.imports.globals.append(GlobalImportDefinition{
                                     .names = names,
                                     .valtype = valtype,
                                     .mut = mut,
@@ -2781,7 +2783,7 @@ pub const ModuleDefinition = struct {
                 .Function => {
                     const num_funcs = try decodeLEB128(u32, reader);
 
-                    try module.functions.ensureTotalCapacity(num_funcs);
+                    try self.functions.ensureTotalCapacity(num_funcs);
 
                     var func_index: u32 = 0;
                     while (func_index < num_funcs) : (func_index += 1) {
@@ -2794,13 +2796,13 @@ pub const ModuleDefinition = struct {
                             .size = 0,
                         };
 
-                        module.functions.addOneAssumeCapacity().* = func;
+                        self.functions.addOneAssumeCapacity().* = func;
                     }
                 },
                 .Table => {
                     const num_tables = try decodeLEB128(u32, reader);
 
-                    try module.tables.ensureTotalCapacity(num_tables);
+                    try self.tables.ensureTotalCapacity(num_tables);
 
                     var table_index: u32 = 0;
                     while (table_index < num_tables) : (table_index += 1) {
@@ -2811,7 +2813,7 @@ pub const ModuleDefinition = struct {
 
                         const limits = try Limits.decode(reader);
 
-                        try module.tables.append(TableDefinition{
+                        try self.tables.append(TableDefinition{
                             .reftype = valtype,
                             .limits = limits,
                         });
@@ -2824,7 +2826,7 @@ pub const ModuleDefinition = struct {
                         return error.ValidationMultipleMemories;
                     }
 
-                    try module.memories.ensureTotalCapacity(num_memories);
+                    try self.memories.ensureTotalCapacity(num_memories);
 
                     var memory_index: u32 = 0;
                     while (memory_index < num_memories) : (memory_index += 1) {
@@ -2846,31 +2848,31 @@ pub const ModuleDefinition = struct {
                         var def = MemoryDefinition{
                             .limits = limits,
                         };
-                        try module.memories.append(def);
+                        try self.memories.append(def);
                     }
                 },
                 .Global => {
                     const num_globals = try decodeLEB128(u32, reader);
 
-                    try module.globals.ensureTotalCapacity(num_globals);
+                    try self.globals.ensureTotalCapacity(num_globals);
 
                     var global_index: u32 = 0;
                     while (global_index < num_globals) : (global_index += 1) {
                         var valtype = try ValType.decode(reader);
                         var mut = try GlobalMut.decode(reader);
 
-                        const expr = try ConstantExpression.decode(reader, module, .Immutable, valtype);
+                        const expr = try ConstantExpression.decode(reader, self, .Immutable, valtype);
 
                         if (std.meta.activeTag(expr) == .Value) {
                             if (std.meta.activeTag(expr.Value) == .FuncRef) {
                                 if (expr.Value.isNull() == false) {
                                     const index: u32 = expr.Value.FuncRef.index;
-                                    try ModuleValidator.validateFunctionIndex(index, module);
+                                    try ModuleValidator.validateFunctionIndex(index, self);
                                 }
                             }
                         }
 
-                        try module.globals.append(GlobalDefinition{
+                        try self.globals.append(GlobalDefinition{
                             .valtype = valtype,
                             .expr = expr,
                             .mut = mut,
@@ -2901,46 +2903,46 @@ pub const ModuleDefinition = struct {
 
                         switch (exportType) {
                             .Function => {
-                                try ModuleValidator.validateFunctionIndex(item_index, module);
-                                try module.exports.functions.append(def);
+                                try ModuleValidator.validateFunctionIndex(item_index, self);
+                                try self.exports.functions.append(def);
                             },
                             .Table => {
-                                try ModuleValidator.validateTableIndex(item_index, module);
-                                try module.exports.tables.append(def);
+                                try ModuleValidator.validateTableIndex(item_index, self);
+                                try self.exports.tables.append(def);
                             },
                             .Memory => {
-                                if (module.imports.memories.items.len + module.memories.items.len <= item_index) {
+                                if (self.imports.memories.items.len + self.memories.items.len <= item_index) {
                                     return error.ValidationUnknownMemory;
                                 }
-                                try module.exports.memories.append(def);
+                                try self.exports.memories.append(def);
                             },
                             .Global => {
-                                try ModuleValidator.validateGlobalIndex(item_index, module);
-                                try module.exports.globals.append(def);
+                                try ModuleValidator.validateGlobalIndex(item_index, self);
+                                try self.exports.globals.append(def);
                             },
                         }
                     }
                 },
                 .Start => {
-                    if (module.start_func_index != null) {
+                    if (self.start_func_index != null) {
                         return error.MalformedMultipleStartSections;
                     }
 
-                    module.start_func_index = try decodeLEB128(u32, reader);
+                    self.start_func_index = try decodeLEB128(u32, reader);
 
-                    if (module.imports.functions.items.len + module.functions.items.len <= module.start_func_index.?) {
+                    if (self.imports.functions.items.len + self.functions.items.len <= self.start_func_index.?) {
                         return error.ValidationUnknownFunction;
                     }
 
                     var func_type_index: usize = undefined;
-                    if (module.start_func_index.? < module.imports.functions.items.len) {
-                        func_type_index = module.imports.functions.items[module.start_func_index.?].type_index;
+                    if (self.start_func_index.? < self.imports.functions.items.len) {
+                        func_type_index = self.imports.functions.items[self.start_func_index.?].type_index;
                     } else {
-                        var local_func_index = module.start_func_index.? - module.imports.functions.items.len;
-                        func_type_index = module.functions.items[local_func_index].type_index;
+                        var local_func_index = self.start_func_index.? - self.imports.functions.items.len;
+                        func_type_index = self.functions.items[local_func_index].type_index;
                     }
 
-                    const func_type: *const FunctionTypeDefinition = &module.types.items[func_type_index];
+                    const func_type: *const FunctionTypeDefinition = &self.types.items[func_type_index];
                     if (func_type.types.items.len > 0) {
                         return error.ValidationStartFunctionType;
                     }
@@ -2987,7 +2989,7 @@ pub const ModuleDefinition = struct {
 
                     const num_segments = try decodeLEB128(u32, reader);
 
-                    try module.elements.ensureTotalCapacity(num_segments);
+                    try self.elements.ensureTotalCapacity(num_segments);
 
                     var segment_index: u32 = 0;
                     while (segment_index < num_segments) : (segment_index += 1) {
@@ -3006,51 +3008,51 @@ pub const ModuleDefinition = struct {
 
                         switch (flags) {
                             0x00 => {
-                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, self);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, self);
                             },
                             0x01 => {
                                 def.mode = .Passive;
                                 try ElementHelpers.readNullElemkind(reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, self);
                             },
                             0x02 => {
                                 def.table_index = try decodeLEB128(u32, reader);
-                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, self);
                                 try ElementHelpers.readNullElemkind(reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, self);
                             },
                             0x03 => {
                                 def.mode = .Declarative;
                                 try ElementHelpers.readNullElemkind(reader);
-                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, module);
+                                try ElementHelpers.readElemsVal(&def.elems_value, def.reftype, reader, self);
                             },
                             0x04 => {
-                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, self);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, self, def.reftype);
                             },
                             0x05 => {
                                 def.mode = .Passive;
                                 def.reftype = try ValType.decodeReftype(reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, self, def.reftype);
                             },
                             0x06 => {
                                 def.table_index = try decodeLEB128(u32, reader);
-                                def.offset = try ElementHelpers.readOffsetExpr(reader, module);
+                                def.offset = try ElementHelpers.readOffsetExpr(reader, self);
                                 def.reftype = try ValType.decodeReftype(reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, self, def.reftype);
                             },
                             0x07 => {
                                 def.mode = .Declarative;
                                 def.reftype = try ValType.decodeReftype(reader);
-                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, module, def.reftype);
+                                try ElementHelpers.readElemsExpr(&def.elems_expr, reader, self, def.reftype);
                             },
                             else => {
                                 return error.MalformedElementType;
                             },
                         }
 
-                        try module.elements.append(def);
+                        try self.elements.append(def);
                     }
                 },
                 .Code => {
@@ -3063,7 +3065,7 @@ pub const ModuleDefinition = struct {
 
                     const num_codes = try decodeLEB128(u32, reader);
 
-                    if (num_codes != module.functions.items.len) {
+                    if (num_codes != self.functions.items.len) {
                         return error.MalformedFunctionCodeSectionMismatch;
                     }
 
@@ -3072,7 +3074,7 @@ pub const ModuleDefinition = struct {
                         const code_size = try decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
-                        var def = &module.functions.items[code_index];
+                        var def = &self.functions.items[code_index];
                         def.offset_into_instructions = @intCast(u32, code_begin_pos);
                         def.size = code_size;
 
@@ -3109,20 +3111,20 @@ pub const ModuleDefinition = struct {
                             }
                         }
 
-                        const instruction_begin_offset = @intCast(u32, module.code.instructions.items.len);
-                        module.functions.items[code_index].offset_into_instructions = instruction_begin_offset;
+                        const instruction_begin_offset = @intCast(u32, self.code.instructions.items.len);
+                        self.functions.items[code_index].offset_into_instructions = instruction_begin_offset;
                         try block_stack.append(BlockData{
                             .offset = instruction_begin_offset,
                             .opcode = .Block,
                         });
 
-                        try validator.beginValidateCode(module, &module.functions.items[code_index]);
+                        try validator.beginValidateCode(self, &self.functions.items[code_index]);
 
                         var parsing_code = true;
                         while (parsing_code) {
-                            const parsing_offset = @intCast(u32, module.code.instructions.items.len);
+                            const parsing_offset = @intCast(u32, self.code.instructions.items.len);
 
-                            var instruction = try Instruction.decode(reader, module);
+                            var instruction = try Instruction.decode(reader, self);
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
                                     .offset = parsing_offset,
@@ -3130,29 +3132,29 @@ pub const ModuleDefinition = struct {
                                 });
                             } else if (instruction.opcode == .Else) {
                                 const block: *const BlockData = &block_stack.items[block_stack.items.len - 1];
-                                try module.if_to_else_offsets.putNoClobber(block.offset, parsing_offset);
-                                instruction.immediate = module.code.instructions.items[block.offset].immediate; // the else gets the matching if's immediate index
+                                try self.if_to_else_offsets.putNoClobber(block.offset, parsing_offset);
+                                instruction.immediate = self.code.instructions.items[block.offset].immediate; // the else gets the matching if's immediate index
                             } else if (instruction.opcode == .End) {
                                 const block: BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
                                 if (block_stack.items.len == 0) {
                                     parsing_code = false;
 
-                                    try module.function_continuations.putNoClobber(block.offset, parsing_offset);
+                                    try self.function_continuations.putNoClobber(block.offset, parsing_offset);
                                     block_stack.clearRetainingCapacity();
                                 } else {
                                     if (block.opcode == .Loop) {
-                                        try module.label_continuations.putNoClobber(block.offset, block.offset);
+                                        try self.label_continuations.putNoClobber(block.offset, block.offset);
                                     } else {
-                                        try module.label_continuations.putNoClobber(block.offset, parsing_offset);
-                                        var else_offset_or_null = module.if_to_else_offsets.get(block.offset);
+                                        try self.label_continuations.putNoClobber(block.offset, parsing_offset);
+                                        var else_offset_or_null = self.if_to_else_offsets.get(block.offset);
                                         if (else_offset_or_null) |else_offset| {
-                                            try module.label_continuations.putNoClobber(else_offset, parsing_offset);
+                                            try self.label_continuations.putNoClobber(else_offset, parsing_offset);
                                         }
                                     }
                                 }
                             }
 
-                            try validator.validateCode(module, &module.functions.items[code_index], instruction);
+                            try validator.validateCode(self, &self.functions.items[code_index], instruction);
                         }
 
                         try validator.endValidateCode();
@@ -3168,19 +3170,19 @@ pub const ModuleDefinition = struct {
                 .Data => {
                     const num_datas = try decodeLEB128(u32, reader);
 
-                    if (module.data_count != null and num_datas != module.data_count.?) {
+                    if (self.data_count != null and num_datas != self.data_count.?) {
                         return error.MalformedDataCountMismatch;
                     }
 
                     var data_index: u32 = 0;
                     while (data_index < num_datas) : (data_index += 1) {
-                        var data = try DataDefinition.decode(reader, module, allocator);
-                        try module.datas.append(data);
+                        var data = try DataDefinition.decode(reader, self, allocator);
+                        try self.datas.append(data);
                     }
                 },
                 .DataCount => {
-                    module.data_count = try decodeLEB128(u32, reader);
-                    try module.datas.ensureTotalCapacity(module.data_count.?);
+                    self.data_count = try decodeLEB128(u32, reader);
+                    try self.datas.ensureTotalCapacity(self.data_count.?);
                 },
             }
 
@@ -3190,20 +3192,20 @@ pub const ModuleDefinition = struct {
             }
         }
 
-        for (module.elements.items) |elem_def| {
+        for (self.elements.items) |elem_def| {
             if (elem_def.mode == .Active) {
-                const valtype = try ModuleValidator.getTableReftype(module, elem_def.table_index);
+                const valtype = try ModuleValidator.getTableReftype(self, elem_def.table_index);
                 if (elem_def.reftype != valtype) {
                     return error.ValidationTypeMismatch;
                 }
             }
         }
 
-        if (module.imports.memories.items.len + module.memories.items.len > 1) {
+        if (self.imports.memories.items.len + self.memories.items.len > 1) {
             return error.ValidationMultipleMemories;
         }
 
-        if (module.function_continuations.count() != module.functions.items.len) {
+        if (self.function_continuations.count() != self.functions.items.len) {
             return error.MalformedFunctionCodeSectionMismatch;
         }
     }
@@ -3551,6 +3553,7 @@ pub const ModuleInstance = struct {
         scratch_allocator: std.mem.Allocator,
     };
 
+    /// module_def is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
             .allocator = allocator,
@@ -3565,7 +3568,8 @@ pub const ModuleInstance = struct {
         self.store.deinit();
     }
 
-    pub fn instantiate(self: *ModuleInstance, imports: ?[]const ModuleImports) !void {
+    /// imports is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
+    pub fn instantiate(self: *ModuleInstance, opts: struct { imports: ?[]const ModuleImports = null }) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
                 if (def.max != null and instance.max == null) {
@@ -3676,7 +3680,7 @@ pub const ModuleInstance = struct {
         var allocator = self.allocator;
 
         for (module_def.imports.functions.items) |*func_import_def| {
-            var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, imports);
+            var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, opts.imports);
 
             const type_def: *const FunctionTypeDefinition = &module_def.types.items[func_import_def.type_index];
             const is_type_signature_eql: bool = import_func.isTypeSignatureEql(type_def);
@@ -3689,7 +3693,7 @@ pub const ModuleInstance = struct {
         }
 
         for (module_def.imports.tables.items) |*table_import_def| {
-            var import_table: *const TableImport = try Helpers.findImportInMultiple(TableImport, &table_import_def.names, imports);
+            var import_table: *const TableImport = try Helpers.findImportInMultiple(TableImport, &table_import_def.names, opts.imports);
 
             var is_eql: bool = undefined;
             switch (import_table.data) {
@@ -3712,7 +3716,7 @@ pub const ModuleInstance = struct {
         }
 
         for (module_def.imports.memories.items) |*memory_import_def| {
-            var import_memory: *const MemoryImport = try Helpers.findImportInMultiple(MemoryImport, &memory_import_def.names, imports);
+            var import_memory: *const MemoryImport = try Helpers.findImportInMultiple(MemoryImport, &memory_import_def.names, opts.imports);
 
             var is_eql: bool = undefined;
             switch (import_memory.data) {
@@ -3733,7 +3737,7 @@ pub const ModuleInstance = struct {
         }
 
         for (module_def.imports.globals.items) |*global_import_def| {
-            var import_global: *const GlobalImport = try Helpers.findImportInMultiple(GlobalImport, &global_import_def.names, imports);
+            var import_global: *const GlobalImport = try Helpers.findImportInMultiple(GlobalImport, &global_import_def.names, opts.imports);
 
             var is_eql: bool = undefined;
             switch (import_global.data) {
