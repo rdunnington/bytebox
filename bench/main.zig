@@ -1,6 +1,6 @@
 const std = @import("std");
-const wasm = @import("wasm");
-const Val = wasm.Val;
+const bytebox = @import("bytebox");
+const Val = bytebox.Val;
 const Timer = std.time.Timer;
 
 const Benchmark = struct {
@@ -21,8 +21,8 @@ fn run(allocator: std.mem.Allocator, benchmark: Benchmark) !void {
 
     var timer = try Timer.start();
 
-    var module_def = try wasm.ModuleDefinition.init(wasm_data, allocator);
-    var module_instance = wasm.ModuleInstance.init(&module_def, allocator);
+    var module_def = try bytebox.ModuleDefinition.init(wasm_data, allocator);
+    var module_instance = bytebox.ModuleInstance.init(&module_def, allocator);
     try module_instance.instantiate(null);
 
     var input = [1]Val{.{ .I32 = benchmark.param }};

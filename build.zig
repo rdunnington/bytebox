@@ -23,21 +23,22 @@ pub fn build(b: *Builder) void {
     var bench_mandelbrot_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/mandelbrot.zig");
 
     hookExeWithStep(b, target, .{
-        .exe_name = "host",
-        .root_src = "src/main.zig",
+        .exe_name = "run",
+        .root_src = "run/main.zig",
         .step_name = "run",
         .description = "Run a wasm program",
+        .needs_root_package = true,
     });
     hookExeWithStep(b, target, .{
         .exe_name = "testsuite",
-        .root_src = "test/testsuite.zig",
+        .root_src = "test/main.zig",
         .step_name = "test",
         .description = "Run the test suite",
         .needs_root_package = true,
     });
     hookExeWithStep(b, target, .{
         .exe_name = "benchmark",
-        .root_src = "bench/benchmark.zig",
+        .root_src = "bench/main.zig",
         .step_name = "bench",
         .description = "Run the benchmark suite",
         .needs_root_package = true,
@@ -65,8 +66,8 @@ fn hookExeWithStep(b: *Builder, target: CrossTarget, opts: ExeOpts) void {
     exe.addPackage(pkg_stable_array);
     if (opts.needs_root_package) {
         const root_pkg = Pkg{
-            .name = "wasm",
-            .source = .{ .path = "src/vm.zig" },
+            .name = "bytebox",
+            .source = .{ .path = "src/core.zig" },
             .dependencies = &[_]Pkg{pkg_stable_array},
         };
         exe.addPackage(root_pkg);
