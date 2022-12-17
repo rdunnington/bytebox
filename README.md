@@ -30,7 +30,7 @@ zig build run -- <wasmfile>
 Or embed Bytebox in your own programs:
 
 ```
-# build.zig
+// build.zig
 const std = @import("std");
 
 pub fn build(b: *std.build.Builder) void {
@@ -47,7 +47,7 @@ pub fn build(b: *std.build.Builder) void {
     step.dependOn(&run.step);
 }
 
-# main.zig
+// main.zig
 const std = @import("std");
 const bytebox = @import("bytebox");
 
