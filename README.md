@@ -30,14 +30,14 @@ zig build run -- <wasmfile>
 Or embed Bytebox in your own programs:
 
 ```
-# build.zig
+// build.zig
 const std = @import("std");
 
 pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("my_program", "src/main.zig");
     exe.addPackage(std.build.Pkg{
         .name = "bytebox",
-        .source = .{ .path = "bytebox/src/core.zig" }, // assumes bytebox is a submodule located in the root dir
+        .source = .{ .path = "bytebox/src/core.zig" }, // submodule in the root dir
     });
     exe.setTarget(b.standardTargetOptions(.{}));
     exe.setBuildMode(b.standardReleaseOptions());
@@ -47,7 +47,7 @@ pub fn build(b: *std.build.Builder) void {
     step.dependOn(&run.step);
 }
 
-# main.zig
+// main.zig
 const std = @import("std");
 const bytebox = @import("bytebox");
 
