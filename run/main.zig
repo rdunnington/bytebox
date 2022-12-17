@@ -1,5 +1,5 @@
 const std = @import("std");
-const wasm = @import("vm.zig");
+const bytebox = @import("bytebox");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,7 +16,11 @@ pub fn main() !void {
 
     var cwd = std.fs.cwd();
     var wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filename, 1024 * 1024 * 128);
-    var module_def = try wasm.ModuleDefinition.init(wasm_data, allocator);
-    var module_instance = wasm.ModuleInstance.init(&module_def, allocator);
-    try module_instance.instantiate(null);
+    var module_def = bytebox.ModuleDefinition.init(allocator);
+    defer module_def.deinit();
+    try module_def.decode(wasm_data);
+
+    var module_instance = bytebox.ModuleInstance.init(&module_def, allocator);
+    defer module_instance.deinit();
+    try module_instance.instantiate(.{});
 }

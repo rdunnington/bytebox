@@ -1,7 +1,7 @@
 const std = @import("std");
-const wasm = @import("wasm");
-const ValType = wasm.ValType;
-const Val = wasm.Val;
+const bytebox = @import("bytebox");
+const ValType = bytebox.ValType;
+const Val = bytebox.Val;
 const print = std.debug.print;
 
 var g_verbose_logging = false;
@@ -228,81 +228,81 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
 
 fn isSameError(err: anyerror, err_string: []const u8) bool {
     return switch (err) {
-        wasm.MalformedError.MalformedMagicSignature => strcmp(err_string, "magic header not detected"),
-        wasm.MalformedError.MalformedUnexpectedEnd => strcmp(err_string, "unexpected end") or
+        bytebox.MalformedError.MalformedMagicSignature => strcmp(err_string, "magic header not detected"),
+        bytebox.MalformedError.MalformedUnexpectedEnd => strcmp(err_string, "unexpected end") or
             strcmp(err_string, "unexpected end of section or function") or
             strcmp(err_string, "length out of bounds"),
-        wasm.MalformedError.MalformedUnsupportedWasmVersion => strcmp(err_string, "unknown binary version"),
-        wasm.MalformedError.MalformedSectionId => strcmp(err_string, "malformed section id"),
-        wasm.MalformedError.MalformedTypeSentinel => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
-        wasm.MalformedError.MalformedLEB128 => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
-        wasm.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero byte expected"),
-        wasm.MalformedError.MalformedTooManyLocals => strcmp(err_string, "too many locals"),
-        wasm.MalformedError.MalformedFunctionCodeSectionMismatch => strcmp(err_string, "function and code section have inconsistent lengths"),
-        wasm.MalformedError.MalformedMissingDataCountSection => strcmp(err_string, "data count section required") or strcmp(err_string, "unknown data segment"),
-        wasm.MalformedError.MalformedDataCountMismatch => strcmp(err_string, "data count and data section have inconsistent lengths"),
-        wasm.MalformedError.MalformedDataType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
-        wasm.MalformedError.MalformedIllegalOpcode => strcmp(err_string, "illegal opcode") or strcmp(err_string, "integer representation too long"),
-        wasm.MalformedError.MalformedReferenceType => strcmp(err_string, "malformed reference type"),
-        wasm.MalformedError.MalformedSectionSizeMismatch => strcmp(err_string, "section size mismatch") or
+        bytebox.MalformedError.MalformedUnsupportedWasmVersion => strcmp(err_string, "unknown binary version"),
+        bytebox.MalformedError.MalformedSectionId => strcmp(err_string, "malformed section id"),
+        bytebox.MalformedError.MalformedTypeSentinel => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
+        bytebox.MalformedError.MalformedLEB128 => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
+        bytebox.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero byte expected"),
+        bytebox.MalformedError.MalformedTooManyLocals => strcmp(err_string, "too many locals"),
+        bytebox.MalformedError.MalformedFunctionCodeSectionMismatch => strcmp(err_string, "function and code section have inconsistent lengths"),
+        bytebox.MalformedError.MalformedMissingDataCountSection => strcmp(err_string, "data count section required") or strcmp(err_string, "unknown data segment"),
+        bytebox.MalformedError.MalformedDataCountMismatch => strcmp(err_string, "data count and data section have inconsistent lengths"),
+        bytebox.MalformedError.MalformedDataType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
+        bytebox.MalformedError.MalformedIllegalOpcode => strcmp(err_string, "illegal opcode") or strcmp(err_string, "integer representation too long"),
+        bytebox.MalformedError.MalformedReferenceType => strcmp(err_string, "malformed reference type"),
+        bytebox.MalformedError.MalformedSectionSizeMismatch => strcmp(err_string, "section size mismatch") or
             strcmp(err_string, "malformed section id") or
             strcmp(err_string, "function and code section have inconsistent lengths"), // this one is a bit of a hack to resolve custom.8.wasm
-        wasm.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
-        wasm.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
-        wasm.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or
+        bytebox.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
+        bytebox.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
+        bytebox.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or
             strcmp(err_string, "unexpected content after last section"),
-        wasm.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
-        wasm.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
-        wasm.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
+        bytebox.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
+        bytebox.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
+        bytebox.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
 
         // ValidationTypeMismatch: result arity handles select.2.wasm which is the exact same binary as select.1.wasm but the test expects a different error :/
-        wasm.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "invalid result arity"),
-        wasm.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
-        wasm.ValidationError.ValidationUnknownType => strcmp(err_string, "unknown type"),
-        wasm.ValidationError.ValidationUnknownFunction => std.mem.startsWith(u8, err_string, "unknown function"),
-        wasm.ValidationError.ValidationUnknownGlobal => std.mem.startsWith(u8, err_string, "unknown global"),
-        wasm.ValidationError.ValidationUnknownLocal => strcmp(err_string, "unknown local"),
-        wasm.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table"),
-        wasm.ValidationError.ValidationUnknownMemory => std.mem.startsWith(u8, err_string, "unknown memory"),
-        wasm.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element") or std.mem.startsWith(u8, err_string, "unknown elem segment"),
-        wasm.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or std.mem.startsWith(u8, err_string, "unknown data segment"),
-        wasm.ValidationError.ValidationTypeStackHeightMismatch => strcmp(err_string, "type mismatch"),
-        wasm.ValidationError.ValidationBadAlignment => strcmp(err_string, "alignment must not be larger than natural"),
-        wasm.ValidationError.ValidationUnknownLabel => strcmp(err_string, "unknown label"),
-        wasm.ValidationError.ValidationImmutableGlobal => strcmp(err_string, "global is immutable"),
-        wasm.ValidationError.ValidationBadConstantExpression => strcmp(err_string, "constant expression required") or strcmp(err_string, "type mismatch"),
-        wasm.ValidationError.ValidationGlobalReferencingMutableGlobal => strcmp(err_string, "constant expression required"),
-        wasm.ValidationError.ValidationUnknownBlockTypeIndex => strcmp(err_string, "type mismatch") or
+        bytebox.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "invalid result arity"),
+        bytebox.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
+        bytebox.ValidationError.ValidationUnknownType => strcmp(err_string, "unknown type"),
+        bytebox.ValidationError.ValidationUnknownFunction => std.mem.startsWith(u8, err_string, "unknown function"),
+        bytebox.ValidationError.ValidationUnknownGlobal => std.mem.startsWith(u8, err_string, "unknown global"),
+        bytebox.ValidationError.ValidationUnknownLocal => strcmp(err_string, "unknown local"),
+        bytebox.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table"),
+        bytebox.ValidationError.ValidationUnknownMemory => std.mem.startsWith(u8, err_string, "unknown memory"),
+        bytebox.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element") or std.mem.startsWith(u8, err_string, "unknown elem segment"),
+        bytebox.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or std.mem.startsWith(u8, err_string, "unknown data segment"),
+        bytebox.ValidationError.ValidationTypeStackHeightMismatch => strcmp(err_string, "type mismatch"),
+        bytebox.ValidationError.ValidationBadAlignment => strcmp(err_string, "alignment must not be larger than natural"),
+        bytebox.ValidationError.ValidationUnknownLabel => strcmp(err_string, "unknown label"),
+        bytebox.ValidationError.ValidationImmutableGlobal => strcmp(err_string, "global is immutable"),
+        bytebox.ValidationError.ValidationBadConstantExpression => strcmp(err_string, "constant expression required") or strcmp(err_string, "type mismatch"),
+        bytebox.ValidationError.ValidationGlobalReferencingMutableGlobal => strcmp(err_string, "constant expression required"),
+        bytebox.ValidationError.ValidationUnknownBlockTypeIndex => strcmp(err_string, "type mismatch") or
             strcmp(err_string, "unexpected end"), // bit of a hack for binary.166.wasm
-        wasm.ValidationError.ValidationSelectArity => strcmp(err_string, "invalid result arity"),
-        wasm.ValidationError.ValidationMultipleMemories => strcmp(err_string, "multiple memories"),
-        wasm.ValidationError.ValidationMemoryInvalidMaxLimit => strcmp(err_string, "size minimum must not be greater than maximum"),
-        wasm.ValidationError.ValidationMemoryMaxPagesExceeded => strcmp(err_string, "memory size must be at most 65536 pages (4GiB)"),
-        wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImport => strcmp(err_string, "unknown global"),
-        wasm.ValidationError.ValidationConstantExpressionGlobalMustBeImmutable => strcmp(err_string, "constant expression required"),
-        wasm.ValidationError.ValidationStartFunctionType => strcmp(err_string, "start function"),
-        wasm.ValidationError.ValidationLimitsMinMustNotBeLargerThanMax => strcmp(err_string, "size minimum must not be greater than maximum"),
-        wasm.ValidationError.ValidationConstantExpressionTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "constant expression required"),
-        wasm.ValidationError.ValidationDuplicateExportName => strcmp(err_string, "duplicate export name"),
-        wasm.ValidationError.ValidationFuncRefUndeclared => strcmp(err_string, "undeclared function reference"),
-        wasm.ValidationError.ValidationIfElseMismatch => strcmp(err_string, "END opcode expected"),
+        bytebox.ValidationError.ValidationSelectArity => strcmp(err_string, "invalid result arity"),
+        bytebox.ValidationError.ValidationMultipleMemories => strcmp(err_string, "multiple memories"),
+        bytebox.ValidationError.ValidationMemoryInvalidMaxLimit => strcmp(err_string, "size minimum must not be greater than maximum"),
+        bytebox.ValidationError.ValidationMemoryMaxPagesExceeded => strcmp(err_string, "memory size must be at most 65536 pages (4GiB)"),
+        bytebox.ValidationError.ValidationConstantExpressionGlobalMustBeImport => strcmp(err_string, "unknown global"),
+        bytebox.ValidationError.ValidationConstantExpressionGlobalMustBeImmutable => strcmp(err_string, "constant expression required"),
+        bytebox.ValidationError.ValidationStartFunctionType => strcmp(err_string, "start function"),
+        bytebox.ValidationError.ValidationLimitsMinMustNotBeLargerThanMax => strcmp(err_string, "size minimum must not be greater than maximum"),
+        bytebox.ValidationError.ValidationConstantExpressionTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "constant expression required"),
+        bytebox.ValidationError.ValidationDuplicateExportName => strcmp(err_string, "duplicate export name"),
+        bytebox.ValidationError.ValidationFuncRefUndeclared => strcmp(err_string, "undeclared function reference"),
+        bytebox.ValidationError.ValidationIfElseMismatch => strcmp(err_string, "END opcode expected"),
 
-        wasm.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
-        wasm.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
+        bytebox.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
+        bytebox.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
 
-        wasm.UninstantiableError.UninstantiableOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
-        wasm.UninstantiableError.UninstantiableOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
+        bytebox.UninstantiableError.UninstantiableOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
+        bytebox.UninstantiableError.UninstantiableOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
 
-        wasm.TrapError.TrapIntegerDivisionByZero => strcmp(err_string, "integer divide by zero"),
-        wasm.TrapError.TrapIntegerOverflow => strcmp(err_string, "integer overflow"),
-        wasm.TrapError.TrapIndirectCallTypeMismatch => strcmp(err_string, "indirect call type mismatch"),
-        wasm.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
-        wasm.TrapError.TrapOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
-        wasm.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
-        wasm.TrapError.TrapUninitializedElement => std.mem.startsWith(u8, err_string, "uninitialized element"),
-        wasm.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
-        wasm.TrapError.TrapStackExhausted => strcmp(err_string, "call stack exhausted"),
-        wasm.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
+        bytebox.TrapError.TrapIntegerDivisionByZero => strcmp(err_string, "integer divide by zero"),
+        bytebox.TrapError.TrapIntegerOverflow => strcmp(err_string, "integer overflow"),
+        bytebox.TrapError.TrapIndirectCallTypeMismatch => strcmp(err_string, "indirect call type mismatch"),
+        bytebox.TrapError.TrapInvalidIntegerConversion => strcmp(err_string, "invalid conversion to integer"),
+        bytebox.TrapError.TrapOutOfBoundsMemoryAccess => strcmp(err_string, "out of bounds memory access"),
+        bytebox.TrapError.TrapUndefinedElement => strcmp(err_string, "undefined element"),
+        bytebox.TrapError.TrapUninitializedElement => std.mem.startsWith(u8, err_string, "uninitialized element"),
+        bytebox.TrapError.TrapOutOfBoundsTableAccess => strcmp(err_string, "out of bounds table access"),
+        bytebox.TrapError.TrapStackExhausted => strcmp(err_string, "call stack exhausted"),
+        bytebox.TrapError.TrapUnreachable => strcmp(err_string, "unreachable"),
 
         else => false,
     };
@@ -483,8 +483,8 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
 const Module = struct {
     filename: []const u8 = "",
-    def: ?wasm.ModuleDefinition = null,
-    inst: ?wasm.ModuleInstance = null,
+    def: ?bytebox.ModuleDefinition = null,
+    inst: ?bytebox.ModuleInstance = null,
 };
 
 const TestOpts = struct {
@@ -495,7 +495,7 @@ const TestOpts = struct {
     force_wasm_regen_only: bool = false,
 };
 
-fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
+fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
     const Functions = struct {
         fn printI32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
@@ -549,7 +549,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     };
 
     const Helpers = struct {
-        fn addGlobal(imports: *wasm.ModuleImports, _allocator: std.mem.Allocator, mut: wasm.GlobalMut, comptime T: type, value: T, name: []const u8) !void {
+        fn addGlobal(imports: *bytebox.ModuleImports, _allocator: std.mem.Allocator, mut: bytebox.GlobalMut, comptime T: type, value: T, name: []const u8) !void {
             const val: Val = switch (T) {
                 i32 => Val{ .I32 = value },
                 i64 => Val{ .I64 = value },
@@ -557,18 +557,18 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
                 f64 => Val{ .F64 = value },
                 else => unreachable,
             };
-            var global = try _allocator.create(wasm.GlobalInstance);
-            global.* = wasm.GlobalInstance{
+            var global = try _allocator.create(bytebox.GlobalInstance);
+            global.* = bytebox.GlobalInstance{
                 .mut = mut,
                 .value = val,
             };
-            try imports.globals.append(wasm.GlobalImport{
+            try imports.globals.append(bytebox.GlobalImport{
                 .name = try _allocator.dupe(u8, name),
                 .data = .{ .Host = global },
             });
         }
     };
-    var imports: wasm.ModuleImports = try wasm.ModuleImports.init("spectest", null, allocator);
+    var imports: bytebox.ModuleImports = try bytebox.ModuleImports.init("spectest", null, allocator);
 
     const no_returns = &[0]ValType{};
 
@@ -581,36 +581,36 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !wasm.ModuleImports {
     try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
     try imports.addHostFunction("print", null, &[_]ValType{}, no_returns, Functions.print);
 
-    const TableInstance = wasm.TableInstance;
+    const TableInstance = bytebox.TableInstance;
 
     var table = try allocator.create(TableInstance);
-    table.* = try TableInstance.init(ValType.FuncRef, wasm.Limits{ .min = 10, .max = 20 }, allocator);
-    try imports.tables.append(wasm.TableImport{
+    table.* = try TableInstance.init(ValType.FuncRef, bytebox.Limits{ .min = 10, .max = 20 }, allocator);
+    try imports.tables.append(bytebox.TableImport{
         .name = try allocator.dupe(u8, "table"),
         .data = .{ .Host = table },
     });
 
-    const MemoryInstance = wasm.MemoryInstance;
+    const MemoryInstance = bytebox.MemoryInstance;
 
     var memory = try allocator.create(MemoryInstance);
-    memory.* = MemoryInstance.init(wasm.Limits{
+    memory.* = MemoryInstance.init(bytebox.Limits{
         .min = 1,
         .max = 2,
     });
     _ = memory.grow(1);
-    try imports.memories.append(wasm.MemoryImport{
+    try imports.memories.append(bytebox.MemoryImport{
         .name = try allocator.dupe(u8, "memory"),
         .data = .{ .Host = memory },
     });
 
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, i32, 666, "global_i32");
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, i64, 666, "global_i64");
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, f32, 666.6, "global_f32");
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, f64, 666.6, "global_f64");
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, i32, 0, "global-i32");
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Immutable, f32, 0, "global-f32");
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Mutable, i32, 0, "global-mut-i32");
-    try Helpers.addGlobal(&imports, allocator, wasm.GlobalMut.Mutable, i64, 0, "global-mut-i64");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Immutable, i32, 666, "global_i32");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Immutable, i64, 666, "global_i64");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Immutable, f32, 666.6, "global_f32");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Immutable, f64, 666.6, "global_f64");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Immutable, i32, 0, "global-i32");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Immutable, f32, 0, "global-f32");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Mutable, i32, 0, "global-mut-i32");
+    try Helpers.addGlobal(&imports, allocator, bytebox.GlobalMut.Mutable, i64, 0, "global-mut-i64");
 
     return imports;
 }
@@ -650,7 +650,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     name_to_module.ensureTotalCapacity(256) catch unreachable;
 
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
-    var imports = std.ArrayList(wasm.ModuleImports).init(allocator);
+    var imports = std.ArrayList(bytebox.ModuleImports).init(allocator);
     defer {
         var spectest_imports = imports.items[0];
         for (spectest_imports.tables.items) |*item| {
@@ -711,7 +711,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 logVerbose("\tSetting export module name to {s}\n", .{c.import_name});
 
-                var module_imports: wasm.ModuleImports = try (module.inst.?).exports(c.import_name);
+                var module_imports: bytebox.ModuleImports = try (module.inst.?).exports(c.import_name);
                 try imports.append(module_imports);
                 continue;
             },
@@ -742,7 +742,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
             module.filename = try allocator.dupe(u8, module_filename);
 
-            module.def = wasm.ModuleDefinition.init(module_data, allocator) catch |e| {
+            module.def = bytebox.ModuleDefinition.init(allocator);
+            (module.def.?).decode(module_data) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
                     expected_str_or_null = unwrapped_expected;
@@ -802,8 +803,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 else => {},
             }
 
-            module.inst = wasm.ModuleInstance.init(&module.def.?, allocator);
-            (module.inst.?).instantiate(imports.items) catch |e| {
+            module.inst = bytebox.ModuleInstance.init(&module.def.?, allocator);
+            (module.inst.?).instantiate(.{ .imports = imports.items }) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
                         logVerbose("\tSuccess!\n", .{});
@@ -850,7 +851,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 }
 
                 const num_expected_returns = if (c.expected_returns) |returns| returns.items.len else 0;
-                var returns_placeholder = std.ArrayList(wasm.Val).init(allocator);
+                var returns_placeholder = std.ArrayList(bytebox.Val).init(allocator);
                 defer returns_placeholder.deinit();
 
                 try returns_placeholder.resize(num_expected_returns);
@@ -870,7 +871,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         };
                     },
                     .Get => {
-                        var val_or_error: anyerror!wasm.Val = (module.inst.?).getGlobal(c.action.field);
+                        var val_or_error: anyerror!bytebox.Val = (module.inst.?).getGlobal(c.action.field);
                         if (val_or_error) |value| {
                             returns[0] = value;
                         } else |e| {
@@ -948,7 +949,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         };
                     },
                     .Get => {
-                        var val_or_error: anyerror!wasm.Val = (module.inst.?).getGlobal(c.action.field);
+                        var val_or_error: anyerror!bytebox.Val = (module.inst.?).getGlobal(c.action.field);
                         if (val_or_error) |value| {
                             returns[0] = value;
                         } else |e| {
