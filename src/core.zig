@@ -49,9 +49,11 @@ pub const AssertError = error{
     AssertIncompleteInstruction,
     AssertUnknownInstruction,
     AssertUnknownExport,
-    AssertAttemptToSetImmutable,
     AssertMissingCallFrame,
     AssertInvalidFunction,
+
+    ModuleAlreadyDecoded,
+    ModuleAlreadyInstantiated,
 };
 
 pub const ValidationError = error{
@@ -2547,6 +2549,8 @@ pub const ModuleDefinition = struct {
     label_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
 
+    is_decoded: bool = false,
+
     pub fn init(allocator: std.mem.Allocator) ModuleDefinition {
         var module = ModuleDefinition{
             .allocator = allocator,
@@ -2589,6 +2593,12 @@ pub const ModuleDefinition = struct {
     }
 
     pub fn decode(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
+        if (self.is_decoded == false) {
+            self.is_decoded = true;
+        } else {
+            return AssertError.ModuleAlreadyDecoded;
+        }
+
         self.decode_internal(wasm) catch |e| {
             var wrapped_error: anyerror = switch (e) {
                 error.EndOfStream => error.MalformedUnexpectedEnd,
@@ -3544,6 +3554,7 @@ pub const ModuleInstance = struct {
     stack: Stack,
     store: Store,
     module_def: *const ModuleDefinition,
+    is_instantiated: bool = false,
 
     const CallContext = struct {
         module: *ModuleInstance,
@@ -3672,6 +3683,12 @@ pub const ModuleInstance = struct {
                 return null;
             }
         };
+
+        if (self.is_instantiated == false) {
+            self.is_instantiated = true;
+        } else {
+            return AssertError.ModuleAlreadyInstantiated;
+        }
 
         try self.stack.reserveStackSpace(1024 * 1024 * 1); // 1MB
 
@@ -4493,9 +4510,6 @@ pub const ModuleInstance = struct {
                 Opcode.Global_Set => {
                     var global_index: u32 = instruction.immediate;
                     var global: *GlobalInstance = current_store.getGlobal(global_index);
-                    if (global.mut == GlobalMut.Immutable) {
-                        return error.AssertAttemptToSetImmutable;
-                    }
                     global.value = try stack.popValue();
                 },
                 Opcode.Table_Get => {
