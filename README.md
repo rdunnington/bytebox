@@ -70,7 +70,9 @@ pub fn main() !void {
 
 ## Status
 
-[WebAssembly](https://webassembly.github.io/spec/core/index.html) support:
+This project is unstable and still in development.
+
+### [WebAssembly](https://webassembly.github.io/spec/core/index.html) support:
 
 | Status | Feature |
 | --- | --- |
@@ -84,9 +86,19 @@ pub fn main() !void {
 |✔|Bulk memory and table instructions|
 |❌|Vector instructions|
 
-### Future
-This project is still a work in progress. Plans for further development include:
+### Roadmap
+These tasks must be completed to enter alpha:
+* Documentation
 * Vector instructions
-* API ergonomics
-* Optimization
-* WASI
+* API ergonomics pass
+* Crash hardening
+* General TODO/code cleanup
+
+To enter beta:
+* No major breaking API changes after this point
+* Performance within 10% of other well-known interpreters (e.g. [micro-wasm-runtime](https://github.com/bytecodealliance/wasm-micro-runtime), [wasm3](https://github.com/wasm3/wasm3))
+* WASI support
+
+To have a 1.0 release:
+* Tested with a wide variety of wasm programs
+* Successfully used in other beta-quality projects
