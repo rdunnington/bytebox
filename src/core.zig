@@ -105,6 +105,78 @@ pub const TrapError = error{
 
 pub const WasmError = MalformedError || ValidationError || UnlinkableError || UninstantiableError || AssertError || TrapError;
 
+const ScratchAllocator = struct {
+    buffer: StableArray(u8),
+
+    const InitOpts = struct {
+        max_size: usize,
+    };
+
+    fn init(opts: InitOpts) ScratchAllocator {
+        return ScratchAllocator{
+            .buffer = StableArray(u8).init(opts.max_size),
+        };
+    }
+
+    fn allocator(self: *ScratchAllocator) std.mem.Allocator {
+        return std.mem.Allocator.init(self, alloc, resize, free);
+    }
+
+    pub fn reset(self: *ScratchAllocator) void {
+        self.buffer.resize(0) catch unreachable;
+    }
+
+    fn alloc(
+        self: *ScratchAllocator,
+        len: usize,
+        ptr_align: u29,
+        len_align: u29,
+        ret_addr: usize,
+    ) std.mem.Allocator.Error![]u8 {
+        _ = ret_addr;
+        _ = len_align;
+
+        const alloc_size = len;
+        const offset_begin = std.mem.alignForward(self.buffer.items.len, ptr_align);
+        const offset_end = offset_begin + alloc_size;
+        self.buffer.resize(offset_end) catch {
+            return std.mem.Allocator.Error.OutOfMemory;
+        };
+        return self.buffer.items[offset_begin..offset_end];
+    }
+
+    fn resize(
+        self: *ScratchAllocator,
+        old_mem: []u8,
+        old_align: u29,
+        new_size: usize,
+        len_align: u29,
+        ret_addr: usize,
+    ) ?usize {
+        _ = self;
+        _ = old_align;
+        _ = ret_addr;
+
+        if (new_size > old_mem.len) {
+            return null;
+        }
+        const aligned_size: usize = if (len_align == 0) new_size else std.mem.alignForward(new_size, len_align);
+        return aligned_size;
+    }
+
+    fn free(
+        self: *ScratchAllocator,
+        old_mem: []u8,
+        old_align: u29,
+        ret_addr: usize,
+    ) void {
+        _ = self;
+        _ = old_mem;
+        _ = old_align;
+        _ = ret_addr;
+    }
+};
+
 const Opcode = enum(u16) {
     Unreachable = 0x00,
     Noop = 0x01,
@@ -3551,6 +3623,7 @@ pub const Store = struct {
 
 pub const ModuleInstance = struct {
     allocator: std.mem.Allocator,
+    scratch_allocator: ?ScratchAllocator,
     stack: Stack,
     store: Store,
     module_def: *const ModuleDefinition,
@@ -3568,6 +3641,7 @@ pub const ModuleInstance = struct {
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
             .allocator = allocator,
+            .scratch_allocator = null,
             .stack = Stack.init(allocator),
             .store = Store.init(allocator),
             .module_def = module_def,
@@ -4036,7 +4110,13 @@ pub const ModuleInstance = struct {
             .locals = locals,
         });
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
-        executeWasm(&self.stack, self.allocator, func.offset_into_instructions) catch |err| {
+
+        // lazy-init scratch allocator
+        if (self.scratch_allocator == null) {
+            self.scratch_allocator = ScratchAllocator.init(.{ .max_size = 1024 * 64 });
+        }
+
+        executeWasm(&self.stack, self.allocator, &self.scratch_allocator.?, func.offset_into_instructions) catch |err| {
             self.stack.forceClearAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
@@ -4120,7 +4200,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn executeWasm(stack: *Stack, allocator: std.mem.Allocator, root_offset: u32) !void {
+    fn executeWasm(stack: *Stack, allocator: std.mem.Allocator, scratch_allocator: *ScratchAllocator, root_offset: u32) !void {
         const Helpers = struct {
             fn seek(offset: u32, max: usize) !u32 {
                 if (offset < max or offset == Label.k_invalid_continuation) {
@@ -4267,10 +4347,7 @@ pub const ModuleInstance = struct {
         var instruction_offset: u32 = root_offset;
 
         while (instruction_offset != Label.k_invalid_continuation) {
-            var arena_allocator = std.heap.ArenaAllocator.init(allocator);
-            defer arena_allocator.deinit();
-
-            var scratch_allocator = arena_allocator.allocator();
+            scratch_allocator.reset();
 
             var current_callframe: *CallFrame = try stack.findCurrentFrame();
             var current_store: *Store = &current_callframe.module_instance.store;
@@ -4280,7 +4357,7 @@ pub const ModuleInstance = struct {
                 .module_def = current_callframe.module_instance.module_def,
                 .stack = stack,
                 .allocator = allocator,
-                .scratch_allocator = scratch_allocator,
+                .scratch_allocator = scratch_allocator.allocator(),
             };
 
             const instructions: []const Instruction = context.module_def.code.instructions.items;
@@ -4319,7 +4396,7 @@ pub const ModuleInstance = struct {
                     next_instruction = try Helpers.seek(end_offset, instructions.len);
                 },
                 Opcode.End => {
-                    var returns = std.ArrayList(Val).init(scratch_allocator);
+                    var returns = std.ArrayList(Val).init(context.scratch_allocator);
                     defer returns.deinit();
 
                     // id 0 means this is the end of a function, otherwise it's the end of a block
