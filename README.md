@@ -13,7 +13,7 @@ Bytebox currently builds with [Zig 0.10.0](https://ziglang.org/download). Other 
 
 ### Run
 
-```
+```sh
 git clone --recurse-submodules https://github.com/rdunnington/bytebox.git
 cd bytebox
 zig build test  # run the official WebAssembly spec testsuite
@@ -23,13 +23,13 @@ zig build bench # run the benchmarks (not robust)
 ### Usage
 
 You can use the standalone runner to load and execute WebAssembly programs:
-```
+```sh
 zig build run -- <wasmfile>
 ```
 
 Or embed Bytebox in your own programs:
 
-```
+```zig
 // build.zig
 const std = @import("std");
 
