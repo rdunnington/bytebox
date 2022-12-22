@@ -443,8 +443,8 @@ pub const Val = union(ValType) {
     F32: f32,
     F64: f64,
     FuncRef: struct {
-        module_instance: ?*ModuleInstance,
-        index: u32, // index into VmState.functions
+        module_instance: ?*ModuleInstance, // TODO remove null flag by pointing to dummy module, should help cache coherency
+        index: u32, // index into functions
     },
     ExternRef: u32, // TODO figure out what this indexes
 
@@ -491,8 +491,6 @@ pub const Val = union(ValType) {
             },
             else => unreachable,
         }
-
-        std.debug.print("\tExpected value of type {}, but got {}\n", .{ T, val });
 
         return error.ValidationTypeMismatch;
     }
@@ -565,224 +563,80 @@ const Label = struct {
 
     blocktype: BlockTypeValue,
     continuation: u32,
-    last_label_index: i32,
-
-    fn isFirstInCallFrame(label: *const Label) bool {
-        return label.last_label_index == -1;
-    }
+    start_offset_values: u32,
 };
 
 const CallFrame = struct {
     func: *const FunctionInstance,
     module_instance: *ModuleInstance,
     locals: std.ArrayList(Val),
-};
 
-const StackItemType = enum(u8) {
-    Val,
-    Label,
-    Frame,
-};
-const StackItem = union(StackItemType) {
-    Val: Val,
-    Label: Label,
-    Frame: CallFrame,
+    start_offset_labels: u16,
 };
 
 const Stack = struct {
+    values: []Val,
+    labels: []Label,
+    frames: []CallFrame,
+    num_values: u32,
+    num_labels: u16,
+    num_frames: u16,
+    mem: []u8,
+    allocator: std.mem.Allocator,
+
     const Self = @This();
+
+    const AllocOpts = struct {
+        max_values: u32,
+        max_labels: u16,
+        max_frames: u16,
+    };
 
     fn init(allocator: std.mem.Allocator) Self {
         var self = Self{
-            .stack = std.ArrayList(StackItem).init(allocator),
+            .values = &[_]Val{},
+            .labels = &[_]Label{},
+            .frames = &[_]CallFrame{},
+            .num_values = 0,
+            .num_labels = 0,
+            .num_frames = 0,
+            .mem = &[_]u8{},
+            .allocator = allocator,
         };
+
         return self;
     }
 
     fn deinit(self: *Self) void {
-        self.stack.deinit();
+        self.forceClearAll();
+        self.allocator.free(self.mem);
     }
 
-    fn reserveStackSpace(self: *Self, num_bytes: usize) !void {
-        const num_items = num_bytes / @sizeOf(StackItem);
-        try self.stack.ensureTotalCapacityPrecise(num_items);
+    fn allocMemory(self: *Self, opts: AllocOpts) !void {
+        const alignment = std.math.max3(@alignOf(Val), @alignOf(Label), @alignOf(CallFrame));
+        const values_alloc_size = std.mem.alignForward(@intCast(usize, opts.max_values) * @sizeOf(Val), alignment);
+        const labels_alloc_size = std.mem.alignForward(@intCast(usize, opts.max_labels) * @sizeOf(Label), alignment);
+        const frames_alloc_size = std.mem.alignForward(@intCast(usize, opts.max_frames) * @sizeOf(CallFrame), alignment);
+        const total_alloc_size: usize = values_alloc_size + labels_alloc_size + frames_alloc_size;
+
+        const begin_labels = values_alloc_size;
+        const begin_frames = values_alloc_size + labels_alloc_size;
+
+        self.mem = try self.allocator.alloc(u8, total_alloc_size);
+        self.values.ptr = @ptrCast([*]Val, @alignCast(@alignOf(Val), self.mem.ptr));
+        self.values.len = opts.max_values;
+        self.labels.ptr = @ptrCast([*]Label, @alignCast(@alignOf(Label), self.mem[begin_labels..].ptr));
+        self.labels.len = opts.max_labels;
+        self.frames.ptr = @ptrCast([*]CallFrame, @alignCast(@alignOf(CallFrame), self.mem[begin_frames..].ptr));
+        self.frames.len = opts.max_frames;
     }
 
-    fn top(self: *const Self) !*const StackItem {
-        if (self.stack.items.len > 0) {
-            return &self.stack.items[self.stack.items.len - 1];
-        }
-        return error.OutOfBounds;
-    }
-
-    fn push(self: *Self, item: StackItem) !void {
-        if (self.stack.items.len == self.stack.capacity) {
+    fn pushValue(self: *Self, value: Val) !void {
+        if (self.num_values < self.values.len) {
+            self.values[self.num_values] = value;
+            self.num_values += 1;
+        } else {
             return error.TrapStackExhausted;
-        }
-        self.stack.appendAssumeCapacity(item);
-    }
-
-    fn pop(self: *Self) !StackItem {
-        if (self.stack.items.len > 0) {
-            const index = self.stack.items.len - 1;
-            return self.stack.orderedRemove(index);
-        }
-        return error.OutOfBounds;
-    }
-
-    fn topValue(self: *const Self) !Val {
-        var item = try self.top();
-        switch (item.*) {
-            .Val => |v| return v,
-            .Label => return error.ValidationTypeMismatch,
-            .Frame => return error.ValidationTypeMismatch,
-        }
-    }
-
-    fn pushValue(self: *Self, v: Val) !void {
-        try self.push(StackItem{ .Val = v });
-    }
-
-    fn popValue(self: *Self) !Val {
-        var item = try self.pop();
-        switch (item) {
-            .Val => |v| return v,
-            .Label => return error.ValidationTypeMismatch,
-            .Frame => return error.ValidationTypeMismatch,
-        }
-    }
-
-    fn pushLabel(self: *Self, blocktype: BlockTypeValue, continuation: u32) !void {
-        try self.push(StackItem{ .Label = .{
-            .blocktype = blocktype,
-            .continuation = continuation,
-            .last_label_index = self.last_label_index,
-        } });
-
-        self.last_label_index = @intCast(i32, self.stack.items.len) - 1;
-    }
-
-    fn popLabel(self: *Self) !Label {
-        var item = try self.pop();
-        var label = switch (item) {
-            .Val => return error.ValidationTypeMismatch,
-            .Label => |label| label,
-            .Frame => return error.ValidationTypeMismatch,
-        };
-
-        self.last_label_index = label.last_label_index;
-
-        return label;
-    }
-
-    fn topLabel(self: *const Self) *const Label {
-        return &self.stack.items[@intCast(usize, self.last_label_index)].Label;
-    }
-
-    fn findLabel(self: *Self, id: u32) !*const Label {
-        if (self.last_label_index < 0) {
-            return error.AssertInvalidLabel;
-        }
-
-        var stack_label_id: u32 = 0;
-        var label_index = self.last_label_index;
-        while (label_index > 0) {
-            if (stack_label_id == id) {
-                return &self.stack.items[@intCast(usize, label_index)].Label;
-            }
-            switch (self.stack.items[@intCast(usize, label_index)]) {
-                .Label => |*label| {
-                    if (label.last_label_index == -1) {
-                        return error.AssertInvalidLabel;
-                    }
-                    label_index = label.last_label_index;
-                },
-                else => {
-                    unreachable; // last_label_index should only point to Labels
-                },
-            }
-            stack_label_id += 1;
-        }
-
-        unreachable;
-    }
-
-    fn pushFrame(self: *Self, frame: CallFrame) !void {
-        try self.push(StackItem{ .Frame = frame });
-
-        // frames reset the label index since you can't jump to labels in a different function
-        self.last_label_index = -1;
-    }
-
-    fn popFrame(self: *Self) !void {
-        var item = try self.pop();
-        switch (item) {
-            .Val => return error.ValidationTypeMismatch,
-            .Label => return error.ValidationTypeMismatch,
-            .Frame => |*frame| {
-                frame.locals.deinit();
-            },
-        }
-
-        // have to do a linear search since we don't know what the last index was
-        var item_index = self.stack.items.len;
-        while (item_index > 0) {
-            item_index -= 1;
-            switch (self.stack.items[item_index]) {
-                .Val => {},
-                .Label => {
-                    self.last_label_index = @intCast(i32, item_index);
-                    break;
-                },
-                .Frame => {
-                    unreachable; // frames should always be pushed with a label above them
-                },
-            }
-        }
-    }
-
-    fn findCurrentFrame(self: *const Self) !*CallFrame {
-        var item_index: i32 = @intCast(i32, self.stack.items.len) - 1;
-        while (item_index >= 0) : (item_index -= 1) {
-            var index = @intCast(usize, item_index);
-            if (std.meta.activeTag(self.stack.items[index]) == .Frame) {
-                var frame: *CallFrame = &self.stack.items[index].Frame;
-                return frame; // why doesn't this get returned properly in the normal case??
-            }
-        }
-
-        return error.AssertMissingCallFrame;
-    }
-
-    fn popI32(self: *Self) !i32 {
-        var val: Val = try self.popValue();
-        switch (val) {
-            ValType.I32 => |value| return value,
-            else => return error.ValidationTypeMismatch,
-        }
-    }
-
-    fn popI64(self: *Self) !i64 {
-        var val: Val = try self.popValue();
-        switch (val) {
-            ValType.I64 => |value| return value,
-            else => return error.ValidationTypeMismatch,
-        }
-    }
-
-    fn popF32(self: *Self) !f32 {
-        var val: Val = try self.popValue();
-        switch (val) {
-            ValType.F32 => |value| return value,
-            else => return error.ValidationTypeMismatch,
-        }
-    }
-
-    fn popF64(self: *Self) !f64 {
-        var val: Val = try self.popValue();
-        switch (val) {
-            ValType.F64 => |value| return value,
-            else => return error.ValidationTypeMismatch,
         }
     }
 
@@ -806,26 +660,130 @@ const Stack = struct {
         try self.pushValue(typed);
     }
 
-    fn size(self: *const Self) usize {
-        return self.stack.items.len;
+    fn popValue(self: *Self) !Val {
+        self.num_values -= 1;
+        var value: Val = self.values[self.num_values];
+        return value;
+    }
+
+    fn topValue(self: *const Self) !Val {
+        var value: Val = self.values[self.num_values - 1];
+        return value;
+    }
+
+    fn popI32(self: *Self) !i32 {
+        var value: Val = try self.popValue();
+        return value.I32;
+    }
+
+    fn popI64(self: *Self) !i64 {
+        var value: Val = try self.popValue();
+        return value.I64;
+    }
+
+    fn popF32(self: *Self) !f32 {
+        var value: Val = try self.popValue();
+        return value.F32;
+    }
+
+    fn popF64(self: *Self) !f64 {
+        var value: Val = try self.popValue();
+        return value.F64;
+    }
+
+    fn pushLabel(self: *Self, blocktype: BlockTypeValue, continuation: u32) !void {
+        if (self.num_labels < self.labels.len) {
+            self.labels[self.num_labels] = Label{
+                .blocktype = blocktype,
+                .continuation = continuation,
+                .start_offset_values = self.num_values,
+            };
+            self.num_labels += 1;
+        } else {
+            return error.TrapStackExhausted;
+        }
+    }
+
+    fn popLabel(self: *Self) Label {
+        self.num_labels -= 1;
+        return self.labels[self.num_labels];
+    }
+
+    fn findLabel(self: *const Self, id: u32) *const Label {
+        const index: usize = (self.num_labels - 1) - id;
+        return &self.labels[index];
+    }
+
+    fn topLabel(self: *const Self) *const Label {
+        return &self.labels[self.num_labels - 1];
+    }
+
+    fn frameLabel(self: *const Self) *const Label {
+        var frame: *const CallFrame = self.topFrame();
+        var frame_label: *const Label = &self.labels[frame.start_offset_labels];
+        return frame_label;
+    }
+
+    fn popAllUntilLabelId(self: *Self, label_id: u32, pop_final_label: bool) void {
+        var label_index: u16 = @intCast(u16, (self.num_labels - label_id) - 1);
+        var label: *const Label = &self.labels[label_index];
+
+        self.num_values = label.start_offset_values;
+        if (pop_final_label) {
+            self.num_labels = label_index;
+        } else {
+            self.num_labels = label_index + 1;
+        }
+    }
+
+    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, locals: std.ArrayList(Val)) !void {
+        if (self.num_frames < self.frames.len) {
+            self.frames[self.num_frames] = CallFrame{
+                .func = func,
+                .module_instance = module_instance,
+                .locals = locals,
+                .start_offset_labels = self.num_labels,
+            };
+            self.num_frames += 1;
+            return;
+        }
+        return error.TrapStackExhausted;
+    }
+
+    fn popFrame(self: *Self) void {
+        self.num_frames -= 1;
+        self.frames[self.num_frames].locals.deinit(); // TODO avoid this alloc/dealloc somehow
+    }
+
+    fn topFrame(self: *const Self) *CallFrame {
+        return &self.frames[self.num_frames - 1];
+    }
+
+    fn isTopFrameRootFunction(self: *const Self) bool {
+        return self.num_frames == 1;
     }
 
     fn forceClearAll(self: *Self) void {
-        while (self.stack.items.len > 0) {
-            var item = self.pop() catch unreachable;
-            switch (item) {
-                .Val => {},
-                .Label => {},
-                .Frame => |callframe| {
-                    callframe.locals.deinit();
-                },
-            }
+        for (self.frames[0..self.num_frames]) |*frame| {
+            frame.locals.deinit();
         }
-        self.last_label_index = -1;
+
+        self.num_values = 0;
+        self.num_labels = 0;
+        self.num_frames = 0;
     }
 
-    stack: std.ArrayList(StackItem),
-    last_label_index: i32 = -1,
+    fn popAllForCurrentFrame(self: *Self) Label {
+        var frame: *CallFrame = self.topFrame();
+        frame.locals.deinit();
+        var frame_label: Label = self.labels[frame.start_offset_labels];
+
+        self.num_values = frame_label.start_offset_values;
+        self.num_labels = frame.start_offset_labels;
+        self.num_frames -= 1;
+
+        return frame_label;
+    }
 };
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
@@ -3764,7 +3722,12 @@ pub const ModuleInstance = struct {
             return AssertError.ModuleAlreadyInstantiated;
         }
 
-        try self.stack.reserveStackSpace(1024 * 1024 * 1); // 1MB
+        // TODO expose these options to the user
+        try self.stack.allocMemory(.{
+            .max_values = 1024 * 64,
+            .max_labels = 1024 * 8,
+            .max_frames = 256,
+        });
 
         var store: *Store = &self.store;
         var module_def: *const ModuleDefinition = self.module_def;
@@ -4104,11 +4067,7 @@ pub const ModuleInstance = struct {
         // TODO move function continuation data into FunctionDefinition
         var function_continuation = self.module_def.function_continuations.get(func.offset_into_instructions) orelse return error.AssertInvalidFunction;
 
-        try self.stack.pushFrame(CallFrame{
-            .func = &func,
-            .module_instance = self,
-            .locals = locals,
-        });
+        try self.stack.pushFrame(&func, self, locals);
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
 
         // lazy-init scratch allocator
@@ -4120,10 +4079,6 @@ pub const ModuleInstance = struct {
             self.stack.forceClearAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
-
-        if (self.stack.size() != returns.len) {
-            return error.ValidationTypeMismatch;
-        }
 
         if (returns.len > 0) {
             var index: i32 = @intCast(i32, returns.len - 1);
@@ -4349,7 +4304,7 @@ pub const ModuleInstance = struct {
         while (instruction_offset != Label.k_invalid_continuation) {
             scratch_allocator.reset();
 
-            var current_callframe: *CallFrame = try stack.findCurrentFrame();
+            var current_callframe: *CallFrame = stack.topFrame();
             var current_store: *Store = &current_callframe.module_instance.store;
 
             var context = CallContext{
@@ -4399,27 +4354,30 @@ pub const ModuleInstance = struct {
                     var returns = std.ArrayList(Val).init(context.scratch_allocator);
                     defer returns.deinit();
 
-                    // id 0 means this is the end of a function, otherwise it's the end of a block
-                    const label_ptr: *const Label = stack.topLabel();
-                    if (label_ptr.isFirstInCallFrame() == false) {
-                        try popValues(&returns, stack, label_ptr.blocktype.getBlocktypeReturnTypes(context.module_def));
-                        _ = try stack.popLabel();
+                    // determine if this is a a scope or function call exit
+                    const top_label: *const Label = stack.topLabel();
+                    const frame_label: *const Label = stack.frameLabel();
+                    if (top_label != frame_label) {
+                        try popValues(&returns, stack, top_label.blocktype.getBlocktypeReturnTypes(context.module_def));
+                        _ = stack.popLabel();
                         try pushValues(returns.items, stack);
                     } else {
                         {
-                            var frame: *const CallFrame = try stack.findCurrentFrame();
+                            var frame: *const CallFrame = stack.topFrame();
                             const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
                             try popValues(&returns, stack, return_types);
                         }
 
-                        var label = try stack.popLabel();
-                        try stack.popFrame();
-                        const is_root_function = (stack.size() == 0);
+                        const is_root_function = stack.isTopFrameRootFunction();
+
+                        var label = stack.popLabel();
+                        stack.popFrame();
                         try pushValues(returns.items, stack);
+
                         if (is_root_function) {
                             return;
                         } else {
-                            const new_frame: *const CallFrame = try stack.findCurrentFrame();
+                            const new_frame: *const CallFrame = stack.topFrame();
                             const new_instructions_len = new_frame.module_instance.module_def.code.instructions.items.len;
                             next_instruction = try Helpers.seek(label.continuation, new_instructions_len);
                         }
@@ -4562,20 +4520,20 @@ pub const ModuleInstance = struct {
                 },
                 Opcode.Local_Get => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = try stack.findCurrentFrame();
+                    var frame: *const CallFrame = stack.topFrame();
                     var v: Val = frame.locals.items[locals_index];
                     try stack.pushValue(v);
                 },
                 Opcode.Local_Set => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = try stack.findCurrentFrame();
+                    var frame: *const CallFrame = stack.topFrame();
                     var v: Val = try stack.popValue();
 
                     frame.locals.items[locals_index] = v;
                 },
                 Opcode.Local_Tee => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = try stack.findCurrentFrame();
+                    var frame: *const CallFrame = stack.topFrame();
                     var v: Val = try stack.topValue();
                     frame.locals.items[locals_index] = v;
                 },
@@ -5804,35 +5762,28 @@ pub const ModuleInstance = struct {
     fn call(context: *CallContext, func: *const FunctionInstance, next_instruction: u32) !u32 {
         const functype: *const FunctionTypeDefinition = &context.module_def.types.items[func.type_def_index];
 
-        var frame = CallFrame{
-            .func = func,
-            .module_instance = context.module,
-            .locals = std.ArrayList(Val).init(context.allocator),
-        };
+        var locals = std.ArrayList(Val).init(context.allocator);
+        try locals.resize(func.local_types.items.len);
 
         const param_types: []const ValType = functype.getParams();
-
-        try frame.locals.resize(func.local_types.items.len);
-
         var param_index = param_types.len;
         while (param_index > 0) {
             param_index -= 1;
             var value = try context.stack.popValue();
             if (std.meta.activeTag(value) != param_types[param_index]) {
-                std.debug.print("\tExpected value of type {}, but got {}\n", .{ param_types[param_index], value });
                 return error.ValidationTypeMismatch;
             }
-            frame.locals.items[param_index] = value;
+            locals.items[param_index] = value;
         }
 
         var locals_index: usize = param_types.len;
         while (locals_index < func.local_types.items.len) : (locals_index += 1) {
-            frame.locals.items[locals_index] = Val.default(func.local_types.items[locals_index]);
+            locals.items[locals_index] = Val.default(func.local_types.items[locals_index]);
         }
 
         const continuation: u32 = next_instruction;
 
-        try context.stack.pushFrame(frame);
+        try context.stack.pushFrame(func, context.module, locals);
         try context.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
 
         return func.offset_into_instructions;
@@ -5911,13 +5862,14 @@ pub const ModuleInstance = struct {
     }
 
     fn branch(context: *CallContext, label_id: u32) !u32 {
-        const label: *const Label = try context.stack.findLabel(label_id);
-        if (label.isFirstInCallFrame()) {
+        const label: *const Label = context.stack.findLabel(label_id);
+        const frame_label: *const Label = context.stack.frameLabel();
+        if (label == frame_label) {
             return try returnFromFunc(context);
         }
-        const continuation = label.continuation;
+        const continuation: u32 = label.continuation;
 
-        const is_loop_continuation = context.module_def.code.instructions.items[continuation].opcode == .Loop;
+        const is_loop_continuation: bool = context.module_def.code.instructions.items[continuation].opcode == .Loop;
 
         if (is_loop_continuation == false or label_id != 0) {
             var args = std.ArrayList(Val).init(context.allocator);
@@ -5928,29 +5880,8 @@ pub const ModuleInstance = struct {
                 try popValues(&args, context.stack, return_types);
             }
 
-            var stack_label_id: u32 = 0;
-            while (true) {
-                var topItem = try context.stack.top();
-                switch (topItem.*) {
-                    .Val => {
-                        _ = try context.stack.popValue();
-                    },
-                    .Frame => {
-                        return error.AssertInvalidLabel;
-                    },
-                    .Label => {
-                        if (stack_label_id == label_id) {
-                            if (is_loop_continuation == false) {
-                                _ = try context.stack.popLabel();
-                            }
-                            break;
-                        } else {
-                            _ = try context.stack.popLabel();
-                            stack_label_id += 1;
-                        }
-                    },
-                }
-            }
+            const pop_final_label = !is_loop_continuation;
+            context.stack.popAllUntilLabelId(label_id, pop_final_label);
 
             if (is_loop_continuation == false) {
                 try pushValues(args.items, context.stack);
@@ -5960,7 +5891,7 @@ pub const ModuleInstance = struct {
     }
 
     fn returnFromFunc(context: *CallContext) !u32 {
-        var frame: *const CallFrame = try context.stack.findCurrentFrame();
+        var frame: *const CallFrame = context.stack.topFrame();
         const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
 
         var returns = std.ArrayList(Val).init(context.scratch_allocator);
@@ -5970,30 +5901,14 @@ pub const ModuleInstance = struct {
         while (returns.items.len < return_types.len) {
             var value = try context.stack.popValue();
             if (std.meta.activeTag(value) != return_types[return_types.len - returns.items.len - 1]) {
-                std.debug.print("\tExpected value of type {}, but got {}\n", .{ return_types[returns.items.len], value });
                 return error.ValidationTypeMismatch;
             }
             try returns.append(value);
         }
 
-        var last_label: Label = undefined;
-        while (true) {
-            var item: *const StackItem = try context.stack.top();
-            switch (item.*) {
-                .Val => {
-                    _ = try context.stack.popValue();
-                },
-                .Label => {
-                    last_label = try context.stack.popLabel();
-                },
-                .Frame => {
-                    _ = try context.stack.popFrame();
-                    break;
-                },
-            }
-        }
+        const is_root_function = context.stack.isTopFrameRootFunction();
 
-        const is_root_function = (context.stack.size() == 0);
+        var last_label: Label = context.stack.popAllForCurrentFrame();
 
         while (returns.items.len > 0) {
             var value = returns.orderedRemove(returns.items.len - 1);
