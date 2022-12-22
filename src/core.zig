@@ -569,8 +569,8 @@ const Label = struct {
 const CallFrame = struct {
     func: *const FunctionInstance,
     module_instance: *ModuleInstance,
-    locals: std.ArrayList(Val),
-
+    locals: []Val,
+    start_offset_values: u32,
     start_offset_labels: u16,
 };
 
@@ -608,7 +608,6 @@ const Stack = struct {
     }
 
     fn deinit(self: *Self) void {
-        self.forceClearAll();
         self.allocator.free(self.mem);
     }
 
@@ -736,23 +735,46 @@ const Stack = struct {
         }
     }
 
-    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, locals: std.ArrayList(Val)) !void {
-        if (self.num_frames < self.frames.len) {
+    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType) !void {
+        const non_param_types: []const ValType = all_local_types[param_types.len..];
+
+        // the stack should already be populated with the params to the function, so all that's
+        // left to do is initialize the locals to their default values
+        var values_index_begin: u32 = self.num_values - @intCast(u32, param_types.len);
+        var values_index_end: u32 = self.num_values + @intCast(u32, non_param_types.len);
+
+        if (self.num_frames < self.frames.len and values_index_end < self.values.len) {
+            var locals_and_params: []Val = self.values[values_index_begin..values_index_end];
+            var locals = self.values[self.num_values..values_index_end];
+
+            self.num_values = values_index_end;
+
+            for (non_param_types) |valtype, i| {
+                locals[i] = Val.default(valtype);
+            }
+
             self.frames[self.num_frames] = CallFrame{
                 .func = func,
                 .module_instance = module_instance,
-                .locals = locals,
+                .locals = locals_and_params,
+                .start_offset_values = values_index_begin,
                 .start_offset_labels = self.num_labels,
             };
             self.num_frames += 1;
-            return;
+        } else {
+            return error.TrapStackExhausted;
         }
-        return error.TrapStackExhausted;
     }
 
-    fn popFrame(self: *Self) void {
+    fn popFrame(self: *Self) Label {
+        var frame: *CallFrame = self.topFrame();
+        var frame_label: Label = self.labels[frame.start_offset_labels];
+
+        self.num_values = frame.start_offset_values;
+        self.num_labels = frame.start_offset_labels;
         self.num_frames -= 1;
-        self.frames[self.num_frames].locals.deinit(); // TODO avoid this alloc/dealloc somehow
+
+        return frame_label;
     }
 
     fn topFrame(self: *const Self) *CallFrame {
@@ -763,26 +785,10 @@ const Stack = struct {
         return self.num_frames == 1;
     }
 
-    fn forceClearAll(self: *Self) void {
-        for (self.frames[0..self.num_frames]) |*frame| {
-            frame.locals.deinit();
-        }
-
+    fn popAll(self: *Self) void {
         self.num_values = 0;
         self.num_labels = 0;
         self.num_frames = 0;
-    }
-
-    fn popAllForCurrentFrame(self: *Self) Label {
-        var frame: *CallFrame = self.topFrame();
-        frame.locals.deinit();
-        var frame_label: Label = self.labels[frame.start_offset_labels];
-
-        self.num_values = frame_label.start_offset_values;
-        self.num_labels = frame.start_offset_labels;
-        self.num_frames -= 1;
-
-        return frame_label;
     }
 };
 
@@ -4041,33 +4047,18 @@ pub const ModuleInstance = struct {
 
     fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
         const func: FunctionInstance = self.store.functions.items[func_instance_index];
-        const func_type_params: []const ValType = self.module_def.types.items[func.type_def_index].getParams();
+        const param_types: []const ValType = self.module_def.types.items[func.type_def_index].getParams();
 
-        if (params.len != func_type_params.len) {
-            return error.ValidationTypeMismatch;
-        }
-
-        var locals = std.ArrayList(Val).init(self.allocator); // gets deinited when popFrame() is called
-        try locals.resize(func.local_types.items.len);
-
-        for (params) |v, i| {
-            if (std.meta.activeTag(v) != func_type_params[i]) {
-                return error.ValidationTypeMismatch;
-            }
-            locals.items[i] = v;
-        }
-
-        // initialize the rest of the locals according to the type of the local
-        var locals_index = params.len;
-        while (locals_index < locals.items.len) : (locals_index += 1) {
-            const valtype: ValType = func.local_types.items[locals_index];
-            locals.items[locals_index] = Val.default(valtype);
+        // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
+        // on the value stack
+        for (params) |v| {
+            try self.stack.pushValue(v);
         }
 
         // TODO move function continuation data into FunctionDefinition
         var function_continuation = self.module_def.function_continuations.get(func.offset_into_instructions) orelse return error.AssertInvalidFunction;
 
-        try self.stack.pushFrame(&func, self, locals);
+        try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
 
         // lazy-init scratch allocator
@@ -4076,7 +4067,7 @@ pub const ModuleInstance = struct {
         }
 
         executeWasm(&self.stack, self.allocator, &self.scratch_allocator.?, func.offset_into_instructions) catch |err| {
-            self.stack.forceClearAll(); // ensure current stack state doesn't pollute future invokes
+            self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
 
@@ -4358,6 +4349,7 @@ pub const ModuleInstance = struct {
                     const top_label: *const Label = stack.topLabel();
                     const frame_label: *const Label = stack.frameLabel();
                     if (top_label != frame_label) {
+                        // TODO don't need to pop/push with a split stack
                         try popValues(&returns, stack, top_label.blocktype.getBlocktypeReturnTypes(context.module_def));
                         _ = stack.popLabel();
                         try pushValues(returns.items, stack);
@@ -4370,8 +4362,7 @@ pub const ModuleInstance = struct {
 
                         const is_root_function = stack.isTopFrameRootFunction();
 
-                        var label = stack.popLabel();
-                        stack.popFrame();
+                        var label = stack.popFrame();
                         try pushValues(returns.items, stack);
 
                         if (is_root_function) {
@@ -4521,21 +4512,20 @@ pub const ModuleInstance = struct {
                 Opcode.Local_Get => {
                     var locals_index: u32 = instruction.immediate;
                     var frame: *const CallFrame = stack.topFrame();
-                    var v: Val = frame.locals.items[locals_index];
+                    var v: Val = frame.locals[locals_index];
                     try stack.pushValue(v);
                 },
                 Opcode.Local_Set => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = stack.topFrame();
+                    var frame: *CallFrame = stack.topFrame();
                     var v: Val = try stack.popValue();
-
-                    frame.locals.items[locals_index] = v;
+                    frame.locals[locals_index] = v;
                 },
                 Opcode.Local_Tee => {
                     var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = stack.topFrame();
+                    var frame: *CallFrame = stack.topFrame();
                     var v: Val = try stack.topValue();
-                    frame.locals.items[locals_index] = v;
+                    frame.locals[locals_index] = v;
                 },
                 Opcode.Global_Get => {
                     var global_index: u32 = instruction.immediate;
@@ -5761,29 +5751,10 @@ pub const ModuleInstance = struct {
 
     fn call(context: *CallContext, func: *const FunctionInstance, next_instruction: u32) !u32 {
         const functype: *const FunctionTypeDefinition = &context.module_def.types.items[func.type_def_index];
-
-        var locals = std.ArrayList(Val).init(context.allocator);
-        try locals.resize(func.local_types.items.len);
-
         const param_types: []const ValType = functype.getParams();
-        var param_index = param_types.len;
-        while (param_index > 0) {
-            param_index -= 1;
-            var value = try context.stack.popValue();
-            if (std.meta.activeTag(value) != param_types[param_index]) {
-                return error.ValidationTypeMismatch;
-            }
-            locals.items[param_index] = value;
-        }
-
-        var locals_index: usize = param_types.len;
-        while (locals_index < func.local_types.items.len) : (locals_index += 1) {
-            locals.items[locals_index] = Val.default(func.local_types.items[locals_index]);
-        }
-
         const continuation: u32 = next_instruction;
 
-        try context.stack.pushFrame(func, context.module, locals);
+        try context.stack.pushFrame(func, context.module, param_types, func.local_types.items);
         try context.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
 
         return func.offset_into_instructions;
@@ -5908,8 +5879,9 @@ pub const ModuleInstance = struct {
 
         const is_root_function = context.stack.isTopFrameRootFunction();
 
-        var last_label: Label = context.stack.popAllForCurrentFrame();
+        var last_label: Label = context.stack.popFrame();
 
+        // TODO don't remove from the array, just walk through it - it will all get freed by the scratch allocator anyway
         while (returns.items.len > 0) {
             var value = returns.orderedRemove(returns.items.len - 1);
             try context.stack.pushValue(value);
