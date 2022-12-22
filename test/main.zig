@@ -1148,6 +1148,8 @@ pub fn main() !void {
         "utf8-invalid-encoding",
     };
 
+    var did_all_succeed: bool = true;
+
     for (all_suites) |suite| {
         if (opts.suite_filter_or_null) |filter| {
             if (strcmp(filter, suite) == false) {
@@ -1207,10 +1209,12 @@ pub fn main() !void {
         if (opts.force_wasm_regen_only == false) {
             logVerbose("Running test suite: {s}\n", .{suite});
 
-            const succeeded = try run(allocator, suite_path, &opts);
-            if (succeeded == false) {
-                std.os.exit(1);
-            }
+            var success: bool = try run(allocator, suite_path, &opts);
+            did_all_succeed = did_all_succeed and success;
         }
+    }
+
+    if (did_all_succeed == false) {
+        std.os.exit(1);
     }
 }
