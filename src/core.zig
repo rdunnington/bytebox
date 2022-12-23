@@ -722,14 +722,24 @@ const Stack = struct {
         return frame_label;
     }
 
-    fn popAllUntilLabelId(self: *Self, label_id: u32, pop_final_label: bool) void {
+    fn popAllUntilLabelId(self: *Self, label_id: u32, pop_final_label: bool, num_returns: usize) void {
         var label_index: u16 = @intCast(u16, (self.num_labels - label_id) - 1);
         var label: *const Label = &self.labels[label_index];
 
-        self.num_values = label.start_offset_values;
         if (pop_final_label) {
+            const source_begin: usize = self.num_values - num_returns;
+            const source_end: usize = self.num_values;
+            const dest_begin: usize = label.start_offset_values;
+            const dest_end: usize = label.start_offset_values + num_returns;
+
+            const returns_source: []const Val = self.values[source_begin..source_end];
+            const returns_dest: []Val = self.values[dest_begin..dest_end];
+            std.mem.copy(Val, returns_dest, returns_source);
+
+            self.num_values = @intCast(u32, dest_end);
             self.num_labels = label_index;
         } else {
+            self.num_values = label.start_offset_values;
             self.num_labels = label_index + 1;
         }
     }
@@ -5810,26 +5820,10 @@ pub const ModuleInstance = struct {
     }
 
     fn enterBlock(context: *CallContext, instruction: Instruction, label_offset: u32) !void {
-        var block_type_value: BlockTypeValue = context.module_def.code.block_type_values.items[instruction.immediate];
-
-        var params = std.ArrayList(Val).init(context.scratch_allocator);
-        defer params.deinit();
-
-        switch (block_type_value) {
-            .TypeIndex => {
-                const type_index = block_type_value.TypeIndex;
-                const func_type: *const FunctionTypeDefinition = &context.module_def.types.items[type_index];
-                const type_params: []const ValType = func_type.getParams();
-
-                try popValues(&params, context.stack, type_params);
-            },
-            else => {},
-        }
-
+        const block_type_value: BlockTypeValue = context.module_def.code.block_type_values.items[instruction.immediate];
         const continuation = context.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
-        try context.stack.pushLabel(block_type_value, continuation);
 
-        try pushValues(params.items, context.stack);
+        try context.stack.pushLabel(block_type_value, continuation);
     }
 
     fn branch(context: *CallContext, label_id: u32) !u32 {
@@ -5843,20 +5837,9 @@ pub const ModuleInstance = struct {
         const is_loop_continuation: bool = context.module_def.code.instructions.items[continuation].opcode == .Loop;
 
         if (is_loop_continuation == false or label_id != 0) {
-            var args = std.ArrayList(Val).init(context.allocator);
-            defer args.deinit();
-
             const return_types: []const ValType = label.blocktype.getBlocktypeReturnTypes(context.module_def);
-            if (is_loop_continuation == false) {
-                try popValues(&args, context.stack, return_types);
-            }
-
             const pop_final_label = !is_loop_continuation;
-            context.stack.popAllUntilLabelId(label_id, pop_final_label);
-
-            if (is_loop_continuation == false) {
-                try pushValues(args.items, context.stack);
-            }
+            context.stack.popAllUntilLabelId(label_id, pop_final_label, return_types.len);
         }
         return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
     }
