@@ -703,9 +703,8 @@ const Stack = struct {
         }
     }
 
-    fn popLabel(self: *Self) Label {
+    fn popLabel(self: *Self) void {
         self.num_labels -= 1;
-        return self.labels[self.num_labels];
     }
 
     fn findLabel(self: *const Self, id: u32) *const Label {
@@ -766,11 +765,20 @@ const Stack = struct {
         }
     }
 
-    fn popFrame(self: *Self) Label {
+    fn popFrame(self: *Self, num_returns: usize) Label {
         var frame: *CallFrame = self.topFrame();
         var frame_label: Label = self.labels[frame.start_offset_labels];
 
-        self.num_values = frame.start_offset_values;
+        const source_begin: usize = self.num_values - num_returns;
+        const source_end: usize = self.num_values;
+        const dest_begin: usize = frame.start_offset_values;
+        const dest_end: usize = frame.start_offset_values + num_returns;
+
+        const returns_source: []const Val = self.values[source_begin..source_end];
+        const returns_dest: []Val = self.values[dest_begin..dest_end];
+        std.mem.copy(Val, returns_dest, returns_source);
+
+        self.num_values = @intCast(u32, dest_end);
         self.num_labels = frame.start_offset_labels;
         self.num_frames -= 1;
 
@@ -4342,28 +4350,20 @@ pub const ModuleInstance = struct {
                     next_instruction = try Helpers.seek(end_offset, instructions.len);
                 },
                 Opcode.End => {
-                    var returns = std.ArrayList(Val).init(context.scratch_allocator);
-                    defer returns.deinit();
-
                     // determine if this is a a scope or function call exit
                     const top_label: *const Label = stack.topLabel();
                     const frame_label: *const Label = stack.frameLabel();
                     if (top_label != frame_label) {
-                        // TODO don't need to pop/push with a split stack
-                        try popValues(&returns, stack, top_label.blocktype.getBlocktypeReturnTypes(context.module_def));
-                        _ = stack.popLabel();
-                        try pushValues(returns.items, stack);
+                        // Since the only values on the stack should be the returns from the block, we just pop the
+                        // label, which leaves the value stack alone.
+                        stack.popLabel();
                     } else {
-                        {
-                            var frame: *const CallFrame = stack.topFrame();
-                            const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
-                            try popValues(&returns, stack, return_types);
-                        }
+                        var frame: *const CallFrame = stack.topFrame();
+                        const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
 
                         const is_root_function = stack.isTopFrameRootFunction();
 
-                        var label = stack.popFrame();
-                        try pushValues(returns.items, stack);
+                        var label = stack.popFrame(return_types.len);
 
                         if (is_root_function) {
                             return;
@@ -5865,27 +5865,9 @@ pub const ModuleInstance = struct {
         var frame: *const CallFrame = context.stack.topFrame();
         const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
 
-        var returns = std.ArrayList(Val).init(context.scratch_allocator);
-        defer returns.deinit();
-        try returns.ensureTotalCapacity(return_types.len);
-
-        while (returns.items.len < return_types.len) {
-            var value = try context.stack.popValue();
-            if (std.meta.activeTag(value) != return_types[return_types.len - returns.items.len - 1]) {
-                return error.ValidationTypeMismatch;
-            }
-            try returns.append(value);
-        }
-
         const is_root_function = context.stack.isTopFrameRootFunction();
 
-        var last_label: Label = context.stack.popFrame();
-
-        // TODO don't remove from the array, just walk through it - it will all get freed by the scratch allocator anyway
-        while (returns.items.len > 0) {
-            var value = returns.orderedRemove(returns.items.len - 1);
-            try context.stack.pushValue(value);
-        }
+        var last_label: Label = context.stack.popFrame(return_types.len);
 
         if (is_root_function) {
             return Label.k_invalid_continuation;
