@@ -437,13 +437,19 @@ pub const ValType = enum(u8) {
     }
 };
 
+// Empty instances of these help avoid nullable pointers. Nullable pointers make structs bigger which
+// fights cache coherency.
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var empty_module_definition = ModuleDefinition.init(gpa.allocator());
+var empty_module_instance = ModuleInstance.init(&empty_module_definition, gpa.allocator());
+
 pub const Val = union(ValType) {
     I32: i32,
     I64: i64,
     F32: f32,
     F64: f64,
     FuncRef: struct {
-        module_instance: ?*ModuleInstance, // TODO remove null flag by pointing to dummy module, should help cache coherency
+        module_instance: *ModuleInstance,
         index: u32, // index into functions
     },
     ExternRef: u32, // TODO figure out what this indexes
@@ -463,10 +469,14 @@ pub const Val = union(ValType) {
 
     pub fn nullRef(valtype: ValType) !Val {
         return switch (valtype) {
-            .FuncRef => Val{ .FuncRef = .{ .index = Val.k_null_funcref, .module_instance = null } },
+            .FuncRef => funcrefFromIndex(Val.k_null_funcref),
             .ExternRef => Val{ .ExternRef = Val.k_null_funcref },
             else => error.AssertInvalidBytecode,
         };
+    }
+
+    pub fn funcrefFromIndex(index: u32) Val {
+        return Val{ .FuncRef = .{ .index = index, .module_instance = &empty_module_instance } };
     }
 
     fn get(val: Val, comptime T: type) !T {
@@ -869,7 +879,7 @@ const ConstantExpression = union(ConstantExpressionType) {
             .F32_Const => ConstantExpression{ .Value = Val{ .F32 = try decodeFloat(f32, reader) } },
             .F64_Const => ConstantExpression{ .Value = Val{ .F64 = try decodeFloat(f64, reader) } },
             .Ref_Null => ConstantExpression{ .Value = try Val.nullRef(try ValType.decode(reader)) },
-            .Ref_Func => ConstantExpression{ .Value = Val{ .FuncRef = .{ .index = try decodeLEB128(u32, reader), .module_instance = null } } },
+            .Ref_Func => ConstantExpression{ .Value = Val.funcrefFromIndex(try decodeLEB128(u32, reader)) },
             .Global_Get => ConstantExpression{ .Global = try decodeLEB128(u32, reader) },
             else => return error.ValidationBadConstantExpression,
         };
@@ -2668,7 +2678,7 @@ pub const ModuleDefinition = struct {
                 switch (valtype) {
                     .FuncRef => {
                         const func_index = try decodeLEB128(u32, reader);
-                        return Val{ .FuncRef = .{ .index = func_index, .module_instance = null } };
+                        return Val.funcrefFromIndex(func_index);
                     },
                     .ExternRef => {
                         unreachable; // TODO
@@ -4433,12 +4443,12 @@ pub const ModuleInstance = struct {
                         return error.TrapUninitializedElement;
                     }
 
-                    std.debug.assert(ref.FuncRef.module_instance != null); // Should have been set in module instantiation
+                    std.debug.assert(ref.FuncRef.module_instance != &empty_module_instance); // Should have been set in module instantiation
 
                     const func_index = ref.FuncRef.index;
                     var call_context = CallContext{
-                        .module = ref.FuncRef.module_instance.?,
-                        .module_def = (ref.FuncRef.module_instance.?).module_def,
+                        .module = ref.FuncRef.module_instance,
+                        .module_def = ref.FuncRef.module_instance.module_def,
                         .stack = context.stack,
                         .allocator = context.allocator,
                     };

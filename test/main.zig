@@ -212,13 +212,8 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
             const int = try std.fmt.parseInt(u32, json_value.String, 10);
             return Val{ .ExternRef = int };
         }
-    } else if (strcmp("funcref", json_type.String)) {
-        if (strcmp("null", json_value.String)) {
-            return Val.nullRef(ValType.FuncRef);
-        } else {
-            const int = try std.fmt.parseInt(u32, json_value.String, 10);
-            return Val{ .FuncRef = .{ .index = int, .module_instance = null } };
-        }
+    } else if (strcmp("funcref", json_type.String) and strcmp("null", json_value.String)) {
+        return Val.nullRef(ValType.FuncRef);
     } else {
         print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
     }
