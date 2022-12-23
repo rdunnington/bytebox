@@ -3605,7 +3605,6 @@ pub const Store = struct {
 
 pub const ModuleInstance = struct {
     allocator: std.mem.Allocator,
-    scratch_allocator: ?ScratchAllocator,
     stack: Stack,
     store: Store,
     module_def: *const ModuleDefinition,
@@ -3616,14 +3615,12 @@ pub const ModuleInstance = struct {
         module_def: *const ModuleDefinition,
         stack: *Stack,
         allocator: std.mem.Allocator,
-        scratch_allocator: std.mem.Allocator,
     };
 
     /// module_def is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
             .allocator = allocator,
-            .scratch_allocator = null,
             .stack = Stack.init(allocator),
             .store = Store.init(allocator),
             .module_def = module_def,
@@ -4079,12 +4076,7 @@ pub const ModuleInstance = struct {
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
 
-        // lazy-init scratch allocator
-        if (self.scratch_allocator == null) {
-            self.scratch_allocator = ScratchAllocator.init(.{ .max_size = 1024 * 64 });
-        }
-
-        executeWasm(&self.stack, self.allocator, &self.scratch_allocator.?, func.offset_into_instructions) catch |err| {
+        executeWasm(&self.stack, self.allocator, func.offset_into_instructions) catch |err| {
             self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
@@ -4164,7 +4156,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn executeWasm(stack: *Stack, allocator: std.mem.Allocator, scratch_allocator: *ScratchAllocator, root_offset: u32) !void {
+    fn executeWasm(stack: *Stack, allocator: std.mem.Allocator, root_offset: u32) !void {
         const Helpers = struct {
             fn seek(offset: u32, max: usize) !u32 {
                 if (offset < max or offset == Label.k_invalid_continuation) {
@@ -4311,8 +4303,6 @@ pub const ModuleInstance = struct {
         var instruction_offset: u32 = root_offset;
 
         while (instruction_offset != Label.k_invalid_continuation) {
-            scratch_allocator.reset();
-
             var current_callframe: *CallFrame = stack.topFrame();
             var current_store: *Store = &current_callframe.module_instance.store;
 
@@ -4321,7 +4311,6 @@ pub const ModuleInstance = struct {
                 .module_def = current_callframe.module_instance.module_def,
                 .stack = stack,
                 .allocator = allocator,
-                .scratch_allocator = scratch_allocator.allocator(),
             };
 
             const instructions: []const Instruction = context.module_def.code.instructions.items;
@@ -4452,7 +4441,6 @@ pub const ModuleInstance = struct {
                         .module_def = (ref.FuncRef.module_instance.?).module_def,
                         .stack = context.stack,
                         .allocator = context.allocator,
-                        .scratch_allocator = context.scratch_allocator,
                     };
                     var call_store = &call_context.module.store;
 
@@ -5810,7 +5798,6 @@ pub const ModuleInstance = struct {
                     .module_def = data.module_instance.module_def,
                     .stack = context.stack,
                     .allocator = context.allocator,
-                    .scratch_allocator = context.scratch_allocator,
                 };
 
                 const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
