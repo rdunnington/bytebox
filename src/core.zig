@@ -3624,7 +3624,6 @@ pub const ModuleInstance = struct {
         module: *ModuleInstance,
         module_def: *const ModuleDefinition,
         stack: *Stack,
-        allocator: std.mem.Allocator,
     };
 
     /// module_def is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
@@ -4086,7 +4085,7 @@ pub const ModuleInstance = struct {
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
 
-        executeWasm(&self.stack, self.allocator, func.offset_into_instructions) catch |err| {
+        executeWasm(&self.stack, func.offset_into_instructions) catch |err| {
             self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
@@ -4166,7 +4165,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn executeWasm(stack: *Stack, allocator: std.mem.Allocator, root_offset: u32) !void {
+    fn executeWasm(stack: *Stack, root_offset: u32) !void {
         const Helpers = struct {
             fn seek(offset: u32, max: usize) !u32 {
                 if (offset < max or offset == Label.k_invalid_continuation) {
@@ -4320,7 +4319,6 @@ pub const ModuleInstance = struct {
                 .module = current_callframe.module_instance,
                 .module_def = current_callframe.module_instance.module_def,
                 .stack = stack,
-                .allocator = allocator,
             };
 
             const instructions: []const Instruction = context.module_def.code.instructions.items;
@@ -4450,7 +4448,6 @@ pub const ModuleInstance = struct {
                         .module = ref.FuncRef.module_instance,
                         .module_def = ref.FuncRef.module_instance.module_def,
                         .stack = context.stack,
-                        .allocator = context.allocator,
                     };
                     var call_store = &call_context.module.store;
 
@@ -5771,43 +5768,32 @@ pub const ModuleInstance = struct {
     fn callImport(context: *CallContext, func: *const FunctionImport, next_instruction: u32) !u32 {
         switch (func.data) {
             .Host => |data| {
-                const param_types = data.func_def.getParams();
-                const return_types = data.func_def.getReturns();
+                const params_len: u32 = @intCast(u32, data.func_def.getParams().len);
+                const returns_len: u32 = @intCast(u32, data.func_def.getReturns().len);
 
-                var values = std.ArrayList(Val).init(context.allocator);
-                defer values.deinit();
-                try values.resize(param_types.len + return_types.len);
+                var stack: *Stack = context.stack;
 
-                var params = values.items[0..param_types.len];
-                var returns = values.items[param_types.len..];
+                if (stack.num_values + returns_len < stack.values.len) {
+                    var params = stack.values[stack.num_values - params_len .. stack.num_values];
+                    var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
 
-                for (params) |_, i| {
-                    var v = try context.stack.popValue();
-                    if (std.meta.activeTag(v) != param_types[param_types.len - i - 1]) {
-                        return error.ValidationTypeMismatch;
-                    }
-                    params[params.len - i - 1] = v;
+                    data.callback(data.userdata, params, returns_temp);
+
+                    stack.num_values = (stack.num_values - params_len) + returns_len;
+                    var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
+
+                    std.mem.copy(Val, returns_dest, returns_temp);
+
+                    return next_instruction;
+                } else {
+                    return error.TrapStackExhausted;
                 }
-
-                data.callback(data.userdata, params, returns);
-
-                // validate return types
-                for (returns) |val, i| {
-                    if (std.meta.activeTag(val) != return_types[i]) {
-                        return error.ValidationTypeMismatch;
-                    }
-                }
-
-                try pushValues(returns, context.stack);
-
-                return next_instruction;
             },
             .Wasm => |data| {
                 var next_context = CallContext{
                     .module = data.module_instance,
                     .module_def = data.module_instance.module_def,
                     .stack = context.stack,
-                    .allocator = context.allocator,
                 };
 
                 const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
