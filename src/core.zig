@@ -1792,11 +1792,6 @@ const Instruction = struct {
             .immediate = immediate,
         };
 
-        switch (inst.opcode) {
-            .Noop => {}, // no need to emit noops since they don't do anything
-            else => try module.code.instructions.append(inst),
-        }
-
         return inst;
     }
 };
@@ -2564,9 +2559,540 @@ const ModuleValidator = struct {
     }
 };
 
+const InstructionFuncData = struct {
+    func: InstructionFunc,
+    immediate: u32, // todo expand this to u64, since the struct is 8-byte aligned anyway
+};
+
+// pc is the "program counter", which points to the next instruction to execute
+const InstructionFunc = *const fn (pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void;
+
+// Maps all instructions to an execution function, to map opcodes directly to function pointers
+// which avoids a giant switch statement. Because the switch-style has a single conditional
+// branch for every opcode, the branch predictor cannot reliably predict the next opcode. However,
+// giving each instruction its own branch allows the branch predictor to cache heuristics for each 
+// instruction, instead of a single branch. This approach is combined with tail calls to ensure the
+// stack doesn't overflow and help optimize the generated asm.
+// In the past, this style of opcode dispatch has been called the poorly-named "threaded code" approach.
+// See the "continuation-passing style" section of this article:
+// http://www.complang.tuwien.ac.at/forth/threaded-code.html
+const InstructionFuncs = struct {
+    const opcodeToFuncTable = [_]InstructionFunc{
+        &op_Noop, // Unreachable = 0x00,
+        &op_Noop, // 0x01,
+        &op_Noop, // Block = 0x02,
+        &op_Noop, // Loop = 0x03,
+        &op_Noop, // If = 0x04,
+        &op_Noop, // Else = 0x05,
+        &op_Noop, // End = 0x0B,
+        &op_Noop, // Branch = 0x0C,
+        &op_Noop, // Branch_If = 0x0D,
+        &op_Noop, // Branch_Table = 0x0E,
+        &op_Noop, // Return = 0x0F,
+        &op_Noop, // Call = 0x10,
+        &op_Noop, // Call_Indirect = 0x11,
+        &op_Invalid, // 0x12
+        &op_Invalid, // 0x13
+        &op_Invalid, // 0x14
+        &op_Invalid, // 0x15
+        &op_Invalid, // 0x16
+        &op_Invalid, // 0x17
+        &op_Invalid, // 0x18
+        &op_Invalid, // 0x19
+        &op_Noop, // Drop = 0x1A,
+        &op_Noop, // Select = 0x1B,
+        &op_Noop, // Select_T = 0x1C,
+        &op_Noop, // Local_Get = 0x20,
+        &op_Noop, // Local_Set = 0x21,
+        &op_Noop, // Local_Tee = 0x22,
+        &op_Noop, // Global_Get = 0x23,
+        &op_Noop, // Global_Set = 0x24,
+        &op_Noop, // Table_Get = 0x25,
+        &op_Noop, // Table_Set = 0x26,
+        &op_Noop, // I32_Load = 0x28,
+        &op_Noop, // I64_Load = 0x29,
+        &op_Noop, // F32_Load = 0x2A,
+        &op_Noop, // F64_Load = 0x2B,
+        &op_Noop, // I32_Load8_S = 0x2C,
+        &op_Noop, // I32_Load8_U = 0x2D,
+        &op_Noop, // I32_Load16_S = 0x2E,
+        &op_Noop, // I32_Load16_U = 0x2F,
+        &op_Noop, // I64_Load8_S = 0x30,
+        &op_Noop, // I64_Load8_U = 0x31,
+        &op_Noop, // I64_Load16_S = 0x32,
+        &op_Noop, // I64_Load16_U = 0x33,
+        &op_Noop, // I64_Load32_S = 0x34,
+        &op_Noop, // I64_Load32_U = 0x35,
+        &op_Noop, // I32_Store = 0x36,
+        &op_Noop, // I64_Store = 0x37,
+        &op_Noop, // F32_Store = 0x38,
+        &op_Noop, // F64_Store = 0x39,
+        &op_Noop, // I32_Store8 = 0x3A,
+        &op_Noop, // I32_Store16 = 0x3B,
+        &op_Noop, // I64_Store8 = 0x3C,
+        &op_Noop, // I64_Store16 = 0x3D,
+        &op_Noop, // I64_Store32 = 0x3E,
+        &op_Noop, // Memory_Size = 0x3F,
+        &op_Noop, // Memory_Grow = 0x40,
+        &op_I32_Const, // 0x41
+        &op_I64_Const, // 0x42
+        &op_F32_Const, // 0x43
+        &op_F64_Const, // 0x44
+        &op_Noop, // I32_Eqz = 0x45,
+        &op_Noop, // I32_Eq = 0x46,
+        &op_Noop, // I32_NE = 0x47,
+        &op_Noop, // I32_LT_S = 0x48,
+        &op_Noop, // I32_LT_U = 0x49,
+        &op_Noop, // I32_GT_S = 0x4A,
+        &op_Noop, // I32_GT_U = 0x4B,
+        &op_Noop, // I32_LE_S = 0x4C,
+        &op_Noop, // I32_LE_U = 0x4D,
+        &op_Noop, // I32_GE_S = 0x4E,
+        &op_Noop, // I32_GE_U = 0x4F,
+        &op_Noop, // I64_Eqz = 0x50,
+        &op_Noop, // I64_Eq = 0x51,
+        &op_Noop, // I64_NE = 0x52,
+        &op_Noop, // I64_LT_S = 0x53,
+        &op_Noop, // I64_LT_U = 0x54,
+        &op_Noop, // I64_GT_S = 0x55,
+        &op_Noop, // I64_GT_U = 0x56,
+        &op_Noop, // I64_LE_S = 0x57,
+        &op_Noop, // I64_LE_U = 0x58,
+        &op_Noop, // I64_GE_S = 0x59,
+        &op_Noop, // I64_GE_U = 0x5A,
+        &op_Noop, // F32_EQ = 0x5B,
+        &op_Noop, // F32_NE = 0x5C,
+        &op_Noop, // F32_LT = 0x5D,
+        &op_Noop, // F32_GT = 0x5E,
+        &op_Noop, // F32_LE = 0x5F,
+        &op_Noop, // F32_GE = 0x60,
+        &op_Noop, // F64_EQ = 0x61,
+        &op_Noop, // F64_NE = 0x62,
+        &op_Noop, // F64_LT = 0x63,
+        &op_Noop, // F64_GT = 0x64,
+        &op_Noop, // F64_LE = 0x65,
+        &op_Noop, // F64_GE = 0x66,
+        &op_Noop, // I32_Clz = 0x67,
+        &op_Noop, // I32_Ctz = 0x68,
+        &op_Noop, // I32_Popcnt = 0x69,
+        &op_Noop, // I32_Add = 0x6A,
+        &op_Noop, // I32_Sub = 0x6B,
+        &op_Noop, // I32_Mul = 0x6C,
+        &op_Noop, // I32_Div_S = 0x6D,
+        &op_Noop, // I32_Div_U = 0x6E,
+        &op_Noop, // I32_Rem_S = 0x6F,
+        &op_Noop, // I32_Rem_U = 0x70,
+        &op_Noop, // I32_And = 0x71,
+        &op_Noop, // I32_Or = 0x72,
+        &op_Noop, // I32_Xor = 0x73,
+        &op_Noop, // I32_Shl = 0x74,
+        &op_Noop, // I32_Shr_S = 0x75,
+        &op_Noop, // I32_Shr_U = 0x76,
+        &op_Noop, // I32_Rotl = 0x77,
+        &op_Noop, // I32_Rotr = 0x78,
+        &op_Noop, // I64_Clz = 0x79,
+        &op_Noop, // I64_Ctz = 0x7A,
+        &op_Noop, // I64_Popcnt = 0x7B,
+        &op_Noop, // I64_Add = 0x7C,
+        &op_Noop, // I64_Sub = 0x7D,
+        &op_Noop, // I64_Mul = 0x7E,
+        &op_Noop, // I64_Div_S = 0x7F,
+        &op_Noop, // I64_Div_U = 0x80,
+        &op_Noop, // I64_Rem_S = 0x81,
+        &op_Noop, // I64_Rem_U = 0x82,
+        &op_Noop, // I64_And = 0x83,
+        &op_Noop, // I64_Or = 0x84,
+        &op_Noop, // I64_Xor = 0x85,
+        &op_Noop, // I64_Shl = 0x86,
+        &op_Noop, // I64_Shr_S = 0x87,
+        &op_Noop, // I64_Shr_U = 0x88,
+        &op_Noop, // I64_Rotl = 0x89,
+        &op_Noop, // I64_Rotr = 0x8A,
+        &op_Noop, // F32_Abs = 0x8B,
+        &op_Noop, // F32_Neg = 0x8C,
+        &op_Noop, // F32_Ceil = 0x8D,
+        &op_Noop, // F32_Floor = 0x8E,
+        &op_Noop, // F32_Trunc = 0x8F,
+        &op_Noop, // F32_Nearest = 0x90,
+        &op_Noop, // F32_Sqrt = 0x91,
+        &op_Noop, // F32_Add = 0x92,
+        &op_Noop, // F32_Sub = 0x93,
+        &op_Noop, // F32_Mul = 0x94,
+        &op_Noop, // F32_Div = 0x95,
+        &op_Noop, // F32_Min = 0x96,
+        &op_Noop, // F32_Max = 0x97,
+        &op_Noop, // F32_Copysign = 0x98,
+        &op_Noop, // F64_Abs = 0x99,
+        &op_Noop, // F64_Neg = 0x9A,
+        &op_Noop, // F64_Ceil = 0x9B,
+        &op_Noop, // F64_Floor = 0x9C,
+        &op_Noop, // F64_Trunc = 0x9D,
+        &op_Noop, // F64_Nearest = 0x9E,
+        &op_Noop, // F64_Sqrt = 0x9F,
+        &op_Noop, // F64_Add = 0xA0,
+        &op_Noop, // F64_Sub = 0xA1,
+        &op_Noop, // F64_Mul = 0xA2,
+        &op_Noop, // F64_Div = 0xA3,
+        &op_Noop, // F64_Min = 0xA4,
+        &op_Noop, // F64_Max = 0xA5,
+        &op_Noop, // F64_Copysign = 0xA6,
+        &op_Noop, // I32_Wrap_I64 = 0xA7,
+        &op_Noop, // I32_Trunc_F32_S = 0xA8,
+        &op_Noop, // I32_Trunc_F32_U = 0xA9,
+        &op_Noop, // I32_Trunc_F64_S = 0xAA,
+        &op_Noop, // I32_Trunc_F64_U = 0xAB,
+        &op_Noop, // I64_Extend_I32_S = 0xAC,
+        &op_Noop, // I64_Extend_I32_U = 0xAD,
+        &op_Noop, // I64_Trunc_F32_S = 0xAE,
+        &op_Noop, // I64_Trunc_F32_U = 0xAF,
+        &op_Noop, // I64_Trunc_F64_S = 0xB0,
+        &op_Noop, // I64_Trunc_F64_U = 0xB1,
+        &op_Noop, // F32_Convert_I32_S = 0xB2,
+        &op_Noop, // F32_Convert_I32_U = 0xB3,
+        &op_Noop, // F32_Convert_I64_S = 0xB4,
+        &op_Noop, // F32_Convert_I64_U = 0xB5,
+        &op_Noop, // F32_Demote_F64 = 0xB6,
+        &op_Noop, // F64_Convert_I32_S = 0xB7,
+        &op_Noop, // F64_Convert_I32_U = 0xB8,
+        &op_Noop, // F64_Convert_I64_S = 0xB9,
+        &op_Noop, // F64_Convert_I64_U = 0xBA,
+        &op_Noop, // F64_Promote_F32 = 0xBB,
+        &op_Noop, // I32_Reinterpret_F32 = 0xBC,
+        &op_Noop, // I64_Reinterpret_F64 = 0xBD,
+        &op_Noop, // F32_Reinterpret_I32 = 0xBE,
+        &op_Noop, // F64_Reinterpret_I64 = 0xBF,
+        &op_Noop, // I32_Extend8_S = 0xC0,
+        &op_Noop, // I32_Extend16_S = 0xC1,
+        &op_Noop, // I64_Extend8_S = 0xC2,
+        &op_Noop, // I64_Extend16_S = 0xC3,
+        &op_Noop, // I64_Extend32_S = 0xC4,
+        &op_Noop, // 0xC5
+        &op_Noop, // 0xC6,
+        &op_Noop, // 0xC7,
+        &op_Noop, // 0xC8,
+        &op_Noop, // 0xC9,
+        &op_Noop, // 0xCA,
+        &op_Noop, // 0xCB,
+        &op_Noop, // 0xCC,
+        &op_Noop, // 0xCD,
+        &op_Noop, // 0xCE,
+        &op_Noop, // 0xCF,
+        &op_Noop, // Ref_Null = 0xD0,
+        &op_Noop, // Ref_Is_Null = 0xD1,
+        &op_Noop, // Ref_Func = 0xD2,
+    };
+
+    const opcodeToFuncFCTable = [_]InstructionFunc{
+        &op_Noop, // I32_Trunc_Sat_F32_S = 0xFC00,
+        &op_Noop, // I32_Trunc_Sat_F32_U = 0xFC01,
+        &op_Noop, // I32_Trunc_Sat_F64_S = 0xFC02,
+        &op_Noop, // I32_Trunc_Sat_F64_U = 0xFC03,
+        &op_Noop, // I64_Trunc_Sat_F32_S = 0xFC04,
+        &op_Noop, // I64_Trunc_Sat_F32_U = 0xFC05,
+        &op_Noop, // I64_Trunc_Sat_F64_S = 0xFC06,
+        &op_Noop, // I64_Trunc_Sat_F64_U = 0xFC07,
+        &op_Noop, // Memory_Init = 0xFC08,
+        &op_Noop, // Data_Drop = 0xFC09,
+        &op_Noop, // Memory_Copy = 0xFC0A,
+        &op_Noop, // Memory_Fill = 0xFC0B,
+        &op_Noop, // Table_Init = 0xFC0C,
+        &op_Noop, // Elem_Drop = 0xFC0D,
+        &op_Noop, // Table_Copy = 0xFC0E,
+        &op_Noop, // Table_Grow = 0xFC0F,
+        &op_Noop, // Table_Size = 0xFC10,
+        &op_Noop, // Table_Fill = 0xFC11,
+    };
+
+    fn instructionToFunc(instruction: Instruction) InstructionFuncData {
+        const opcode_int = @enumToInt(instruction.opcode);
+        var func: InstructionFunc = if (opcode_int <= 0xD2) opcodeToFuncTable[opcode_int] else opcodeToFuncFCTable[opcode_int - 0xFC00];
+
+        return InstructionFuncData{
+            .func = func,
+            .immediate = instruction.immediate,
+        };
+    }
+
+    fn run(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+        try @call(.{ .modifier = .always_tail }, pc[0].func, .{ stack, pc });
+    }
+
+    // TODO remove this and just use the stuff directly from the stack
+    const CallContext = struct {
+        module: *ModuleInstance,
+        module_def: *const ModuleDefinition,
+        stack: *Stack,
+    };
+
+    const OpHelpers = struct {
+        fn seek(offset: u32, max: usize) !u32 {
+            if (offset < max or offset == Label.k_invalid_continuation) {
+                return offset;
+            }
+            return error.OutOfBounds;
+        }
+
+        fn propagateNanWithOp(op: anytype, v1: anytype, v2: @TypeOf(v1)) @TypeOf(v1) {
+            if (std.math.isNan(v1)) {
+                return v1;
+            } else if (std.math.isNan(v2)) {
+                return v2;
+            } else {
+                return op(v1, v2);
+            }
+        }
+
+        fn truncateTo(comptime T: type, value: anytype) !T {
+            switch (T) {
+                i32 => {},
+                u32 => {},
+                i64 => {},
+                u64 => {},
+                else => @compileError("Only i32 and i64 are supported outputs."),
+            }
+            switch (@TypeOf(value)) {
+                f32 => {},
+                f64 => {},
+                else => @compileError("Only f32 and f64 are supported inputs."),
+            }
+
+            var truncated = @trunc(value);
+
+            if (std.math.isNan(truncated)) {
+                return error.TrapInvalidIntegerConversion;
+            } else if (truncated < std.math.minInt(T)) {
+                return error.TrapIntegerOverflow;
+            } else {
+                if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
+                    if (truncated > std.math.maxInt(T)) {
+                        return error.TrapIntegerOverflow;
+                    }
+                } else {
+                    if (truncated >= std.math.maxInt(T)) {
+                        return error.TrapIntegerOverflow;
+                    }
+                }
+            }
+            return @floatToInt(T, truncated);
+        }
+
+        fn saturatedTruncateTo(comptime T: type, value: anytype) T {
+            switch (T) {
+                i32 => {},
+                u32 => {},
+                i64 => {},
+                u64 => {},
+                else => @compileError("Only i32 and i64 are supported outputs."),
+            }
+            switch (@TypeOf(value)) {
+                f32 => {},
+                f64 => {},
+                else => @compileError("Only f32 and f64 are supported inputs."),
+            }
+
+            var truncated = @trunc(value);
+
+            if (std.math.isNan(truncated)) {
+                return 0;
+            } else if (truncated < std.math.minInt(T)) {
+                return std.math.minInt(T);
+            } else {
+                if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
+                    if (truncated > std.math.maxInt(T)) {
+                        return std.math.maxInt(T);
+                    }
+                } else {
+                    if (truncated >= std.math.maxInt(T)) {
+                        return std.math.maxInt(T);
+                    }
+                }
+            }
+            return @floatToInt(T, truncated);
+        }
+
+        fn loadFromMem(comptime T: type, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !T {
+            if (offset_from_stack < 0) {
+                return error.TrapOutOfBoundsMemoryAccess;
+            }
+
+            const memory: *const MemoryInstance = store.getMemory(0);
+            const offset: usize = offset_from_memarg + @intCast(usize, offset_from_stack);
+
+            const bit_count = std.meta.bitCount(T);
+            const read_type = switch (bit_count) {
+                8 => u8,
+                16 => u16,
+                32 => u32,
+                64 => u64,
+                else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
+            };
+
+            const end = offset + (bit_count / 8);
+
+            if (memory.mem.items.len < end) {
+                return error.TrapOutOfBoundsMemoryAccess;
+            }
+
+            const mem = memory.mem.items[offset..end];
+            const value = std.mem.readIntSliceLittle(read_type, mem);
+            return @bitCast(T, value);
+        }
+
+        fn storeInMem(value: anytype, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !void {
+            if (offset_from_stack < 0) {
+                return error.TrapOutOfBoundsMemoryAccess;
+            }
+
+            const memory: *MemoryInstance = store.getMemory(0);
+            const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
+
+            const bit_count = std.meta.bitCount(@TypeOf(value));
+            const write_type = switch (bit_count) {
+                8 => u8,
+                16 => u16,
+                32 => u32,
+                64 => u64,
+                else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
+            };
+
+            const end = offset + (bit_count / 8);
+            if (memory.mem.items.len < end) {
+                return error.TrapOutOfBoundsMemoryAccess;
+            }
+
+            const write_value = @bitCast(write_type, value);
+
+            const mem = memory.mem.items[offset..end];
+            std.mem.writeIntSliceLittle(write_type, mem, write_value);
+        }
+
+        fn call(context: *CallContext, func: *const FunctionInstance, next_instruction: u32) !u32 {
+            const functype: *const FunctionTypeDefinition = &context.module_def.types.items[func.type_def_index];
+            const param_types: []const ValType = functype.getParams();
+            const continuation: u32 = next_instruction;
+
+            try context.stack.pushFrame(func, context.module, param_types, func.local_types.items);
+            try context.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
+
+            return func.offset_into_instructions;
+        }
+
+        fn callImport(context: *CallContext, func: *const FunctionImport, next_instruction: u32) !u32 {
+            switch (func.data) {
+                .Host => |data| {
+                    const params_len: u32 = @intCast(u32, data.func_def.getParams().len);
+                    const returns_len: u32 = @intCast(u32, data.func_def.getReturns().len);
+
+                    var stack: *Stack = context.stack;
+
+                    if (stack.num_values + returns_len < stack.values.len) {
+                        var params = stack.values[stack.num_values - params_len .. stack.num_values];
+                        var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
+
+                        data.callback(data.userdata, params, returns_temp);
+
+                        stack.num_values = (stack.num_values - params_len) + returns_len;
+                        var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
+
+                        std.mem.copy(Val, returns_dest, returns_temp);
+
+                        return next_instruction;
+                    } else {
+                        return error.TrapStackExhausted;
+                    }
+                },
+                .Wasm => |data| {
+                    var next_context = CallContext{
+                        .module = data.module_instance,
+                        .module_def = data.module_instance.module_def,
+                        .stack = context.stack,
+                    };
+
+                    const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
+                    return try call(&next_context, func_instance, next_instruction);
+                },
+            }
+        }
+
+        fn enterBlock(context: *CallContext, instruction: Instruction, label_offset: u32) !void {
+            const block_type_value: BlockTypeValue = context.module_def.code.block_type_values.items[instruction.immediate];
+            const continuation = context.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
+
+            try context.stack.pushLabel(block_type_value, continuation);
+        }
+
+        fn branch(context: *CallContext, label_id: u32) !u32 {
+            const label: *const Label = context.stack.findLabel(label_id);
+            const frame_label: *const Label = context.stack.frameLabel();
+            if (label == frame_label) {
+                return try returnFromFunc(context);
+            }
+            const continuation: u32 = label.continuation;
+
+            const is_loop_continuation: bool = context.module_def.code.instructions.items[continuation].opcode == .Loop;
+
+            if (is_loop_continuation == false or label_id != 0) {
+                const return_types: []const ValType = label.blocktype.getBlocktypeReturnTypes(context.module_def);
+                const pop_final_label = !is_loop_continuation;
+                context.stack.popAllUntilLabelId(label_id, pop_final_label, return_types.len);
+            }
+            return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
+        }
+
+        fn returnFromFunc(context: *CallContext) !u32 {
+            var frame: *const CallFrame = context.stack.topFrame();
+            const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
+
+            const is_root_function = context.stack.isTopFrameRootFunction();
+
+            var last_label: Label = context.stack.popFrame(return_types.len);
+
+            if (is_root_function) {
+                return Label.k_invalid_continuation;
+            } else {
+                return last_label.continuation;
+            }
+        }
+    };
+
+    fn op_Invalid(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+        _ = pc;
+        _ = stack;
+        unreachable;
+    }
+
+    fn op_Noop(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+        @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc, stack });
+    }
+
+    fn op_I32_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+        var v: i32 = @bitCast(i32, pc.immediate);
+        try stack.pushI32(v);
+        @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc, stack });
+    }
+
+    fn op_I64_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+        var v: i64 = stack.topFrame().module_instance.module_def.code.i64_const.items[pc.immediate];
+        try stack.pushI64(v);
+        @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc, stack });
+    }
+
+    fn op_F32_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+        var v: f32 = @bitCast(f32, pc.immediate);
+        try stack.pushF32(v);
+        @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc, stack });
+    }
+
+    fn op_F64_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+        var v: f64 = stack.topFrame().module_instance.module_def.code.f64_const.items[pc.immediate];
+        try stack.pushF64(v);
+        @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc, stack });
+    }
+};
+
 pub const ModuleDefinition = struct {
     const Code = struct {
-        instructions: std.ArrayList(Instruction),
+        instructions: std.ArrayList(InstructionFuncData),
 
         // Instruction.immediate indexes these arrays depending on the opcode
         block_type_values: std.ArrayList(BlockTypeValue),
@@ -3199,6 +3725,19 @@ pub const ModuleDefinition = struct {
                             const parsing_offset = @intCast(u32, self.code.instructions.items.len);
 
                             var instruction = try Instruction.decode(reader, self);
+
+                            switch (instruction.opcode) {
+                                .Noop => {}, // no need to emit noops since they don't do anything
+                                else => {
+                                    var instruction_func = InstructionFuncs.instructionToFunc(instruction);
+                                    try self.code.instructions.append(instruction_func);
+                                },
+                            }
+
+                            // TODO change these continuation offsets into pointers into the InstructionFuncData array to avoid
+                            // the opcode needing to lookup the function to call - it can just do it directly if it has the pointer.
+                            // Will fold nicely into immediates getting bumped up to 8 bytes.
+
                             if (instruction.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
                                     .offset = parsing_offset,
@@ -3619,12 +4158,6 @@ pub const ModuleInstance = struct {
     store: Store,
     module_def: *const ModuleDefinition,
     is_instantiated: bool = false,
-
-    const CallContext = struct {
-        module: *ModuleInstance,
-        module_def: *const ModuleDefinition,
-        stack: *Stack,
-    };
 
     /// module_def is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
@@ -4085,7 +4618,9 @@ pub const ModuleInstance = struct {
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
 
-        executeWasm(&self.stack, func.offset_into_instructions) catch |err| {
+        const inst: InstructionFuncData = self.module_def.instructions.items[func.offset_into_instructions];
+        InstructionFuncs.run(&inst, &self.stack) catch |err| {
+            // executeWasm(&self, func.offset_into_instructions) catch |err| {
             self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
@@ -4165,1700 +4700,1452 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn executeWasm(stack: *Stack, root_offset: u32) !void {
-        const Helpers = struct {
-            fn seek(offset: u32, max: usize) !u32 {
-                if (offset < max or offset == Label.k_invalid_continuation) {
-                    return offset;
-                }
-                return error.OutOfBounds;
-            }
-
-            fn propagateNanWithOp(op: anytype, v1: anytype, v2: @TypeOf(v1)) @TypeOf(v1) {
-                if (std.math.isNan(v1)) {
-                    return v1;
-                } else if (std.math.isNan(v2)) {
-                    return v2;
-                } else {
-                    return op(v1, v2);
-                }
-            }
-
-            fn truncateTo(comptime T: type, value: anytype) !T {
-                switch (T) {
-                    i32 => {},
-                    u32 => {},
-                    i64 => {},
-                    u64 => {},
-                    else => @compileError("Only i32 and i64 are supported outputs."),
-                }
-                switch (@TypeOf(value)) {
-                    f32 => {},
-                    f64 => {},
-                    else => @compileError("Only f32 and f64 are supported inputs."),
-                }
-
-                var truncated = @trunc(value);
-
-                if (std.math.isNan(truncated)) {
-                    return error.TrapInvalidIntegerConversion;
-                } else if (truncated < std.math.minInt(T)) {
-                    return error.TrapIntegerOverflow;
-                } else {
-                    if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
-                        if (truncated > std.math.maxInt(T)) {
-                            return error.TrapIntegerOverflow;
-                        }
-                    } else {
-                        if (truncated >= std.math.maxInt(T)) {
-                            return error.TrapIntegerOverflow;
-                        }
-                    }
-                }
-                return @floatToInt(T, truncated);
-            }
-
-            fn saturatedTruncateTo(comptime T: type, value: anytype) T {
-                switch (T) {
-                    i32 => {},
-                    u32 => {},
-                    i64 => {},
-                    u64 => {},
-                    else => @compileError("Only i32 and i64 are supported outputs."),
-                }
-                switch (@TypeOf(value)) {
-                    f32 => {},
-                    f64 => {},
-                    else => @compileError("Only f32 and f64 are supported inputs."),
-                }
-
-                var truncated = @trunc(value);
-
-                if (std.math.isNan(truncated)) {
-                    return 0;
-                } else if (truncated < std.math.minInt(T)) {
-                    return std.math.minInt(T);
-                } else {
-                    if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
-                        if (truncated > std.math.maxInt(T)) {
-                            return std.math.maxInt(T);
-                        }
-                    } else {
-                        if (truncated >= std.math.maxInt(T)) {
-                            return std.math.maxInt(T);
-                        }
-                    }
-                }
-                return @floatToInt(T, truncated);
-            }
-
-            fn loadFromMem(comptime T: type, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !T {
-                if (offset_from_stack < 0) {
-                    return error.TrapOutOfBoundsMemoryAccess;
-                }
-
-                const memory: *const MemoryInstance = store.getMemory(0);
-                const offset: usize = offset_from_memarg + @intCast(usize, offset_from_stack);
-
-                const bit_count = std.meta.bitCount(T);
-                const read_type = switch (bit_count) {
-                    8 => u8,
-                    16 => u16,
-                    32 => u32,
-                    64 => u64,
-                    else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
-                };
-
-                const end = offset + (bit_count / 8);
-
-                if (memory.mem.items.len < end) {
-                    return error.TrapOutOfBoundsMemoryAccess;
-                }
-
-                const mem = memory.mem.items[offset..end];
-                const value = std.mem.readIntSliceLittle(read_type, mem);
-                return @bitCast(T, value);
-            }
-
-            fn storeInMem(value: anytype, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !void {
-                if (offset_from_stack < 0) {
-                    return error.TrapOutOfBoundsMemoryAccess;
-                }
-
-                const memory: *MemoryInstance = store.getMemory(0);
-                const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
-
-                const bit_count = std.meta.bitCount(@TypeOf(value));
-                const write_type = switch (bit_count) {
-                    8 => u8,
-                    16 => u16,
-                    32 => u32,
-                    64 => u64,
-                    else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
-                };
-
-                const end = offset + (bit_count / 8);
-                if (memory.mem.items.len < end) {
-                    return error.TrapOutOfBoundsMemoryAccess;
-                }
-
-                const write_value = @bitCast(write_type, value);
-
-                const mem = memory.mem.items[offset..end];
-                std.mem.writeIntSliceLittle(write_type, mem, write_value);
-            }
-        };
-
-        var instruction_offset: u32 = root_offset;
-
-        while (instruction_offset != Label.k_invalid_continuation) {
-            var current_callframe: *CallFrame = stack.topFrame();
-            var current_store: *Store = &current_callframe.module_instance.store;
-
-            var context = CallContext{
-                .module = current_callframe.module_instance,
-                .module_def = current_callframe.module_instance.module_def,
-                .stack = stack,
-            };
-
-            const instructions: []const Instruction = context.module_def.code.instructions.items;
-            var instruction: Instruction = instructions[instruction_offset];
-            var next_instruction: u32 = instruction_offset + 1;
-
-            switch (instruction.opcode) {
-                Opcode.Unreachable => {
-                    return error.TrapUnreachable;
-                },
-                Opcode.Noop => {
-                    // should have been stripped in the decoding phase
-                    unreachable;
-                },
-                Opcode.Block => {
-                    try enterBlock(&context, instruction, instruction_offset);
-                },
-                Opcode.Loop => {
-                    try enterBlock(&context, instruction, instruction_offset);
-                },
-                Opcode.If => {
-                    var condition = try stack.popI32();
-                    if (condition != 0) {
-                        try enterBlock(&context, instruction, instruction_offset);
-                    } else if (context.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| { // +1 to skip the else opcode, since it's treated as an End for the If block.
-                        try enterBlock(&context, instruction, else_offset);
-                        next_instruction = try Helpers.seek(else_offset + 1, instructions.len);
-                    } else {
-                        const continuation = context.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
-                        next_instruction = try Helpers.seek(continuation + 1, instructions.len);
-                    }
-                },
-                Opcode.Else => {
-                    // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
-                    const end_offset = context.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
-                    next_instruction = try Helpers.seek(end_offset, instructions.len);
-                },
-                Opcode.End => {
-                    // determine if this is a a scope or function call exit
-                    const top_label: *const Label = stack.topLabel();
-                    const frame_label: *const Label = stack.frameLabel();
-                    if (top_label != frame_label) {
-                        // Since the only values on the stack should be the returns from the block, we just pop the
-                        // label, which leaves the value stack alone.
-                        stack.popLabel();
-                    } else {
-                        var frame: *const CallFrame = stack.topFrame();
-                        const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
-
-                        const is_root_function = stack.isTopFrameRootFunction();
-
-                        var label = stack.popFrame(return_types.len);
-
-                        if (is_root_function) {
-                            return;
-                        } else {
-                            const new_frame: *const CallFrame = stack.topFrame();
-                            const new_instructions_len = new_frame.module_instance.module_def.code.instructions.items.len;
-                            next_instruction = try Helpers.seek(label.continuation, new_instructions_len);
-                        }
-                    }
-                },
-                Opcode.Branch => {
-                    const label_id: u32 = instruction.immediate;
-                    const branch_to_instruction = try branch(&context, label_id);
-                    next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
-                },
-                Opcode.Branch_If => {
-                    const label_id: u32 = instruction.immediate;
-                    const v = try stack.popI32();
-                    if (v != 0) {
-                        const branch_to_instruction = try branch(&context, label_id);
-                        next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
-                    }
-                },
-                Opcode.Branch_Table => {
-                    var immediates: *const BranchTableImmediates = &context.module_def.code.branch_table.items[instruction.immediate];
-                    var table: []const u32 = immediates.label_ids.items;
-
-                    const label_index = try stack.popI32();
-                    const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
-                    const branch_to_instruction = try branch(&context, label_id);
-
-                    next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
-                },
-                Opcode.Return => {
-                    const continuation: u32 = try returnFromFunc(&context);
-                    next_instruction = try Helpers.seek(continuation, instructions.len);
-                },
-                Opcode.Call => {
-                    const func_index: u32 = instruction.immediate;
-                    if (func_index >= current_store.imports.functions.items.len) {
-                        const func_instance_index = func_index - current_store.imports.functions.items.len;
-                        const func: *const FunctionInstance = &current_store.functions.items[@intCast(usize, func_instance_index)];
-                        next_instruction = try call(&context, func, next_instruction);
-                    } else {
-                        var func_import = &current_store.imports.functions.items[func_index];
-                        next_instruction = try callImport(&context, func_import, next_instruction);
-                    }
-                },
-                Opcode.Call_Indirect => {
-                    var immediates: *const CallIndirectImmediates = &context.module_def.code.call_indirect.items[instruction.immediate];
-
-                    if (context.module_def.types.items.len <= immediates.type_index) {
-                        return error.AssertUnknownType;
-                    }
-                    if (current_store.imports.tables.items.len + current_store.tables.items.len <= immediates.table_index) {
-                        return error.AssertUnknownTable;
-                    }
-
-                    const table: *const TableInstance = current_store.getTable(immediates.table_index);
-
-                    const ref_index = try stack.popI32();
-                    if (table.refs.items.len <= ref_index or ref_index < 0) {
-                        return error.TrapUndefinedElement;
-                    }
-
-                    const ref: Val = table.refs.items[@intCast(usize, ref_index)];
-                    if (ref.isNull()) {
-                        return error.TrapUninitializedElement;
-                    }
-
-                    std.debug.assert(ref.FuncRef.module_instance != &empty_module_instance); // Should have been set in module instantiation
-
-                    const func_index = ref.FuncRef.index;
-                    var call_context = CallContext{
-                        .module = ref.FuncRef.module_instance,
-                        .module_def = ref.FuncRef.module_instance.module_def,
-                        .stack = context.stack,
-                    };
-                    var call_store = &call_context.module.store;
-
-                    if (call_store.imports.functions.items.len + call_store.functions.items.len <= func_index) {
-                        return error.ValidationUnknownFunction;
-                    }
-
-                    if (func_index >= call_store.imports.functions.items.len) {
-                        const func: *const FunctionInstance = &call_store.functions.items[func_index - call_store.imports.functions.items.len];
-                        if (func.type_def_index != immediates.type_index) {
-                            const func_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[func.type_def_index];
-                            const immediate_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[immediates.type_index];
-
-                            var type_comparer = FunctionTypeContext{};
-                            if (type_comparer.eql(func_type_def, immediate_type_def) == false) {
-                                return error.TrapIndirectCallTypeMismatch;
-                            }
-                        }
-                        next_instruction = try call(&call_context, func, next_instruction);
-                    } else {
-                        var func_import: *const FunctionImport = &call_store.imports.functions.items[func_index];
-                        var func_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[immediates.type_index];
-                        if (func_import.isTypeSignatureEql(func_type_def) == false) {
-                            return error.TrapIndirectCallTypeMismatch;
-                        }
-                        next_instruction = try callImport(&call_context, func_import, next_instruction);
-                    }
-                },
-                Opcode.Drop => {
-                    _ = try stack.popValue();
-                },
-                Opcode.Select => {
-                    var boolean: i32 = try stack.popI32();
-                    var v2: Val = try stack.popValue();
-                    var v1: Val = try stack.popValue();
-
-                    if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
-                        return error.ValidationTypeMismatch;
-                    }
-
-                    if (boolean != 0) {
-                        try stack.pushValue(v1);
-                    } else {
-                        try stack.pushValue(v2);
-                    }
-                },
-                Opcode.Select_T => {
-                    var boolean: i32 = try stack.popI32();
-                    var v2: Val = try stack.popValue();
-                    var v1: Val = try stack.popValue();
-
-                    if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
-                        return error.ValidationTypeMismatch;
-                    }
-
-                    var valtype: ValType = @intToEnum(ValType, instruction.immediate);
-                    if (std.meta.activeTag(v1) != valtype) {
-                        return error.ValidationTypeMismatch;
-                    }
-
-                    if (boolean != 0) {
-                        try stack.pushValue(v1);
-                    } else {
-                        try stack.pushValue(v2);
-                    }
-                },
-                Opcode.Local_Get => {
-                    var locals_index: u32 = instruction.immediate;
-                    var frame: *const CallFrame = stack.topFrame();
-                    var v: Val = frame.locals[locals_index];
-                    try stack.pushValue(v);
-                },
-                Opcode.Local_Set => {
-                    var locals_index: u32 = instruction.immediate;
-                    var frame: *CallFrame = stack.topFrame();
-                    var v: Val = try stack.popValue();
-                    frame.locals[locals_index] = v;
-                },
-                Opcode.Local_Tee => {
-                    var locals_index: u32 = instruction.immediate;
-                    var frame: *CallFrame = stack.topFrame();
-                    var v: Val = try stack.topValue();
-                    frame.locals[locals_index] = v;
-                },
-                Opcode.Global_Get => {
-                    var global_index: u32 = instruction.immediate;
-                    var global: *GlobalInstance = current_store.getGlobal(global_index);
-                    try stack.pushValue(global.value);
-                },
-                Opcode.Global_Set => {
-                    var global_index: u32 = instruction.immediate;
-                    var global: *GlobalInstance = current_store.getGlobal(global_index);
-                    global.value = try stack.popValue();
-                },
-                Opcode.Table_Get => {
-                    const table_index = instruction.immediate;
-                    const table: *const TableInstance = current_store.getTable(table_index);
-                    const index: i32 = try stack.popI32();
-                    if (table.refs.items.len <= index or index < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-                    const ref = table.refs.items[@intCast(usize, index)];
-                    try stack.pushValue(ref);
-                },
-                Opcode.Table_Set => {
-                    const table_index = instruction.immediate;
-                    var table: *TableInstance = current_store.getTable(table_index);
-                    const ref = try stack.popValue();
-                    const index: i32 = try stack.popI32();
-                    if (table.refs.items.len <= index or index < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-                    if (ref.isRefType() == false) {
-                        return error.TrapTableSetTypeMismatch;
-                    }
-                    table.refs.items[@intCast(usize, index)] = ref;
-                },
-                Opcode.I32_Load => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(i32, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI32(value);
-                },
-                Opcode.I64_Load => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(i64, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI64(value);
-                },
-                Opcode.F32_Load => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(f32, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushF32(value);
-                },
-                Opcode.F64_Load => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value = try Helpers.loadFromMem(f64, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushF64(value);
-                },
-                Opcode.I32_Load8_S => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: i32 = try Helpers.loadFromMem(i8, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Load8_U => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: u32 = try Helpers.loadFromMem(u8, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI32(@bitCast(i32, value));
-                },
-                Opcode.I32_Load16_S => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: i32 = try Helpers.loadFromMem(i16, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Load16_U => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: u32 = try Helpers.loadFromMem(u16, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI32(@bitCast(i32, value));
-                },
-                Opcode.I64_Load8_S => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i8, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Load8_U => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u8, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI64(@bitCast(i64, value));
-                },
-                Opcode.I64_Load16_S => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i16, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Load16_U => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u16, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI64(@bitCast(i64, value));
-                },
-                Opcode.I64_Load32_S => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: i64 = try Helpers.loadFromMem(i32, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Load32_U => {
-                    var offset_from_stack: i32 = try stack.popI32();
-                    var value: u64 = try Helpers.loadFromMem(u32, current_store, instruction.immediate, offset_from_stack);
-                    try stack.pushI64(@bitCast(i64, value));
-                },
-                Opcode.I32_Store => {
-                    const value: i32 = try stack.popI32();
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.I64_Store => {
-                    const value: i64 = try stack.popI64();
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.F32_Store => {
-                    const value: f32 = try stack.popF32();
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.F64_Store => {
-                    const value: f64 = try stack.popF64();
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.I32_Store8 => {
-                    const value: i8 = @truncate(i8, try stack.popI32());
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.I32_Store16 => {
-                    const value: i16 = @truncate(i16, try stack.popI32());
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.I64_Store8 => {
-                    const value: i8 = @truncate(i8, try stack.popI64());
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.I64_Store16 => {
-                    const value: i16 = @truncate(i16, try stack.popI64());
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.I64_Store32 => {
-                    const value: i32 = @truncate(i32, try stack.popI64());
-                    const offset_from_stack: i32 = try stack.popI32();
-                    try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
-                },
-                Opcode.Memory_Size => {
-                    const memory_index: usize = 0;
-                    var memory_instance: *const MemoryInstance = current_store.getMemory(memory_index);
-
-                    const num_pages: i32 = @intCast(i32, memory_instance.size());
-                    try stack.pushI32(num_pages);
-                },
-                Opcode.Memory_Grow => {
-                    const memory_index: usize = 0;
-                    var memory_instance: *MemoryInstance = current_store.getMemory(memory_index);
-
-                    const old_num_pages: i32 = @intCast(i32, memory_instance.limits.min);
-                    const num_pages: i32 = try stack.popI32();
-
-                    if (num_pages >= 0 and memory_instance.grow(@intCast(usize, num_pages))) {
-                        try stack.pushI32(old_num_pages);
-                    } else {
-                        try stack.pushI32(-1);
-                    }
-                },
-                Opcode.I32_Const => {
-                    var v: i32 = @bitCast(i32, instruction.immediate);
-                    try stack.pushI32(v);
-                },
-                Opcode.I64_Const => {
-                    var v: i64 = context.module_def.code.i64_const.items[instruction.immediate];
-                    try stack.pushI64(v);
-                },
-                Opcode.F32_Const => {
-                    var v: f32 = @bitCast(f32, instruction.immediate);
-                    try stack.pushF32(v);
-                },
-                Opcode.F64_Const => {
-                    var v: f64 = context.module_def.code.f64_const.items[instruction.immediate];
-                    try stack.pushF64(v);
-                },
-                Opcode.I32_Eqz => {
-                    var v1: i32 = try stack.popI32();
-                    var result: i32 = if (v1 == 0) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_Eq => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result: i32 = if (v1 == v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_NE => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result: i32 = if (v1 != v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_LT_S => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result: i32 = if (v1 < v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_LT_U => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var result: i32 = if (v1 < v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_GT_S => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result: i32 = if (v1 > v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_GT_U => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var result: i32 = if (v1 > v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_LE_S => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_LE_U => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var result: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_GE_S => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_GE_U => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var result: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_Eqz => {
-                    var v1: i64 = try stack.popI64();
-                    var result: i32 = if (v1 == 0) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_Eq => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result: i32 = if (v1 == v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_NE => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result: i32 = if (v1 != v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_LT_S => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result: i32 = if (v1 < v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_LT_U => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var result: i32 = if (v1 < v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_GT_S => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result: i32 = if (v1 > v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_GT_U => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var result: i32 = if (v1 > v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_LE_S => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_LE_U => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var result: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_GE_S => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.I64_GE_U => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var result: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.pushI32(result);
-                },
-                Opcode.F32_EQ => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value: i32 = if (v1 == v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F32_NE => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value: i32 = if (v1 != v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F32_LT => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value: i32 = if (v1 < v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F32_GT => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value: i32 = if (v1 > v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F32_LE => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F32_GE => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F64_EQ => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value: i32 = if (v1 == v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F64_NE => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value: i32 = if (v1 != v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F64_LT => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value: i32 = if (v1 < v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F64_GT => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value: i32 = if (v1 > v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F64_LE => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value: i32 = if (v1 <= v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.F64_GE => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value: i32 = if (v1 >= v2) 1 else 0;
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Clz => {
-                    var v: i32 = try stack.popI32();
-                    var num_zeroes = @clz(v);
-                    try stack.pushI32(num_zeroes);
-                },
-                Opcode.I32_Ctz => {
-                    var v: i32 = try stack.popI32();
-                    var num_zeroes = @ctz(v);
-                    try stack.pushI32(num_zeroes);
-                },
-                Opcode.I32_Popcnt => {
-                    var v: i32 = try stack.popI32();
-                    var num_bits_set = @popCount(v);
-                    try stack.pushI32(num_bits_set);
-                },
-                Opcode.I32_Add => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result = v1 +% v2;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_Sub => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var result = v1 -% v2;
-                    try stack.pushI32(result);
-                },
-                Opcode.I32_Mul => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var value = v1 *% v2;
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Div_S => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var value = std.math.divTrunc(i32, v1, v2) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else if (e == error.Overflow) {
-                            return error.TrapIntegerOverflow;
-                        } else {
-                            return e;
-                        }
-                    };
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Div_U => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var value_unsigned = std.math.divFloor(u32, v1, v2) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else if (e == error.Overflow) {
-                            return error.TrapIntegerOverflow;
-                        } else {
-                            return e;
-                        }
-                    };
-                    var value = @bitCast(i32, value_unsigned);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Rem_S => {
-                    var v2: i32 = try stack.popI32();
-                    var v1: i32 = try stack.popI32();
-                    var denom = try std.math.absInt(v2);
-                    var value = std.math.rem(i32, v1, denom) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else {
-                            return e;
-                        }
-                    };
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Rem_U => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var value_unsigned = std.math.rem(u32, v1, v2) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else {
-                            return e;
-                        }
-                    };
-                    var value = @bitCast(i32, value_unsigned);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_And => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var value = @bitCast(i32, v1 & v2);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Or => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var value = @bitCast(i32, v1 | v2);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Xor => {
-                    var v2: u32 = @bitCast(u32, try stack.popI32());
-                    var v1: u32 = @bitCast(u32, try stack.popI32());
-                    var value = @bitCast(i32, v1 ^ v2);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Shl => {
-                    var shift_unsafe: i32 = try stack.popI32();
-                    var int: i32 = try stack.popI32();
-                    var shift: i32 = try std.math.mod(i32, shift_unsafe, 32);
-                    var value = std.math.shl(i32, int, shift);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Shr_S => {
-                    var shift_unsafe: i32 = try stack.popI32();
-                    var int: i32 = try stack.popI32();
-                    var shift = try std.math.mod(i32, shift_unsafe, 32);
-                    var value = std.math.shr(i32, int, shift);
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Shr_U => {
-                    var shift_unsafe: u32 = @bitCast(u32, try stack.popI32());
-                    var int: u32 = @bitCast(u32, try stack.popI32());
-                    var shift = try std.math.mod(u32, shift_unsafe, 32);
-                    var value = @bitCast(i32, std.math.shr(u32, int, shift));
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Rotl => {
-                    var rot: u32 = @bitCast(u32, try stack.popI32());
-                    var int: u32 = @bitCast(u32, try stack.popI32());
-                    var value = @bitCast(i32, std.math.rotl(u32, int, rot));
-                    try stack.pushI32(value);
-                },
-                Opcode.I32_Rotr => {
-                    var rot: u32 = @bitCast(u32, try stack.popI32());
-                    var int: u32 = @bitCast(u32, try stack.popI32());
-                    var value = @bitCast(i32, std.math.rotr(u32, int, rot));
-                    try stack.pushI32(value);
-                },
-                Opcode.I64_Clz => {
-                    var v: i64 = try stack.popI64();
-                    var num_zeroes = @clz(v);
-                    try stack.pushI64(num_zeroes);
-                },
-                Opcode.I64_Ctz => {
-                    var v: i64 = try stack.popI64();
-                    var num_zeroes = @ctz(v);
-                    try stack.pushI64(num_zeroes);
-                },
-                Opcode.I64_Popcnt => {
-                    var v: i64 = try stack.popI64();
-                    var num_bits_set = @popCount(v);
-                    try stack.pushI64(num_bits_set);
-                },
-                Opcode.I64_Add => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result = v1 +% v2;
-                    try stack.pushI64(result);
-                },
-                Opcode.I64_Sub => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var result = v1 -% v2;
-                    try stack.pushI64(result);
-                },
-                Opcode.I64_Mul => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var value = v1 *% v2;
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Div_S => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var value = std.math.divTrunc(i64, v1, v2) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else if (e == error.Overflow) {
-                            return error.TrapIntegerOverflow;
-                        } else {
-                            return e;
-                        }
-                    };
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Div_U => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var value_unsigned = std.math.divFloor(u64, v1, v2) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else if (e == error.Overflow) {
-                            return error.TrapIntegerOverflow;
-                        } else {
-                            return e;
-                        }
-                    };
-                    var value = @bitCast(i64, value_unsigned);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Rem_S => {
-                    var v2: i64 = try stack.popI64();
-                    var v1: i64 = try stack.popI64();
-                    var denom = try std.math.absInt(v2);
-                    var value = std.math.rem(i64, v1, denom) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else {
-                            return e;
-                        }
-                    };
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Rem_U => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var value_unsigned = std.math.rem(u64, v1, v2) catch |e| {
-                        if (e == error.DivisionByZero) {
-                            return error.TrapIntegerDivisionByZero;
-                        } else {
-                            return e;
-                        }
-                    };
-                    var value = @bitCast(i64, value_unsigned);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_And => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var value = @bitCast(i64, v1 & v2);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Or => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var value = @bitCast(i64, v1 | v2);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Xor => {
-                    var v2: u64 = @bitCast(u64, try stack.popI64());
-                    var v1: u64 = @bitCast(u64, try stack.popI64());
-                    var value = @bitCast(i64, v1 ^ v2);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Shl => {
-                    var shift_unsafe: i64 = try stack.popI64();
-                    var int: i64 = try stack.popI64();
-                    var shift: i64 = try std.math.mod(i64, shift_unsafe, 64);
-                    var value = std.math.shl(i64, int, shift);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Shr_S => {
-                    var shift_unsafe: i64 = try stack.popI64();
-                    var int: i64 = try stack.popI64();
-                    var shift = try std.math.mod(i64, shift_unsafe, 64);
-                    var value = std.math.shr(i64, int, shift);
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Shr_U => {
-                    var shift_unsafe: u64 = @bitCast(u64, try stack.popI64());
-                    var int: u64 = @bitCast(u64, try stack.popI64());
-                    var shift = try std.math.mod(u64, shift_unsafe, 64);
-                    var value = @bitCast(i64, std.math.shr(u64, int, shift));
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Rotl => {
-                    var rot: u64 = @bitCast(u64, try stack.popI64());
-                    var int: u64 = @bitCast(u64, try stack.popI64());
-                    var value = @bitCast(i64, std.math.rotl(u64, int, rot));
-                    try stack.pushI64(value);
-                },
-                Opcode.I64_Rotr => {
-                    var rot: u64 = @bitCast(u64, try stack.popI64());
-                    var int: u64 = @bitCast(u64, try stack.popI64());
-                    var value = @bitCast(i64, std.math.rotr(u64, int, rot));
-                    try stack.pushI64(value);
-                },
-                Opcode.F32_Abs => {
-                    var f = try stack.popF32();
-                    var value = std.math.fabs(f);
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Neg => {
-                    var f = try stack.popF32();
-                    try stack.pushF32(-f);
-                },
-                Opcode.F32_Ceil => {
-                    var f = try stack.popF32();
-                    var value = @ceil(f);
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Floor => {
-                    var f = try stack.popF32();
-                    var value = @floor(f);
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Trunc => {
-                    var f = try stack.popF32();
-                    var value = std.math.trunc(f);
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Nearest => {
-                    var f = try stack.popF32();
-                    var value: f32 = undefined;
-                    var ceil = @ceil(f);
-                    var floor = @floor(f);
-                    if (ceil - f == f - floor) {
-                        value = if (@mod(ceil, 2) == 0) ceil else floor;
-                    } else {
-                        value = @round(f);
-                    }
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Sqrt => {
-                    var f = try stack.popF32();
-                    var value = std.math.sqrt(f);
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Add => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value = v1 + v2;
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Sub => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value = v1 - v2;
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Mul => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value = v1 * v2;
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Div => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value = v1 / v2;
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Min => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Max => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
-                    try stack.pushF32(value);
-                },
-                Opcode.F32_Copysign => {
-                    var v2 = try stack.popF32();
-                    var v1 = try stack.popF32();
-                    var value = std.math.copysign(v1, v2);
-                    try stack.pushF32(value);
-                },
-                Opcode.F64_Abs => {
-                    var f = try stack.popF64();
-                    var value = std.math.fabs(f);
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Neg => {
-                    var f = try stack.popF64();
-                    try stack.pushF64(-f);
-                },
-                Opcode.F64_Ceil => {
-                    var f = try stack.popF64();
-                    var value = @ceil(f);
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Floor => {
-                    var f = try stack.popF64();
-                    var value = @floor(f);
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Trunc => {
-                    var f = try stack.popF64();
-                    var value = @trunc(f);
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Nearest => {
-                    var f = try stack.popF64();
-                    var value: f64 = undefined;
-                    var ceil = @ceil(f);
-                    var floor = @floor(f);
-                    if (ceil - f == f - floor) {
-                        value = if (@mod(ceil, 2) == 0) ceil else floor;
-                    } else {
-                        value = @round(f);
-                    }
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Sqrt => {
-                    var f = try stack.popF64();
-                    var value = std.math.sqrt(f);
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Add => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value = v1 + v2;
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Sub => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value = v1 - v2;
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Mul => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value = v1 * v2;
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Div => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value = v1 / v2;
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Min => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Max => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
-                    try stack.pushF64(value);
-                },
-                Opcode.F64_Copysign => {
-                    var v2 = try stack.popF64();
-                    var v1 = try stack.popF64();
-                    var value = std.math.copysign(v1, v2);
-                    try stack.pushF64(value);
-                },
-                Opcode.I32_Wrap_I64 => {
-                    var v = try stack.popI64();
-                    var mod = @truncate(i32, v);
-                    try stack.pushI32(mod);
-                },
-                Opcode.I32_Trunc_F32_S => {
-                    var v = try stack.popF32();
-                    var int = try Helpers.truncateTo(i32, v);
-                    try stack.pushI32(int);
-                },
-                Opcode.I32_Trunc_F32_U => {
-                    var v = try stack.popF32();
-                    var int = try Helpers.truncateTo(u32, v);
-                    try stack.pushI32(@bitCast(i32, int));
-                },
-                Opcode.I32_Trunc_F64_S => {
-                    var v = try stack.popF64();
-                    var int = try Helpers.truncateTo(i32, v);
-                    try stack.pushI32(int);
-                },
-                Opcode.I32_Trunc_F64_U => {
-                    var v = try stack.popF64();
-                    var int = try Helpers.truncateTo(u32, v);
-                    try stack.pushI32(@bitCast(i32, int));
-                },
-                Opcode.I64_Extend_I32_S => {
-                    var v32 = try stack.popI32();
-                    var v64: i64 = v32;
-                    try stack.pushI64(v64);
-                },
-                Opcode.I64_Extend_I32_U => {
-                    var v32 = try stack.popI32();
-                    var v64: u64 = @bitCast(u32, v32);
-                    try stack.pushI64(@bitCast(i64, v64));
-                },
-                Opcode.I64_Trunc_F32_S => {
-                    var v = try stack.popF32();
-                    var int = try Helpers.truncateTo(i64, v);
-                    try stack.pushI64(int);
-                },
-                Opcode.I64_Trunc_F32_U => {
-                    var v = try stack.popF32();
-                    var int = try Helpers.truncateTo(u64, v);
-                    try stack.pushI64(@bitCast(i64, int));
-                },
-                Opcode.I64_Trunc_F64_S => {
-                    var v = try stack.popF64();
-                    var int = try Helpers.truncateTo(i64, v);
-                    try stack.pushI64(int);
-                },
-                Opcode.I64_Trunc_F64_U => {
-                    var v = try stack.popF64();
-                    var int = try Helpers.truncateTo(u64, v);
-                    try stack.pushI64(@bitCast(i64, int));
-                },
-                Opcode.F32_Convert_I32_S => {
-                    var v = try stack.popI32();
-                    try stack.pushF32(@intToFloat(f32, v));
-                },
-                Opcode.F32_Convert_I32_U => {
-                    var v = @bitCast(u32, try stack.popI32());
-                    try stack.pushF32(@intToFloat(f32, v));
-                },
-                Opcode.F32_Convert_I64_S => {
-                    var v = try stack.popI64();
-                    try stack.pushF32(@intToFloat(f32, v));
-                },
-                Opcode.F32_Convert_I64_U => {
-                    var v = @bitCast(u64, try stack.popI64());
-                    try stack.pushF32(@intToFloat(f32, v));
-                },
-                Opcode.F32_Demote_F64 => {
-                    var v = try stack.popF64();
-                    try stack.pushF32(@floatCast(f32, v));
-                },
-                Opcode.F64_Convert_I32_S => {
-                    var v = try stack.popI32();
-                    try stack.pushF64(@intToFloat(f64, v));
-                },
-                Opcode.F64_Convert_I32_U => {
-                    var v = @bitCast(u32, try stack.popI32());
-                    try stack.pushF64(@intToFloat(f64, v));
-                },
-                Opcode.F64_Convert_I64_S => {
-                    var v = try stack.popI64();
-                    try stack.pushF64(@intToFloat(f64, v));
-                },
-                Opcode.F64_Convert_I64_U => {
-                    var v = @bitCast(u64, try stack.popI64());
-                    try stack.pushF64(@intToFloat(f64, v));
-                },
-                Opcode.F64_Promote_F32 => {
-                    var v = try stack.popF32();
-                    try stack.pushF64(@floatCast(f64, v));
-                },
-                Opcode.I32_Reinterpret_F32 => {
-                    var v = try stack.popF32();
-                    try stack.pushI32(@bitCast(i32, v));
-                },
-                Opcode.I64_Reinterpret_F64 => {
-                    var v = try stack.popF64();
-                    try stack.pushI64(@bitCast(i64, v));
-                },
-                Opcode.F32_Reinterpret_I32 => {
-                    var v = try stack.popI32();
-                    try stack.pushF32(@bitCast(f32, v));
-                },
-                Opcode.F64_Reinterpret_I64 => {
-                    var v = try stack.popI64();
-                    try stack.pushF64(@bitCast(f64, v));
-                },
-                Opcode.I32_Extend8_S => {
-                    var v = try stack.popI32();
-                    var v_truncated = @truncate(i8, v);
-                    var v_extended: i32 = v_truncated;
-                    try stack.pushI32(v_extended);
-                },
-                Opcode.I32_Extend16_S => {
-                    var v = try stack.popI32();
-                    var v_truncated = @truncate(i16, v);
-                    var v_extended: i32 = v_truncated;
-                    try stack.pushI32(v_extended);
-                },
-                Opcode.I64_Extend8_S => {
-                    var v = try stack.popI64();
-                    var v_truncated = @truncate(i8, v);
-                    var v_extended: i64 = v_truncated;
-                    try stack.pushI64(v_extended);
-                },
-                Opcode.I64_Extend16_S => {
-                    var v = try stack.popI64();
-                    var v_truncated = @truncate(i16, v);
-                    var v_extended: i64 = v_truncated;
-                    try stack.pushI64(v_extended);
-                },
-                Opcode.I64_Extend32_S => {
-                    var v = try stack.popI64();
-                    var v_truncated = @truncate(i32, v);
-                    var v_extended: i64 = v_truncated;
-                    try stack.pushI64(v_extended);
-                },
-                Opcode.Ref_Null => {
-                    var valtype = @intToEnum(ValType, instruction.immediate);
-                    var val = try Val.nullRef(valtype);
-                    try stack.pushValue(val);
-                },
-                Opcode.Ref_Is_Null => {
-                    const val: Val = try stack.popValue();
-                    const boolean: i32 = if (val.isNull()) 1 else 0;
-                    try stack.pushI32(boolean);
-                },
-                Opcode.Ref_Func => {
-                    const func_index = instruction.immediate;
-                    const val = Val{ .FuncRef = .{ .index = func_index, .module_instance = context.module } };
-                    try stack.pushValue(val);
-                },
-                Opcode.I32_Trunc_Sat_F32_S => {
-                    var v = try stack.popF32();
-                    var int = Helpers.saturatedTruncateTo(i32, v);
-                    try stack.pushI32(int);
-                },
-                Opcode.I32_Trunc_Sat_F32_U => {
-                    var v = try stack.popF32();
-                    var int = Helpers.saturatedTruncateTo(u32, v);
-                    try stack.pushI32(@bitCast(i32, int));
-                },
-                Opcode.I32_Trunc_Sat_F64_S => {
-                    var v = try stack.popF64();
-                    var int = Helpers.saturatedTruncateTo(i32, v);
-                    try stack.pushI32(int);
-                },
-                Opcode.I32_Trunc_Sat_F64_U => {
-                    var v = try stack.popF64();
-                    var int = Helpers.saturatedTruncateTo(u32, v);
-                    try stack.pushI32(@bitCast(i32, int));
-                },
-                Opcode.I64_Trunc_Sat_F32_S => {
-                    var v = try stack.popF32();
-                    var int = Helpers.saturatedTruncateTo(i64, v);
-                    try stack.pushI64(int);
-                },
-                Opcode.I64_Trunc_Sat_F32_U => {
-                    var v = try stack.popF32();
-                    var int = Helpers.saturatedTruncateTo(u64, v);
-                    try stack.pushI64(@bitCast(i64, int));
-                },
-                Opcode.I64_Trunc_Sat_F64_S => {
-                    var v = try stack.popF64();
-                    var int = Helpers.saturatedTruncateTo(i64, v);
-                    try stack.pushI64(int);
-                },
-                Opcode.I64_Trunc_Sat_F64_U => {
-                    var v = try stack.popF64();
-                    var int = Helpers.saturatedTruncateTo(u64, v);
-                    try stack.pushI64(@bitCast(i64, int));
-                },
-                Opcode.Memory_Init => {
-                    const data_index: u32 = instruction.immediate;
-                    const data: *const DataDefinition = &context.module_def.datas.items[data_index];
-                    const memory: *MemoryInstance = &current_store.memories.items[0];
-
-                    const length = try stack.popI32();
-                    const data_offset = try stack.popI32();
-                    const memory_offset = try stack.popI32();
-
-                    if (length < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-                    if (data.bytes.items.len < data_offset + length or data_offset < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-                    if (memory.mem.items.len < memory_offset + length or memory_offset < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-
-                    const data_offset_u32 = @intCast(u32, data_offset);
-                    const memory_offset_u32 = @intCast(u32, memory_offset);
-                    const length_u32 = @intCast(u32, length);
-
-                    var source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
-                    var destination = memory.mem.items[memory_offset_u32 .. memory_offset_u32 + length_u32];
-                    std.mem.copy(u8, destination, source);
-                },
-                Opcode.Data_Drop => {
-                    const data_index: u32 = instruction.immediate;
-                    var data: *DataDefinition = &context.module_def.datas.items[data_index];
-                    data.bytes.clearAndFree();
-                },
-                Opcode.Memory_Copy => {
-                    const memory: *MemoryInstance = &current_store.memories.items[0];
-
-                    const length = try stack.popI32();
-                    const source_offset = try stack.popI32();
-                    const dest_offset = try stack.popI32();
-
-                    if (length < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-                    if (memory.mem.items.len < source_offset + length or source_offset < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-                    if (memory.mem.items.len < dest_offset + length or dest_offset < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-
-                    const source_offset_u32 = @intCast(u32, source_offset);
-                    const dest_offset_u32 = @intCast(u32, dest_offset);
-                    const length_u32 = @intCast(u32, length);
-
-                    var source = memory.mem.items[source_offset_u32 .. source_offset_u32 + length_u32];
-                    var destination = memory.mem.items[dest_offset_u32 .. dest_offset_u32 + length_u32];
-
-                    if (@ptrToInt(destination.ptr) < @ptrToInt(source.ptr)) {
-                        std.mem.copy(u8, destination, source);
-                    } else {
-                        std.mem.copyBackwards(u8, destination, source);
-                    }
-                },
-                Opcode.Memory_Fill => {
-                    const memory: *MemoryInstance = &current_store.memories.items[0];
-
-                    const length = try stack.popI32();
-                    const value: u8 = @truncate(u8, @bitCast(u32, try stack.popI32()));
-                    const offset = try stack.popI32();
-
-                    if (length < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-                    if (memory.mem.items.len < offset + length or offset < 0) {
-                        return error.TrapOutOfBoundsMemoryAccess;
-                    }
-
-                    const offset_u32 = @intCast(u32, offset);
-                    const length_u32 = @intCast(u32, length);
-
-                    var destination = memory.mem.items[offset_u32 .. offset_u32 + length_u32];
-
-                    std.mem.set(u8, destination, value);
-                },
-                Opcode.Table_Init => {
-                    const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];
-                    const elem_index = pair.index_x;
-                    const table_index = pair.index_y;
-
-                    const elem: *const ElementInstance = &current_store.elements.items[elem_index];
-                    const table: *TableInstance = current_store.getTable(table_index);
-
-                    const length_i32 = try stack.popI32();
-                    const elem_start_index = try stack.popI32();
-                    const table_start_index = try stack.popI32();
-
-                    if (elem_start_index + length_i32 > elem.refs.items.len or elem_start_index < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-                    if (table_start_index + length_i32 > table.refs.items.len or table_start_index < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-                    if (length_i32 < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-
-                    const elem_begin = @intCast(usize, elem_start_index);
-                    const table_begin = @intCast(usize, table_start_index);
-                    const length = @intCast(usize, length_i32);
-
-                    var dest: []Val = table.refs.items[table_begin .. table_begin + length];
-                    var src: []const Val = elem.refs.items[elem_begin .. elem_begin + length];
-                    std.mem.copy(Val, dest, src);
-                },
-                Opcode.Elem_Drop => {
-                    const elem_index: u32 = instruction.immediate;
-                    var elem: *ElementInstance = &current_store.elements.items[elem_index];
-                    elem.refs.clearAndFree();
-                },
-                Opcode.Table_Copy => {
-                    const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];
-                    const dest_table_index = pair.index_x;
-                    const src_table_index = pair.index_y;
-
-                    const dest_table: *TableInstance = current_store.getTable(dest_table_index);
-                    const src_table: *const TableInstance = current_store.getTable(src_table_index);
-
-                    const length_i32 = try stack.popI32();
-                    const src_start_index = try stack.popI32();
-                    const dest_start_index = try stack.popI32();
-
-                    if (src_start_index + length_i32 > src_table.refs.items.len or src_start_index < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-                    if (dest_start_index + length_i32 > dest_table.refs.items.len or dest_start_index < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-                    if (length_i32 < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-
-                    const dest_begin = @intCast(usize, dest_start_index);
-                    const src_begin = @intCast(usize, src_start_index);
-                    const length = @intCast(usize, length_i32);
-
-                    var dest: []Val = dest_table.refs.items[dest_begin .. dest_begin + length];
-                    var src: []const Val = src_table.refs.items[src_begin .. src_begin + length];
-                    if (dest_start_index <= src_start_index) {
-                        std.mem.copy(Val, dest, src);
-                    } else {
-                        std.mem.copyBackwards(Val, dest, src);
-                    }
-                },
-                Opcode.Table_Grow => {
-                    const table_index: u32 = instruction.immediate;
-                    const table: *TableInstance = current_store.getTable(table_index);
-                    const length = @bitCast(u32, try stack.popI32());
-                    const init_value = try stack.popValue();
-                    const old_length = @intCast(i32, table.refs.items.len);
-                    const return_value: i32 = if (table.grow(length, init_value)) old_length else -1;
-                    try stack.pushI32(return_value);
-                },
-                Opcode.Table_Size => {
-                    const table_index: u32 = instruction.immediate;
-                    const table: *TableInstance = current_store.getTable(table_index);
-                    const length = @intCast(i32, table.refs.items.len);
-                    try stack.pushI32(length);
-                },
-                Opcode.Table_Fill => {
-                    const table_index: u32 = instruction.immediate;
-                    const table: *TableInstance = current_store.getTable(table_index);
-
-                    const length_i32 = try stack.popI32();
-                    const funcref = try stack.popValue();
-                    const dest_table_index = try stack.popI32();
-
-                    if (funcref.isRefType() == false) {
-                        return error.ValidationTypeMismatch;
-                    }
-
-                    if (dest_table_index + length_i32 > table.refs.items.len or length_i32 < 0) {
-                        return error.TrapOutOfBoundsTableAccess;
-                    }
-
-                    const dest_begin = @intCast(usize, dest_table_index);
-                    const length = @intCast(usize, length_i32);
-
-                    var dest: []Val = table.refs.items[dest_begin .. dest_begin + length];
-
-                    std.mem.set(Val, dest, funcref);
-                },
-            }
-
-            instruction_offset = next_instruction;
-        }
-    }
-
-    fn call(context: *CallContext, func: *const FunctionInstance, next_instruction: u32) !u32 {
-        const functype: *const FunctionTypeDefinition = &context.module_def.types.items[func.type_def_index];
-        const param_types: []const ValType = functype.getParams();
-        const continuation: u32 = next_instruction;
-
-        try context.stack.pushFrame(func, context.module, param_types, func.local_types.items);
-        try context.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
-
-        return func.offset_into_instructions;
-    }
-
-    fn callImport(context: *CallContext, func: *const FunctionImport, next_instruction: u32) !u32 {
-        switch (func.data) {
-            .Host => |data| {
-                const params_len: u32 = @intCast(u32, data.func_def.getParams().len);
-                const returns_len: u32 = @intCast(u32, data.func_def.getReturns().len);
-
-                var stack: *Stack = context.stack;
-
-                if (stack.num_values + returns_len < stack.values.len) {
-                    var params = stack.values[stack.num_values - params_len .. stack.num_values];
-                    var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
-
-                    data.callback(data.userdata, params, returns_temp);
-
-                    stack.num_values = (stack.num_values - params_len) + returns_len;
-                    var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
-
-                    std.mem.copy(Val, returns_dest, returns_temp);
-
-                    return next_instruction;
-                } else {
-                    return error.TrapStackExhausted;
-                }
-            },
-            .Wasm => |data| {
-                var next_context = CallContext{
-                    .module = data.module_instance,
-                    .module_def = data.module_instance.module_def,
-                    .stack = context.stack,
-                };
-
-                const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
-                return try call(&next_context, func_instance, next_instruction);
-            },
-        }
-    }
-
-    fn enterBlock(context: *CallContext, instruction: Instruction, label_offset: u32) !void {
-        const block_type_value: BlockTypeValue = context.module_def.code.block_type_values.items[instruction.immediate];
-        const continuation = context.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
-
-        try context.stack.pushLabel(block_type_value, continuation);
-    }
-
-    fn branch(context: *CallContext, label_id: u32) !u32 {
-        const label: *const Label = context.stack.findLabel(label_id);
-        const frame_label: *const Label = context.stack.frameLabel();
-        if (label == frame_label) {
-            return try returnFromFunc(context);
-        }
-        const continuation: u32 = label.continuation;
-
-        const is_loop_continuation: bool = context.module_def.code.instructions.items[continuation].opcode == .Loop;
-
-        if (is_loop_continuation == false or label_id != 0) {
-            const return_types: []const ValType = label.blocktype.getBlocktypeReturnTypes(context.module_def);
-            const pop_final_label = !is_loop_continuation;
-            context.stack.popAllUntilLabelId(label_id, pop_final_label, return_types.len);
-        }
-        return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
-    }
-
-    fn returnFromFunc(context: *CallContext) !u32 {
-        var frame: *const CallFrame = context.stack.topFrame();
-        const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
-
-        const is_root_function = context.stack.isTopFrameRootFunction();
-
-        var last_label: Label = context.stack.popFrame(return_types.len);
-
-        if (is_root_function) {
-            return Label.k_invalid_continuation;
-        } else {
-            return last_label.continuation;
-        }
-    }
-
-    fn popValues(returns: *std.ArrayList(Val), stack: *Stack, types: []const ValType) !void {
-        try returns.ensureTotalCapacity(types.len);
-        while (returns.items.len < types.len) {
-            var item = try stack.popValue();
-            if (types[types.len - returns.items.len - 1] != std.meta.activeTag(item)) {
-                return error.ValidationTypeMismatch;
-            }
-            try returns.append(item);
-        }
-    }
-
-    fn pushValues(returns: []const Val, stack: *Stack) !void {
-        var index = returns.len;
-        while (index > 0) {
-            index -= 1;
-            var item = returns[index];
-            try stack.pushValue(item);
-        }
-    }
+    // fn executeWasm(self: *ModuleInstance, root_offset: u32) !void {
+
+    // InstructionFuncs.run(&self.module_def.instructions.items[root_offset], &self.stack);
+
+    // var instruction_offset: u32 = root_offset;
+
+    // while (instruction_offset != Label.k_invalid_continuation) {
+    //     var current_callframe: *CallFrame = stack.topFrame();
+    //     var current_store: *Store = &current_callframe.module_instance.store;
+
+    //     var context = CallContext{
+    //         .module = current_callframe.module_instance,
+    //         .module_def = current_callframe.module_instance.module_def,
+    //         .stack = stack,
+    //     };
+
+    //     const instructions: []const Instruction = context.module_def.code.instructions.items;
+    //     var instruction: Instruction = instructions[instruction_offset];
+    //     var next_instruction: u32 = instruction_offset + 1;
+
+    //     switch (instruction.opcode) {
+    //         Opcode.Unreachable => {
+    //             return error.TrapUnreachable;
+    //         },
+    //         Opcode.Noop => {
+    //             // should have been stripped in the decoding phase
+    //             unreachable;
+    //         },
+    //         Opcode.Block => {
+    //             try enterBlock(&context, instruction, instruction_offset);
+    //         },
+    //         Opcode.Loop => {
+    //             try enterBlock(&context, instruction, instruction_offset);
+    //         },
+    //         Opcode.If => {
+    //             var condition = try stack.popI32();
+    //             if (condition != 0) {
+    //                 try enterBlock(&context, instruction, instruction_offset);
+    //             } else if (context.module_def.if_to_else_offsets.get(instruction_offset)) |else_offset| { // +1 to skip the else opcode, since it's treated as an End for the If block.
+    //                 try enterBlock(&context, instruction, else_offset);
+    //                 next_instruction = try Helpers.seek(else_offset + 1, instructions.len);
+    //             } else {
+    //                 const continuation = context.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
+    //                 next_instruction = try Helpers.seek(continuation + 1, instructions.len);
+    //             }
+    //         },
+    //         Opcode.Else => {
+    //             // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
+    //             const end_offset = context.module_def.label_continuations.get(instruction_offset) orelse return error.AssertInvalidLabel;
+    //             next_instruction = try Helpers.seek(end_offset, instructions.len);
+    //         },
+    //         Opcode.End => {
+    //             // determine if this is a a scope or function call exit
+    //             const top_label: *const Label = stack.topLabel();
+    //             const frame_label: *const Label = stack.frameLabel();
+    //             if (top_label != frame_label) {
+    //                 // Since the only values on the stack should be the returns from the block, we just pop the
+    //                 // label, which leaves the value stack alone.
+    //                 stack.popLabel();
+    //             } else {
+    //                 var frame: *const CallFrame = stack.topFrame();
+    //                 const return_types: []const ValType = context.module_def.types.items[frame.func.type_def_index].getReturns();
+
+    //                 const is_root_function = stack.isTopFrameRootFunction();
+
+    //                 var label = stack.popFrame(return_types.len);
+
+    //                 if (is_root_function) {
+    //                     return;
+    //                 } else {
+    //                     const new_frame: *const CallFrame = stack.topFrame();
+    //                     const new_instructions_len = new_frame.module_instance.module_def.code.instructions.items.len;
+    //                     next_instruction = try Helpers.seek(label.continuation, new_instructions_len);
+    //                 }
+    //             }
+    //         },
+    //         Opcode.Branch => {
+    //             const label_id: u32 = instruction.immediate;
+    //             const branch_to_instruction = try branch(&context, label_id);
+    //             next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
+    //         },
+    //         Opcode.Branch_If => {
+    //             const label_id: u32 = instruction.immediate;
+    //             const v = try stack.popI32();
+    //             if (v != 0) {
+    //                 const branch_to_instruction = try branch(&context, label_id);
+    //                 next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
+    //             }
+    //         },
+    //         Opcode.Branch_Table => {
+    //             var immediates: *const BranchTableImmediates = &context.module_def.code.branch_table.items[instruction.immediate];
+    //             var table: []const u32 = immediates.label_ids.items;
+
+    //             const label_index = try stack.popI32();
+    //             const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
+    //             const branch_to_instruction = try branch(&context, label_id);
+
+    //             next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
+    //         },
+    //         Opcode.Return => {
+    //             const continuation: u32 = try returnFromFunc(&context);
+    //             next_instruction = try Helpers.seek(continuation, instructions.len);
+    //         },
+    //         Opcode.Call => {
+    //             const func_index: u32 = instruction.immediate;
+    //             if (func_index >= current_store.imports.functions.items.len) {
+    //                 const func_instance_index = func_index - current_store.imports.functions.items.len;
+    //                 const func: *const FunctionInstance = &current_store.functions.items[@intCast(usize, func_instance_index)];
+    //                 next_instruction = try call(&context, func, next_instruction);
+    //             } else {
+    //                 var func_import = &current_store.imports.functions.items[func_index];
+    //                 next_instruction = try callImport(&context, func_import, next_instruction);
+    //             }
+    //         },
+    //         Opcode.Call_Indirect => {
+    //             var immediates: *const CallIndirectImmediates = &context.module_def.code.call_indirect.items[instruction.immediate];
+
+    //             if (context.module_def.types.items.len <= immediates.type_index) {
+    //                 return error.AssertUnknownType;
+    //             }
+    //             if (current_store.imports.tables.items.len + current_store.tables.items.len <= immediates.table_index) {
+    //                 return error.AssertUnknownTable;
+    //             }
+
+    //             const table: *const TableInstance = current_store.getTable(immediates.table_index);
+
+    //             const ref_index = try stack.popI32();
+    //             if (table.refs.items.len <= ref_index or ref_index < 0) {
+    //                 return error.TrapUndefinedElement;
+    //             }
+
+    //             const ref: Val = table.refs.items[@intCast(usize, ref_index)];
+    //             if (ref.isNull()) {
+    //                 return error.TrapUninitializedElement;
+    //             }
+
+    //             std.debug.assert(ref.FuncRef.module_instance != &empty_module_instance); // Should have been set in module instantiation
+
+    //             const func_index = ref.FuncRef.index;
+    //             var call_context = CallContext{
+    //                 .module = ref.FuncRef.module_instance,
+    //                 .module_def = ref.FuncRef.module_instance.module_def,
+    //                 .stack = context.stack,
+    //             };
+    //             var call_store = &call_context.module.store;
+
+    //             if (call_store.imports.functions.items.len + call_store.functions.items.len <= func_index) {
+    //                 return error.ValidationUnknownFunction;
+    //             }
+
+    //             if (func_index >= call_store.imports.functions.items.len) {
+    //                 const func: *const FunctionInstance = &call_store.functions.items[func_index - call_store.imports.functions.items.len];
+    //                 if (func.type_def_index != immediates.type_index) {
+    //                     const func_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[func.type_def_index];
+    //                     const immediate_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[immediates.type_index];
+
+    //                     var type_comparer = FunctionTypeContext{};
+    //                     if (type_comparer.eql(func_type_def, immediate_type_def) == false) {
+    //                         return error.TrapIndirectCallTypeMismatch;
+    //                     }
+    //                 }
+    //                 next_instruction = try call(&call_context, func, next_instruction);
+    //             } else {
+    //                 var func_import: *const FunctionImport = &call_store.imports.functions.items[func_index];
+    //                 var func_type_def: *const FunctionTypeDefinition = &call_context.module_def.types.items[immediates.type_index];
+    //                 if (func_import.isTypeSignatureEql(func_type_def) == false) {
+    //                     return error.TrapIndirectCallTypeMismatch;
+    //                 }
+    //                 next_instruction = try callImport(&call_context, func_import, next_instruction);
+    //             }
+    //         },
+    //         Opcode.Drop => {
+    //             _ = try stack.popValue();
+    //         },
+    //         Opcode.Select => {
+    //             var boolean: i32 = try stack.popI32();
+    //             var v2: Val = try stack.popValue();
+    //             var v1: Val = try stack.popValue();
+
+    //             if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
+    //                 return error.ValidationTypeMismatch;
+    //             }
+
+    //             if (boolean != 0) {
+    //                 try stack.pushValue(v1);
+    //             } else {
+    //                 try stack.pushValue(v2);
+    //             }
+    //         },
+    //         Opcode.Select_T => {
+    //             var boolean: i32 = try stack.popI32();
+    //             var v2: Val = try stack.popValue();
+    //             var v1: Val = try stack.popValue();
+
+    //             if (std.meta.activeTag(v1) != std.meta.activeTag(v2)) {
+    //                 return error.ValidationTypeMismatch;
+    //             }
+
+    //             var valtype: ValType = @intToEnum(ValType, instruction.immediate);
+    //             if (std.meta.activeTag(v1) != valtype) {
+    //                 return error.ValidationTypeMismatch;
+    //             }
+
+    //             if (boolean != 0) {
+    //                 try stack.pushValue(v1);
+    //             } else {
+    //                 try stack.pushValue(v2);
+    //             }
+    //         },
+    //         Opcode.Local_Get => {
+    //             var locals_index: u32 = instruction.immediate;
+    //             var frame: *const CallFrame = stack.topFrame();
+    //             var v: Val = frame.locals[locals_index];
+    //             try stack.pushValue(v);
+    //         },
+    //         Opcode.Local_Set => {
+    //             var locals_index: u32 = instruction.immediate;
+    //             var frame: *CallFrame = stack.topFrame();
+    //             var v: Val = try stack.popValue();
+    //             frame.locals[locals_index] = v;
+    //         },
+    //         Opcode.Local_Tee => {
+    //             var locals_index: u32 = instruction.immediate;
+    //             var frame: *CallFrame = stack.topFrame();
+    //             var v: Val = try stack.topValue();
+    //             frame.locals[locals_index] = v;
+    //         },
+    //         Opcode.Global_Get => {
+    //             var global_index: u32 = instruction.immediate;
+    //             var global: *GlobalInstance = current_store.getGlobal(global_index);
+    //             try stack.pushValue(global.value);
+    //         },
+    //         Opcode.Global_Set => {
+    //             var global_index: u32 = instruction.immediate;
+    //             var global: *GlobalInstance = current_store.getGlobal(global_index);
+    //             global.value = try stack.popValue();
+    //         },
+    //         Opcode.Table_Get => {
+    //             const table_index = instruction.immediate;
+    //             const table: *const TableInstance = current_store.getTable(table_index);
+    //             const index: i32 = try stack.popI32();
+    //             if (table.refs.items.len <= index or index < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+    //             const ref = table.refs.items[@intCast(usize, index)];
+    //             try stack.pushValue(ref);
+    //         },
+    //         Opcode.Table_Set => {
+    //             const table_index = instruction.immediate;
+    //             var table: *TableInstance = current_store.getTable(table_index);
+    //             const ref = try stack.popValue();
+    //             const index: i32 = try stack.popI32();
+    //             if (table.refs.items.len <= index or index < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+    //             if (ref.isRefType() == false) {
+    //                 return error.TrapTableSetTypeMismatch;
+    //             }
+    //             table.refs.items[@intCast(usize, index)] = ref;
+    //         },
+    //         Opcode.I32_Load => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value = try Helpers.loadFromMem(i32, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I64_Load => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value = try Helpers.loadFromMem(i64, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.F32_Load => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value = try Helpers.loadFromMem(f32, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F64_Load => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value = try Helpers.loadFromMem(f64, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.I32_Load8_S => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: i32 = try Helpers.loadFromMem(i8, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Load8_U => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: u32 = try Helpers.loadFromMem(u8, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI32(@bitCast(i32, value));
+    //         },
+    //         Opcode.I32_Load16_S => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: i32 = try Helpers.loadFromMem(i16, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Load16_U => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: u32 = try Helpers.loadFromMem(u16, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI32(@bitCast(i32, value));
+    //         },
+    //         Opcode.I64_Load8_S => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: i64 = try Helpers.loadFromMem(i8, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Load8_U => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: u64 = try Helpers.loadFromMem(u8, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI64(@bitCast(i64, value));
+    //         },
+    //         Opcode.I64_Load16_S => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: i64 = try Helpers.loadFromMem(i16, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Load16_U => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: u64 = try Helpers.loadFromMem(u16, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI64(@bitCast(i64, value));
+    //         },
+    //         Opcode.I64_Load32_S => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: i64 = try Helpers.loadFromMem(i32, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Load32_U => {
+    //             var offset_from_stack: i32 = try stack.popI32();
+    //             var value: u64 = try Helpers.loadFromMem(u32, current_store, instruction.immediate, offset_from_stack);
+    //             try stack.pushI64(@bitCast(i64, value));
+    //         },
+    //         Opcode.I32_Store => {
+    //             const value: i32 = try stack.popI32();
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.I64_Store => {
+    //             const value: i64 = try stack.popI64();
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.F32_Store => {
+    //             const value: f32 = try stack.popF32();
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.F64_Store => {
+    //             const value: f64 = try stack.popF64();
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.I32_Store8 => {
+    //             const value: i8 = @truncate(i8, try stack.popI32());
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.I32_Store16 => {
+    //             const value: i16 = @truncate(i16, try stack.popI32());
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.I64_Store8 => {
+    //             const value: i8 = @truncate(i8, try stack.popI64());
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.I64_Store16 => {
+    //             const value: i16 = @truncate(i16, try stack.popI64());
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.I64_Store32 => {
+    //             const value: i32 = @truncate(i32, try stack.popI64());
+    //             const offset_from_stack: i32 = try stack.popI32();
+    //             try Helpers.storeInMem(value, current_store, instruction.immediate, offset_from_stack);
+    //         },
+    //         Opcode.Memory_Size => {
+    //             const memory_index: usize = 0;
+    //             var memory_instance: *const MemoryInstance = current_store.getMemory(memory_index);
+
+    //             const num_pages: i32 = @intCast(i32, memory_instance.size());
+    //             try stack.pushI32(num_pages);
+    //         },
+    //         Opcode.Memory_Grow => {
+    //             const memory_index: usize = 0;
+    //             var memory_instance: *MemoryInstance = current_store.getMemory(memory_index);
+
+    //             const old_num_pages: i32 = @intCast(i32, memory_instance.limits.min);
+    //             const num_pages: i32 = try stack.popI32();
+
+    //             if (num_pages >= 0 and memory_instance.grow(@intCast(usize, num_pages))) {
+    //                 try stack.pushI32(old_num_pages);
+    //             } else {
+    //                 try stack.pushI32(-1);
+    //             }
+    //         },
+    //         Opcode.I32_Const => {
+    //             var v: i32 = @bitCast(i32, instruction.immediate);
+    //             try stack.pushI32(v);
+    //         },
+    //         Opcode.I64_Const => {
+    //             var v: i64 = context.module_def.code.i64_const.items[instruction.immediate];
+    //             try stack.pushI64(v);
+    //         },
+    //         Opcode.F32_Const => {
+    //             var v: f32 = @bitCast(f32, instruction.immediate);
+    //             try stack.pushF32(v);
+    //         },
+    //         Opcode.F64_Const => {
+    //             var v: f64 = context.module_def.code.f64_const.items[instruction.immediate];
+    //             try stack.pushF64(v);
+    //         },
+    //         Opcode.I32_Eqz => {
+    //             var v1: i32 = try stack.popI32();
+    //             var result: i32 = if (v1 == 0) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_Eq => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result: i32 = if (v1 == v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_NE => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result: i32 = if (v1 != v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_LT_S => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result: i32 = if (v1 < v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_LT_U => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var result: i32 = if (v1 < v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_GT_S => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result: i32 = if (v1 > v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_GT_U => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var result: i32 = if (v1 > v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_LE_S => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result: i32 = if (v1 <= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_LE_U => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var result: i32 = if (v1 <= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_GE_S => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result: i32 = if (v1 >= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_GE_U => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var result: i32 = if (v1 >= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_Eqz => {
+    //             var v1: i64 = try stack.popI64();
+    //             var result: i32 = if (v1 == 0) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_Eq => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result: i32 = if (v1 == v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_NE => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result: i32 = if (v1 != v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_LT_S => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result: i32 = if (v1 < v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_LT_U => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var result: i32 = if (v1 < v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_GT_S => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result: i32 = if (v1 > v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_GT_U => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var result: i32 = if (v1 > v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_LE_S => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result: i32 = if (v1 <= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_LE_U => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var result: i32 = if (v1 <= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_GE_S => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result: i32 = if (v1 >= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I64_GE_U => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var result: i32 = if (v1 >= v2) 1 else 0;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.F32_EQ => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value: i32 = if (v1 == v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F32_NE => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value: i32 = if (v1 != v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F32_LT => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value: i32 = if (v1 < v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F32_GT => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value: i32 = if (v1 > v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F32_LE => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value: i32 = if (v1 <= v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F32_GE => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value: i32 = if (v1 >= v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F64_EQ => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value: i32 = if (v1 == v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F64_NE => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value: i32 = if (v1 != v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F64_LT => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value: i32 = if (v1 < v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F64_GT => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value: i32 = if (v1 > v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F64_LE => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value: i32 = if (v1 <= v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.F64_GE => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value: i32 = if (v1 >= v2) 1 else 0;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Clz => {
+    //             var v: i32 = try stack.popI32();
+    //             var num_zeroes = @clz(v);
+    //             try stack.pushI32(num_zeroes);
+    //         },
+    //         Opcode.I32_Ctz => {
+    //             var v: i32 = try stack.popI32();
+    //             var num_zeroes = @ctz(v);
+    //             try stack.pushI32(num_zeroes);
+    //         },
+    //         Opcode.I32_Popcnt => {
+    //             var v: i32 = try stack.popI32();
+    //             var num_bits_set = @popCount(v);
+    //             try stack.pushI32(num_bits_set);
+    //         },
+    //         Opcode.I32_Add => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result = v1 +% v2;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_Sub => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var result = v1 -% v2;
+    //             try stack.pushI32(result);
+    //         },
+    //         Opcode.I32_Mul => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var value = v1 *% v2;
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Div_S => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var value = std.math.divTrunc(i32, v1, v2) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else if (e == error.Overflow) {
+    //                     return error.TrapIntegerOverflow;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Div_U => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var value_unsigned = std.math.divFloor(u32, v1, v2) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else if (e == error.Overflow) {
+    //                     return error.TrapIntegerOverflow;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             var value = @bitCast(i32, value_unsigned);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Rem_S => {
+    //             var v2: i32 = try stack.popI32();
+    //             var v1: i32 = try stack.popI32();
+    //             var denom = try std.math.absInt(v2);
+    //             var value = std.math.rem(i32, v1, denom) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Rem_U => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var value_unsigned = std.math.rem(u32, v1, v2) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             var value = @bitCast(i32, value_unsigned);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_And => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var value = @bitCast(i32, v1 & v2);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Or => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var value = @bitCast(i32, v1 | v2);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Xor => {
+    //             var v2: u32 = @bitCast(u32, try stack.popI32());
+    //             var v1: u32 = @bitCast(u32, try stack.popI32());
+    //             var value = @bitCast(i32, v1 ^ v2);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Shl => {
+    //             var shift_unsafe: i32 = try stack.popI32();
+    //             var int: i32 = try stack.popI32();
+    //             var shift: i32 = try std.math.mod(i32, shift_unsafe, 32);
+    //             var value = std.math.shl(i32, int, shift);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Shr_S => {
+    //             var shift_unsafe: i32 = try stack.popI32();
+    //             var int: i32 = try stack.popI32();
+    //             var shift = try std.math.mod(i32, shift_unsafe, 32);
+    //             var value = std.math.shr(i32, int, shift);
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Shr_U => {
+    //             var shift_unsafe: u32 = @bitCast(u32, try stack.popI32());
+    //             var int: u32 = @bitCast(u32, try stack.popI32());
+    //             var shift = try std.math.mod(u32, shift_unsafe, 32);
+    //             var value = @bitCast(i32, std.math.shr(u32, int, shift));
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Rotl => {
+    //             var rot: u32 = @bitCast(u32, try stack.popI32());
+    //             var int: u32 = @bitCast(u32, try stack.popI32());
+    //             var value = @bitCast(i32, std.math.rotl(u32, int, rot));
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I32_Rotr => {
+    //             var rot: u32 = @bitCast(u32, try stack.popI32());
+    //             var int: u32 = @bitCast(u32, try stack.popI32());
+    //             var value = @bitCast(i32, std.math.rotr(u32, int, rot));
+    //             try stack.pushI32(value);
+    //         },
+    //         Opcode.I64_Clz => {
+    //             var v: i64 = try stack.popI64();
+    //             var num_zeroes = @clz(v);
+    //             try stack.pushI64(num_zeroes);
+    //         },
+    //         Opcode.I64_Ctz => {
+    //             var v: i64 = try stack.popI64();
+    //             var num_zeroes = @ctz(v);
+    //             try stack.pushI64(num_zeroes);
+    //         },
+    //         Opcode.I64_Popcnt => {
+    //             var v: i64 = try stack.popI64();
+    //             var num_bits_set = @popCount(v);
+    //             try stack.pushI64(num_bits_set);
+    //         },
+    //         Opcode.I64_Add => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result = v1 +% v2;
+    //             try stack.pushI64(result);
+    //         },
+    //         Opcode.I64_Sub => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var result = v1 -% v2;
+    //             try stack.pushI64(result);
+    //         },
+    //         Opcode.I64_Mul => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var value = v1 *% v2;
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Div_S => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var value = std.math.divTrunc(i64, v1, v2) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else if (e == error.Overflow) {
+    //                     return error.TrapIntegerOverflow;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Div_U => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var value_unsigned = std.math.divFloor(u64, v1, v2) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else if (e == error.Overflow) {
+    //                     return error.TrapIntegerOverflow;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             var value = @bitCast(i64, value_unsigned);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Rem_S => {
+    //             var v2: i64 = try stack.popI64();
+    //             var v1: i64 = try stack.popI64();
+    //             var denom = try std.math.absInt(v2);
+    //             var value = std.math.rem(i64, v1, denom) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Rem_U => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var value_unsigned = std.math.rem(u64, v1, v2) catch |e| {
+    //                 if (e == error.DivisionByZero) {
+    //                     return error.TrapIntegerDivisionByZero;
+    //                 } else {
+    //                     return e;
+    //                 }
+    //             };
+    //             var value = @bitCast(i64, value_unsigned);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_And => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var value = @bitCast(i64, v1 & v2);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Or => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var value = @bitCast(i64, v1 | v2);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Xor => {
+    //             var v2: u64 = @bitCast(u64, try stack.popI64());
+    //             var v1: u64 = @bitCast(u64, try stack.popI64());
+    //             var value = @bitCast(i64, v1 ^ v2);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Shl => {
+    //             var shift_unsafe: i64 = try stack.popI64();
+    //             var int: i64 = try stack.popI64();
+    //             var shift: i64 = try std.math.mod(i64, shift_unsafe, 64);
+    //             var value = std.math.shl(i64, int, shift);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Shr_S => {
+    //             var shift_unsafe: i64 = try stack.popI64();
+    //             var int: i64 = try stack.popI64();
+    //             var shift = try std.math.mod(i64, shift_unsafe, 64);
+    //             var value = std.math.shr(i64, int, shift);
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Shr_U => {
+    //             var shift_unsafe: u64 = @bitCast(u64, try stack.popI64());
+    //             var int: u64 = @bitCast(u64, try stack.popI64());
+    //             var shift = try std.math.mod(u64, shift_unsafe, 64);
+    //             var value = @bitCast(i64, std.math.shr(u64, int, shift));
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Rotl => {
+    //             var rot: u64 = @bitCast(u64, try stack.popI64());
+    //             var int: u64 = @bitCast(u64, try stack.popI64());
+    //             var value = @bitCast(i64, std.math.rotl(u64, int, rot));
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.I64_Rotr => {
+    //             var rot: u64 = @bitCast(u64, try stack.popI64());
+    //             var int: u64 = @bitCast(u64, try stack.popI64());
+    //             var value = @bitCast(i64, std.math.rotr(u64, int, rot));
+    //             try stack.pushI64(value);
+    //         },
+    //         Opcode.F32_Abs => {
+    //             var f = try stack.popF32();
+    //             var value = std.math.fabs(f);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Neg => {
+    //             var f = try stack.popF32();
+    //             try stack.pushF32(-f);
+    //         },
+    //         Opcode.F32_Ceil => {
+    //             var f = try stack.popF32();
+    //             var value = @ceil(f);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Floor => {
+    //             var f = try stack.popF32();
+    //             var value = @floor(f);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Trunc => {
+    //             var f = try stack.popF32();
+    //             var value = std.math.trunc(f);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Nearest => {
+    //             var f = try stack.popF32();
+    //             var value: f32 = undefined;
+    //             var ceil = @ceil(f);
+    //             var floor = @floor(f);
+    //             if (ceil - f == f - floor) {
+    //                 value = if (@mod(ceil, 2) == 0) ceil else floor;
+    //             } else {
+    //                 value = @round(f);
+    //             }
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Sqrt => {
+    //             var f = try stack.popF32();
+    //             var value = std.math.sqrt(f);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Add => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value = v1 + v2;
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Sub => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value = v1 - v2;
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Mul => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value = v1 * v2;
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Div => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value = v1 / v2;
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Min => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Max => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F32_Copysign => {
+    //             var v2 = try stack.popF32();
+    //             var v1 = try stack.popF32();
+    //             var value = std.math.copysign(v1, v2);
+    //             try stack.pushF32(value);
+    //         },
+    //         Opcode.F64_Abs => {
+    //             var f = try stack.popF64();
+    //             var value = std.math.fabs(f);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Neg => {
+    //             var f = try stack.popF64();
+    //             try stack.pushF64(-f);
+    //         },
+    //         Opcode.F64_Ceil => {
+    //             var f = try stack.popF64();
+    //             var value = @ceil(f);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Floor => {
+    //             var f = try stack.popF64();
+    //             var value = @floor(f);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Trunc => {
+    //             var f = try stack.popF64();
+    //             var value = @trunc(f);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Nearest => {
+    //             var f = try stack.popF64();
+    //             var value: f64 = undefined;
+    //             var ceil = @ceil(f);
+    //             var floor = @floor(f);
+    //             if (ceil - f == f - floor) {
+    //                 value = if (@mod(ceil, 2) == 0) ceil else floor;
+    //             } else {
+    //                 value = @round(f);
+    //             }
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Sqrt => {
+    //             var f = try stack.popF64();
+    //             var value = std.math.sqrt(f);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Add => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value = v1 + v2;
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Sub => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value = v1 - v2;
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Mul => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value = v1 * v2;
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Div => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value = v1 / v2;
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Min => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value = Helpers.propagateNanWithOp(std.math.min, v1, v2);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Max => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value = Helpers.propagateNanWithOp(std.math.max, v1, v2);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.F64_Copysign => {
+    //             var v2 = try stack.popF64();
+    //             var v1 = try stack.popF64();
+    //             var value = std.math.copysign(v1, v2);
+    //             try stack.pushF64(value);
+    //         },
+    //         Opcode.I32_Wrap_I64 => {
+    //             var v = try stack.popI64();
+    //             var mod = @truncate(i32, v);
+    //             try stack.pushI32(mod);
+    //         },
+    //         Opcode.I32_Trunc_F32_S => {
+    //             var v = try stack.popF32();
+    //             var int = try Helpers.truncateTo(i32, v);
+    //             try stack.pushI32(int);
+    //         },
+    //         Opcode.I32_Trunc_F32_U => {
+    //             var v = try stack.popF32();
+    //             var int = try Helpers.truncateTo(u32, v);
+    //             try stack.pushI32(@bitCast(i32, int));
+    //         },
+    //         Opcode.I32_Trunc_F64_S => {
+    //             var v = try stack.popF64();
+    //             var int = try Helpers.truncateTo(i32, v);
+    //             try stack.pushI32(int);
+    //         },
+    //         Opcode.I32_Trunc_F64_U => {
+    //             var v = try stack.popF64();
+    //             var int = try Helpers.truncateTo(u32, v);
+    //             try stack.pushI32(@bitCast(i32, int));
+    //         },
+    //         Opcode.I64_Extend_I32_S => {
+    //             var v32 = try stack.popI32();
+    //             var v64: i64 = v32;
+    //             try stack.pushI64(v64);
+    //         },
+    //         Opcode.I64_Extend_I32_U => {
+    //             var v32 = try stack.popI32();
+    //             var v64: u64 = @bitCast(u32, v32);
+    //             try stack.pushI64(@bitCast(i64, v64));
+    //         },
+    //         Opcode.I64_Trunc_F32_S => {
+    //             var v = try stack.popF32();
+    //             var int = try Helpers.truncateTo(i64, v);
+    //             try stack.pushI64(int);
+    //         },
+    //         Opcode.I64_Trunc_F32_U => {
+    //             var v = try stack.popF32();
+    //             var int = try Helpers.truncateTo(u64, v);
+    //             try stack.pushI64(@bitCast(i64, int));
+    //         },
+    //         Opcode.I64_Trunc_F64_S => {
+    //             var v = try stack.popF64();
+    //             var int = try Helpers.truncateTo(i64, v);
+    //             try stack.pushI64(int);
+    //         },
+    //         Opcode.I64_Trunc_F64_U => {
+    //             var v = try stack.popF64();
+    //             var int = try Helpers.truncateTo(u64, v);
+    //             try stack.pushI64(@bitCast(i64, int));
+    //         },
+    //         Opcode.F32_Convert_I32_S => {
+    //             var v = try stack.popI32();
+    //             try stack.pushF32(@intToFloat(f32, v));
+    //         },
+    //         Opcode.F32_Convert_I32_U => {
+    //             var v = @bitCast(u32, try stack.popI32());
+    //             try stack.pushF32(@intToFloat(f32, v));
+    //         },
+    //         Opcode.F32_Convert_I64_S => {
+    //             var v = try stack.popI64();
+    //             try stack.pushF32(@intToFloat(f32, v));
+    //         },
+    //         Opcode.F32_Convert_I64_U => {
+    //             var v = @bitCast(u64, try stack.popI64());
+    //             try stack.pushF32(@intToFloat(f32, v));
+    //         },
+    //         Opcode.F32_Demote_F64 => {
+    //             var v = try stack.popF64();
+    //             try stack.pushF32(@floatCast(f32, v));
+    //         },
+    //         Opcode.F64_Convert_I32_S => {
+    //             var v = try stack.popI32();
+    //             try stack.pushF64(@intToFloat(f64, v));
+    //         },
+    //         Opcode.F64_Convert_I32_U => {
+    //             var v = @bitCast(u32, try stack.popI32());
+    //             try stack.pushF64(@intToFloat(f64, v));
+    //         },
+    //         Opcode.F64_Convert_I64_S => {
+    //             var v = try stack.popI64();
+    //             try stack.pushF64(@intToFloat(f64, v));
+    //         },
+    //         Opcode.F64_Convert_I64_U => {
+    //             var v = @bitCast(u64, try stack.popI64());
+    //             try stack.pushF64(@intToFloat(f64, v));
+    //         },
+    //         Opcode.F64_Promote_F32 => {
+    //             var v = try stack.popF32();
+    //             try stack.pushF64(@floatCast(f64, v));
+    //         },
+    //         Opcode.I32_Reinterpret_F32 => {
+    //             var v = try stack.popF32();
+    //             try stack.pushI32(@bitCast(i32, v));
+    //         },
+    //         Opcode.I64_Reinterpret_F64 => {
+    //             var v = try stack.popF64();
+    //             try stack.pushI64(@bitCast(i64, v));
+    //         },
+    //         Opcode.F32_Reinterpret_I32 => {
+    //             var v = try stack.popI32();
+    //             try stack.pushF32(@bitCast(f32, v));
+    //         },
+    //         Opcode.F64_Reinterpret_I64 => {
+    //             var v = try stack.popI64();
+    //             try stack.pushF64(@bitCast(f64, v));
+    //         },
+    //         Opcode.I32_Extend8_S => {
+    //             var v = try stack.popI32();
+    //             var v_truncated = @truncate(i8, v);
+    //             var v_extended: i32 = v_truncated;
+    //             try stack.pushI32(v_extended);
+    //         },
+    //         Opcode.I32_Extend16_S => {
+    //             var v = try stack.popI32();
+    //             var v_truncated = @truncate(i16, v);
+    //             var v_extended: i32 = v_truncated;
+    //             try stack.pushI32(v_extended);
+    //         },
+    //         Opcode.I64_Extend8_S => {
+    //             var v = try stack.popI64();
+    //             var v_truncated = @truncate(i8, v);
+    //             var v_extended: i64 = v_truncated;
+    //             try stack.pushI64(v_extended);
+    //         },
+    //         Opcode.I64_Extend16_S => {
+    //             var v = try stack.popI64();
+    //             var v_truncated = @truncate(i16, v);
+    //             var v_extended: i64 = v_truncated;
+    //             try stack.pushI64(v_extended);
+    //         },
+    //         Opcode.I64_Extend32_S => {
+    //             var v = try stack.popI64();
+    //             var v_truncated = @truncate(i32, v);
+    //             var v_extended: i64 = v_truncated;
+    //             try stack.pushI64(v_extended);
+    //         },
+    //         Opcode.Ref_Null => {
+    //             var valtype = @intToEnum(ValType, instruction.immediate);
+    //             var val = try Val.nullRef(valtype);
+    //             try stack.pushValue(val);
+    //         },
+    //         Opcode.Ref_Is_Null => {
+    //             const val: Val = try stack.popValue();
+    //             const boolean: i32 = if (val.isNull()) 1 else 0;
+    //             try stack.pushI32(boolean);
+    //         },
+    //         Opcode.Ref_Func => {
+    //             const func_index = instruction.immediate;
+    //             const val = Val{ .FuncRef = .{ .index = func_index, .module_instance = context.module } };
+    //             try stack.pushValue(val);
+    //         },
+    //         Opcode.I32_Trunc_Sat_F32_S => {
+    //             var v = try stack.popF32();
+    //             var int = Helpers.saturatedTruncateTo(i32, v);
+    //             try stack.pushI32(int);
+    //         },
+    //         Opcode.I32_Trunc_Sat_F32_U => {
+    //             var v = try stack.popF32();
+    //             var int = Helpers.saturatedTruncateTo(u32, v);
+    //             try stack.pushI32(@bitCast(i32, int));
+    //         },
+    //         Opcode.I32_Trunc_Sat_F64_S => {
+    //             var v = try stack.popF64();
+    //             var int = Helpers.saturatedTruncateTo(i32, v);
+    //             try stack.pushI32(int);
+    //         },
+    //         Opcode.I32_Trunc_Sat_F64_U => {
+    //             var v = try stack.popF64();
+    //             var int = Helpers.saturatedTruncateTo(u32, v);
+    //             try stack.pushI32(@bitCast(i32, int));
+    //         },
+    //         Opcode.I64_Trunc_Sat_F32_S => {
+    //             var v = try stack.popF32();
+    //             var int = Helpers.saturatedTruncateTo(i64, v);
+    //             try stack.pushI64(int);
+    //         },
+    //         Opcode.I64_Trunc_Sat_F32_U => {
+    //             var v = try stack.popF32();
+    //             var int = Helpers.saturatedTruncateTo(u64, v);
+    //             try stack.pushI64(@bitCast(i64, int));
+    //         },
+    //         Opcode.I64_Trunc_Sat_F64_S => {
+    //             var v = try stack.popF64();
+    //             var int = Helpers.saturatedTruncateTo(i64, v);
+    //             try stack.pushI64(int);
+    //         },
+    //         Opcode.I64_Trunc_Sat_F64_U => {
+    //             var v = try stack.popF64();
+    //             var int = Helpers.saturatedTruncateTo(u64, v);
+    //             try stack.pushI64(@bitCast(i64, int));
+    //         },
+    //         Opcode.Memory_Init => {
+    //             const data_index: u32 = instruction.immediate;
+    //             const data: *const DataDefinition = &context.module_def.datas.items[data_index];
+    //             const memory: *MemoryInstance = &current_store.memories.items[0];
+
+    //             const length = try stack.popI32();
+    //             const data_offset = try stack.popI32();
+    //             const memory_offset = try stack.popI32();
+
+    //             if (length < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+    //             if (data.bytes.items.len < data_offset + length or data_offset < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+    //             if (memory.mem.items.len < memory_offset + length or memory_offset < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+
+    //             const data_offset_u32 = @intCast(u32, data_offset);
+    //             const memory_offset_u32 = @intCast(u32, memory_offset);
+    //             const length_u32 = @intCast(u32, length);
+
+    //             var source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
+    //             var destination = memory.mem.items[memory_offset_u32 .. memory_offset_u32 + length_u32];
+    //             std.mem.copy(u8, destination, source);
+    //         },
+    //         Opcode.Data_Drop => {
+    //             const data_index: u32 = instruction.immediate;
+    //             var data: *DataDefinition = &context.module_def.datas.items[data_index];
+    //             data.bytes.clearAndFree();
+    //         },
+    //         Opcode.Memory_Copy => {
+    //             const memory: *MemoryInstance = &current_store.memories.items[0];
+
+    //             const length = try stack.popI32();
+    //             const source_offset = try stack.popI32();
+    //             const dest_offset = try stack.popI32();
+
+    //             if (length < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+    //             if (memory.mem.items.len < source_offset + length or source_offset < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+    //             if (memory.mem.items.len < dest_offset + length or dest_offset < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+
+    //             const source_offset_u32 = @intCast(u32, source_offset);
+    //             const dest_offset_u32 = @intCast(u32, dest_offset);
+    //             const length_u32 = @intCast(u32, length);
+
+    //             var source = memory.mem.items[source_offset_u32 .. source_offset_u32 + length_u32];
+    //             var destination = memory.mem.items[dest_offset_u32 .. dest_offset_u32 + length_u32];
+
+    //             if (@ptrToInt(destination.ptr) < @ptrToInt(source.ptr)) {
+    //                 std.mem.copy(u8, destination, source);
+    //             } else {
+    //                 std.mem.copyBackwards(u8, destination, source);
+    //             }
+    //         },
+    //         Opcode.Memory_Fill => {
+    //             const memory: *MemoryInstance = &current_store.memories.items[0];
+
+    //             const length = try stack.popI32();
+    //             const value: u8 = @truncate(u8, @bitCast(u32, try stack.popI32()));
+    //             const offset = try stack.popI32();
+
+    //             if (length < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+    //             if (memory.mem.items.len < offset + length or offset < 0) {
+    //                 return error.TrapOutOfBoundsMemoryAccess;
+    //             }
+
+    //             const offset_u32 = @intCast(u32, offset);
+    //             const length_u32 = @intCast(u32, length);
+
+    //             var destination = memory.mem.items[offset_u32 .. offset_u32 + length_u32];
+
+    //             std.mem.set(u8, destination, value);
+    //         },
+    //         Opcode.Table_Init => {
+    //             const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];
+    //             const elem_index = pair.index_x;
+    //             const table_index = pair.index_y;
+
+    //             const elem: *const ElementInstance = &current_store.elements.items[elem_index];
+    //             const table: *TableInstance = current_store.getTable(table_index);
+
+    //             const length_i32 = try stack.popI32();
+    //             const elem_start_index = try stack.popI32();
+    //             const table_start_index = try stack.popI32();
+
+    //             if (elem_start_index + length_i32 > elem.refs.items.len or elem_start_index < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+    //             if (table_start_index + length_i32 > table.refs.items.len or table_start_index < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+    //             if (length_i32 < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+
+    //             const elem_begin = @intCast(usize, elem_start_index);
+    //             const table_begin = @intCast(usize, table_start_index);
+    //             const length = @intCast(usize, length_i32);
+
+    //             var dest: []Val = table.refs.items[table_begin .. table_begin + length];
+    //             var src: []const Val = elem.refs.items[elem_begin .. elem_begin + length];
+    //             std.mem.copy(Val, dest, src);
+    //         },
+    //         Opcode.Elem_Drop => {
+    //             const elem_index: u32 = instruction.immediate;
+    //             var elem: *ElementInstance = &current_store.elements.items[elem_index];
+    //             elem.refs.clearAndFree();
+    //         },
+    //         Opcode.Table_Copy => {
+    //             const pair: *const TablePairImmediates = &context.module_def.code.table_pairs.items[instruction.immediate];
+    //             const dest_table_index = pair.index_x;
+    //             const src_table_index = pair.index_y;
+
+    //             const dest_table: *TableInstance = current_store.getTable(dest_table_index);
+    //             const src_table: *const TableInstance = current_store.getTable(src_table_index);
+
+    //             const length_i32 = try stack.popI32();
+    //             const src_start_index = try stack.popI32();
+    //             const dest_start_index = try stack.popI32();
+
+    //             if (src_start_index + length_i32 > src_table.refs.items.len or src_start_index < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+    //             if (dest_start_index + length_i32 > dest_table.refs.items.len or dest_start_index < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+    //             if (length_i32 < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+
+    //             const dest_begin = @intCast(usize, dest_start_index);
+    //             const src_begin = @intCast(usize, src_start_index);
+    //             const length = @intCast(usize, length_i32);
+
+    //             var dest: []Val = dest_table.refs.items[dest_begin .. dest_begin + length];
+    //             var src: []const Val = src_table.refs.items[src_begin .. src_begin + length];
+    //             if (dest_start_index <= src_start_index) {
+    //                 std.mem.copy(Val, dest, src);
+    //             } else {
+    //                 std.mem.copyBackwards(Val, dest, src);
+    //             }
+    //         },
+    //         Opcode.Table_Grow => {
+    //             const table_index: u32 = instruction.immediate;
+    //             const table: *TableInstance = current_store.getTable(table_index);
+    //             const length = @bitCast(u32, try stack.popI32());
+    //             const init_value = try stack.popValue();
+    //             const old_length = @intCast(i32, table.refs.items.len);
+    //             const return_value: i32 = if (table.grow(length, init_value)) old_length else -1;
+    //             try stack.pushI32(return_value);
+    //         },
+    //         Opcode.Table_Size => {
+    //             const table_index: u32 = instruction.immediate;
+    //             const table: *TableInstance = current_store.getTable(table_index);
+    //             const length = @intCast(i32, table.refs.items.len);
+    //             try stack.pushI32(length);
+    //         },
+    //         Opcode.Table_Fill => {
+    //             const table_index: u32 = instruction.immediate;
+    //             const table: *TableInstance = current_store.getTable(table_index);
+
+    //             const length_i32 = try stack.popI32();
+    //             const funcref = try stack.popValue();
+    //             const dest_table_index = try stack.popI32();
+
+    //             if (funcref.isRefType() == false) {
+    //                 return error.ValidationTypeMismatch;
+    //             }
+
+    //             if (dest_table_index + length_i32 > table.refs.items.len or length_i32 < 0) {
+    //                 return error.TrapOutOfBoundsTableAccess;
+    //             }
+
+    //             const dest_begin = @intCast(usize, dest_table_index);
+    //             const length = @intCast(usize, length_i32);
+
+    //             var dest: []Val = table.refs.items[dest_begin .. dest_begin + length];
+
+    //             std.mem.set(Val, dest, funcref);
+    //         },
+    //     }
+
+    //     instruction_offset = next_instruction;
+    // }
+    // }
 };
