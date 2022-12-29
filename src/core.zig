@@ -2817,8 +2817,6 @@ const InstructionFuncs = struct {
         const opcode_int = @enumToInt(instruction.opcode);
         var func: InstructionFunc = if (opcode_int <= 0xD2) opcodeToFuncTable[opcode_int] else opcodeToFuncFCTable[opcode_int - 0xFC00];
 
-        // std.debug.print("instructionToFunc {} -> {}\n", .{instruction.opcode, func});
-
         return InstructionFuncData{
             .func = func,
             .immediate = instruction.immediate,
@@ -2828,13 +2826,6 @@ const InstructionFuncs = struct {
     fn run(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
         try @call(.{ .modifier = .always_tail }, pc[0].func, .{ pc, stack });
     }
-
-    // TODO remove this and just use the stuff directly from the stack
-    const CallContext = struct {
-        module: *ModuleInstance,
-        module_def: *const ModuleDefinition,
-        stack: *Stack,
-    };
 
     const OpHelpers = struct {
         fn propagateNanWithOp(op: anytype, v1: anytype, v2: @TypeOf(v1)) @TypeOf(v1) {
@@ -3016,15 +3007,6 @@ const InstructionFuncs = struct {
             const module_def: *const ModuleDefinition = stack.topFrame().module_instance.module_def;
             const block_type_value: BlockTypeValue = module_def.code.block_type_values.items[block_type_value_immediate];
 
-            // TODO delete
-            // if (module_def.label_continuations.contains(label_offset) == false) {
-            //     std.debug.print("label offset {} not present in map. keys:\n", .{label_offset});
-            //     var keys = module_def.label_continuations.keyIterator();
-            //     while (keys.next()) |key| {
-            //         std.debug.print("\t{}\n", .{key.*});
-            //     }
-            // }
-
             const continuation = module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
 
             try stack.pushLabel(block_type_value, continuation);
@@ -3040,7 +3022,6 @@ const InstructionFuncs = struct {
             const module_def: *const ModuleDefinition = stack.topFrame().module_instance.module_def;
 
             const continuation: u32 = label.continuation;
-            // const is_loop_continuation: bool = module_def.code.instructions.items[continuation].opcode == .Loop;
             const is_loop_continuation: bool = module_def.code.instructions.items[continuation].func == &op_Loop;
 
             if (is_loop_continuation == false or label_id != 0) {
