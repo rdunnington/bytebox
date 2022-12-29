@@ -556,6 +556,19 @@ const BlockTypeValue = union(BlockType) {
             .TypeIndex => |index| return module_def.types.items[index].getReturns(),
         }
     }
+
+    fn toU64(value: BlockTypeValue) u64 {
+        comptime {
+            std.debug.assert(@sizeOf(BlockTypeValue) == @sizeOf(u64));
+        }
+        const value_ptr: *const BlockTypeValue = &value;
+        return @ptrCast(*const u64, @alignCast(8, value_ptr)).*;
+    }
+
+    fn fromU64(value: u64) BlockTypeValue {
+        const value_ptr: *const u64 = &value;
+        return @ptrCast(*const BlockTypeValue, @alignCast(4, value_ptr)).*;
+    }
 };
 
 const BlockTypeStatics = struct {
@@ -1382,6 +1395,19 @@ const MemArg = struct {
 const CallIndirectImmediates = struct {
     type_index: u32,
     table_index: u32,
+
+    fn toU64(immediates: CallIndirectImmediates) u64 {
+        var type_index: u64 = immediates.type_index;
+        var table_index: u64 = immediates.table_index;
+        return type_index | (table_index << 32);
+    }
+
+    fn fromU64(value: u64) CallIndirectImmediates {
+        return CallIndirectImmediates{
+            .type_index = @truncate(u32, value),
+            .table_index = @truncate(u32, value >> 32),
+        };
+    }
 };
 
 const BranchTableImmediates = struct {
@@ -1392,6 +1418,19 @@ const BranchTableImmediates = struct {
 const TablePairImmediates = struct {
     index_x: u32,
     index_y: u32,
+
+    fn toU64(immediates: TablePairImmediates) u64 {
+        var index_x: u64 = immediates.index_x;
+        var index_y: u64 = immediates.index_y;
+        return index_x | (index_y << 32);
+    }
+
+    fn fromU64(value: u64) TablePairImmediates {
+        return TablePairImmediates{
+            .index_x = @truncate(u32, value),
+            .index_y = @truncate(u32, value >> 32),
+        };
+    }
 };
 
 // pc is the "program counter", which points to the next instruction to execute
@@ -1403,21 +1442,21 @@ const Instruction = struct {
 };
 
 const InstructionOp = struct {
-    const k_invalid_immediate = std.math.maxInt(u32);
+    const k_invalid_immediate = std.math.maxInt(u64);
 
     opcode: Opcode,
     immediate: u64, // interpreted differently depending on the opcode.
 
     fn decode(reader: anytype, module: *ModuleDefinition) !InstructionOp {
         const Helpers = struct {
-            fn decodeBlockType(_reader: anytype, _module: *ModuleDefinition) !u32 {
+            fn decodeBlockType(_reader: anytype, _module: *ModuleDefinition) !u64 {
                 var value: BlockTypeValue = undefined;
 
                 const blocktype = try _reader.readByte();
                 const valtype_or_err = ValType.bytecodeToValtype(blocktype);
                 if (std.meta.isError(valtype_or_err)) {
                     if (blocktype == k_block_type_void_sentinel_byte) {
-                        return 0; // the first item in the blocktype array is always void
+                        value = BlockTypeValue{.Void = {}};
                     } else {
                         _reader.context.pos -= 1; // move the stream backwards 1 byte to reconstruct the integer
                         var index_33bit = try decodeLEB128(i33, _reader);
@@ -1436,18 +1475,10 @@ const InstructionOp = struct {
                     value = BlockTypeValue{ .ValType = valtype };
                 }
 
-                for (_module.code.block_type_values.items) |*item, i| {
-                    if (std.meta.eql(item.*, value)) {
-                        return @intCast(u32, i);
-                    }
-                }
-
-                var immediate_index = _module.code.block_type_values.items.len;
-                try _module.code.block_type_values.append(value);
-                return @intCast(u32, immediate_index);
+                return value.toU64();
             }
 
-            fn decodeTablePair(_reader: anytype, _module: *ModuleDefinition) !u32 {
+            fn decodeTablePair(_reader: anytype) !u64 {
                 const elem_index = try decodeLEB128(u32, _reader);
                 const table_index = try decodeLEB128(u32, _reader);
 
@@ -1455,16 +1486,7 @@ const InstructionOp = struct {
                     .index_x = elem_index,
                     .index_y = table_index,
                 };
-
-                for (_module.code.table_pairs.items) |*item, i| {
-                    if (std.meta.eql(item, &pair)) {
-                        return @intCast(u32, i);
-                    }
-                }
-
-                var immediate_index = _module.code.table_pairs.items.len;
-                try _module.code.table_pairs.append(pair);
-                return @intCast(u32, immediate_index);
+                return TablePairImmediates.toU64(pair);
             }
         };
 
@@ -1488,7 +1510,7 @@ const InstructionOp = struct {
                 return error.MalformedIllegalOpcode;
             };
         }
-        var immediate: u32 = k_invalid_immediate;
+        var immediate: u64 = k_invalid_immediate;
 
         switch (opcode) {
             .Select_T => {
@@ -1526,17 +1548,7 @@ const InstructionOp = struct {
             },
             .I64_Const => {
                 var value = try decodeLEB128(i64, reader);
-
-                for (module.code.i64_const.items) |item, i| {
-                    if (value == item) {
-                        immediate = @intCast(u32, i);
-                    }
-                }
-
-                if (immediate == k_invalid_immediate) {
-                    immediate = @intCast(u32, module.code.i64_const.items.len);
-                    try module.code.i64_const.append(value);
-                }
+                immediate = @bitCast(u64, value);
             },
             .F32_Const => {
                 var value = try decodeFloat(f32, reader);
@@ -1544,18 +1556,7 @@ const InstructionOp = struct {
             },
             .F64_Const => {
                 var value = try decodeFloat(f64, reader);
-
-                for (module.code.f64_const.items) |item, i| {
-                    if (value == item and std.math.signbit(value) == std.math.signbit(item)) {
-                        immediate = @intCast(u32, i);
-                        break;
-                    }
-                }
-
-                if (immediate == k_invalid_immediate) {
-                    immediate = @intCast(u32, module.code.f64_const.items.len);
-                    try module.code.f64_const.append(value);
-                }
+                immediate = @bitCast(u64, value);
             },
             .Block => {
                 immediate = try Helpers.decodeBlockType(reader, module);
@@ -1608,22 +1609,11 @@ const InstructionOp = struct {
                 immediate = try decodeLEB128(u32, reader); // function index
             },
             .Call_Indirect => {
-                var call_indirect_immedates = CallIndirectImmediates{
+                var immediates = CallIndirectImmediates{
                     .type_index = try decodeLEB128(u32, reader),
                     .table_index = try decodeLEB128(u32, reader),
                 };
-
-                for (module.code.call_indirect.items) |*item, i| {
-                    if (std.meta.eql(item.*, call_indirect_immedates)) {
-                        immediate = @intCast(u32, i);
-                        break;
-                    }
-                }
-
-                if (immediate == k_invalid_immediate) {
-                    immediate = @intCast(u32, module.code.call_indirect.items.len);
-                    try module.code.call_indirect.append(call_indirect_immedates);
-                }
+                immediate = CallIndirectImmediates.toU64(immediates);
             },
             .I32_Load => {
                 var memarg = try MemArg.decode(reader, 32);
@@ -1773,13 +1763,13 @@ const InstructionOp = struct {
                 }
             },
             .Table_Init => {
-                immediate = try Helpers.decodeTablePair(reader, module);
+                immediate = try Helpers.decodeTablePair(reader);
             },
             .Elem_Drop => {
                 immediate = try decodeLEB128(u32, reader); // elemidx
             },
             .Table_Copy => {
-                immediate = try Helpers.decodeTablePair(reader, module);
+                immediate = try Helpers.decodeTablePair(reader);
             },
             .Table_Grow => {
                 immediate = try decodeLEB128(u32, reader); // tableidx
@@ -1919,7 +1909,7 @@ const ModuleValidator = struct {
             }
 
             fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: InstructionOp) !void {
-                const block_type_value: BlockTypeValue = module_.code.block_type_values.items[instruction_.immediate];
+                const block_type_value = BlockTypeValue.fromU64(instruction_.immediate);
 
                 var start_types: []const ValType = block_type_value.getBlocktypeParamTypes(module_);
                 var end_types: []const ValType = block_type_value.getBlocktypeReturnTypes(module_);
@@ -2128,7 +2118,7 @@ const ModuleValidator = struct {
                 try Helpers.popPushFuncTypes(self, type_index, module);
             },
             .Call_Indirect => {
-                const immediates: *const CallIndirectImmediates = &module.code.call_indirect.items[instruction.immediate];
+                const immediates = CallIndirectImmediates.fromU64(instruction.immediate);
 
                 try validateTypeIndex(immediates.type_index, module);
                 try validateTableIndex(immediates.table_index, module);
@@ -2422,7 +2412,7 @@ const ModuleValidator = struct {
                 try self.popType(.I32);
             },
             .Table_Init => {
-                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+                const pair = TablePairImmediates.fromU64(instruction.immediate);
                 const elem_index = pair.index_x;
                 const table_index = pair.index_y;
                 try validateTableIndex(table_index, module);
@@ -2443,7 +2433,7 @@ const ModuleValidator = struct {
                 try validateElementIndex(instruction.immediate, module);
             },
             .Table_Copy => {
-                const pair: *const TablePairImmediates = &module.code.table_pairs.items[instruction.immediate];
+                const pair = TablePairImmediates.fromU64(instruction.immediate);
                 const dest_table_index = pair.index_x;
                 const src_table_index = pair.index_y;
                 try validateTableIndex(dest_table_index, module);
@@ -2998,9 +2988,9 @@ const InstructionFuncs = struct {
             }
         }
 
-        fn enterBlock(stack: *Stack, block_type_value_immediate: usize, label_offset: u32) !void {
+        fn enterBlock(stack: *Stack, block_type_value_immediate: u64, label_offset: u32) !void {
             const module_def: *const ModuleDefinition = stack.topFrame().module_instance.module_def;
-            const block_type_value: BlockTypeValue = module_def.code.block_type_values.items[block_type_value_immediate];
+            const block_type_value = BlockTypeValue.fromU64(block_type_value_immediate);
 
             const continuation = module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
 
@@ -3223,7 +3213,7 @@ const InstructionFuncs = struct {
 
         const current_module: *ModuleInstance = stack.topFrame().module_instance;
 
-        var immediates: *const CallIndirectImmediates = &current_module.module_def.code.call_indirect.items[pc[0].immediate];
+        const immediates = CallIndirectImmediates.fromU64(pc[0].immediate);
 
         const table: *const TableInstance = current_module.store.getTable(immediates.table_index);
 
@@ -3601,7 +3591,7 @@ const InstructionFuncs = struct {
 
     fn op_I64_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Const", pc, stack);
-        var v: i64 = stack.topFrame().module_instance.module_def.code.i64_const.items[pc[0].immediate];
+        var v: i64 = @bitCast(i64, pc[0].immediate);
         try stack.pushI64(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
@@ -3615,7 +3605,7 @@ const InstructionFuncs = struct {
 
     fn op_F64_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Const", pc, stack);
-        var v: f64 = stack.topFrame().module_instance.module_def.code.f64_const.items[pc[0].immediate];
+        var v: f64 = @bitCast(f64, pc[0].immediate);
         try stack.pushF64(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
@@ -4976,7 +4966,7 @@ const InstructionFuncs = struct {
 
     fn op_Table_Init(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Init", pc, stack);
-        const pair: *const TablePairImmediates = &stack.topFrame().module_instance.module_def.code.table_pairs.items[pc[0].immediate];
+        const pair = TablePairImmediates.fromU64(pc[0].immediate);
         const elem_index = pair.index_x;
         const table_index = pair.index_y;
 
@@ -5017,7 +5007,7 @@ const InstructionFuncs = struct {
 
     fn op_Table_Copy(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Copy", pc, stack);
-        const pair: *const TablePairImmediates = &stack.topFrame().module_instance.module_def.code.table_pairs.items[pc[0].immediate];
+        const pair = TablePairImmediates.fromU64(pc[0].immediate);
         const dest_table_index = pair.index_x;
         const src_table_index = pair.index_y;
 
@@ -5101,12 +5091,7 @@ pub const ModuleDefinition = struct {
         instructions: std.ArrayList(Instruction),
 
         // Instruction.immediate indexes these arrays depending on the opcode
-        block_type_values: std.ArrayList(BlockTypeValue),
-        call_indirect: std.ArrayList(CallIndirectImmediates),
         branch_table: std.ArrayList(BranchTableImmediates),
-        table_pairs: std.ArrayList(TablePairImmediates),
-        i64_const: std.ArrayList(i64),
-        f64_const: std.ArrayList(f64),
     };
 
     const Imports = struct {
@@ -5152,12 +5137,7 @@ pub const ModuleDefinition = struct {
             .allocator = allocator,
             .code = Code{
                 .instructions = std.ArrayList(Instruction).init(allocator),
-                .block_type_values = std.ArrayList(BlockTypeValue).init(allocator),
-                .call_indirect = std.ArrayList(CallIndirectImmediates).init(allocator),
                 .branch_table = std.ArrayList(BranchTableImmediates).init(allocator),
-                .table_pairs = std.ArrayList(TablePairImmediates).init(allocator),
-                .i64_const = std.ArrayList(i64).init(allocator),
-                .f64_const = std.ArrayList(f64).init(allocator),
             },
             .types = std.ArrayList(FunctionTypeDefinition).init(allocator),
             .imports = Imports{
@@ -5240,9 +5220,6 @@ pub const ModuleDefinition = struct {
         var allocator = self.allocator;
         var validator = ModuleValidator.init(allocator);
         defer validator.deinit();
-
-        // first block type is always void for quick decoding
-        try self.code.block_type_values.append(BlockTypeValue{ .Void = {} });
 
         var stream = std.io.fixedBufferStream(wasm);
         var reader = stream.reader();
@@ -5830,15 +5807,10 @@ pub const ModuleDefinition = struct {
 
     pub fn deinit(self: *ModuleDefinition) void {
         self.code.instructions.deinit();
-        self.code.block_type_values.deinit();
-        self.code.call_indirect.deinit();
-        self.code.i64_const.deinit();
-        self.code.f64_const.deinit();
         for (self.code.branch_table.items) |*item| {
             item.label_ids.deinit();
         }
         self.code.branch_table.deinit();
-        self.code.table_pairs.deinit();
 
         for (self.imports.functions.items) |*item| {
             self.allocator.free(item.names.module_name);
