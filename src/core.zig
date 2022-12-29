@@ -1394,13 +1394,21 @@ const TablePairImmediates = struct {
     index_y: u32,
 };
 
+// pc is the "program counter", which points to the next instruction to execute
+const InstructionFunc = *const fn (pc: [*]const Instruction, stack: *Stack) anyerror!void;
+
 const Instruction = struct {
-    const k_invalid_immediate = std.math.maxInt(u24);
+    func: InstructionFunc,
+    immediate: u32,
+};
 
-    immediate: u32, // interpreted differently depending on the opcode
+const InstructionOp = struct {
+    const k_invalid_immediate = std.math.maxInt(u32);
+
     opcode: Opcode,
+    immediate: u32, // interpreted differently depending on the opcode. TODO: expand this to u64, since the struct is 8-byte aligned anyway
 
-    fn decode(reader: anytype, module: *ModuleDefinition) !Instruction {
+    fn decode(reader: anytype, module: *ModuleDefinition) !InstructionOp {
         const Helpers = struct {
             fn decodeBlockType(_reader: anytype, _module: *ModuleDefinition) !u32 {
                 var value: BlockTypeValue = undefined;
@@ -1785,12 +1793,20 @@ const Instruction = struct {
             else => {},
         }
 
-        var inst = Instruction{
+        return .{
             .opcode = opcode,
             .immediate = immediate,
         };
+    }
 
-        return inst;
+    fn toInstruction(self: *InstructionOp) Instruction {
+        const opcode_int = @enumToInt(self.opcode);
+        const func: InstructionFunc = if (opcode_int <= 0xD2) InstructionFuncs.opcodeToFuncTable[opcode_int] else InstructionFuncs.opcodeToFuncFCTable[opcode_int - 0xFC00];
+
+        return Instruction{
+            .func = func,
+            .immediate = self.immediate,
+        };
     }
 };
 
@@ -1892,7 +1908,7 @@ const ModuleValidator = struct {
         try self.pushControl(Opcode.Call, func_type_def.getParams(), func_type_def.getReturns());
     }
 
-    fn validateCode(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition, instruction: Instruction) !void {
+    fn validateCode(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition, instruction: InstructionOp) !void {
         const Helpers = struct {
             fn popReturnTypes(validator: *ModuleValidator, types: []const ValType) !void {
                 var i = types.len;
@@ -1902,7 +1918,7 @@ const ModuleValidator = struct {
                 }
             }
 
-            fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction) !void {
+            fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: InstructionOp) !void {
                 const block_type_value: BlockTypeValue = module_.code.block_type_values.items[instruction_.immediate];
 
                 var start_types: []const ValType = block_type_value.getBlocktypeParamTypes(module_);
@@ -2557,17 +2573,6 @@ const ModuleValidator = struct {
     }
 };
 
-// pc is the "program counter", which points to the next instruction to execute
-const InstructionFunc = *const fn (pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void;
-
-// TODO rename this to Instruction and remove the old struct
-const InstructionFuncData = struct {
-    func: InstructionFunc,
-    immediate: u32, // todo expand this to u64, since the struct is 8-byte aligned anyway
-};
-
-const InstructionFuncData2 = Instruction;
-
 // Maps all instructions to an execution function, to map opcodes directly to function pointers
 // which avoids a giant switch statement. Because the switch-style has a single conditional
 // branch for every opcode, the branch predictor cannot reliably predict the next opcode. However,
@@ -2585,11 +2590,11 @@ const InstructionFuncs = struct {
         &op_Loop, // 0x03
         &op_If, // 0x04
         &op_Else, // 0x05
-        &op_Noop, // 0x06
-        &op_Noop, // 0x07
-        &op_Noop, // 0x08
-        &op_Noop, // 0x09
-        &op_Noop, // 0x0A
+        &op_Invalid, // 0x06
+        &op_Invalid, // 0x07
+        &op_Invalid, // 0x08
+        &op_Invalid, // 0x09
+        &op_Invalid, // 0x0A
         &op_End, // 0x0B,
         &op_Branch, // 0x0C
         &op_Branch_If, // 0x0D
@@ -2608,9 +2613,9 @@ const InstructionFuncs = struct {
         &op_Drop, // 0x1A
         &op_Select, // 0x1B
         &op_Select_T, // 0x1C
-        &op_Noop, // 0x1D
-        &op_Noop, // 0x1E
-        &op_Noop, // 0x1F
+        &op_Invalid, // 0x1D
+        &op_Invalid, // 0x1E
+        &op_Invalid, // 0x1F
         &op_Local_Get, // 0x20
         &op_Local_Set, // 0x21
         &op_Local_Tee, // 0x22
@@ -2618,7 +2623,7 @@ const InstructionFuncs = struct {
         &op_Global_Set, // 0x24
         &op_Table_Get, // 0x25
         &op_Table_Set, // 0x26
-        &op_Noop, // 0x27
+        &op_Invalid, // 0x27
         &op_I32_Load, // 0x28
         &op_I64_Load, // 0x29
         &op_F32_Load, // 0x2A
@@ -2776,17 +2781,17 @@ const InstructionFuncs = struct {
         &op_I64_Extend8_S, // 0xC2
         &op_I64_Extend16_S, // 0xC3
         &op_I64_Extend32_S, // 0xC4
-        &op_Noop, // 0xC5
-        &op_Noop, // 0xC6
-        &op_Noop, // 0xC7
-        &op_Noop, // 0xC8
-        &op_Noop, // 0xC9
-        &op_Noop, // 0xCA
-        &op_Noop, // 0xCB
-        &op_Noop, // 0xCC
-        &op_Noop, // 0xCD
-        &op_Noop, // 0xCE
-        &op_Noop, // 0xCF
+        &op_Invalid, // 0xC5
+        &op_Invalid, // 0xC6
+        &op_Invalid, // 0xC7
+        &op_Invalid, // 0xC8
+        &op_Invalid, // 0xC9
+        &op_Invalid, // 0xCA
+        &op_Invalid, // 0xCB
+        &op_Invalid, // 0xCC
+        &op_Invalid, // 0xCD
+        &op_Invalid, // 0xCE
+        &op_Invalid, // 0xCF
         &op_Ref_Null, // 0xD0
         &op_Ref_Is_Null, // 0xD1
         &op_Ref_Func, // 0xD2
@@ -2813,17 +2818,7 @@ const InstructionFuncs = struct {
         &op_Table_Fill, // 0xFC11
     };
 
-    fn instructionToFunc(instruction: Instruction) InstructionFuncData {
-        const opcode_int = @enumToInt(instruction.opcode);
-        var func: InstructionFunc = if (opcode_int <= 0xD2) opcodeToFuncTable[opcode_int] else opcodeToFuncFCTable[opcode_int - 0xFC00];
-
-        return InstructionFuncData{
-            .func = func,
-            .immediate = instruction.immediate,
-        };
-    }
-
-    fn run(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn run(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         try @call(.{ .modifier = .always_tail }, pc[0].func, .{ pc, stack });
     }
 
@@ -2962,7 +2957,7 @@ const InstructionFuncs = struct {
             std.mem.writeIntSliceLittle(write_type, mem, write_value);
         }
 
-        fn call(pc: [*]const InstructionFuncData, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) ![*]const InstructionFuncData {
+        fn call(pc: [*]const Instruction, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) ![*]const Instruction {
             const functype: *const FunctionTypeDefinition = &module_instance.module_def.types.items[func.type_def_index];
             const param_types: []const ValType = functype.getParams();
             const continuation: u32 = calcInstructionOffset(pc + 1, stack);
@@ -2970,11 +2965,11 @@ const InstructionFuncs = struct {
             try stack.pushFrame(func, module_instance, param_types, func.local_types.items);
             try stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, continuation);
 
-            var next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, func.offset_into_instructions);
+            var next_pc: [*]const Instruction = OpHelpers.calcNextPC(stack, func.offset_into_instructions);
             return next_pc;
         }
 
-        fn callImport(pc: [*]const InstructionFuncData, stack: *Stack, func: *const FunctionImport) ![*]const InstructionFuncData {
+        fn callImport(pc: [*]const Instruction, stack: *Stack, func: *const FunctionImport) ![*]const Instruction {
             switch (func.data) {
                 .Host => |data| {
                     const params_len: u32 = @intCast(u32, data.func_def.getParams().len);
@@ -3012,7 +3007,7 @@ const InstructionFuncs = struct {
             try stack.pushLabel(block_type_value, continuation);
         }
 
-        fn branch(stack: *Stack, label_id: u32) !?[*]const InstructionFuncData {
+        fn branch(stack: *Stack, label_id: u32) !?[*]const Instruction {
             const label: *const Label = stack.findLabel(label_id);
             const frame_label: *const Label = stack.frameLabel();
             if (label == frame_label) {
@@ -3032,7 +3027,7 @@ const InstructionFuncs = struct {
             return OpHelpers.calcNextPC(stack, continuation + 1); // branching takes care of popping/pushing values so skip the End instruction
         }
 
-        fn returnFromFunc(stack: *Stack) !?[*]const InstructionFuncData {
+        fn returnFromFunc(stack: *Stack) !?[*]const Instruction {
             const frame: *const CallFrame = stack.topFrame();
             const return_types: []const ValType = frame.module_instance.module_def.types.items[frame.func.type_def_index].getReturns();
 
@@ -3047,13 +3042,13 @@ const InstructionFuncs = struct {
             }
         }
 
-        fn calcInstructionOffset(pc: [*]const InstructionFuncData, stack: *Stack) u32 {
+        fn calcInstructionOffset(pc: [*]const Instruction, stack: *Stack) u32 {
             var label_offset_bytes = @ptrToInt(pc) - @ptrToInt(stack.topFrame().module_instance.module_def.code.instructions.items.ptr);
-            var label_offset = label_offset_bytes / @sizeOf(InstructionFuncData);    
+            var label_offset = label_offset_bytes / @sizeOf(Instruction);    
             return @intCast(u32, label_offset);    
         }
 
-        fn calcNextPC(stack: *Stack, instruction_offset: usize) [*]const InstructionFuncData {
+        fn calcNextPC(stack: *Stack, instruction_offset: usize) [*]const Instruction {
             const frame: *const CallFrame = stack.topFrame();
 
             std.debug.assert(instruction_offset < frame.module_instance.module_def.code.instructions.items.len);
@@ -3062,48 +3057,47 @@ const InstructionFuncs = struct {
         }
     };
 
-    fn debugPreamble(name: []const u8, pc: [*]const InstructionFuncData, stack: *Stack) void {
+    fn debugPreamble(name: []const u8, pc: [*]const Instruction, stack: *Stack) void {
         // std.debug.print("\tinstruction: {s} at {*}. Next func: {*}\n", .{name, pc, pc[1].func});
         _ = name;
         _ = pc;
         _ = stack;
     }
 
-    fn op_Invalid(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Invalid(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         _ = pc;
         _ = stack;
         unreachable;
     }
 
-    fn op_Unreachable(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Unreachable(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         _ = pc;
         _ = stack;
         return error.TrapUnreachable;
     }
 
-    fn op_Noop(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Noop(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Noop", pc, stack);
-        std.debug.print("\t\t>>>> noop!!!!!\n", .{});
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Block(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Block(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Block", pc, stack);
         var label_offset = OpHelpers.calcInstructionOffset(pc, stack);
         try OpHelpers.enterBlock(stack, pc[0].immediate, label_offset);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Loop(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Loop(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Loop", pc, stack);
         var label_offset = OpHelpers.calcInstructionOffset(pc, stack);
         try OpHelpers.enterBlock(stack, pc[0].immediate, label_offset);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_If(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_If(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("If", pc, stack);
-        var next_pc: [*]const InstructionFuncData = undefined;
+        var next_pc: [*]const Instruction = undefined;
 
         const label_offset = OpHelpers.calcInstructionOffset(pc, stack);
 
@@ -3124,17 +3118,17 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
 
-    fn op_Else(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Else(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Else", pc, stack);
         // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
         var label_offset = OpHelpers.calcInstructionOffset(pc, stack);
         const continuation = stack.topFrame().module_instance.module_def.label_continuations.get(label_offset) orelse return error.AssertInvalidLabel;
 
-        var next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, continuation);
+        var next_pc: [*]const Instruction = OpHelpers.calcNextPC(stack, continuation);
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
 
-    fn op_End(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_End(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("End", pc, stack);
 
         // TODO - this instruction tries to determine at runtime what behavior to take, but we can
@@ -3142,7 +3136,7 @@ const InstructionFuncs = struct {
         // to avoid branching. Probably could bake the return types length into the immediate to avoid
         // cache misses on the lookup we're currently doing.
 
-        var next_pc: [*]const InstructionFuncData = pc + 1;
+        var next_pc: [*]const Instruction = pc + 1;
 
         // determine if this is a a scope or function call exit
         const top_label: *const Label = stack.topLabel();
@@ -3169,16 +3163,16 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
 
-    fn op_Branch(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Branch(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Branch", pc, stack);
         const label_id: u32 = pc[0].immediate;
-        const next_pc: [*]const InstructionFuncData = try OpHelpers.branch(stack, label_id) orelse return;
+        const next_pc: [*]const Instruction = try OpHelpers.branch(stack, label_id) orelse return;
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
     
-    fn op_Branch_If(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Branch_If(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Branch_If", pc, stack);
-        var next_pc: [*]const InstructionFuncData = pc + 1;
+        var next_pc: [*]const Instruction = pc + 1;
         const v = try stack.popI32();
         if (v != 0) {
             const label_id: u32 = pc[0].immediate;
@@ -3187,31 +3181,31 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
     
-    fn op_Branch_Table(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Branch_Table(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table", pc, stack);
         const immediates: *const BranchTableImmediates = &stack.topFrame().module_instance.module_def.code.branch_table.items[pc[0].immediate];
         const table: []const u32 = immediates.label_ids.items;
 
         const label_index = try stack.popI32();
         const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
-        const next_pc: [*]const InstructionFuncData = try OpHelpers.branch(stack, label_id) orelse return;
+        const next_pc: [*]const Instruction = try OpHelpers.branch(stack, label_id) orelse return;
 
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
     
-    fn op_Return(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Return(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Return", pc, stack);
-        var next_pc: [*]const InstructionFuncData = try OpHelpers.returnFromFunc(stack) orelse return;
+        var next_pc: [*]const Instruction = try OpHelpers.returnFromFunc(stack) orelse return;
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
 
-    fn op_Call(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Call(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Call", pc, stack);
 
         const func_index: u32 = pc[0].immediate;
         const module_instance: *ModuleInstance = stack.topFrame().module_instance;
         const store: *const Store = &module_instance.store;
-        var next_pc: [*]const InstructionFuncData = pc;
+        var next_pc: [*]const Instruction = pc;
         if (func_index >= store.imports.functions.items.len) {
             const func_instance_index = func_index - store.imports.functions.items.len;
             const func: *const FunctionInstance = &store.functions.items[@intCast(usize, func_instance_index)];
@@ -3224,7 +3218,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
 
-    fn op_Call_Indirect(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Call_Indirect(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Call_Indirect", pc, stack);
 
         const current_module: *ModuleInstance = stack.topFrame().module_instance;
@@ -3250,7 +3244,7 @@ const InstructionFuncs = struct {
 
         std.debug.assert(call_module != &empty_module_instance); // Should have been set in module instantiation
 
-        var next_pc: [*]const InstructionFuncData = undefined;
+        var next_pc: [*]const Instruction = undefined;
         if (func_index >= call_store.imports.functions.items.len) {
             const func: *const FunctionInstance = &call_store.functions.items[func_index - call_store.imports.functions.items.len];
             if (func.type_def_index != immediates.type_index) {
@@ -3275,13 +3269,13 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
 
-    fn op_Drop(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Drop(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Drop", pc, stack);
         _ = try stack.popValue();
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
     
-    fn op_Select(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Select(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Select", pc, stack);
 
         var boolean: i32 = try stack.popI32();
@@ -3297,7 +3291,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
     
-    fn op_Select_T(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Select_T(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Select_T", pc, stack);
 
         var boolean: i32 = try stack.popI32();
@@ -3313,7 +3307,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Local_Get(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Local_Get(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Local_Get", pc, stack);
 
         var locals_index: u32 = pc[0].immediate;
@@ -3323,7 +3317,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Local_Set(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Local_Set(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Local_Set", pc, stack);
         var locals_index: u32 = pc[0].immediate;
         var frame: *CallFrame = stack.topFrame();
@@ -3332,7 +3326,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Local_Tee(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Local_Tee(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Local_Tee", pc, stack);
         var locals_index: u32 = pc[0].immediate;
         var frame: *CallFrame = stack.topFrame();
@@ -3341,7 +3335,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Global_Get(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Global_Get(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Global_Get", pc, stack);
         var global_index: u32 = pc[0].immediate;
         var global: *GlobalInstance = stack.topFrame().module_instance.store.getGlobal(global_index);
@@ -3349,7 +3343,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Global_Set(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Global_Set(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Global_Set", pc, stack);
         var global_index: u32 = pc[0].immediate;
         var global: *GlobalInstance = stack.topFrame().module_instance.store.getGlobal(global_index);
@@ -3357,7 +3351,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Table_Get(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Table_Get(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Get", pc, stack);
         const table_index = pc[0].immediate;
         const table: *const TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
@@ -3370,7 +3364,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Table_Set(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Table_Set(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Set", pc, stack);
         const table_index = pc[0].immediate;
         var table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
@@ -3386,7 +3380,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Load(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Load(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Load", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value = try OpHelpers.loadFromMem(i32, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3394,7 +3388,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Load(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Load(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Load", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value = try OpHelpers.loadFromMem(i64, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3402,7 +3396,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Load(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Load(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Load", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value = try OpHelpers.loadFromMem(f32, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3410,7 +3404,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Load(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Load(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Load", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value = try OpHelpers.loadFromMem(f64, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3418,7 +3412,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Load8_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Load8_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Load8_S", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: i32 = try OpHelpers.loadFromMem(i8, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3426,7 +3420,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Load8_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Load8_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Load8_U", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: u32 = try OpHelpers.loadFromMem(u8, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3434,7 +3428,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Load16_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Load16_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Load16_S", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: i32 = try OpHelpers.loadFromMem(i16, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3442,7 +3436,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Load16_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Load16_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Load16_U", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: u32 = try OpHelpers.loadFromMem(u16, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3450,7 +3444,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Load8_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Load8_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Load8_S", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: i64 = try OpHelpers.loadFromMem(i8, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3458,7 +3452,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Load8_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Load8_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Load8_U", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: u64 = try OpHelpers.loadFromMem(u8, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3466,7 +3460,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Load16_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Load16_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Load16_S", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: i64 = try OpHelpers.loadFromMem(i16, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3474,7 +3468,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Load16_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Load16_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Load16_U", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: u64 = try OpHelpers.loadFromMem(u16, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3482,7 +3476,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Load32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Load32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Load32_S", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: i64 = try OpHelpers.loadFromMem(i32, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3490,7 +3484,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Load32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Load32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Load32_U", pc, stack);
         var offset_from_stack: i32 = try stack.popI32();
         var value: u64 = try OpHelpers.loadFromMem(u32, &stack.topFrame().module_instance.store, pc[0].immediate, offset_from_stack);
@@ -3498,7 +3492,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Store(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Store(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Store", pc, stack);
         const value: i32 = try stack.popI32();
         const offset_from_stack: i32 = try stack.popI32();
@@ -3506,7 +3500,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Store(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Store(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Store", pc, stack);
         const value: i64 = try stack.popI64();
         const offset_from_stack: i32 = try stack.popI32();
@@ -3514,7 +3508,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Store(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Store(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Store", pc, stack);
         const value: f32 = try stack.popF32();
         const offset_from_stack: i32 = try stack.popI32();
@@ -3522,7 +3516,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Store(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Store(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Store", pc, stack);
         const value: f64 = try stack.popF64();
         const offset_from_stack: i32 = try stack.popI32();
@@ -3530,7 +3524,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Store8(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Store8(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Store8", pc, stack);
         const value: i8 = @truncate(i8, try stack.popI32());
         const offset_from_stack: i32 = try stack.popI32();
@@ -3538,7 +3532,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Store16(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Store16(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Store16", pc, stack);
         const value: i16 = @truncate(i16, try stack.popI32());
         const offset_from_stack: i32 = try stack.popI32();
@@ -3546,7 +3540,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Store8(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Store8(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Store8", pc, stack);
         const value: i8 = @truncate(i8, try stack.popI64());
         const offset_from_stack: i32 = try stack.popI32();
@@ -3554,7 +3548,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Store16(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Store16(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Store16", pc, stack);
         const value: i16 = @truncate(i16, try stack.popI64());
         const offset_from_stack: i32 = try stack.popI32();
@@ -3562,7 +3556,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Store32(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Store32(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Store32", pc, stack);
         const value: i32 = @truncate(i32, try stack.popI64());
         const offset_from_stack: i32 = try stack.popI32();
@@ -3570,7 +3564,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Memory_Size(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Memory_Size(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Memory_Size", pc, stack);
         const memory_index: usize = 0;
         var memory_instance: *const MemoryInstance = stack.topFrame().module_instance.store.getMemory(memory_index);
@@ -3580,7 +3574,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Memory_Grow(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Memory_Grow(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Memory_Grow", pc, stack);
         const memory_index: usize = 0;
         var memory_instance: *MemoryInstance = stack.topFrame().module_instance.store.getMemory(memory_index);
@@ -3598,35 +3592,35 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Const", pc, stack);
         var v: i32 = @bitCast(i32, pc[0].immediate);
         try stack.pushI32(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Const", pc, stack);
         var v: i64 = stack.topFrame().module_instance.module_def.code.i64_const.items[pc[0].immediate];
         try stack.pushI64(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Const", pc, stack);
         var v: f32 = @bitCast(f32, pc[0].immediate);
         try stack.pushF32(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Const(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Const", pc, stack);
         var v: f64 = stack.topFrame().module_instance.module_def.code.f64_const.items[pc[0].immediate];
         try stack.pushF64(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-   fn op_I32_Eqz(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+   fn op_I32_Eqz(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Eqz", pc, stack);
         var v1: i32 = try stack.popI32();
         var result: i32 = if (v1 == 0) 1 else 0;
@@ -3634,7 +3628,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Eq(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Eq(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Eq", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3643,7 +3637,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_NE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_NE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_NE", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3652,7 +3646,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_LT_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_LT_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_LT_S", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3661,7 +3655,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_LT_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_LT_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_LT_U", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -3670,7 +3664,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_GT_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_GT_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_GT_S", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3679,7 +3673,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_GT_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_GT_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_GT_U", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -3688,7 +3682,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_LE_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_LE_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_LE_S", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3697,7 +3691,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_LE_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_LE_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_LE_U", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -3706,7 +3700,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_GE_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_GE_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_GE_S", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3715,7 +3709,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_GE_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_GE_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_GE_U", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -3724,7 +3718,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Eqz(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Eqz(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Eqz", pc, stack);
         var v1: i64 = try stack.popI64();
         var result: i32 = if (v1 == 0) 1 else 0;
@@ -3732,7 +3726,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Eq(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Eq(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Eq", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -3741,7 +3735,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_NE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_NE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_NE", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -3750,7 +3744,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_LT_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_LT_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_LT_S", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -3759,7 +3753,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_LT_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_LT_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_LT_U", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -3768,7 +3762,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_GT_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_GT_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_GT_S", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -3777,7 +3771,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_GT_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_GT_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_GT_U", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -3786,7 +3780,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_LE_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_LE_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_LE_S", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -3795,7 +3789,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_LE_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_LE_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_LE_U", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -3804,7 +3798,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_GE_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_GE_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_GE_S", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -3813,7 +3807,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_GE_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_GE_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_GE_U", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -3822,7 +3816,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_EQ(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_EQ(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_EQ", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -3831,7 +3825,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_NE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_NE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_NE", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -3840,7 +3834,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_LT(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_LT(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_LT", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -3849,7 +3843,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_GT(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_GT(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_GT", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -3858,7 +3852,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_LE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_LE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_LE", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -3867,7 +3861,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_GE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_GE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_GE", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -3876,7 +3870,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_EQ(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_EQ(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_EQ", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -3885,7 +3879,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_NE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_NE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_NE", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -3894,7 +3888,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_LT(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_LT(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_LT", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -3903,7 +3897,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_GT(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_GT(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_GT", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -3912,7 +3906,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_LE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_LE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_LE", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -3921,7 +3915,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_GE(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_GE(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_GE", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -3930,7 +3924,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Clz(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Clz(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Clz", pc, stack);
         var v: i32 = try stack.popI32();
         var num_zeroes = @clz(v);
@@ -3938,7 +3932,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Ctz(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Ctz(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Ctz", pc, stack);
         var v: i32 = try stack.popI32();
         var num_zeroes = @ctz(v);
@@ -3946,7 +3940,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Popcnt(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Popcnt(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Popcnt", pc, stack);
         var v: i32 = try stack.popI32();
         var num_bits_set = @popCount(v);
@@ -3954,7 +3948,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Add(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Add(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Add", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3963,7 +3957,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Sub(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Sub(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Sub", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3972,7 +3966,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Mul(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Mul(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Mul", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3981,7 +3975,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Div_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Div_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Div_S", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -3998,7 +3992,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Div_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Div_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Div_U", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -4016,7 +4010,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Rem_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Rem_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Rem_S", pc, stack);
         var v2: i32 = try stack.popI32();
         var v1: i32 = try stack.popI32();
@@ -4032,7 +4026,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Rem_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Rem_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Rem_U", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -4048,7 +4042,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_And(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_And(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_And", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -4057,7 +4051,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Or(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Or(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Or", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -4066,7 +4060,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Xor(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Xor(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Xor", pc, stack);
         var v2: u32 = @bitCast(u32, try stack.popI32());
         var v1: u32 = @bitCast(u32, try stack.popI32());
@@ -4075,7 +4069,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Shl(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Shl(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Shl", pc, stack);
         var shift_unsafe: i32 = try stack.popI32();
         var int: i32 = try stack.popI32();
@@ -4085,7 +4079,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Shr_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Shr_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Shr_S", pc, stack);
         var shift_unsafe: i32 = try stack.popI32();
         var int: i32 = try stack.popI32();
@@ -4095,7 +4089,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Shr_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Shr_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Shr_U", pc, stack);
         var shift_unsafe: u32 = @bitCast(u32, try stack.popI32());
         var int: u32 = @bitCast(u32, try stack.popI32());
@@ -4105,7 +4099,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Rotl(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Rotl(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Rotl", pc, stack);
         var rot: u32 = @bitCast(u32, try stack.popI32());
         var int: u32 = @bitCast(u32, try stack.popI32());
@@ -4114,7 +4108,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Rotr(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Rotr(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Rotr", pc, stack);
         var rot: u32 = @bitCast(u32, try stack.popI32());
         var int: u32 = @bitCast(u32, try stack.popI32());
@@ -4123,7 +4117,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Clz(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Clz(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Clz", pc, stack);
         var v: i64 = try stack.popI64();
         var num_zeroes = @clz(v);
@@ -4131,7 +4125,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Ctz(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Ctz(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Ctz", pc, stack);
         var v: i64 = try stack.popI64();
         var num_zeroes = @ctz(v);
@@ -4139,7 +4133,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Popcnt(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Popcnt(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Popcnt", pc, stack);
         var v: i64 = try stack.popI64();
         var num_bits_set = @popCount(v);
@@ -4147,7 +4141,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Add(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Add(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Add", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -4156,7 +4150,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Sub(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Sub(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Sub", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -4165,7 +4159,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Mul(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Mul(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Mul", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -4174,7 +4168,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Div_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Div_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Div_S", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -4191,7 +4185,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Div_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Div_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Div_U", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -4209,7 +4203,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Rem_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Rem_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Rem_S", pc, stack);
         var v2: i64 = try stack.popI64();
         var v1: i64 = try stack.popI64();
@@ -4225,7 +4219,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Rem_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Rem_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Rem_U", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -4241,7 +4235,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_And(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_And(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_And", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -4250,7 +4244,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Or(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Or(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Or", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -4259,7 +4253,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Xor(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Xor(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Xor", pc, stack);
         var v2: u64 = @bitCast(u64, try stack.popI64());
         var v1: u64 = @bitCast(u64, try stack.popI64());
@@ -4268,7 +4262,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Shl(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Shl(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Shl", pc, stack);
         var shift_unsafe: i64 = try stack.popI64();
         var int: i64 = try stack.popI64();
@@ -4278,7 +4272,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Shr_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Shr_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Shr_S", pc, stack);
         var shift_unsafe: i64 = try stack.popI64();
         var int: i64 = try stack.popI64();
@@ -4288,7 +4282,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Shr_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Shr_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Shr_U", pc, stack);
         var shift_unsafe: u64 = @bitCast(u64, try stack.popI64());
         var int: u64 = @bitCast(u64, try stack.popI64());
@@ -4298,7 +4292,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Rotl(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Rotl(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Rotl", pc, stack);
         var rot: u64 = @bitCast(u64, try stack.popI64());
         var int: u64 = @bitCast(u64, try stack.popI64());
@@ -4307,7 +4301,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Rotr(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Rotr(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Rotr", pc, stack);
         var rot: u64 = @bitCast(u64, try stack.popI64());
         var int: u64 = @bitCast(u64, try stack.popI64());
@@ -4316,7 +4310,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Abs(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Abs(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Abs", pc, stack);
         var f = try stack.popF32();
         var value = std.math.fabs(f);
@@ -4324,14 +4318,14 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Neg(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Neg(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Neg", pc, stack);
         var f = try stack.popF32();
         try stack.pushF32(-f);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Ceil(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Ceil(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Ceil", pc, stack);
         var f = try stack.popF32();
         var value = @ceil(f);
@@ -4339,7 +4333,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Floor(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Floor(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Floor", pc, stack);
         var f = try stack.popF32();
         var value = @floor(f);
@@ -4347,7 +4341,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Trunc(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Trunc(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Trunc", pc, stack);
         var f = try stack.popF32();
         var value = std.math.trunc(f);
@@ -4355,7 +4349,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Nearest(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Nearest(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Nearest", pc, stack);
         var f = try stack.popF32();
         var value: f32 = undefined;
@@ -4370,7 +4364,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Sqrt(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Sqrt(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Sqrt", pc, stack);
         var f = try stack.popF32();
         var value = std.math.sqrt(f);
@@ -4378,7 +4372,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Add(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Add(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Add", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -4387,7 +4381,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Sub(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Sub(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Sub", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -4396,7 +4390,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Mul(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Mul(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Mul", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -4405,7 +4399,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Div(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Div(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Div", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -4414,7 +4408,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Min(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Min(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Min", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -4423,7 +4417,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Max(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Max(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Max", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -4432,7 +4426,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Copysign(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Copysign(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Copysign", pc, stack);
         var v2 = try stack.popF32();
         var v1 = try stack.popF32();
@@ -4441,7 +4435,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Abs(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Abs(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Abs", pc, stack);
         var f = try stack.popF64();
         var value = std.math.fabs(f);
@@ -4449,14 +4443,14 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Neg(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Neg(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Neg", pc, stack);
         var f = try stack.popF64();
         try stack.pushF64(-f);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Ceil(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Ceil(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Ceil", pc, stack);
         var f = try stack.popF64();
         var value = @ceil(f);
@@ -4464,7 +4458,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Floor(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Floor(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Floor", pc, stack);
         var f = try stack.popF64();
         var value = @floor(f);
@@ -4472,7 +4466,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Trunc(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Trunc(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Trunc", pc, stack);
         var f = try stack.popF64();
         var value = @trunc(f);
@@ -4480,7 +4474,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Nearest(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Nearest(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Nearest", pc, stack);
         var f = try stack.popF64();
         var value: f64 = undefined;
@@ -4495,7 +4489,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Sqrt(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Sqrt(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Sqrt", pc, stack);
         var f = try stack.popF64();
         var value = std.math.sqrt(f);
@@ -4503,7 +4497,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Add(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Add(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Add", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -4512,7 +4506,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Sub(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Sub(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Sub", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -4521,7 +4515,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Mul(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Mul(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Mul", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -4530,7 +4524,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Div(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Div(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Div", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -4539,7 +4533,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Min(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Min(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Min", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -4548,7 +4542,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Max(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Max(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Max", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -4557,7 +4551,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Copysign(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Copysign(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Copysign", pc, stack);
         var v2 = try stack.popF64();
         var v1 = try stack.popF64();
@@ -4566,7 +4560,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Wrap_I64(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Wrap_I64(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Wrap_I64", pc, stack);
         var v = try stack.popI64();
         var mod = @truncate(i32, v);
@@ -4574,7 +4568,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_F32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_F32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_F32_S", pc, stack);
         var v = try stack.popF32();
         var int = try OpHelpers.truncateTo(i32, v);
@@ -4582,7 +4576,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_F32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_F32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_F32_U", pc, stack);
         var v = try stack.popF32();
         var int = try OpHelpers.truncateTo(u32, v);
@@ -4590,7 +4584,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_F64_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_F64_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_F64_S", pc, stack);
         var v = try stack.popF64();
         var int = try OpHelpers.truncateTo(i32, v);
@@ -4598,7 +4592,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_F64_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_F64_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_F64_U", pc, stack);
         var v = try stack.popF64();
         var int = try OpHelpers.truncateTo(u32, v);
@@ -4606,7 +4600,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Extend_I32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Extend_I32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Extend_I32_S", pc, stack);
         var v32 = try stack.popI32();
         var v64: i64 = v32;
@@ -4614,7 +4608,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Extend_I32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Extend_I32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Extend_I32_U", pc, stack);
         var v32 = try stack.popI32();
         var v64: u64 = @bitCast(u32, v32);
@@ -4622,7 +4616,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_F32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_F32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_F32_S", pc, stack);
         var v = try stack.popF32();
         var int = try OpHelpers.truncateTo(i64, v);
@@ -4630,7 +4624,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_F32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_F32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_F32_U", pc, stack);
         var v = try stack.popF32();
         var int = try OpHelpers.truncateTo(u64, v);
@@ -4638,7 +4632,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_F64_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_F64_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_F64_S", pc, stack);
         var v = try stack.popF64();
         var int = try OpHelpers.truncateTo(i64, v);
@@ -4646,7 +4640,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_F64_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_F64_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_F64_U", pc, stack);
         var v = try stack.popF64();
         var int = try OpHelpers.truncateTo(u64, v);
@@ -4654,105 +4648,105 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Convert_I32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Convert_I32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Convert_I32_S", pc, stack);
         var v = try stack.popI32();
         try stack.pushF32(@intToFloat(f32, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Convert_I32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Convert_I32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Convert_I32_U", pc, stack);
         var v = @bitCast(u32, try stack.popI32());
         try stack.pushF32(@intToFloat(f32, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Convert_I64_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Convert_I64_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Convert_I64_S", pc, stack);
         var v = try stack.popI64();
         try stack.pushF32(@intToFloat(f32, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Convert_I64_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Convert_I64_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Convert_I64_U", pc, stack);
         var v = @bitCast(u64, try stack.popI64());
         try stack.pushF32(@intToFloat(f32, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Demote_F64(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Demote_F64(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Demote_F64", pc, stack);
         var v = try stack.popF64();
         try stack.pushF32(@floatCast(f32, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Convert_I32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Convert_I32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Convert_I32_S", pc, stack);
         var v = try stack.popI32();
         try stack.pushF64(@intToFloat(f64, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Convert_I32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Convert_I32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Convert_I32_U", pc, stack);
         var v = @bitCast(u32, try stack.popI32());
         try stack.pushF64(@intToFloat(f64, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Convert_I64_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Convert_I64_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Convert_I64_S", pc, stack);
         var v = try stack.popI64();
         try stack.pushF64(@intToFloat(f64, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Convert_I64_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Convert_I64_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Convert_I64_U", pc, stack);
         var v = @bitCast(u64, try stack.popI64());
         try stack.pushF64(@intToFloat(f64, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Promote_F32(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Promote_F32(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Promote_F32", pc, stack);
         var v = try stack.popF32();
         try stack.pushF64(@floatCast(f64, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Reinterpret_F32(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Reinterpret_F32(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Reinterpret_F32", pc, stack);
         var v = try stack.popF32();
         try stack.pushI32(@bitCast(i32, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Reinterpret_F64(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Reinterpret_F64(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Reinterpret_F64", pc, stack);
         var v = try stack.popF64();
         try stack.pushI64(@bitCast(i64, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F32_Reinterpret_I32(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F32_Reinterpret_I32(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Reinterpret_I32", pc, stack);
         var v = try stack.popI32();
         try stack.pushF32(@bitCast(f32, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_F64_Reinterpret_I64(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_F64_Reinterpret_I64(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64_Reinterpret_I64", pc, stack);
         var v = try stack.popI64();
         try stack.pushF64(@bitCast(f64, v));
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Extend8_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Extend8_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Extend8_S", pc, stack);
         var v = try stack.popI32();
         var v_truncated = @truncate(i8, v);
@@ -4761,7 +4755,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Extend16_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Extend16_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Extend16_S", pc, stack);
         var v = try stack.popI32();
         var v_truncated = @truncate(i16, v);
@@ -4770,7 +4764,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Extend8_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Extend8_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Extend8_S", pc, stack);
         var v = try stack.popI64();
         var v_truncated = @truncate(i8, v);
@@ -4779,7 +4773,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Extend16_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Extend16_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Extend16_S", pc, stack);
         var v = try stack.popI64();
         var v_truncated = @truncate(i16, v);
@@ -4788,7 +4782,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Extend32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Extend32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Extend32_S", pc, stack);
         var v = try stack.popI64();
         var v_truncated = @truncate(i32, v);
@@ -4797,7 +4791,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Ref_Null(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Ref_Null(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Ref_Null", pc, stack);
         var valtype = @intToEnum(ValType, pc[0].immediate);
         var val = try Val.nullRef(valtype);
@@ -4805,7 +4799,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Ref_Is_Null(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Ref_Is_Null(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Ref_Is_Null", pc, stack);
         const val: Val = try stack.popValue();
         const boolean: i32 = if (val.isNull()) 1 else 0;
@@ -4813,7 +4807,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Ref_Func(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Ref_Func(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Ref_Func", pc, stack);
         const func_index = pc[0].immediate;
         const val = Val{ .FuncRef = .{ .index = func_index, .module_instance = stack.topFrame().module_instance } };
@@ -4821,7 +4815,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_Sat_F32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_Sat_F32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_Sat_F32_S", pc, stack);
         var v = try stack.popF32();
         var int = OpHelpers.saturatedTruncateTo(i32, v);
@@ -4829,7 +4823,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_Sat_F32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_Sat_F32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_Sat_F32_U", pc, stack);
         var v = try stack.popF32();
         var int = OpHelpers.saturatedTruncateTo(u32, v);
@@ -4837,7 +4831,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_Sat_F64_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_Sat_F64_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_Sat_F64_S", pc, stack);
         var v = try stack.popF64();
         var int = OpHelpers.saturatedTruncateTo(i32, v);
@@ -4845,7 +4839,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I32_Trunc_Sat_F64_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I32_Trunc_Sat_F64_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Trunc_Sat_F64_U", pc, stack);
         var v = try stack.popF64();
         var int = OpHelpers.saturatedTruncateTo(u32, v);
@@ -4853,7 +4847,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_Sat_F32_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_Sat_F32_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_Sat_F32_S", pc, stack);
         var v = try stack.popF32();
         var int = OpHelpers.saturatedTruncateTo(i64, v);
@@ -4861,7 +4855,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_Sat_F32_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_Sat_F32_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_Sat_F32_U", pc, stack);
         var v = try stack.popF32();
         var int = OpHelpers.saturatedTruncateTo(u64, v);
@@ -4869,7 +4863,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_Sat_F64_S(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_Sat_F64_S(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_Sat_F64_S", pc, stack);
         var v = try stack.popF64();
         var int = OpHelpers.saturatedTruncateTo(i64, v);
@@ -4877,7 +4871,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_I64_Trunc_Sat_F64_U(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_I64_Trunc_Sat_F64_U(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64_Trunc_Sat_F64_U", pc, stack);
         var v = try stack.popF64();
         var int = OpHelpers.saturatedTruncateTo(u64, v);
@@ -4885,7 +4879,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Memory_Init(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Memory_Init(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Memory_Init", pc, stack);
         const data_index: u32 = pc[0].immediate;
         const data: *const DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
@@ -4915,7 +4909,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Data_Drop(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Data_Drop(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Data_Drop", pc, stack);
         const data_index: u32 = pc[0].immediate;
         var data: *DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
@@ -4923,7 +4917,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Memory_Copy(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Memory_Copy(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Memory_Copy", pc, stack);
         const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
 
@@ -4956,7 +4950,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Memory_Fill(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Memory_Fill(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Memory_Fill", pc, stack);
         const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
 
@@ -4980,7 +4974,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Table_Init(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Table_Init(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Init", pc, stack);
         const pair: *const TablePairImmediates = &stack.topFrame().module_instance.module_def.code.table_pairs.items[pc[0].immediate];
         const elem_index = pair.index_x;
@@ -5013,7 +5007,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Elem_Drop(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Elem_Drop(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Elem_Drop", pc, stack);
         const elem_index: u32 = pc[0].immediate;
         var elem: *ElementInstance = &stack.topFrame().module_instance.store.elements.items[elem_index];
@@ -5021,7 +5015,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Table_Copy(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Table_Copy(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Copy", pc, stack);
         const pair: *const TablePairImmediates = &stack.topFrame().module_instance.module_def.code.table_pairs.items[pc[0].immediate];
         const dest_table_index = pair.index_x;
@@ -5058,7 +5052,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Table_Grow(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Table_Grow(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Grow", pc, stack);
         const table_index: u32 = pc[0].immediate;
         const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
@@ -5070,7 +5064,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Table_Size(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Table_Size(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Size", pc, stack);
         const table_index: u32 = pc[0].immediate;
         const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
@@ -5079,7 +5073,7 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
 
-    fn op_Table_Fill(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
+    fn op_Table_Fill(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Fill", pc, stack);
         const table_index: u32 = pc[0].immediate;
         const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
@@ -5104,7 +5098,7 @@ const InstructionFuncs = struct {
 
 pub const ModuleDefinition = struct {
     const Code = struct {
-        instructions: std.ArrayList(InstructionFuncData),
+        instructions: std.ArrayList(Instruction),
 
         // Instruction.immediate indexes these arrays depending on the opcode
         block_type_values: std.ArrayList(BlockTypeValue),
@@ -5157,7 +5151,7 @@ pub const ModuleDefinition = struct {
         var module = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
-                .instructions = std.ArrayList(InstructionFuncData).init(allocator),
+                .instructions = std.ArrayList(Instruction).init(allocator),
                 .block_type_values = std.ArrayList(BlockTypeValue).init(allocator),
                 .call_indirect = std.ArrayList(CallIndirectImmediates).init(allocator),
                 .branch_table = std.ArrayList(BranchTableImmediates).init(allocator),
@@ -5736,30 +5730,22 @@ pub const ModuleDefinition = struct {
                         while (parsing_code) {
                             const parsing_offset = @intCast(u32, self.code.instructions.items.len);
 
-                            var instruction = try Instruction.decode(reader, self);
+                            var instruction_op: InstructionOp = try InstructionOp.decode(reader, self);
 
-                            switch (instruction.opcode) {
-                                .Noop => {}, // no need to emit noops since they don't do anything
-                                else => {
-                                    var instruction_func = InstructionFuncs.instructionToFunc(instruction);
-                                    try self.code.instructions.append(instruction_func);
-                                },
-                            }
-
-                            // TODO change these continuation offsets into pointers into the InstructionFuncData array to avoid
+                            // TODO change these continuation offsets into pointers into the Instruction array to avoid
                             // the opcode needing to lookup the function to call - it can just do it directly if it has the pointer.
                             // Will fold nicely into immediates getting bumped up to 8 bytes.
 
-                            if (instruction.opcode.expectsEnd()) {
+                            if (instruction_op.opcode.expectsEnd()) {
                                 try block_stack.append(BlockData{
                                     .offset = parsing_offset,
-                                    .opcode = instruction.opcode,
+                                    .opcode = instruction_op.opcode,
                                 });
-                            } else if (instruction.opcode == .Else) {
+                            } else if (instruction_op.opcode == .Else) {
                                 const block: *const BlockData = &block_stack.items[block_stack.items.len - 1];
                                 try self.if_to_else_offsets.putNoClobber(block.offset, parsing_offset);
-                                instruction.immediate = self.code.instructions.items[block.offset].immediate; // the else gets the matching if's immediate index
-                            } else if (instruction.opcode == .End) {
+                                instruction_op.immediate = self.code.instructions.items[block.offset].immediate; // the else gets the matching if's immediate index
+                            } else if (instruction_op.opcode == .End) {
                                 const block: BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
                                 if (block_stack.items.len == 0) {
                                     parsing_code = false;
@@ -5779,7 +5765,14 @@ pub const ModuleDefinition = struct {
                                 }
                             }
 
-                            try validator.validateCode(self, &self.functions.items[code_index], instruction);
+                            try validator.validateCode(self, &self.functions.items[code_index], instruction_op);
+
+                            switch (instruction_op.opcode) {
+                                .Noop => {}, // no need to emit noops since they don't do anything
+                                else => {
+                                    try self.code.instructions.append(instruction_op.toInstruction());
+                                },
+                            }
                         }
 
                         try validator.endValidateCode();
@@ -6630,7 +6623,7 @@ pub const ModuleInstance = struct {
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
         try self.stack.pushLabel(BlockTypeValue{ .TypeIndex = func.type_def_index }, function_continuation);
 
-        const pc: [*]InstructionFuncData = self.module_def.code.instructions.items.ptr + func.offset_into_instructions;
+        const pc: [*]Instruction = self.module_def.code.instructions.items.ptr + func.offset_into_instructions;
         InstructionFuncs.run(pc, &self.stack) catch |err| {
             // executeWasm(&self, func.offset_into_instructions) catch |err| {
             self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
