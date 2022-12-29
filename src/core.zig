@@ -730,7 +730,7 @@ const Stack = struct {
         return frame_label;
     }
 
-    fn popAllUntilLabelId(self: *Self, label_id: u32, pop_final_label: bool, num_returns: usize) void {
+    fn popAllUntilLabelId(self: *Self, label_id: u64, pop_final_label: bool, num_returns: usize) void {
         var label_index: u16 = @intCast(u16, (self.num_labels - label_id) - 1);
         var label: *const Label = &self.labels[label_index];
 
@@ -1399,14 +1399,14 @@ const InstructionFunc = *const fn (pc: [*]const Instruction, stack: *Stack) anye
 
 const Instruction = struct {
     func: InstructionFunc,
-    immediate: u32,
+    immediate: u64,
 };
 
 const InstructionOp = struct {
     const k_invalid_immediate = std.math.maxInt(u32);
 
     opcode: Opcode,
-    immediate: u32, // interpreted differently depending on the opcode. TODO: expand this to u64, since the struct is 8-byte aligned anyway
+    immediate: u64, // interpreted differently depending on the opcode.
 
     fn decode(reader: anytype, module: *ModuleDefinition) !InstructionOp {
         const Helpers = struct {
@@ -1845,25 +1845,25 @@ const ModuleValidator = struct {
         self.control_types.deinit();
     }
 
-    fn validateTypeIndex(index: u32, module: *const ModuleDefinition) !void {
+    fn validateTypeIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.types.items.len <= index) {
             return error.ValidationUnknownType;
         }
     }
 
-    fn validateGlobalIndex(index: u32, module: *const ModuleDefinition) !void {
+    fn validateGlobalIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.imports.globals.items.len + module.globals.items.len <= index) {
             return error.ValidationUnknownGlobal;
         }
     }
 
-    fn validateTableIndex(index: u32, module: *const ModuleDefinition) !void {
+    fn validateTableIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.imports.tables.items.len + module.tables.items.len <= index) {
             return error.ValidationUnknownTable;
         }
     }
 
-    fn getTableReftype(module: *const ModuleDefinition, index: u32) !ValType {
+    fn getTableReftype(module: *const ModuleDefinition, index: u64) !ValType {
         if (index < module.imports.tables.items.len) {
             return module.imports.tables.items[index].reftype;
         }
@@ -1876,7 +1876,7 @@ const ModuleValidator = struct {
         return error.ValidationUnknownTable;
     }
 
-    fn validateFunctionIndex(index: u32, module: *const ModuleDefinition) !void {
+    fn validateFunctionIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.imports.functions.items.len + module.functions.items.len <= index) {
             return error.ValidationUnknownFunction;
         }
@@ -1888,13 +1888,13 @@ const ModuleValidator = struct {
         }
     }
 
-    fn validateElementIndex(index: u32, module: *const ModuleDefinition) !void {
+    fn validateElementIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.elements.items.len <= index) {
             return error.ValidationUnknownElement;
         }
     }
 
-    fn validateDataIndex(index: u32, module: *const ModuleDefinition) !void {
+    fn validateDataIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.data_count.? <= index) {
             return error.ValidationUnknownData;
         }
@@ -1928,7 +1928,7 @@ const ModuleValidator = struct {
                 try validator.pushControl(instruction_.opcode, start_types, end_types);
             }
 
-            fn getLocalValtype(validator: *const ModuleValidator, module_: *const ModuleDefinition, func_: *const FunctionDefinition, locals_index: u32) !ValType {
+            fn getLocalValtype(validator: *const ModuleValidator, module_: *const ModuleDefinition, func_: *const FunctionDefinition, locals_index: u64) !ValType {
                 var i = validator.control_stack.items.len - 1;
                 while (i >= 0) : (i -= 1) {
                     const frame: *const ControlFrame = &validator.control_stack.items[i];
@@ -1952,7 +1952,7 @@ const ModuleValidator = struct {
                 Mutable,
             };
 
-            fn getGlobalValtype(module_: *const ModuleDefinition, global_index: u32, required_mutability: GlobalMutablilityRequirement) !ValType {
+            fn getGlobalValtype(module_: *const ModuleDefinition, global_index: u64, required_mutability: GlobalMutablilityRequirement) !ValType {
                 if (global_index < module_.imports.globals.items.len) {
                     const global: *const GlobalImportDefinition = &module_.imports.globals.items[global_index];
                     if (required_mutability == .Mutable and global.mut == .Immutable) {
@@ -2055,14 +2055,14 @@ const ModuleValidator = struct {
                 try self.freeControlTypes(&frame);
             },
             .Branch => {
-                const control_index: u32 = instruction.immediate;
+                const control_index: u64 = instruction.immediate;
                 const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
 
                 try Helpers.popReturnTypes(self, block_return_types);
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
             .Branch_If => {
-                const control_index: u32 = instruction.immediate;
+                const control_index: u64 = instruction.immediate;
                 const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
                 try self.popType(.I32);
 
@@ -2110,7 +2110,7 @@ const ModuleValidator = struct {
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
             .Call => {
-                const func_index: u32 = instruction.immediate;
+                const func_index: u64 = instruction.immediate;
                 if (module.imports.functions.items.len + module.functions.items.len <= func_index) {
                     return error.ValidationUnknownFunction;
                 }
@@ -2901,7 +2901,7 @@ const InstructionFuncs = struct {
             return @floatToInt(T, truncated);
         }
 
-        fn loadFromMem(comptime T: type, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !T {
+        fn loadFromMem(comptime T: type, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) !T {
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
@@ -2929,13 +2929,13 @@ const InstructionFuncs = struct {
             return @bitCast(T, value);
         }
 
-        fn storeInMem(value: anytype, store: *Store, offset_from_memarg: u32, offset_from_stack: i32) !void {
+        fn storeInMem(value: anytype, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) !void {
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
             const memory: *MemoryInstance = store.getMemory(0);
-            const offset: u32 = offset_from_memarg + @intCast(u32, offset_from_stack);
+            const offset: usize = offset_from_memarg + @intCast(u32, offset_from_stack);
 
             const bit_count = std.meta.bitCount(@TypeOf(value));
             const write_type = switch (bit_count) {
@@ -2998,7 +2998,7 @@ const InstructionFuncs = struct {
             }
         }
 
-        fn enterBlock(stack: *Stack, block_type_value_immediate: u32, label_offset: u32) !void {
+        fn enterBlock(stack: *Stack, block_type_value_immediate: usize, label_offset: u32) !void {
             const module_def: *const ModuleDefinition = stack.topFrame().module_instance.module_def;
             const block_type_value: BlockTypeValue = module_def.code.block_type_values.items[block_type_value_immediate];
 
@@ -3007,8 +3007,8 @@ const InstructionFuncs = struct {
             try stack.pushLabel(block_type_value, continuation);
         }
 
-        fn branch(stack: *Stack, label_id: u32) !?[*]const Instruction {
-            const label: *const Label = stack.findLabel(label_id);
+        fn branch(stack: *Stack, label_id: usize) !?[*]const Instruction {
+            const label: *const Label = stack.findLabel(@intCast(u32, label_id));
             const frame_label: *const Label = stack.frameLabel();
             if (label == frame_label) {
                 return try returnFromFunc(stack);
@@ -3165,7 +3165,7 @@ const InstructionFuncs = struct {
 
     fn op_Branch(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Branch", pc, stack);
-        const label_id: u32 = pc[0].immediate;
+        const label_id: u64 = pc[0].immediate;
         const next_pc: [*]const Instruction = try OpHelpers.branch(stack, label_id) orelse return;
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
@@ -3175,7 +3175,7 @@ const InstructionFuncs = struct {
         var next_pc: [*]const Instruction = pc + 1;
         const v = try stack.popI32();
         if (v != 0) {
-            const label_id: u32 = pc[0].immediate;
+            const label_id: u64 = pc[0].immediate;
             next_pc = try OpHelpers.branch(stack, label_id) orelse return;
         }
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
@@ -3202,7 +3202,7 @@ const InstructionFuncs = struct {
     fn op_Call(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Call", pc, stack);
 
-        const func_index: u32 = pc[0].immediate;
+        const func_index: u64 = pc[0].immediate;
         const module_instance: *ModuleInstance = stack.topFrame().module_instance;
         const store: *const Store = &module_instance.store;
         var next_pc: [*]const Instruction = pc;
@@ -3310,7 +3310,7 @@ const InstructionFuncs = struct {
     fn op_Local_Get(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Local_Get", pc, stack);
 
-        var locals_index: u32 = pc[0].immediate;
+        var locals_index: u64 = pc[0].immediate;
         var frame: *const CallFrame = stack.topFrame();
         var v: Val = frame.locals[locals_index];
         try stack.pushValue(v);
@@ -3319,7 +3319,7 @@ const InstructionFuncs = struct {
 
     fn op_Local_Set(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Local_Set", pc, stack);
-        var locals_index: u32 = pc[0].immediate;
+        var locals_index: u64 = pc[0].immediate;
         var frame: *CallFrame = stack.topFrame();
         var v: Val = try stack.popValue();
         frame.locals[locals_index] = v;
@@ -3328,7 +3328,7 @@ const InstructionFuncs = struct {
 
     fn op_Local_Tee(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Local_Tee", pc, stack);
-        var locals_index: u32 = pc[0].immediate;
+        var locals_index: u64 = pc[0].immediate;
         var frame: *CallFrame = stack.topFrame();
         var v: Val = try stack.topValue();
         frame.locals[locals_index] = v;
@@ -3337,7 +3337,7 @@ const InstructionFuncs = struct {
 
     fn op_Global_Get(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Global_Get", pc, stack);
-        var global_index: u32 = pc[0].immediate;
+        var global_index: u64 = pc[0].immediate;
         var global: *GlobalInstance = stack.topFrame().module_instance.store.getGlobal(global_index);
         try stack.pushValue(global.value);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
@@ -3345,7 +3345,7 @@ const InstructionFuncs = struct {
 
     fn op_Global_Set(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Global_Set", pc, stack);
-        var global_index: u32 = pc[0].immediate;
+        var global_index: u64 = pc[0].immediate;
         var global: *GlobalInstance = stack.topFrame().module_instance.store.getGlobal(global_index);
         global.value = try stack.popValue();
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
@@ -3353,7 +3353,7 @@ const InstructionFuncs = struct {
 
     fn op_Table_Get(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Get", pc, stack);
-        const table_index = pc[0].immediate;
+        const table_index: u64 = pc[0].immediate;
         const table: *const TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
         const index: i32 = try stack.popI32();
         if (table.refs.items.len <= index or index < 0) {
@@ -3366,7 +3366,7 @@ const InstructionFuncs = struct {
 
     fn op_Table_Set(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Set", pc, stack);
-        const table_index = pc[0].immediate;
+        const table_index: u64 = pc[0].immediate;
         var table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
         const ref = try stack.popValue();
         const index: i32 = try stack.popI32();
@@ -3594,7 +3594,7 @@ const InstructionFuncs = struct {
 
     fn op_I32_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32_Const", pc, stack);
-        var v: i32 = @bitCast(i32, pc[0].immediate);
+        var v: i32 = @bitCast(i32, @truncate(u32, pc[0].immediate));
         try stack.pushI32(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
@@ -3608,7 +3608,7 @@ const InstructionFuncs = struct {
 
     fn op_F32_Const(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F32_Const", pc, stack);
-        var v: f32 = @bitCast(f32, pc[0].immediate);
+        var v: f32 = @bitCast(f32, @truncate(u32, pc[0].immediate));
         try stack.pushF32(v);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
     }
@@ -4809,7 +4809,7 @@ const InstructionFuncs = struct {
 
     fn op_Ref_Func(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Ref_Func", pc, stack);
-        const func_index = pc[0].immediate;
+        const func_index: u32 = @intCast(u32, pc[0].immediate);
         const val = Val{ .FuncRef = .{ .index = func_index, .module_instance = stack.topFrame().module_instance } };
         try stack.pushValue(val);
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
@@ -4881,7 +4881,7 @@ const InstructionFuncs = struct {
 
     fn op_Memory_Init(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Memory_Init", pc, stack);
-        const data_index: u32 = pc[0].immediate;
+        const data_index: u64 = pc[0].immediate;
         const data: *const DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
         const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
 
@@ -4911,7 +4911,7 @@ const InstructionFuncs = struct {
 
     fn op_Data_Drop(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Data_Drop", pc, stack);
-        const data_index: u32 = pc[0].immediate;
+        const data_index: u64 = pc[0].immediate;
         var data: *DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
         data.bytes.clearAndFree();
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
@@ -5009,7 +5009,7 @@ const InstructionFuncs = struct {
 
     fn op_Elem_Drop(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Elem_Drop", pc, stack);
-        const elem_index: u32 = pc[0].immediate;
+        const elem_index: u64 = pc[0].immediate;
         var elem: *ElementInstance = &stack.topFrame().module_instance.store.elements.items[elem_index];
         elem.refs.clearAndFree();
         try @call(.{ .modifier = .always_tail }, pc[1].func, .{ pc + 1, stack });
@@ -5054,7 +5054,7 @@ const InstructionFuncs = struct {
 
     fn op_Table_Grow(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Grow", pc, stack);
-        const table_index: u32 = pc[0].immediate;
+        const table_index: u64 = pc[0].immediate;
         const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
         const length = @bitCast(u32, try stack.popI32());
         const init_value = try stack.popValue();
@@ -5066,7 +5066,7 @@ const InstructionFuncs = struct {
 
     fn op_Table_Size(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Size", pc, stack);
-        const table_index: u32 = pc[0].immediate;
+        const table_index: u64 = pc[0].immediate;
         const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
         const length = @intCast(i32, table.refs.items.len);
         try stack.pushI32(length);
@@ -5075,7 +5075,7 @@ const InstructionFuncs = struct {
 
     fn op_Table_Fill(pc: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Table_Fill", pc, stack);
-        const table_index: u32 = pc[0].immediate;
+        const table_index: u64 = pc[0].immediate;
         const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
 
         const length_i32 = try stack.popI32();
@@ -6117,7 +6117,7 @@ pub const Store = struct {
         self.elements.deinit();
     }
 
-    fn getTable(self: *Store, index: u32) *TableInstance {
+    fn getTable(self: *Store, index: usize) *TableInstance {
         if (self.imports.tables.items.len <= index) {
             var instance_index = index - self.imports.tables.items.len;
             return &self.tables.items[instance_index];
@@ -6130,7 +6130,7 @@ pub const Store = struct {
         }
     }
 
-    fn getMemory(self: *Store, index: u32) *MemoryInstance {
+    fn getMemory(self: *Store, index: usize) *MemoryInstance {
         if (self.imports.memories.items.len <= index) {
             var instance_index = index - self.imports.memories.items.len;
             return &self.memories.items[instance_index];
@@ -6143,7 +6143,7 @@ pub const Store = struct {
         }
     }
 
-    fn getGlobal(self: *Store, index: u32) *GlobalInstance {
+    fn getGlobal(self: *Store, index: usize) *GlobalInstance {
         if (self.imports.globals.items.len <= index) {
             var instance_index = index - self.imports.globals.items.len;
             return &self.globals.items[instance_index];
