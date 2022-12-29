@@ -755,6 +755,8 @@ const Stack = struct {
     }
 
     fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType) !void {
+        // std.debug.print("\tpushFrame\n", .{});
+
         const non_param_types: []const ValType = all_local_types[param_types.len..];
 
         // the stack should already be populated with the params to the function, so all that's
@@ -786,6 +788,7 @@ const Stack = struct {
     }
 
     fn popFrame(self: *Self, num_returns: usize) Label {
+        // std.debug.print("\tpopFrame\n", .{});
         var frame: *CallFrame = self.topFrame();
         var frame_label: Label = self.labels[frame.start_offset_labels];
 
@@ -3039,7 +3042,7 @@ const InstructionFuncs = struct {
             try stack.pushLabel(block_type_value, continuation);
         }
 
-        fn branch(stack: *Stack, label_id: u32) !u32 {
+        fn branch(stack: *Stack, label_id: u32) !?[*]const InstructionFuncData {
             const label: *const Label = stack.findLabel(label_id);
             const frame_label: *const Label = stack.frameLabel();
             if (label == frame_label) {
@@ -3057,10 +3060,10 @@ const InstructionFuncs = struct {
                 const pop_final_label = !is_loop_continuation;
                 stack.popAllUntilLabelId(label_id, pop_final_label, return_types.len);
             }
-            return continuation + 1; // branching takes care of popping/pushing values so skip the End instruction
+            return OpHelpers.calcNextPC(stack, continuation + 1); // branching takes care of popping/pushing values so skip the End instruction
         }
 
-        fn returnFromFunc(stack: *Stack) !u32 {
+        fn returnFromFunc(stack: *Stack) !?[*]const InstructionFuncData {
             const frame: *const CallFrame = stack.topFrame();
             const return_types: []const ValType = frame.module_instance.module_def.types.items[frame.func.type_def_index].getReturns();
 
@@ -3069,9 +3072,10 @@ const InstructionFuncs = struct {
             const last_label: Label = stack.popFrame(return_types.len);
 
             if (is_root_function) {
-                return Label.k_invalid_continuation;
+                // return Label.k_invalid_continuation;
+                return null;
             } else {
-                return last_label.continuation;
+                return OpHelpers.calcNextPC(stack, last_label.continuation);
             }
         }
 
@@ -3207,8 +3211,8 @@ const InstructionFuncs = struct {
     fn op_Branch(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
         debugPreamble("Branch", pc, stack);
         const label_id: u32 = pc[0].immediate;
-        const continuation: u32 = try OpHelpers.branch(stack, label_id);
-        const next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, continuation);
+        const next_pc: [*]const InstructionFuncData = try OpHelpers.branch(stack, label_id) orelse return;
+        // const next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, continuation);
         // next_instruction = try Helpers.seek(branch_to_instruction, instructions.len);
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
@@ -3219,9 +3223,9 @@ const InstructionFuncs = struct {
         const v = try stack.popI32();
         if (v != 0) {
             const label_id: u32 = pc[0].immediate;
-            const continuation = try OpHelpers.branch(stack, label_id);
+            next_pc = try OpHelpers.branch(stack, label_id) orelse return;
             // const continuation: u32 = try OpHelpers.seek(branch_to_instruction, instructions.len);
-            next_pc = OpHelpers.calcNextPC(stack, continuation);
+            // next_pc = OpHelpers.calcNextPC(stack, continuation);
         }
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
@@ -3233,21 +3237,22 @@ const InstructionFuncs = struct {
 
         const label_index = try stack.popI32();
         const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@intCast(usize, label_index)] else immediates.fallback_id;
-        const continuation = try OpHelpers.branch(stack, label_id);
+        const next_pc: [*]const InstructionFuncData = try OpHelpers.branch(stack, label_id) orelse return;
 
         // const continuation: u32 = try Helpers.seek(branch_to_instruction, instructions.len);
-        const next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, continuation);
+        // const next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, continuation);
         try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
     
     fn op_Return(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
         debugPreamble("Return", pc, stack);
-        const continuation: u32 = try OpHelpers.returnFromFunc(stack);
-        if (continuation != Label.k_invalid_continuation) {
+        var next_pc: [*]const InstructionFuncData = try OpHelpers.returnFromFunc(stack) orelse return;
+        // if (continuation != Label.k_invalid_continuation) {
             // next_instruction = try Helpers.seek(continuation, instructions.len);
-            var next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, continuation);
-            try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
-        }
+            // var next_pc: [*]const InstructionFuncData = OpHelpers.calcNextPC(stack, continuation);
+            // try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
+        // }
+        try @call(.{ .modifier = .always_tail }, next_pc[0].func, .{ next_pc, stack });
     }
 
     fn op_Call(pc: [*]const InstructionFuncData, stack: *Stack) anyerror!void {
@@ -5161,9 +5166,9 @@ const InstructionFuncs = struct {
         const funcref = try stack.popValue();
         const dest_table_index = try stack.popI32();
 
-        if (funcref.isRefType() == false) {
-            return error.ValidationTypeMismatch;
-        }
+        // if (funcref.isRefType() == false) {
+        //     return error.ValidationTypeMismatch;
+        // }
 
         if (dest_table_index + length_i32 > table.refs.items.len or length_i32 < 0) {
             return error.TrapOutOfBoundsTableAccess;
