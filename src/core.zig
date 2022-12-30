@@ -1066,12 +1066,14 @@ const FunctionTypeContext = struct {
 const FunctionDefinition = struct {
     type_index: u32,
     offset_into_instructions: u32,
+    continuation: u32,
     locals: std.ArrayList(ValType),
     size: u32,
 };
 
 const FunctionInstance = struct {
     type_def_index: u32,
+    def_index: u32,
     offset_into_instructions: u32,
     local_types: std.ArrayList(ValType),
 };
@@ -5203,7 +5205,6 @@ pub const ModuleDefinition = struct {
     start_func_index: ?u32 = null,
     data_count: ?u32 = null,
 
-    function_continuations: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
     if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
 
     is_decoded: bool = false,
@@ -5236,7 +5237,6 @@ pub const ModuleDefinition = struct {
             .datas = std.ArrayList(DataDefinition).init(allocator),
             .custom_sections = std.ArrayList(CustomSection).init(allocator),
 
-            .function_continuations = std.AutoHashMap(u32, u32).init(allocator),
             .if_to_else_offsets = std.AutoHashMap(u32, u32).init(allocator),
         };
 
@@ -5310,6 +5310,8 @@ pub const ModuleDefinition = struct {
                 return error.MalformedUnsupportedWasmVersion;
             }
         }
+
+        var num_functions_parsed: u32 = 0;
 
         while (stream.pos < stream.buffer.len) {
             const section_id: Section = std.meta.intToEnum(Section, try reader.readByte()) catch {
@@ -5452,6 +5454,7 @@ pub const ModuleDefinition = struct {
                             // we'll fix these up later when we find them in the Code section
                             .offset_into_instructions = 0,
                             .size = 0,
+                            .continuation = 0,
                         };
 
                         self.functions.addOneAssumeCapacity().* = func;
@@ -5735,7 +5738,7 @@ pub const ModuleDefinition = struct {
                         const code_size = try decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
-                        var def = &self.functions.items[code_index];
+                        var def: *FunctionDefinition = &self.functions.items[code_index];
                         def.offset_into_instructions = @intCast(u32, code_begin_pos);
                         def.size = code_size;
 
@@ -5802,8 +5805,11 @@ pub const ModuleDefinition = struct {
                                 if (block_stack.items.len == 0) {
                                     parsing_code = false;
 
-                                    try self.function_continuations.putNoClobber(block.begin_index, instruction_index);
+                                    def.continuation = instruction_index;
+
                                     block_stack.clearRetainingCapacity();
+
+                                    num_functions_parsed += 1;
                                 } else {
                                     var block_instruction_op: *InstructionOp = &instruction_ops.items[block.begin_index];
                                     var block_instruction: *Instruction = &self.code.instructions.items[block.begin_index];
@@ -5883,7 +5889,7 @@ pub const ModuleDefinition = struct {
             return error.ValidationMultipleMemories;
         }
 
-        if (self.function_continuations.count() != self.functions.items.len) {
+        if (num_functions_parsed != self.functions.items.len) {
             return error.MalformedFunctionCodeSectionMismatch;
         }
     }
@@ -5947,7 +5953,6 @@ pub const ModuleDefinition = struct {
         }
         self.custom_sections.deinit();
 
-        self.function_continuations.deinit();
         self.if_to_else_offsets.deinit();
     }
 };
@@ -6439,7 +6444,7 @@ pub const ModuleInstance = struct {
 
         try store.functions.ensureTotalCapacity(module_def.functions.items.len);
 
-        for (module_def.functions.items) |*def_func| {
+        for (module_def.functions.items) |*def_func, i| {
             const func_type: *const FunctionTypeDefinition = &module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
 
@@ -6450,6 +6455,7 @@ pub const ModuleInstance = struct {
 
             var f = FunctionInstance{
                 .type_def_index = def_func.type_index,
+                .def_index = @intCast(u32, i),
                 .offset_into_instructions = def_func.offset_into_instructions,
                 .local_types = local_types,
             };
@@ -6663,6 +6669,7 @@ pub const ModuleInstance = struct {
 
     fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
         const func: FunctionInstance = self.store.functions.items[func_instance_index];
+        const func_def: FunctionDefinition = self.module_def.functions.items[func.def_index];
         const func_type: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
         const param_types: []const ValType = func_type.getParams();
         const return_types: []const ValType = func_type.getReturns();
@@ -6673,15 +6680,11 @@ pub const ModuleInstance = struct {
             try self.stack.pushValue(v);
         }
 
-        // TODO move function continuation data into FunctionDefinition
-        var function_continuation = self.module_def.function_continuations.get(func.offset_into_instructions) orelse return error.AssertInvalidFunction;
-
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
-        try self.stack.pushLabel(@intCast(u32, return_types.len), function_continuation);
+        try self.stack.pushLabel(@intCast(u32, return_types.len), func_def.continuation);
 
         const pc: [*]Instruction = self.module_def.code.instructions.items.ptr + func.offset_into_instructions;
         InstructionFuncs.run(pc, &self.stack) catch |err| {
-            // executeWasm(&self, func.offset_into_instructions) catch |err| {
             self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
             return err;
         };
