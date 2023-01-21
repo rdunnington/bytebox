@@ -382,6 +382,7 @@ const CallFrame = struct {
     func: *const FunctionInstance,
     module_instance: *ModuleInstance,
     locals: []Val,
+    num_returns: u32,
     start_offset_values: u32,
     start_offset_labels: u16,
 };
@@ -561,7 +562,7 @@ const Stack = struct {
         }
     }
 
-    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType) !void {
+    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType, num_returns: u32) !void {
         const non_param_types: []const ValType = all_local_types[param_types.len..];
 
         // the stack should already be populated with the params to the function, so all that's
@@ -583,6 +584,7 @@ const Stack = struct {
                 .func = func,
                 .module_instance = module_instance,
                 .locals = locals_and_params,
+                .num_returns = num_returns,
                 .start_offset_values = values_index_begin,
                 .start_offset_labels = self.num_labels,
             };
@@ -596,9 +598,7 @@ const Stack = struct {
         var frame: *CallFrame = self.topFrame();
         var frame_label: Label = self.labels[frame.start_offset_labels];
 
-        const return_types: []const ValType = frame.module_instance.module_def.types.items[frame.func.type_def_index].getReturns();
-        const num_returns: usize = return_types.len;
-
+        const num_returns: usize = frame.num_returns;
         const source_begin: usize = self.num_values - num_returns;
         const source_end: usize = self.num_values;
         const dest_begin: usize = frame.start_offset_values;
@@ -817,6 +817,10 @@ const FunctionTypeDefinition = struct {
     }
     fn getReturns(self: *const FunctionTypeDefinition) []const ValType {
         return self.types.items[self.num_params..];
+    }
+    fn calcNumReturns(self: *const FunctionTypeDefinition) u32 {
+        const total: u32 = @intCast(u32, self.types.items.len);
+        return total - self.num_params;
     }
 };
 
@@ -2804,7 +2808,7 @@ const InstructionFuncs = struct {
             const return_types: []const ValType = functype.getReturns();
             const continuation: u32 = pc + 1;
 
-            try stack.pushFrame(func, module_instance, param_types, func.local_types.items);
+            try stack.pushFrame(func, module_instance, param_types, func.local_types.items, functype.calcNumReturns());
             try stack.pushLabel(@intCast(u32, return_types.len), continuation);
 
             return FuncCallData{
@@ -2817,7 +2821,7 @@ const InstructionFuncs = struct {
             switch (func.data) {
                 .Host => |data| {
                     const params_len: u32 = @intCast(u32, data.func_def.getParams().len);
-                    const returns_len: u32 = @intCast(u32, data.func_def.getReturns().len);
+                    const returns_len: u32 = @intCast(u32, data.func_def.calcNumReturns());
 
                     if (stack.num_values + returns_len < stack.values.len) {
                         var params = stack.values[stack.num_values - params_len .. stack.num_values];
@@ -6415,7 +6419,7 @@ pub const ModuleInstance = struct {
             try self.stack.pushValue(v);
         }
 
-        try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
+        try self.stack.pushFrame(&func, self, param_types, func.local_types.items, func_type.calcNumReturns());
         try self.stack.pushLabel(@intCast(u32, return_types.len), func_def.continuation);
 
         InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack) catch |err| {
