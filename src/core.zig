@@ -896,6 +896,12 @@ const ExportDefinition = struct {
     index: u32,
 };
 
+pub const FunctionExportInfo = struct {
+    name: []const u8,
+    params: []const ValType,
+    returns: []const ValType,
+};
+
 pub const GlobalMut = enum(u8) {
     Immutable = 0,
     Mutable = 1,
@@ -5664,6 +5670,33 @@ pub const ModuleDefinition = struct {
             item.data.deinit();
         }
         self.custom_sections.deinit();
+    }
+
+    pub fn getFuncExportInfo(self: *const ModuleDefinition, funcname: []const u8) ?FunctionExportInfo {
+        for (self.exports.functions.items) |*func_export| {
+            if (std.mem.eql(u8, func_export.name, funcname)) {
+                var type_index: u32 = undefined;
+
+                const num_imports = self.imports.functions.items.len;
+                if (func_export.index >= num_imports) {
+                    const instance_index = func_export.index - num_imports;
+                    type_index = self.functions.items[instance_index].type_index;
+                } else {
+                    type_index = self.imports.functions.items[func_export.index].type_index;
+                }
+
+                var params: []const ValType = self.types.items[type_index].getParams();
+                var returns: []const ValType = self.types.items[type_index].getReturns();
+
+                return FunctionExportInfo{
+                    .name = func_export.name,
+                    .params = params,
+                    .returns = returns,
+                };
+            }
+        }
+
+        return null;
     }
 };
 
