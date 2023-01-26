@@ -382,6 +382,7 @@ const CallFrame = struct {
     func: *const FunctionInstance,
     module_instance: *ModuleInstance,
     locals: []Val,
+    num_returns: u32,
     start_offset_values: u32,
     start_offset_labels: u16,
 };
@@ -561,7 +562,7 @@ const Stack = struct {
         }
     }
 
-    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType) !void {
+    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType, num_returns: u32) !void {
         const non_param_types: []const ValType = all_local_types[param_types.len..];
 
         // the stack should already be populated with the params to the function, so all that's
@@ -583,6 +584,7 @@ const Stack = struct {
                 .func = func,
                 .module_instance = module_instance,
                 .locals = locals_and_params,
+                .num_returns = num_returns,
                 .start_offset_values = values_index_begin,
                 .start_offset_labels = self.num_labels,
             };
@@ -596,9 +598,7 @@ const Stack = struct {
         var frame: *CallFrame = self.topFrame();
         var frame_label: Label = self.labels[frame.start_offset_labels];
 
-        const return_types: []const ValType = frame.module_instance.module_def.types.items[frame.func.type_def_index].getReturns();
-        const num_returns: usize = return_types.len;
-
+        const num_returns: usize = frame.num_returns;
         const source_begin: usize = self.num_values - num_returns;
         const source_end: usize = self.num_values;
         const dest_begin: usize = frame.start_offset_values;
@@ -817,6 +817,10 @@ const FunctionTypeDefinition = struct {
     }
     fn getReturns(self: *const FunctionTypeDefinition) []const ValType {
         return self.types.items[self.num_params..];
+    }
+    fn calcNumReturns(self: *const FunctionTypeDefinition) u32 {
+        const total: u32 = @intCast(u32, self.types.items.len);
+        return total - self.num_params;
     }
 };
 
@@ -1196,39 +1200,9 @@ const MemArg = struct {
     }
 };
 
-const U32Pair = struct {
-    a: u32,
-    b: u32,
-
-    fn toU64(a: u32, b: u32) u64 {
-        var aa: u64 = a;
-        var bb: u64 = b;
-        return aa | (bb << 32);
-    }
-
-    fn fromU64(v: u64) U32Pair {
-        return U32Pair{
-            .a = @truncate(u32, v),
-            .b = @truncate(u32, v >> 32),
-        };
-    }
-};
-
 const CallIndirectImmediates = struct {
     type_index: u32,
     table_index: u32,
-
-    fn toU64(immediates: CallIndirectImmediates) u64 {
-        return U32Pair.toU64(immediates.type_index, immediates.table_index);
-    }
-
-    fn fromU64(value: u64) CallIndirectImmediates {
-        var pair: U32Pair = U32Pair.fromU64(value);
-        return CallIndirectImmediates{
-            .type_index = pair.a,
-            .table_index = pair.b,
-        };
-    }
 };
 
 const BranchTableImmediates = struct {
@@ -1239,37 +1213,19 @@ const BranchTableImmediates = struct {
 const TablePairImmediates = struct {
     index_x: u32,
     index_y: u32,
-
-    fn toU64(immediates: TablePairImmediates) u64 {
-        return U32Pair.toU64(immediates.index_x, immediates.index_y);
-    }
-
-    fn fromU64(value: u64) TablePairImmediates {
-        var pair: U32Pair = U32Pair.fromU64(value);
-        return TablePairImmediates{
-            .index_x = pair.a,
-            .index_y = pair.b,
-        };
-    }
 };
 
 const BlockImmediates = struct {
     blocktype: BlockTypeValue,
     num_returns: u32,
     continuation: u32,
+};
 
-    fn toU64(immediates: BlockImmediates) u64 {
-        return U32Pair.toU64(immediates.num_returns, immediates.continuation);
-    }
-
-    fn fromU64(value: u64) BlockImmediates {
-        var pair: U32Pair = U32Pair.fromU64(value);
-        return BlockImmediates{
-            .blocktype = BlockTypeValue{ .Void = {} }, // unused in the places we're converting back from u64
-            .num_returns = pair.a,
-            .continuation = pair.b,
-        };
-    }
+const IfImmediates = struct {
+    blocktype: BlockTypeValue,
+    num_returns: u32,
+    else_continuation: u32,
+    end_continuation: u32,
 };
 
 const InstructionImmediatesTypes = enum(u8) {
@@ -1285,6 +1241,7 @@ const InstructionImmediatesTypes = enum(u8) {
     Block,
     CallIndirect,
     TablePair,
+    If,
 };
 
 const InstructionImmediates = union(InstructionImmediatesTypes) {
@@ -1300,6 +1257,7 @@ const InstructionImmediates = union(InstructionImmediatesTypes) {
     Block: BlockImmediates,
     CallIndirect: CallIndirectImmediates,
     TablePair: TablePairImmediates,
+    If: IfImmediates,
 };
 
 const Instruction = struct {
@@ -1430,7 +1388,15 @@ const Instruction = struct {
                 immediate = try Helpers.decodeBlockType(reader, module);
             },
             .If => {
-                immediate = try Helpers.decodeBlockType(reader, module);
+                const block_immediates: InstructionImmediates = try Helpers.decodeBlockType(reader, module);
+                immediate = InstructionImmediates{
+                    .If = IfImmediates{
+                        .blocktype = block_immediates.Block.blocktype,
+                        .num_returns = block_immediates.Block.num_returns,
+                        .else_continuation = block_immediates.Block.continuation,
+                        .end_continuation = block_immediates.Block.continuation,
+                    },
+                };
             },
             .Branch => {
                 immediate = InstructionImmediates{ .LabelId = try decodeLEB128(u32, reader) };
@@ -1765,7 +1731,11 @@ const ModuleValidator = struct {
             }
 
             fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction) !void {
-                const blocktype: BlockTypeValue = instruction_.immediate.Block.blocktype;
+                const blocktype: BlockTypeValue = switch (instruction_.immediate) {
+                    .Block => |v| v.blocktype,
+                    .If => |v| v.blocktype,
+                    else => unreachable,
+                };
 
                 var start_types: []const ValType = blocktype.getBlocktypeParamTypes(module_);
                 var end_types: []const ValType = blocktype.getBlocktypeReturnTypes(module_);
@@ -2804,7 +2774,7 @@ const InstructionFuncs = struct {
             const return_types: []const ValType = functype.getReturns();
             const continuation: u32 = pc + 1;
 
-            try stack.pushFrame(func, module_instance, param_types, func.local_types.items);
+            try stack.pushFrame(func, module_instance, param_types, func.local_types.items, functype.calcNumReturns());
             try stack.pushLabel(@intCast(u32, return_types.len), continuation);
 
             return FuncCallData{
@@ -2817,7 +2787,7 @@ const InstructionFuncs = struct {
             switch (func.data) {
                 .Host => |data| {
                     const params_len: u32 = @intCast(u32, data.func_def.getParams().len);
-                    const returns_len: u32 = @intCast(u32, data.func_def.getReturns().len);
+                    const returns_len: u32 = @intCast(u32, data.func_def.calcNumReturns());
 
                     if (stack.num_values + returns_len < stack.values.len) {
                         var params = stack.values[stack.num_values - params_len .. stack.num_values];
@@ -2914,14 +2884,13 @@ const InstructionFuncs = struct {
 
         const condition = try stack.popI32();
         if (condition != 0) {
-            try stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
+            try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
             next_pc = pc + 1;
-        } else if (stack.topFrame().module_instance.module_def.if_to_else_offsets.get(pc)) |else_offset| {
-            try stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
-            // +1 to skip the else opcode, since it's treated as an End for the If block.
-            next_pc = else_offset + 1;
         } else {
-            next_pc = code[pc].immediate.Block.continuation + 1;
+            if (code[pc].immediate.If.else_continuation != code[pc].immediate.If.end_continuation) {
+                try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
+            }
+            next_pc = code[pc].immediate.If.else_continuation + 1;
         }
 
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[next_pc].opcode), .{ next_pc, code, stack });
@@ -2930,7 +2899,7 @@ const InstructionFuncs = struct {
     fn op_Else(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("Else", pc, code, stack);
         // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
-        var next_pc: u32 = code[pc].immediate.Block.continuation;
+        var next_pc: u32 = code[pc].immediate.If.end_continuation;
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[next_pc].opcode), .{ next_pc, code, stack });
     }
 
@@ -4941,8 +4910,6 @@ pub const ModuleDefinition = struct {
     start_func_index: ?u32 = null,
     data_count: ?u32 = null,
 
-    if_to_else_offsets: std.AutoHashMap(u32, u32), // todo use a sorted ArrayList
-
     is_decoded: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) ModuleDefinition {
@@ -4972,8 +4939,6 @@ pub const ModuleDefinition = struct {
             },
             .datas = std.ArrayList(DataDefinition).init(allocator),
             .custom_sections = std.ArrayList(CustomSection).init(allocator),
-
-            .if_to_else_offsets = std.AutoHashMap(u32, u32).init(allocator),
         };
 
         return module;
@@ -5460,6 +5425,9 @@ pub const ModuleDefinition = struct {
                     var block_stack = std.ArrayList(BlockData).init(allocator);
                     defer block_stack.deinit();
 
+                    var if_to_else_offsets = std.AutoHashMap(u32, u32).init(allocator);
+                    defer if_to_else_offsets.deinit();
+
                     var instructions = &self.code.instructions;
 
                     const num_codes = try decodeLEB128(u32, reader);
@@ -5532,9 +5500,10 @@ pub const ModuleDefinition = struct {
                                 });
                             } else if (instruction.opcode == .Else) {
                                 const block: *const BlockData = &block_stack.items[block_stack.items.len - 1];
-                                try self.if_to_else_offsets.putNoClobber(block.begin_index, instruction_index);
+                                try if_to_else_offsets.putNoClobber(block.begin_index, instruction_index);
                                 // the else gets the matching if's immediates
                                 instruction.immediate = instructions.items[block.begin_index].immediate;
+                                // and the if will have its else_continuation updated when .End is parsed
                             } else if (instruction.opcode == .End) {
                                 const block: BlockData = block_stack.orderedRemove(block_stack.items.len - 1);
                                 if (block_stack.items.len == 0) {
@@ -5552,12 +5521,20 @@ pub const ModuleDefinition = struct {
                                     if (block.opcode == .Loop) {
                                         block_instruction.immediate.Block.continuation = block.begin_index;
                                     } else {
-                                        block_instruction.immediate.Block.continuation = instruction_index;
+                                        switch (block_instruction.immediate) {
+                                            .Block => |*v| v.continuation = instruction_index,
+                                            .If => |*v| {
+                                                v.end_continuation = instruction_index;
+                                                v.else_continuation = instruction_index;
+                                            },
+                                            else => unreachable,
+                                        }
 
-                                        var else_index_or_null = self.if_to_else_offsets.get(block.begin_index);
+                                        var else_index_or_null = if_to_else_offsets.get(block.begin_index);
                                         if (else_index_or_null) |index| {
                                             var else_instruction: *Instruction = &instructions.items[index];
                                             else_instruction.immediate = block_instruction.immediate;
+                                            block_instruction.immediate.If.else_continuation = index;
                                         }
                                     }
                                 }
@@ -5687,8 +5664,6 @@ pub const ModuleDefinition = struct {
             item.data.deinit();
         }
         self.custom_sections.deinit();
-
-        self.if_to_else_offsets.deinit();
     }
 };
 
@@ -6415,7 +6390,7 @@ pub const ModuleInstance = struct {
             try self.stack.pushValue(v);
         }
 
-        try self.stack.pushFrame(&func, self, param_types, func.local_types.items);
+        try self.stack.pushFrame(&func, self, param_types, func.local_types.items, func_type.calcNumReturns());
         try self.stack.pushLabel(@intCast(u32, return_types.len), func_def.continuation);
 
         InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack) catch |err| {
