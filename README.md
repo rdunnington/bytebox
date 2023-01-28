@@ -24,7 +24,7 @@ zig build bench # run the benchmarks (not robust)
 
 You can use the standalone runner to load and execute WebAssembly programs:
 ```sh
-zig build run -- <wasmfile>
+zig build run -- <file> [function] [function args]...
 ```
 
 Or embed Bytebox in your own programs:
@@ -76,15 +76,15 @@ This project is unstable and still in development.
 
 | Status | Feature |
 | --- | --- |
-|✔|WebAssembly 1.0|
-|✔|Sign extension instructions|
-|✔|Non-trapping float-to-int conversion|
-|✔|Multiple values|
-|✔|Reference types|
-|✔|Table instructions|
-|✔|Multiple tables|
-|✔|Bulk memory and table instructions|
-|❌|Vector instructions|
+|☑|WebAssembly 1.0|
+|☑|Sign extension instructions|
+|☑|Non-trapping float-to-int conversion|
+|☑|Multiple values|
+|☑|Reference types|
+|☑|Table instructions|
+|☑|Multiple tables|
+|☑|Bulk memory and table instructions|
+|☐|Vector instructions|
 
 ### Roadmap
 These tasks must be completed to enter alpha:
