@@ -9,7 +9,7 @@ BYTEBOX="${TEST_RUNTIME_EXE:-bytebox}"
 while [[ $# -gt 0 ]]; do
     case $1 in
     --version)
-        bytebox -V
+        bytebox -v
         exit 0
         ;;
     --test-file)

@@ -16,6 +16,12 @@ pub fn main() !void {
             \\Usage: {s} <FILE> [OPTION]...
             \\  
             \\  Valid options:
+            \\
+            \\    -h, --help
+            \\      Print help information.
+            \\
+            \\    -v, --version
+            \\      Print version information.
             \\    
             \\    <FUNCTION> [ARGS]...
             \\      Call an exported, named function with arguments. The arguments are automatically
@@ -24,6 +30,12 @@ pub fn main() !void {
             \\
         ;
         std.log.info(usage_string, .{args[0]});
+        return;
+    } else if (std.mem.eql(u8, args[1], "-v") or std.mem.eql(u8, args[1], "--version")) {
+        std.log.info("bytebox v0.0.1", .{});
+        return;
+    } else if (args[1][0] == '-') {
+        std.log.warn("Unrecognized option '{s}'. Run bytebox with no arguments or with --help to print usage information.", .{args[1]});
         return;
     }
 
