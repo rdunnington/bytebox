@@ -1,15 +1,17 @@
 #!/bin/bash
 
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
 TEST_FILE=
 ARGS=()
 PROG_ARGS=()
 
-BYTEBOX="${TEST_RUNTIME_EXE:-bytebox}"
+BYTEBOX="${SCRIPT_DIR}/../../zig-out/bin/${TEST_RUNTIME_EXE:-bytebox}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
     --version)
-        bytebox -v
+        ${BYTEBOX} -v
         exit 0
         ;;
     --test-file)
