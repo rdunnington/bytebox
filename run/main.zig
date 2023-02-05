@@ -4,6 +4,78 @@ const bytebox = @import("bytebox");
 const Val = bytebox.Val;
 const ValType = bytebox.ValType;
 
+const CmdOpts = struct {
+    print_help: bool = false,
+    print_version: bool = false,
+    filename: ?[]const u8 = null,
+    invoke: ?InvokeArgs = null,
+
+    invalid_arg: ?[]const u8 = null,
+    missing_options: ?[]const u8 = null,
+};
+
+const InvokeArgs = struct {
+    funcname: []const u8,
+    args: [][]const u8,
+};
+
+fn parseCmdOpts(args: [][]const u8) CmdOpts {
+    var opts = CmdOpts{};
+
+    var arg_index: usize = 1;
+    while (arg_index < args.len) {
+        if (arg_index == 1 and args[arg_index][0] != '-') {
+            opts.filename = args[arg_index];
+        } else if (args.len < 2 or std.mem.eql(u8, args[arg_index], "-h") or std.mem.eql(u8, args[arg_index], "--help")) {
+            opts.print_help = true;
+        } else if (std.mem.eql(u8, args[arg_index], "-v") or std.mem.eql(u8, args[arg_index], "--version")) {
+            opts.print_version = true;
+        } else if (std.mem.eql(u8, args[arg_index], "-i") or std.mem.eql(u8, args[arg_index], "--invoke")) {
+            arg_index += 1;
+            if (arg_index < args.len) {
+                opts.invoke = InvokeArgs{
+                    .funcname = args[arg_index],
+                    .args = args[arg_index + 1 ..],
+                };
+            } else {
+                opts.missing_options = args[arg_index];
+            }
+            arg_index = args.len;
+        } else {
+            opts.invalid_arg = args[arg_index];
+            break;
+        }
+
+        arg_index += 1;
+    }
+
+    return opts;
+}
+
+const version_string = "bytebox v0.0.1";
+
+fn printHelp(args: [][]const u8) !void {
+    const usage_string: []const u8 =
+        \\Usage: {s} <FILE> [OPTION]...
+        \\  
+        \\  Valid options:
+        \\
+        \\    -h, --help
+        \\      Print help information.
+        \\
+        \\    -v, --version
+        \\      Print version information.
+        \\    
+        \\    -i, --invoke <FUNCTION> [ARGS]...
+        \\      Call an exported, named function with arguments. The arguments are automatically
+        \\      translated from string inputs to the function's native types. If the conversion
+        \\      is not possible, an error is printed and execution aborts.
+        \\
+    ;
+
+    try stdout.print(usage_string, .{args[0]});
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
@@ -11,39 +83,36 @@ pub fn main() !void {
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 2 or std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
-        const usage_string: []const u8 =
-            \\Usage: {s} <FILE> [OPTION]...
-            \\  
-            \\  Valid options:
-            \\
-            \\    -h, --help
-            \\      Print help information.
-            \\
-            \\    -v, --version
-            \\      Print version information.
-            \\    
-            \\    <FUNCTION> [ARGS]...
-            \\      Call an exported, named function with arguments. The arguments are automatically
-            \\      translated from string inputs to the function's native types. If the conversion
-            \\      is not possible, an error is printed and execution aborts.
-            \\
-        ;
-        std.log.info(usage_string, .{args[0]});
+    const opts: CmdOpts = parseCmdOpts(args);
+
+    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
+
+    if (opts.print_help) {
+        try printHelp(args);
         return;
-    } else if (std.mem.eql(u8, args[1], "-v") or std.mem.eql(u8, args[1], "--version")) {
-        std.log.info("bytebox v0.0.1", .{});
+    } else if (opts.print_version) {
+        try stdout.print("{s}", .{version_string});
         return;
-    } else if (args[1][0] == '-') {
-        std.log.warn("Unrecognized option '{s}'. Run bytebox with no arguments or with --help to print usage information.", .{args[1]});
+    } else if (opts.invalid_arg) |invalid_arg| {
+        try stderr.print("Invalid argument {s}.\n", .{invalid_arg});
+        try printHelp(args);
+        return;
+    } else if (opts.missing_options) |missing_options| {
+        try stderr.print("Argument {s} is missing required options.\n", .{missing_options});
+        try printHelp(args);
+        return;
+    } else if (opts.invoke != null and opts.filename == null) {
+        try stderr.print("Cannot invoke {s} without a file to load.", .{opts.invoke.?.funcname});
+        try printHelp(args);
         return;
     }
 
-    const wasm_filename: []const u8 = args[1];
+    std.debug.assert(opts.filename != null);
 
     var cwd = std.fs.cwd();
-    var wasm_data: []u8 = cwd.readFileAlloc(allocator, wasm_filename, 1024 * 1024 * 128) catch |e| {
-        std.log.err("Failed to read file '{s}' into memory: {}", .{ wasm_filename, e });
+    var wasm_data: []u8 = cwd.readFileAlloc(allocator, opts.filename.?, 1024 * 1024 * 128) catch |e| {
+        std.log.err("Failed to read file '{s}' into memory: {}", .{ opts.filename.?, e });
         return;
     };
     defer allocator.free(wasm_data);
@@ -64,104 +133,105 @@ pub fn main() !void {
         return;
     };
 
-    if (args.len == 2) {
-        return;
-    }
-
-    const wasm_funcname: []const u8 = args[2];
-
-    const func_info: ?bytebox.FunctionExportInfo = module_def.getFuncExportInfo(wasm_funcname);
-    if (func_info == null) {
-        std.log.err("Failed to find function '{s}' - either it doesn't exist or is not a public export.", .{wasm_funcname});
-        return;
-    }
-
-    const num_params: usize = args.len - 3;
-    if (func_info.?.params.len != num_params) {
-        var strbuf = std.ArrayList(u8).init(allocator);
-        defer strbuf.deinit();
-        try writeSignature(&strbuf, &func_info.?);
-        std.log.err("Specified {} params but expected {}. The signature of {s} is:\n{s}", .{ num_params, func_info.?.params.len, wasm_funcname, strbuf.items });
-        return;
-    }
-
-    const wasm_args: [][]const u8 = args[3..];
-    std.debug.assert(wasm_args.len == num_params);
-
-    var params = std.ArrayList(bytebox.Val).init(allocator);
-    defer params.deinit();
-    try params.resize(wasm_args.len);
-    for (func_info.?.params) |valtype, i| {
-        const arg: []const u8 = wasm_args[i];
-        switch (valtype) {
-            .I32 => {
-                var parsed: i32 = std.fmt.parseInt(i32, arg, 0) catch |e| {
-                    std.log.err("Failed to parse arg at index {} ('{s}') as an i32: {}", .{ i, arg, e });
-                    return;
-                };
-                params.items[i] = Val{ .I32 = parsed };
-            },
-            .I64 => {
-                var parsed: i64 = std.fmt.parseInt(i64, arg, 0) catch |e| {
-                    std.log.err("Failed to parse arg at index {} ('{s}') as an i64: {}", .{ i, arg, e });
-                    return;
-                };
-                params.items[i] = Val{ .I64 = parsed };
-            },
-            .F32 => {
-                var parsed: f32 = std.fmt.parseFloat(f32, arg) catch |e| {
-                    std.log.err("Failed to parse arg at index {} ('{s}') as a f32: {}", .{ i, arg, e });
-                    return;
-                };
-                params.items[i] = Val{ .F32 = parsed };
-            },
-            .F64 => {
-                var parsed: f64 = std.fmt.parseFloat(f64, arg) catch |e| {
-                    std.log.err("Failed to parse arg at index {} ('{s}') as a f64: {}", .{ i, arg, e });
-                    return;
-                };
-                params.items[i] = Val{ .F64 = parsed };
-            },
-            .FuncRef => {
-                std.log.err("Param at index {} is a funcref, making this function only invokeable from code.", .{i});
-                return;
-            },
-            .ExternRef => {
-                std.log.err("Param at index {} is an externref, making this function only invokeable from code.", .{i});
-                return;
-            },
+    if (opts.invoke) |invoke| {
+        const func_info: ?bytebox.FunctionExportInfo = module_def.getFuncExportInfo(invoke.funcname);
+        if (func_info == null) {
+            std.log.err("Failed to find function '{s}' - either it doesn't exist or is not a public export.", .{invoke.funcname});
+            return;
         }
-    }
 
-    var returns = std.ArrayList(bytebox.Val).init(allocator);
-    try returns.resize(func_info.?.returns.len);
+        const num_params: usize = invoke.args.len;
+        if (func_info.?.params.len != num_params) {
+            var strbuf = std.ArrayList(u8).init(allocator);
+            defer strbuf.deinit();
+            try writeSignature(&strbuf, &func_info.?);
+            std.log.err("Specified {} params but expected {}. The signature of '{s}' is:\n{s}", .{
+                num_params,
+                func_info.?.params.len,
+                invoke.funcname,
+                strbuf.items,
+            });
+            return;
+        }
 
-    module_instance.invoke(wasm_funcname, params.items, returns.items) catch |e| {
-        std.log.err("Caught error {} during function invoke. The wasm program may have a bug.", .{e});
-        return;
-    };
+        const wasm_args: [][]const u8 = invoke.args;
+        std.debug.assert(wasm_args.len == num_params);
 
-    {
-        var strbuf = std.ArrayList(u8).init(allocator);
-        defer strbuf.deinit();
-        var writer = strbuf.writer();
-
-        try std.fmt.format(writer, "{s} completed with {} returns", .{ wasm_funcname, returns.items.len });
-        if (returns.items.len > 0) {
-            try std.fmt.format(writer, ":\n", .{});
-            for (returns.items) |val| {
-                switch (val) {
-                    .I32 => |v| try std.fmt.format(writer, "  {} (i32)\n", .{v}),
-                    .I64 => |v| try std.fmt.format(writer, "  {} (i64)\n", .{v}),
-                    .F32 => |v| try std.fmt.format(writer, "  {} (f32)\n", .{v}),
-                    .F64 => |v| try std.fmt.format(writer, "  {} (f64)\n", .{v}),
-                    .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
-                    .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
-                }
+        var params = std.ArrayList(bytebox.Val).init(allocator);
+        defer params.deinit();
+        try params.resize(wasm_args.len);
+        for (func_info.?.params) |valtype, i| {
+            const arg: []const u8 = wasm_args[i];
+            switch (valtype) {
+                .I32 => {
+                    var parsed: i32 = std.fmt.parseInt(i32, arg, 0) catch |e| {
+                        std.log.err("Failed to parse arg at index {} ('{s}') as an i32: {}", .{ i, arg, e });
+                        return;
+                    };
+                    params.items[i] = Val{ .I32 = parsed };
+                },
+                .I64 => {
+                    var parsed: i64 = std.fmt.parseInt(i64, arg, 0) catch |e| {
+                        std.log.err("Failed to parse arg at index {} ('{s}') as an i64: {}", .{ i, arg, e });
+                        return;
+                    };
+                    params.items[i] = Val{ .I64 = parsed };
+                },
+                .F32 => {
+                    var parsed: f32 = std.fmt.parseFloat(f32, arg) catch |e| {
+                        std.log.err("Failed to parse arg at index {} ('{s}') as a f32: {}", .{ i, arg, e });
+                        return;
+                    };
+                    params.items[i] = Val{ .F32 = parsed };
+                },
+                .F64 => {
+                    var parsed: f64 = std.fmt.parseFloat(f64, arg) catch |e| {
+                        std.log.err("Failed to parse arg at index {} ('{s}') as a f64: {}", .{ i, arg, e });
+                        return;
+                    };
+                    params.items[i] = Val{ .F64 = parsed };
+                },
+                .FuncRef => {
+                    std.log.err("Param at index {} is a funcref, making this function only invokeable from code.", .{i});
+                    return;
+                },
+                .ExternRef => {
+                    std.log.err("Param at index {} is an externref, making this function only invokeable from code.", .{i});
+                    return;
+                },
             }
-            try std.fmt.format(writer, "\n", .{});
         }
-        std.log.info("{s}", .{strbuf.items});
+
+        var returns = std.ArrayList(bytebox.Val).init(allocator);
+        try returns.resize(func_info.?.returns.len);
+
+        module_instance.invoke(invoke.funcname, params.items, returns.items) catch |e| {
+            std.log.err("Caught error {} during function invoke. The wasm program may have a bug.", .{e});
+            return;
+        };
+
+        {
+            var strbuf = std.ArrayList(u8).init(allocator);
+            defer strbuf.deinit();
+            var writer = strbuf.writer();
+
+            try std.fmt.format(writer, "'{s}' completed with {} returns", .{ invoke.funcname, returns.items.len });
+            if (returns.items.len > 0) {
+                try std.fmt.format(writer, ":\n", .{});
+                for (returns.items) |val| {
+                    switch (val) {
+                        .I32 => |v| try std.fmt.format(writer, "  {} (i32)\n", .{v}),
+                        .I64 => |v| try std.fmt.format(writer, "  {} (i64)\n", .{v}),
+                        .F32 => |v| try std.fmt.format(writer, "  {} (f32)\n", .{v}),
+                        .F64 => |v| try std.fmt.format(writer, "  {} (f64)\n", .{v}),
+                        .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
+                        .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
+                    }
+                }
+                try std.fmt.format(writer, "\n", .{});
+            }
+            std.log.info("{s}", .{strbuf.items});
+        }
     }
 }
 
