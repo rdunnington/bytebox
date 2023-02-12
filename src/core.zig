@@ -1,10 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
+pub const wasi = @import("wasi.zig");
 const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
 
 const opcodes = @import("opcode.zig");
 const Opcode = opcodes.Opcode;
 const WasmOpcode = opcodes.WasmOpcode;
+
+const AllocError = std.mem.Allocator.Error;
 
 pub const MalformedError = error{
     MalformedMagicSignature,
@@ -109,7 +112,7 @@ pub const TrapError = error{
 
 pub const WasmError = MalformedError || ValidationError || UnlinkableError || UninstantiableError || AssertError || TrapError;
 
-const ScratchAllocator = struct {
+pub const ScratchAllocator = struct {
     buffer: StableArray(u8),
 
     const InitOpts = struct {
@@ -122,7 +125,7 @@ const ScratchAllocator = struct {
         };
     }
 
-    fn allocator(self: *ScratchAllocator) std.mem.Allocator {
+    pub fn allocator(self: *ScratchAllocator) std.mem.Allocator {
         return std.mem.Allocator.init(self, alloc, resize, free);
     }
 
@@ -1938,16 +1941,7 @@ const ModuleValidator = struct {
                     return error.ValidationUnknownFunction;
                 }
 
-                var type_index: u32 = undefined;
-                if (func_index < module.imports.functions.items.len) {
-                    const func_def: *const FunctionImportDefinition = &module.imports.functions.items[func_index];
-                    type_index = func_def.type_index;
-                } else {
-                    const module_func_index = func_index - module.imports.functions.items.len;
-                    const func_def: *const FunctionDefinition = &module.functions.items[module_func_index];
-                    type_index = func_def.type_index;
-                }
-
+                var type_index: u32 = module.getFuncTypeIndex(func_index);
                 try Helpers.popPushFuncTypes(self, type_index, module);
             },
             .Call_Indirect => {
@@ -2796,10 +2790,11 @@ const InstructionFuncs = struct {
                     const returns_len: u32 = @intCast(u32, data.func_def.calcNumReturns());
 
                     if (stack.num_values + returns_len < stack.values.len) {
+                        var module: *ModuleInstance = stack.topFrame().module_instance;
                         var params = stack.values[stack.num_values - params_len .. stack.num_values];
                         var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
 
-                        data.callback(data.userdata, params, returns_temp);
+                        data.callback(data.userdata, module, params, returns_temp);
 
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
@@ -5698,6 +5693,157 @@ pub const ModuleDefinition = struct {
 
         return null;
     }
+
+    pub fn dump(self: *const ModuleDefinition, writer: anytype) !void {
+        const Helpers = struct {
+            fn function(_writer: anytype, functype: *const FunctionTypeDefinition) !void {
+                const params: []const ValType = functype.getParams();
+                const returns: []const ValType = functype.getReturns();
+
+                try _writer.print("(", .{});
+                for (params) |v, i| {
+                    try _writer.print("{s}", .{valtype(v)});
+                    if (i != params.len - 1) {
+                        try _writer.print(", ", .{});
+                    }
+                }
+                try _writer.print(") -> ", .{});
+
+                if (returns.len == 0) {
+                    try _writer.print("void", .{});
+                } else {
+                    for (returns) |v, i| {
+                        try _writer.print("{s}", .{valtype(v)});
+                        if (i != returns.len - 1) {
+                            try _writer.print(", ", .{});
+                        }
+                    }
+                }
+
+                try _writer.print("\n", .{});
+            }
+
+            fn limits(_writer: anytype, l: *const Limits) !void {
+                try _writer.print("limits (min {}, max {?})\n", .{ l.min, l.max });
+            }
+
+            fn valtype(v: ValType) []const u8 {
+                return switch (v) {
+                    .I32 => "i32",
+                    .I64 => "i64",
+                    .F32 => "f32",
+                    .F64 => "f64",
+                    .FuncRef => "funcref",
+                    .ExternRef => "externref",
+                };
+            }
+
+            fn mut(m: GlobalMut) []const u8 {
+                return switch (m) {
+                    .Immutable => "immutable",
+                    .Mutable => "mutable",
+                };
+            }
+        };
+
+        try writer.print("Imports:\n", .{});
+
+        try writer.print("\tFunctions: {}\n", .{self.imports.functions.items.len});
+        for (self.imports.functions.items) |*import| {
+            try writer.print("\t\t{s}.{s}", .{ import.names.module_name, import.names.import_name });
+            try Helpers.function(writer, &self.types.items[import.type_index]);
+        }
+
+        try writer.print("\tGlobals: {}\n", .{self.imports.globals.items.len});
+        for (self.imports.globals.items) |import| {
+            try writer.print("\t\t{s}.{s}: type {s}, mut: {s}\n", .{
+                import.names.module_name,
+                import.names.import_name,
+                Helpers.valtype(import.valtype),
+                Helpers.mut(import.mut),
+            });
+        }
+
+        try writer.print("\tMemories: {}\n", .{self.imports.memories.items.len});
+        for (self.imports.memories.items) |import| {
+            try writer.print("\t\t{s}.{s}: ", .{ import.names.module_name, import.names.import_name });
+            try Helpers.limits(writer, &import.limits);
+        }
+
+        try writer.print("\tTables: {}\n", .{self.imports.tables.items.len});
+        for (self.imports.tables.items) |import| {
+            try writer.print("\t\t{s}.{s}: type {s}, ", .{
+                import.names.module_name,
+                import.names.import_name,
+                Helpers.valtype(import.reftype),
+            });
+            try Helpers.limits(writer, &import.limits);
+        }
+
+        try writer.print("Exports:\n", .{});
+
+        try writer.print("\tFunctions: {}\n", .{self.exports.functions.items.len});
+        for (self.exports.functions.items) |*ex| {
+            try writer.print("\t\t{s}", .{ex.name});
+            const func_type: *const FunctionTypeDefinition = &self.types.items[self.getFuncTypeIndex(ex.index)];
+            try Helpers.function(writer, func_type);
+        }
+
+        try writer.print("\tGlobal: {}\n", .{self.exports.globals.items.len});
+        for (self.exports.globals.items) |*ex| {
+            var valtype: ValType = undefined;
+            var mut: GlobalMut = undefined;
+            if (ex.index < self.imports.globals.items.len) {
+                valtype = self.imports.globals.items[ex.index].valtype;
+                mut = self.imports.globals.items[ex.index].mut;
+            } else {
+                const instance_index: usize = ex.index - self.imports.globals.items.len;
+                valtype = self.globals.items[instance_index].valtype;
+                mut = self.globals.items[instance_index].mut;
+            }
+            try writer.print("\t\t{s}: type {s}, mut: {s}\n", .{ ex.name, Helpers.valtype(valtype), Helpers.mut(mut) });
+        }
+
+        try writer.print("\tMemories: {}\n", .{self.exports.memories.items.len});
+        for (self.exports.memories.items) |*ex| {
+            var limits: *const Limits = undefined;
+            if (ex.index < self.imports.memories.items.len) {
+                limits = &self.imports.memories.items[ex.index].limits;
+            } else {
+                const instance_index: usize = ex.index - self.imports.memories.items.len;
+                limits = &self.memories.items[instance_index].limits;
+            }
+            try writer.print("\t\t{s}: ", .{ex.name});
+            try Helpers.limits(writer, limits);
+        }
+
+        try writer.print("\tTables: {}\n", .{self.exports.tables.items.len});
+        for (self.exports.tables.items) |*ex| {
+            var reftype: ValType = undefined;
+            var limits: *const Limits = undefined;
+            if (ex.index < self.imports.tables.items.len) {
+                reftype = self.imports.tables.items[ex.index].reftype;
+                limits = &self.imports.tables.items[ex.index].limits;
+            } else {
+                const instance_index: usize = ex.index - self.imports.tables.items.len;
+                reftype = self.tables.items[instance_index].reftype;
+                limits = &self.tables.items[instance_index].limits;
+            }
+            try writer.print("\t\t{s}: type {s}, ", .{ ex.name, Helpers.valtype(reftype) });
+            try Helpers.limits(writer, limits);
+        }
+    }
+
+    fn getFuncTypeIndex(self: *const ModuleDefinition, func_index: usize) u32 {
+        if (func_index < self.imports.functions.items.len) {
+            const func_def: *const FunctionImportDefinition = &self.imports.functions.items[func_index];
+            return func_def.type_index;
+        } else {
+            const module_func_index = func_index - self.imports.functions.items.len;
+            const func_def: *const FunctionDefinition = &self.functions.items[module_func_index];
+            return func_def.type_index;
+        }
+    }
 };
 
 const ImportType = enum(u8) {
@@ -5705,7 +5851,7 @@ const ImportType = enum(u8) {
     Wasm,
 };
 
-const HostFunctionCallback = *const fn (userdata: ?*anyopaque, params: []const Val, returns: []Val) void;
+const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void;
 
 const HostFunction = struct {
     userdata: ?*anyopaque,
@@ -5959,14 +6105,21 @@ pub const Store = struct {
     }
 };
 
+pub const ModuleInstantiateOpts = struct {
+    /// imports is not owned by ModuleInstance - caller must ensure its memory outlives ModuleInstance
+    imports: ?[]const ModuleImports = null,
+    argv: ?[][]const u8 = null,
+};
+
 pub const ModuleInstance = struct {
     allocator: std.mem.Allocator,
     stack: Stack,
     store: Store,
     module_def: *const ModuleDefinition,
-    is_instantiated: bool = false,
 
-    /// module_def is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
+    is_instantiated: bool = false,
+    argv: [][]const u8 = &[_][]u8{},
+
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
             .allocator = allocator,
@@ -5979,10 +6132,16 @@ pub const ModuleInstance = struct {
     pub fn deinit(self: *ModuleInstance) void {
         self.stack.deinit();
         self.store.deinit();
+
+        if (self.argv.len > 0) {
+            for (self.argv) |arg| {
+                self.allocator.free(arg);
+            }
+            self.allocator.free(self.argv);
+        }
     }
 
-    /// imports is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
-    pub fn instantiate(self: *ModuleInstance, opts: struct { imports: ?[]const ModuleImports = null }) !void {
+    pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
                 if (def.max != null and instance.max == null) {
@@ -6102,6 +6261,13 @@ pub const ModuleInstance = struct {
         var store: *Store = &self.store;
         var module_def: *const ModuleDefinition = self.module_def;
         var allocator = self.allocator;
+
+        if (opts.argv) |argv| {
+            self.argv = try self.allocator.dupe([]const u8, argv);
+            for (argv) |arg, i| {
+                self.argv[i] = try self.allocator.dupe(u8, arg);
+            }
+        }
 
         for (module_def.imports.functions.items) |*func_import_def| {
             var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, opts.imports);
@@ -6410,6 +6576,21 @@ pub const ModuleInstance = struct {
         return error.AssertUnknownExport;
     }
 
+    pub fn memorySlice(self: *ModuleInstance, offset: usize, length: usize) []u8 {
+        const memory: *MemoryInstance = self.store.getMemory(0);
+
+        var data: []u8 = memory.mem.items[offset .. offset + length];
+        return data;
+    }
+
+    pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) void {
+        var bytes: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
+        std.mem.writeIntLittle(T, &bytes, value);
+
+        var destination = self.memorySlice(offset, bytes.len);
+        std.mem.copy(u8, destination, &bytes);
+    }
+
     fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
         const func: FunctionInstance = self.store.functions.items[func_instance_index];
         const func_def: FunctionDefinition = self.module_def.functions.items[func.def_index];
@@ -6457,7 +6638,7 @@ pub const ModuleInstance = struct {
                     return error.ValidationTypeMismatch;
                 }
 
-                data.callback(data.userdata, params, returns);
+                data.callback(data.userdata, self, params, returns);
 
                 // validate return types
                 for (returns) |val, i| {

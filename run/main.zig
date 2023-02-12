@@ -1,5 +1,6 @@
 const std = @import("std");
 const bytebox = @import("bytebox");
+const wasi = bytebox.wasi;
 
 const Val = bytebox.Val;
 const ValType = bytebox.ValType;
@@ -7,7 +8,9 @@ const ValType = bytebox.ValType;
 const CmdOpts = struct {
     print_help: bool = false,
     print_version: bool = false,
+    print_dump: bool = false,
     filename: ?[]const u8 = null,
+    wasm_argv: ?[][]const u8 = null,
     invoke: ?InvokeArgs = null,
 
     invalid_arg: ?[]const u8 = null,
@@ -19,18 +22,43 @@ const InvokeArgs = struct {
     args: [][]const u8,
 };
 
+fn isArgvOption(arg: []const u8) bool {
+    return arg.len > 0 and arg[0] == '-';
+}
+
 fn parseCmdOpts(args: [][]const u8) CmdOpts {
     var opts = CmdOpts{};
 
+    if (args.len < 2) {
+        opts.print_help = true;
+    }
+
     var arg_index: usize = 1;
     while (arg_index < args.len) {
-        if (arg_index == 1 and args[arg_index][0] != '-') {
-            opts.filename = args[arg_index];
-        } else if (args.len < 2 or std.mem.eql(u8, args[arg_index], "-h") or std.mem.eql(u8, args[arg_index], "--help")) {
+        var arg = args[arg_index];
+
+        if (arg_index == 1 and !isArgvOption(arg)) {
+            opts.filename = arg;
+            opts.wasm_argv = args[1..2];
+        } else if (arg_index == 2 and !isArgvOption(arg)) {
+            var wasm_argv_begin: usize = arg_index - 1; // include wasm filename
+            var wasm_argv_end: usize = arg_index;
+            while (wasm_argv_end + 1 < args.len and !isArgvOption(args[wasm_argv_end + 1])) {
+                wasm_argv_end += 1;
+            }
+            opts.wasm_argv = args[wasm_argv_begin..wasm_argv_end+1];
+            arg_index = wasm_argv_end;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             opts.print_help = true;
-        } else if (std.mem.eql(u8, args[arg_index], "-v") or std.mem.eql(u8, args[arg_index], "--version")) {
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             opts.print_version = true;
-        } else if (std.mem.eql(u8, args[arg_index], "-i") or std.mem.eql(u8, args[arg_index], "--invoke")) {
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dump")) {
+            if (opts.filename != null) {
+                opts.print_dump = true;
+            } else {
+                opts.missing_options = arg;
+            }
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--invoke")) {
             arg_index += 1;
             if (arg_index < args.len) {
                 opts.invoke = InvokeArgs{
@@ -38,11 +66,11 @@ fn parseCmdOpts(args: [][]const u8) CmdOpts {
                     .args = args[arg_index + 1 ..],
                 };
             } else {
-                opts.missing_options = args[arg_index];
+                opts.missing_options = arg;
             }
             arg_index = args.len;
         } else {
-            opts.invalid_arg = args[arg_index];
+            opts.invalid_arg = arg;
             break;
         }
 
@@ -56,23 +84,29 @@ const version_string = "bytebox v0.0.1";
 
 fn printHelp(args: [][]const u8) !void {
     const usage_string: []const u8 =
-        \\Usage: {s} <FILE> [OPTION]...
+        \\Usage: {s} <FILE> [WASM_ARGS]... [OPTION]...
         \\  
-        \\  Valid options:
+        \\  Options:
         \\
         \\    -h, --help
         \\      Print help information.
         \\
         \\    -v, --version
         \\      Print version information.
+        \\
+        \\    -d, --dump
+        \\      Prints the given module definition's imports and exports. Imports are qualified
+        \\      with the import module name.
         \\    
         \\    -i, --invoke <FUNCTION> [ARGS]...
         \\      Call an exported, named function with arguments. The arguments are automatically
         \\      translated from string inputs to the function's native types. If the conversion
         \\      is not possible, an error is printed and execution aborts.
         \\
+        \\
     ;
 
+    const stdout = std.io.getStdOut().writer();
     try stdout.print(usage_string, .{args[0]});
 }
 
@@ -95,7 +129,7 @@ pub fn main() !void {
         try stdout.print("{s}", .{version_string});
         return;
     } else if (opts.invalid_arg) |invalid_arg| {
-        try stderr.print("Invalid argument {s}.\n", .{invalid_arg});
+        try stderr.print("Invalid argument '{s}'.\n", .{invalid_arg});
         try printHelp(args);
         return;
     } else if (opts.missing_options) |missing_options| {
@@ -125,11 +159,24 @@ pub fn main() !void {
         return;
     };
 
+    if (opts.print_dump) {
+        var strbuf = std.ArrayList(u8).init(allocator);
+        try strbuf.ensureTotalCapacity(1024 * 16);
+        try module_def.dump(strbuf.writer());
+        try stdout.print("{s}", .{strbuf.items});
+        return;
+    }
+
     var module_instance = bytebox.ModuleInstance.init(&module_def, allocator);
     defer module_instance.deinit();
 
-    module_instance.instantiate(.{}) catch |e| {
-        std.log.err("Caught error {} instantiating module - invalid wasm.", .{e});
+    var instantiate_opts = bytebox.ModuleInstantiateOpts{
+        .imports = &[_]bytebox.ModuleImports{ try wasi.makeImports(allocator) },
+        .argv = opts.wasm_argv,
+    };
+
+    module_instance.instantiate(instantiate_opts) catch |e| {
+        std.log.err("Caught {} instantiating module - invalid wasm.", .{e});
         return;
     };
 
@@ -230,7 +277,7 @@ pub fn main() !void {
                 }
                 try std.fmt.format(writer, "\n", .{});
             }
-            std.log.info("{s}", .{strbuf.items});
+            try stdout.print("{s}\n", .{strbuf.items});
         }
     }
 }
