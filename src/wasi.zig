@@ -255,10 +255,7 @@ pub fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     if (array_length > 0) {
         var mem: []u8 = module.memorySlice(array_begin_offset, array_length);
-
-        var timestamp = @bitCast(u64, std.time.milliTimestamp());
-        var rng = std.rand.DefaultPrng.init(timestamp);
-        rng.fill(mem);
+        std.crypto.random.bytes(mem);
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
