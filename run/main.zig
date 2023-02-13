@@ -11,6 +11,7 @@ const CmdOpts = struct {
     print_dump: bool = false,
     filename: ?[]const u8 = null,
     wasm_argv: ?[][]const u8 = null,
+    wasm_env: ?[][]const u8 = null,
     invoke: ?InvokeArgs = null,
 
     invalid_arg: ?[]const u8 = null,
@@ -26,7 +27,7 @@ fn isArgvOption(arg: []const u8) bool {
     return arg.len > 0 and arg[0] == '-';
 }
 
-fn parseCmdOpts(args: [][]const u8) CmdOpts {
+fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8)) CmdOpts {
     var opts = CmdOpts{};
 
     if (args.len < 2) {
@@ -69,12 +70,19 @@ fn parseCmdOpts(args: [][]const u8) CmdOpts {
                 opts.missing_options = arg;
             }
             arg_index = args.len;
+        } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--env")) {
+            arg_index += 1;
+            env_buffer.appendAssumeCapacity(args[arg_index]);
         } else {
             opts.invalid_arg = arg;
             break;
         }
 
         arg_index += 1;
+    }
+
+    if (env_buffer.items.len > 0) {
+        opts.wasm_env = env_buffer.items;
     }
 
     return opts;
@@ -103,6 +111,11 @@ fn printHelp(args: [][]const u8) !void {
         \\      translated from string inputs to the function's native types. If the conversion
         \\      is not possible, an error is printed and execution aborts.
         \\
+        \\    -e, --env <ENVAR>
+        \\      Set an environment variable for the execution environment. Typically retrieved
+        \\      via the WASI API environ_sizes_get() and environ_get(). Multiple instances of
+        \\      of this flag is needed to pass multiple variables.
+        \\
         \\
     ;
 
@@ -117,7 +130,11 @@ pub fn main() !void {
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const opts: CmdOpts = parseCmdOpts(args);
+    var env_buffer = std.ArrayList([]const u8).init(allocator);
+    defer env_buffer.deinit();
+    try env_buffer.ensureTotalCapacity(4096); // 4096 vars should be enough for most insane script file scenarios.
+
+    const opts: CmdOpts = parseCmdOpts(args, &env_buffer);
 
     const stdout = std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
@@ -173,6 +190,7 @@ pub fn main() !void {
     var instantiate_opts = bytebox.ModuleInstantiateOpts{
         .imports = &[_]bytebox.ModuleImports{ try wasi.makeImports(allocator) },
         .argv = opts.wasm_argv,
+        .env = opts.wasm_env,
     };
 
     module_instance.instantiate(instantiate_opts) catch |e| {

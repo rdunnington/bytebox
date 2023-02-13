@@ -6109,6 +6109,7 @@ pub const ModuleInstantiateOpts = struct {
     /// imports is not owned by ModuleInstance - caller must ensure its memory outlives ModuleInstance
     imports: ?[]const ModuleImports = null,
     argv: ?[][]const u8 = null,
+    env: ?[][]const u8 = null,
 };
 
 pub const ModuleInstance = struct {
@@ -6119,6 +6120,7 @@ pub const ModuleInstance = struct {
 
     is_instantiated: bool = false,
     argv: [][]const u8 = &[_][]u8{},
+    env: [][]const u8 = &[_][]u8{},
 
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
@@ -6138,6 +6140,13 @@ pub const ModuleInstance = struct {
                 self.allocator.free(arg);
             }
             self.allocator.free(self.argv);
+        }
+
+        if (self.env.len > 0) {
+            for (self.env) |e| {
+                self.allocator.free(e);
+            }
+            self.allocator.free(self.env);
         }
     }
 
@@ -6266,6 +6275,13 @@ pub const ModuleInstance = struct {
             self.argv = try self.allocator.dupe([]const u8, argv);
             for (argv) |arg, i| {
                 self.argv[i] = try self.allocator.dupe(u8, arg);
+            }
+        }
+
+        if (opts.env) |env| {
+            self.env = try self.allocator.dupe([]const u8, env);
+            for (env) |e, i| {
+                self.env[i] = try self.allocator.dupe(u8, e);
             }
         }
 

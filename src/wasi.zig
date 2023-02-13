@@ -95,6 +95,55 @@ const Errno = enum(u8) {
     }
 };
 
+const Helpers = struct {
+    fn strings_sizes_get(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
+        std.debug.assert(params.len == 2);
+        std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+        std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+        std.debug.assert(returns.len == 1);
+
+        const strings_count: u32 = @intCast(u32, strings.len);
+        var strings_length: u32 = 0;
+        for (strings) |string| {
+            strings_length += @intCast(u32, string.len) + 1; // +1 for required null terminator of each string
+        }
+
+        const dest_string_count = @bitCast(u32, params[0].I32);
+        const dest_string_length = @bitCast(u32, params[1].I32);
+
+        module.memoryWriteInt(u32, strings_count, dest_string_count);
+        module.memoryWriteInt(u32, strings_length, dest_string_length);
+
+        returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
+    }
+
+    fn strings_get(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
+        std.debug.assert(params.len == 2);
+        std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+        std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+        std.debug.assert(returns.len == 1);
+
+        const dest_string_ptrs_begin = @bitCast(u32, params[0].I32);
+        const dest_string_mem_begin = @bitCast(u32, params[1].I32);
+
+        var dest_string_ptrs: u32 = dest_string_ptrs_begin;
+        var dest_string_strings: u32 = dest_string_mem_begin;
+
+        for (strings) |string| {
+            module.memoryWriteInt(u32, dest_string_strings, dest_string_ptrs);
+
+            var mem: []u8 = module.memorySlice(dest_string_strings, string.len + 1);
+            std.mem.copy(u8, mem[0..string.len], string);
+            mem[string.len] = 0; // null terminator
+
+            dest_string_ptrs += @sizeOf(u32);
+            dest_string_strings += @intCast(u32, string.len + 1);
+        }
+
+        returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
+    }
+};
+
 fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 1);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
@@ -105,50 +154,19 @@ fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, retur
 }
 
 fn wasi_args_sizes_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
-
-    const args_count: u32 = @intCast(u32, module.argv.len);
-    var args_length: u32 = 0;
-    for (module.argv) |arg| {
-        args_length += @intCast(u32, arg.len) + 1; // +1 for required null terminator of each string
-    }
-
-    const dest_arg_count = @bitCast(u32, params[0].I32);
-    const dest_arg_length = @bitCast(u32, params[1].I32);
-
-    module.memoryWriteInt(u32, args_count, dest_arg_count);
-    module.memoryWriteInt(u32, args_length, dest_arg_length);
-
-    returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
+    Helpers.strings_sizes_get(module, module.argv, params, returns);
 }
 
 fn wasi_args_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
+    Helpers.strings_get(module, module.argv, params, returns);
+}
 
-    const dest_arg_ptrs_begin = @bitCast(u32, params[0].I32);
-    const dest_arg_strings_begin = @bitCast(u32, params[1].I32);
+fn wasi_environ_sizes_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    Helpers.strings_sizes_get(module, module.env, params, returns);
+}
 
-    var dest_arg_ptrs: u32 = dest_arg_ptrs_begin;
-    var dest_arg_strings: u32 = dest_arg_strings_begin;
-
-    for (module.argv) |arg| {
-        module.memoryWriteInt(u32, dest_arg_strings, dest_arg_ptrs);
-
-        var mem: []u8 = module.memorySlice(dest_arg_strings, arg.len + 1);
-        std.mem.copy(u8, mem[0..arg.len], arg);
-        mem[arg.len] = 0; // null terminator
-
-        dest_arg_ptrs += @sizeOf(u32);
-        dest_arg_strings += @intCast(u32, arg.len + 1);
-    }
-
-    returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
+fn wasi_environ_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    Helpers.strings_get(module, module.env, params, returns);
 }
 
 fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -253,6 +271,8 @@ pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
 
     try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
     try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
+    try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
+    try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
     try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
     try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
     try imports.addHostFunction("proc_exit", null, &[_]ValType{.I32}, void_returns, wasi_proc_exit);
