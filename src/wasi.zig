@@ -91,7 +91,7 @@ const Errno = enum(u8) {
         return switch (err) {
             error.OutOfMemory => .NOMEM,
             else => .INVAL,
-        }; 
+        };
     }
 };
 
@@ -122,7 +122,7 @@ fn wasi_args_sizes_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
     module.memoryWriteInt(u32, args_count, dest_arg_count);
     module.memoryWriteInt(u32, args_length, dest_arg_length);
 
-    returns[0] = Val{.I32 = @enumToInt(Errno.SUCCESS)};
+    returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
 }
 
 fn wasi_args_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -147,7 +147,7 @@ fn wasi_args_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, r
         dest_arg_strings += arg_len;
     }
 
-    returns[0] = Val{.I32 = @enumToInt(Errno.SUCCESS)};
+    returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
 }
 
 fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -220,7 +220,29 @@ fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, r
 
     // std.debug.print("errno: {}\n", .{errno});
 
-    returns[0] = Val{.I32 = @enumToInt(errno)};
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+pub fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 2);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    const array_begin_offset: u32 = @bitCast(u32, params[0].I32);
+    const array_length: u32 = @bitCast(u32, params[1].I32);
+
+    var errno = Errno.SUCCESS;
+
+    if (array_length > 0) {
+        var mem: []u8 = module.memorySlice(array_begin_offset, array_length);
+
+        var timestamp = @bitCast(u64, std.time.milliTimestamp());
+        var rng = std.rand.DefaultPrng.init(timestamp);
+        rng.fill(mem);
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
@@ -228,9 +250,10 @@ pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
 
     const void_returns = &[0]ValType{};
 
-    try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_args_sizes_get);
-    try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_args_get);
-    try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_write);
+    try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
+    try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
+    try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
+    try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
     try imports.addHostFunction("proc_exit", null, &[_]ValType{.I32}, void_returns, wasi_proc_exit);
 
     return imports;
