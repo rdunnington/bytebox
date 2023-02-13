@@ -95,6 +95,15 @@ const Errno = enum(u8) {
     }
 };
 
+const WindowsApi = struct {
+    const windows = std.os.windows;
+    const BOOL = windows.BOOL;
+    const DWORD = windows.DWORD;
+    const WINAPI = windows.WINAPI;
+
+    extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
+};
+
 const Helpers = struct {
     fn strings_sizes_get(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
         std.debug.assert(params.len == 2);
@@ -167,6 +176,85 @@ fn wasi_environ_sizes_get(_: ?*anyopaque, module: *ModuleInstance, params: []con
 
 fn wasi_environ_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     Helpers.strings_get(module, module.env, params, returns);
+}
+
+fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 2);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    const wasi_clockid = params[0].I32;
+    const timestamp_mem_begin = @bitCast(u32, params[1].I32);
+
+    var system_clockid: ?i32 = switch (wasi_clockid) {
+        std.os.wasi.CLOCK.REALTIME => if (builtin.os.tag != .windows) std.os.system.CLOCK.REALTIME else std.os.wasi.CLOCK.REALTIME,
+        std.os.wasi.CLOCK.MONOTONIC => if (builtin.os.tag != .windows) std.os.system.CLOCK.MONOTONIC else std.os.wasi.CLOCK.REALTIME,
+        std.os.wasi.CLOCK.PROCESS_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.PROCESS_CPUTIME_ID else std.os.wasi.CLOCK.REALTIME,
+        std.os.wasi.CLOCK.THREAD_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.THREAD_CPUTIME_ID else std.os.wasi.CLOCK.REALTIME,
+        else => null,
+    };
+
+    var errno = Errno.SUCCESS;
+    if (system_clockid) |id| {
+        var freqency_ns: u64 = 0;
+        if (builtin.os.tag == .windows) {
+            // Follow the mingw pattern since clock_getres() isn't linked in libc for windows
+            if (id == std.os.wasi.CLOCK.REALTIME or id == std.os.wasi.CLOCK.MONOTONIC) {
+                const pow_10_9: u64 = 1000000000;
+                const tick_frequency: u64 = std.os.windows.QueryPerformanceFrequency();
+                freqency_ns = (pow_10_9 + (tick_frequency >> 1)) / tick_frequency;
+                if (freqency_ns < 1) {
+                    freqency_ns = 1;
+                }
+            } else {
+                var timeAdjustment: WindowsApi.DWORD = undefined;
+                var timeIncrement: WindowsApi.DWORD = undefined;
+                var timeAdjustmentDisabled: WindowsApi.BOOL = undefined;
+                if (WindowsApi.GetSystemTimeAdjustment(&timeAdjustment, &timeIncrement, &timeAdjustmentDisabled) == std.os.windows.TRUE) {
+                    freqency_ns = timeIncrement * 100;
+                } else {
+                    errno = Errno.INVAL;
+                }
+            }
+        } else {
+            var ts: std.os.system.timespec = undefined;
+            if (std.os.clock_getres(id, &ts)) {
+                freqency_ns = @intCast(u64, ts.tv_nsec);
+            } else |_| {
+                errno = Errno.INVAL;
+            }
+        }
+
+        module.memoryWriteInt(u64, freqency_ns, timestamp_mem_begin);
+    } else {
+        errno = Errno.INVAL;
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 4);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[3]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_close(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 1);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -270,7 +358,10 @@ pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
     try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
     try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
     try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
+    try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_clock_res_get);
     try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
+    try imports.addHostFunction("fd_seek", null, &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
+    try imports.addHostFunction("fd_close", null, &[_]ValType{ .I32, }, &[_]ValType{.I32}, wasi_fd_close);
     try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
     try imports.addHostFunction("proc_exit", null, &[_]ValType{.I32}, void_returns, wasi_proc_exit);
 
