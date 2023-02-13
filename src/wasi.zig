@@ -134,17 +134,18 @@ fn wasi_args_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, r
     const dest_arg_ptrs_begin = @bitCast(u32, params[0].I32);
     const dest_arg_strings_begin = @bitCast(u32, params[1].I32);
 
-    var dest_arg_ptrs = dest_arg_ptrs_begin;
-    var dest_arg_strings = dest_arg_strings_begin;
+    var dest_arg_ptrs: u32 = dest_arg_ptrs_begin;
+    var dest_arg_strings: u32 = dest_arg_strings_begin;
 
     for (module.argv) |arg| {
-        const arg_len = @intCast(u32, arg.len);
-        // module.memoryWrite(dest_arg_ptrs, std.mem.asBytes(&dest_arg_strings));
-        // module.memoryWrite(dest_arg_strings, arg);
-        // module.memoryWrite(dest_arg_strings + arg_len, &[_]u8{0}); // null terminator
+        module.memoryWriteInt(u32, dest_arg_strings, dest_arg_ptrs);
+
+        var mem: []u8 = module.memorySlice(dest_arg_strings, arg.len + 1);
+        std.mem.copy(u8, mem[0..arg.len], arg);
+        mem[arg.len] = 0; // null terminator
 
         dest_arg_ptrs += @sizeOf(u32);
-        dest_arg_strings += arg_len;
+        dest_arg_strings += @intCast(u32, arg.len + 1);
     }
 
     returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
