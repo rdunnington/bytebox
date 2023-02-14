@@ -198,105 +198,108 @@ pub fn main() !void {
         return;
     };
 
-    if (opts.invoke) |invoke| {
-        const func_info: ?bytebox.FunctionExportInfo = module_def.getFuncExportInfo(invoke.funcname);
-        if (func_info == null) {
-            std.log.err("Failed to find function '{s}' - either it doesn't exist or is not a public export.", .{invoke.funcname});
-            return;
+    const invoke_funcname: []const u8 = if (opts.invoke) |invoke| invoke.funcname else "_start";
+    const invoke_args: [][]const u8 = if (opts.invoke) |invoke| invoke.args else &[_][]u8{};
+
+    const func_info: ?bytebox.FunctionExportInfo = module_def.getFuncExportInfo(invoke_funcname);
+    if (func_info == null) {
+        // don't log an error if the user didn't explicitly try to invoke a function
+        if (opts.invoke != null) {
+            std.log.err("Failed to find function '{s}' - either it doesn't exist or is not a public export.", .{invoke_funcname});
         }
+        return;
+    }
 
-        const num_params: usize = invoke.args.len;
-        if (func_info.?.params.len != num_params) {
-            var strbuf = std.ArrayList(u8).init(allocator);
-            defer strbuf.deinit();
-            try writeSignature(&strbuf, &func_info.?);
-            std.log.err("Specified {} params but expected {}. The signature of '{s}' is:\n{s}", .{
-                num_params,
-                func_info.?.params.len,
-                invoke.funcname,
-                strbuf.items,
-            });
-            return;
-        }
+    const num_params: usize = invoke_args.len;
+    if (func_info.?.params.len != num_params) {
+        var strbuf = std.ArrayList(u8).init(allocator);
+        defer strbuf.deinit();
+        try writeSignature(&strbuf, &func_info.?);
+        std.log.err("Specified {} params but expected {}. The signature of '{s}' is:\n{s}", .{
+            num_params,
+            func_info.?.params.len,
+            invoke_funcname,
+            strbuf.items,
+        });
+        return;
+    }
 
-        const wasm_args: [][]const u8 = invoke.args;
-        std.debug.assert(wasm_args.len == num_params);
+    std.debug.assert(invoke_args.len == num_params);
 
-        var params = std.ArrayList(bytebox.Val).init(allocator);
-        defer params.deinit();
-        try params.resize(wasm_args.len);
-        for (func_info.?.params) |valtype, i| {
-            const arg: []const u8 = wasm_args[i];
-            switch (valtype) {
-                .I32 => {
-                    var parsed: i32 = std.fmt.parseInt(i32, arg, 0) catch |e| {
-                        std.log.err("Failed to parse arg at index {} ('{s}') as an i32: {}", .{ i, arg, e });
-                        return;
-                    };
-                    params.items[i] = Val{ .I32 = parsed };
-                },
-                .I64 => {
-                    var parsed: i64 = std.fmt.parseInt(i64, arg, 0) catch |e| {
-                        std.log.err("Failed to parse arg at index {} ('{s}') as an i64: {}", .{ i, arg, e });
-                        return;
-                    };
-                    params.items[i] = Val{ .I64 = parsed };
-                },
-                .F32 => {
-                    var parsed: f32 = std.fmt.parseFloat(f32, arg) catch |e| {
-                        std.log.err("Failed to parse arg at index {} ('{s}') as a f32: {}", .{ i, arg, e });
-                        return;
-                    };
-                    params.items[i] = Val{ .F32 = parsed };
-                },
-                .F64 => {
-                    var parsed: f64 = std.fmt.parseFloat(f64, arg) catch |e| {
-                        std.log.err("Failed to parse arg at index {} ('{s}') as a f64: {}", .{ i, arg, e });
-                        return;
-                    };
-                    params.items[i] = Val{ .F64 = parsed };
-                },
-                .FuncRef => {
-                    std.log.err("Param at index {} is a funcref, making this function only invokeable from code.", .{i});
+    var params = std.ArrayList(bytebox.Val).init(allocator);
+    defer params.deinit();
+    try params.resize(invoke_args.len);
+    for (func_info.?.params) |valtype, i| {
+        const arg: []const u8 = invoke_args[i];
+        switch (valtype) {
+            .I32 => {
+                var parsed: i32 = std.fmt.parseInt(i32, arg, 0) catch |e| {
+                    std.log.err("Failed to parse arg at index {} ('{s}') as an i32: {}", .{ i, arg, e });
                     return;
-                },
-                .ExternRef => {
-                    std.log.err("Param at index {} is an externref, making this function only invokeable from code.", .{i});
+                };
+                params.items[i] = Val{ .I32 = parsed };
+            },
+            .I64 => {
+                var parsed: i64 = std.fmt.parseInt(i64, arg, 0) catch |e| {
+                    std.log.err("Failed to parse arg at index {} ('{s}') as an i64: {}", .{ i, arg, e });
                     return;
-                },
-            }
+                };
+                params.items[i] = Val{ .I64 = parsed };
+            },
+            .F32 => {
+                var parsed: f32 = std.fmt.parseFloat(f32, arg) catch |e| {
+                    std.log.err("Failed to parse arg at index {} ('{s}') as a f32: {}", .{ i, arg, e });
+                    return;
+                };
+                params.items[i] = Val{ .F32 = parsed };
+            },
+            .F64 => {
+                var parsed: f64 = std.fmt.parseFloat(f64, arg) catch |e| {
+                    std.log.err("Failed to parse arg at index {} ('{s}') as a f64: {}", .{ i, arg, e });
+                    return;
+                };
+                params.items[i] = Val{ .F64 = parsed };
+            },
+            .FuncRef => {
+                std.log.err("Param at index {} is a funcref, making this function only invokeable from code.", .{i});
+                return;
+            },
+            .ExternRef => {
+                std.log.err("Param at index {} is an externref, making this function only invokeable from code.", .{i});
+                return;
+            },
         }
+    }
 
-        var returns = std.ArrayList(bytebox.Val).init(allocator);
-        try returns.resize(func_info.?.returns.len);
+    var returns = std.ArrayList(bytebox.Val).init(allocator);
+    try returns.resize(func_info.?.returns.len);
 
-        module_instance.invoke(invoke.funcname, params.items, returns.items) catch |e| {
-            std.log.err("Caught error {} during function invoke. The wasm program may have a bug.", .{e});
-            return;
-        };
+    module_instance.invoke(invoke_funcname, params.items, returns.items) catch |e| {
+        std.log.err("Caught error {} during function invoke. The wasm program may have a bug.", .{e});
+        return;
+    };
 
-        {
-            var strbuf = std.ArrayList(u8).init(allocator);
-            defer strbuf.deinit();
-            var writer = strbuf.writer();
+    {
+        var strbuf = std.ArrayList(u8).init(allocator);
+        defer strbuf.deinit();
+        var writer = strbuf.writer();
 
-            try std.fmt.format(writer, "'{s}' completed with {} returns", .{ invoke.funcname, returns.items.len });
-            if (returns.items.len > 0) {
-                try std.fmt.format(writer, ":\n", .{});
-                for (returns.items) |val| {
-                    switch (val) {
-                        .I32 => |v| try std.fmt.format(writer, "  {} (i32)\n", .{v}),
-                        .I64 => |v| try std.fmt.format(writer, "  {} (i64)\n", .{v}),
-                        .F32 => |v| try std.fmt.format(writer, "  {} (f32)\n", .{v}),
-                        .F64 => |v| try std.fmt.format(writer, "  {} (f64)\n", .{v}),
-                        .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
-                        .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
-                    }
+        try std.fmt.format(writer, "'{s}' completed with {} returns", .{ invoke_funcname, returns.items.len });
+        if (returns.items.len > 0) {
+            try std.fmt.format(writer, ":\n", .{});
+            for (returns.items) |val| {
+                switch (val) {
+                    .I32 => |v| try std.fmt.format(writer, "  {} (i32)\n", .{v}),
+                    .I64 => |v| try std.fmt.format(writer, "  {} (i64)\n", .{v}),
+                    .F32 => |v| try std.fmt.format(writer, "  {} (f32)\n", .{v}),
+                    .F64 => |v| try std.fmt.format(writer, "  {} (f64)\n", .{v}),
+                    .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
+                    .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
                 }
-                try std.fmt.format(writer, "\n", .{});
             }
-            try stdout.print("{s}\n", .{strbuf.items});
+            try std.fmt.format(writer, "\n", .{});
         }
+        try stdout.print("{s}\n", .{strbuf.items});
     }
 }
 
