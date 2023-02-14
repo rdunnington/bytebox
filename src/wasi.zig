@@ -343,10 +343,55 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_fdstat_get(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 2);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_fdstat_set_flags(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 2);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_prestat_get(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 2);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_prestat_dir_name(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 3);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_read(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 4);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
     std.debug.assert(std.meta.activeTag(params[2]) == .I32);
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
@@ -356,9 +401,23 @@ fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+
 fn wasi_fd_close(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 1);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 4);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
 
     // TODO
@@ -439,7 +498,24 @@ fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, r
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-pub fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_open(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 9);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[3]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[4]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[5]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[6]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[7]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[8]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 2);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
@@ -463,17 +539,27 @@ pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
 
     const void_returns = &[0]ValType{};
 
-    try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
-    try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
-    try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
-    try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
-    try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_clock_res_get);
-    try imports.addHostFunction("clock_time_get", null, &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get);
-    try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
-    try imports.addHostFunction("fd_seek", null, &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
-    try imports.addHostFunction("fd_close", null, &[_]ValType{ .I32, }, &[_]ValType{.I32}, wasi_fd_close);
-    try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
-    try imports.addHostFunction("proc_exit", null, &[_]ValType{.I32}, void_returns, wasi_proc_exit);
+    try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_args_sizes_get);
+    try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_args_get);
+    try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_environ_sizes_get);
+    try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_environ_get);
+    try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_clock_res_get);
+    try imports.addHostFunction("clock_time_get", null, &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{ .I32 }, wasi_clock_time_get);
+
+    try imports.addHostFunction("fd_fdstat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_fdstat_get);
+    try imports.addHostFunction("fd_fdstat_set_flags", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_fdstat_set_flags);
+    try imports.addHostFunction("fd_prestat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_prestat_get);
+    try imports.addHostFunction("fd_prestat_dir_name", null, &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_prestat_dir_name);
+    try imports.addHostFunction("fd_read", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_read);
+
+    try imports.addHostFunction("fd_close", null, &[_]ValType{ .I32, }, &[_]ValType{ .I32 }, wasi_fd_close);
+    try imports.addHostFunction("fd_seek", null, &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_seek);
+    try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_write);
+
+    try imports.addHostFunction("path_open", null, &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_path_open);
+
+    try imports.addHostFunction("proc_exit", null, &[_]ValType{ .I32 }, void_returns, wasi_proc_exit);
+    try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_random_get);
 
     return imports;
 }
