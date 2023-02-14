@@ -97,11 +97,23 @@ const Errno = enum(u8) {
 
 const WindowsApi = struct {
     const windows = std.os.windows;
+
     const BOOL = windows.BOOL;
     const DWORD = windows.DWORD;
     const WINAPI = windows.WINAPI;
+    const HANDLE = windows.HANDLE;
+    const FILETIME = windows.FILETIME;
+
+    const CLOCK = struct {
+        const REALTIME = 0;
+        const MONOTONIC = 1;
+        const PROCESS_CPUTIME_ID = 2;
+        const THREAD_CPUTIME_ID = 3;
+    };
 
     extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
+    extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(WINAPI) BOOL;
+    const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
 
 const Helpers = struct {
@@ -151,6 +163,22 @@ const Helpers = struct {
 
         returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
     }
+
+    fn convert_clockid(wasi_clockid: i32) ?i32 {
+        var system_clockid: ?i32 = switch (wasi_clockid) {
+            std.os.wasi.CLOCK.REALTIME => if (builtin.os.tag != .windows) std.os.system.CLOCK.REALTIME else WindowsApi.CLOCK.REALTIME,
+            std.os.wasi.CLOCK.MONOTONIC => if (builtin.os.tag != .windows) std.os.system.CLOCK.MONOTONIC else WindowsApi.CLOCK.MONOTONIC,
+            std.os.wasi.CLOCK.PROCESS_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.PROCESS_CPUTIME_ID else WindowsApi.CLOCK.PROCESS_CPUTIME_ID,
+            std.os.wasi.CLOCK.THREAD_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.THREAD_CPUTIME_ID else WindowsApi.CLOCK.THREAD_CPUTIME_ID,
+            else => null,
+        };
+        return system_clockid;
+    }
+
+    fn filetimeToU64(ft: std.os.windows.FILETIME) u64 {
+        const v: u64 = (@intCast(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        return v;
+    }
 };
 
 fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -187,23 +215,17 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
     const wasi_clockid = params[0].I32;
     const timestamp_mem_begin = @bitCast(u32, params[1].I32);
 
-    var system_clockid: ?i32 = switch (wasi_clockid) {
-        std.os.wasi.CLOCK.REALTIME => if (builtin.os.tag != .windows) std.os.system.CLOCK.REALTIME else std.os.wasi.CLOCK.REALTIME,
-        std.os.wasi.CLOCK.MONOTONIC => if (builtin.os.tag != .windows) std.os.system.CLOCK.MONOTONIC else std.os.wasi.CLOCK.REALTIME,
-        std.os.wasi.CLOCK.PROCESS_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.PROCESS_CPUTIME_ID else std.os.wasi.CLOCK.REALTIME,
-        std.os.wasi.CLOCK.THREAD_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.THREAD_CPUTIME_ID else std.os.wasi.CLOCK.REALTIME,
-        else => null,
-    };
+    const system_clockid: ?i32 = Helpers.convert_clockid(wasi_clockid);
 
     var errno = Errno.SUCCESS;
-    if (system_clockid) |id| {
+    if (system_clockid) |clockid| {
         var freqency_ns: u64 = 0;
         if (builtin.os.tag == .windows) {
             // Follow the mingw pattern since clock_getres() isn't linked in libc for windows
-            if (id == std.os.wasi.CLOCK.REALTIME or id == std.os.wasi.CLOCK.MONOTONIC) {
-                const pow_10_9: u64 = 1000000000;
+            if (clockid == std.os.wasi.CLOCK.REALTIME or clockid == std.os.wasi.CLOCK.MONOTONIC) {
+                const ns_per_second: u64 = 1000000000;
                 const tick_frequency: u64 = std.os.windows.QueryPerformanceFrequency();
-                freqency_ns = (pow_10_9 + (tick_frequency >> 1)) / tick_frequency;
+                freqency_ns = (ns_per_second + (tick_frequency >> 1)) / tick_frequency;
                 if (freqency_ns < 1) {
                     freqency_ns = 1;
                 }
@@ -219,7 +241,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
             }
         } else {
             var ts: std.os.system.timespec = undefined;
-            if (std.os.clock_getres(id, &ts)) {
+            if (std.os.clock_getres(clockid, &ts)) {
                 freqency_ns = @intCast(u64, ts.tv_nsec);
             } else |_| {
                 errno = Errno.INVAL;
@@ -227,6 +249,93 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
         }
 
         module.memoryWriteInt(u64, freqency_ns, timestamp_mem_begin);
+    } else {
+        errno = Errno.INVAL;
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 3);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    const wasi_clockid = params[0].I32;
+    //const precision = params[1].I64; // unused
+    const timestamp_mem_begin = @bitCast(u32, params[2].I32);
+
+    const system_clockid: ?i32 = Helpers.convert_clockid(wasi_clockid);
+
+    var errno = Errno.SUCCESS;
+    if (system_clockid) |clockid| {
+        const ns_per_second = 1000000000;
+        var timestamp_ns: u64 = 0;
+
+        // zig's stdlib has support for realtime clock on windows
+        if (builtin.os.tag == .windows) {
+            switch (clockid) {
+                std.os.wasi.CLOCK.REALTIME => {
+                    var ft: WindowsApi.FILETIME = undefined;
+                    std.os.windows.kernel32.GetSystemTimeAsFileTime(&ft);
+
+                    // Windows epoch starts on Jan 1, 1601. Unix epoch starts on Jan 1, 1970.
+                    const win_epoch_to_unix_epoch_100ns: u64 = 116444736000000000;
+                    const timestamp_windows_100ns: u64 = Helpers.filetimeToU64(ft);
+
+                    const timestamp_100ns: u64 = timestamp_windows_100ns - win_epoch_to_unix_epoch_100ns;
+                    timestamp_ns = timestamp_100ns * 100;
+                },
+                std.os.wasi.CLOCK.MONOTONIC => {
+                    const ticks: u64 = std.os.windows.QueryPerformanceCounter();
+                    const ticks_per_second: u64 = std.os.windows.QueryPerformanceFrequency();
+
+                    // break up into 2 calculations to avoid overflow
+                    const timestamp_secs_part: u64 = ticks / ticks_per_second;
+                    const timestamp_ns_part: u64 = ((ticks % ticks_per_second) * ns_per_second + (ticks_per_second >> 1)) / ticks_per_second;
+
+                    timestamp_ns = timestamp_secs_part + timestamp_ns_part;
+                },
+                std.os.wasi.CLOCK.PROCESS_CPUTIME_ID => {
+                    var createTime: WindowsApi.FILETIME = undefined;
+                    var exitTime: WindowsApi.FILETIME = undefined;
+                    var kernelTime: WindowsApi.FILETIME = undefined;
+                    var userTime: WindowsApi.FILETIME = undefined;
+                    if (std.os.windows.kernel32.GetProcessTimes(WindowsApi.GetCurrentProcess(), &createTime, &exitTime, &kernelTime, &userTime) == std.os.windows.TRUE) {
+                        const timestamp_100ns: u64 = Helpers.filetimeToU64(kernelTime) + Helpers.filetimeToU64(userTime);
+                        timestamp_ns = timestamp_100ns * 100;
+                    } else {
+                        errno = Errno.INVAL;
+                    }
+                },
+                std.os.wasi.CLOCK.THREAD_CPUTIME_ID => {
+                    var createTime: WindowsApi.FILETIME = undefined;
+                    var exitTime: WindowsApi.FILETIME = undefined;
+                    var kernelTime: WindowsApi.FILETIME = undefined;
+                    var userTime: WindowsApi.FILETIME = undefined;
+                    if (WindowsApi.GetThreadTimes(WindowsApi.GetCurrentProcess(), &createTime, &exitTime, &kernelTime, &userTime) == std.os.windows.TRUE) {
+                        const timestamp_100ns: u64 = Helpers.filetimeToU64(kernelTime) + Helpers.filetimeToU64(userTime);
+                        timestamp_ns = timestamp_100ns * 100;
+                    } else {
+                        errno = Errno.INVAL;
+                    }
+                },
+                else => unreachable,
+            }
+        } else {
+            var ts: std.os.system.timespec = undefined;
+            if (std.os.clock_gettime(clockid, &ts)) {
+                const sec_part = @intCast(u64, ts.tv_sec);
+                const nsec_part = @intCast(u64, ts.tv_nsec);
+                timestamp_ns = (sec_part * ns_per_second) + nsec_part;
+            } else |_| {
+                errno = Errno.INVAL;
+            }
+        }
+
+        module.memoryWriteInt(u64, timestamp_ns, timestamp_mem_begin);
     } else {
         errno = Errno.INVAL;
     }
@@ -359,6 +468,7 @@ pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
     try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
     try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
     try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_clock_res_get);
+    try imports.addHostFunction("clock_time_get", null, &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get);
     try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
     try imports.addHostFunction("fd_seek", null, &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
     try imports.addHostFunction("fd_close", null, &[_]ValType{ .I32, }, &[_]ValType{.I32}, wasi_fd_close);
