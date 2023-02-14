@@ -343,6 +343,16 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_fd_datasync(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 1);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    // TODO
+    var errno = Errno.SUCCESS;
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_fd_fdstat_get(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 2);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
@@ -546,6 +556,7 @@ pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
     try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_clock_res_get);
     try imports.addHostFunction("clock_time_get", null, &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{ .I32 }, wasi_clock_time_get);
 
+    try imports.addHostFunction("fd_datasync", null, &[_]ValType{ .I32,}, &[_]ValType{ .I32 }, wasi_fd_datasync);
     try imports.addHostFunction("fd_fdstat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_fdstat_get);
     try imports.addHostFunction("fd_fdstat_set_flags", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_fdstat_set_flags);
     try imports.addHostFunction("fd_prestat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_prestat_get);
