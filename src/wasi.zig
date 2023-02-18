@@ -90,9 +90,78 @@ const Errno = enum(u8) {
     fn translateError(err: anyerror) Errno {
         return switch (err) {
             error.OutOfMemory => .NOMEM,
+            error.AccessDenied => .ACCES,
+            error.FileTooBig => .FBIG,
+            error.IsDir => .ISDIR,
+            error.SymLinkLoop => .LOOP,
+            error.ProcessFdQuotaExceeded => .MFILE,
+            error.NameTooLong => .NAMETOOLONG,
+            error.SystemFdQuotaExceeded => .NFILE,
+            error.NoDevice => .NODEV,
+            error.FileNotFound => .NOENT,
+            error.SystemResources => .NOMEM,
+            error.NoSpaceLeft => .NOSPC,
+            error.NotDir => .NOTDIR,
+            error.PathAlreadyExists => .EXIST,
+            error.DeviceBusy => .BUSY,
+            error.FileLocksNotSupported => .NOTSUP,
+            error.WouldBlock => .AGAIN,
+            error.FileBusy => .TXTBSY,
             else => .INVAL,
         };
     }
+};
+
+const WasiLookupFlags = packed struct {
+    symlink_follow: bool,
+};
+
+const WasiOpenFlags = packed struct {
+    creat: bool,
+    directory: bool,
+    excl: bool,
+    trunc: bool,
+};
+
+const WasiRights = packed struct {
+    fd_datasync: bool,
+    fd_read: bool,
+    fd_seek: bool,
+    fd_fdstat_set_flags: bool,
+    fd_sync: bool,
+    fd_tell: bool,
+    fd_write: bool,
+    fd_advise: bool,
+    fd_allocate: bool,
+    path_create_directory: bool,
+    path_create_file: bool,
+    path_link_source: bool,
+    path_link_target: bool,
+    path_open: bool,
+    fd_readdir: bool,
+    path_readlink: bool,
+    path_rename_source: bool,
+    path_rename_target: bool,
+    path_filestat_get: bool,
+    path_filestat_set_size: bool,
+    path_filestat_set_times: bool,
+    fd_filestat_get: bool,
+    fd_filestat_set_size: bool,
+    fd_filestat_set_times: bool,
+    path_symlink: bool,
+    path_remove_directory: bool,
+    path_unlink_file: bool,
+    poll_fd_readwrite: bool,
+    sock_shutdown: bool,
+    sock_accept: bool,
+};
+
+const WasiFdFlags = packed struct {
+    append: bool,
+    dsync: bool,
+    nonblock: bool,
+    rsync: bool,
+    sync: bool,
 };
 
 const WindowsApi = struct {
@@ -178,6 +247,73 @@ const Helpers = struct {
     fn filetimeToU64(ft: std.os.windows.FILETIME) u64 {
         const v: u64 = (@intCast(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
         return v;
+    }
+
+    fn decodeLookupFlags(value: i32) WasiLookupFlags {
+        return WasiLookupFlags{
+            .symlink_follow = (value & 0x01),
+        };
+    }
+
+    fn decodeOpenFlags(value: i32) WasiOpenFlags {
+        return WasiOpenFlags{
+            .creat = (value & 0x01) != 0,
+            .directory = (value & 0x02) != 0,
+            .excl = (value & 0x04) != 0,
+            .trunc = (value & 0x08) != 0,
+        };
+    }
+
+    fn decodeRights(value: i64) WasiRights {
+        return WasiRights{
+            .fd_datasync = (value & 0x0001) != 0,
+            .fd_read = (value & 0x0002) != 0,
+            .fd_seek = (value & 0x0004) != 0,
+            .fd_fdstat_set_flags = (value & 0x0008) != 0,
+
+            .fd_sync = (value & 0x0010) != 0,
+            .fd_tell = (value & 0x0020) != 0,
+            .fd_write = (value & 0x0040) != 0,
+            .fd_advise = (value & 0x0080) != 0,
+
+            .fd_allocate = (value & 0x0100) != 0,
+            .path_create_directory = (value & 0x0200) != 0,
+            .path_create_file = (value & 0x0400) != 0,
+            .path_link_source = (value & 0x0800) != 0,
+
+            .path_link_target = (value & 0x1000) != 0,
+            .path_open = (value & 0x2000) != 0,
+            .fd_readdir = (value & 0x4000) != 0,
+            .path_readlink = (value & 0x8000) != 0,
+
+            .path_rename_source = (value & 0x10000) != 0,
+            .path_rename_target = (value & 0x20000) != 0,
+            .path_filestat_get = (value & 0x40000) != 0,
+            .path_filestat_set_size = (value & 0x80000) != 0,
+
+            .path_filestat_set_times = (value & 0x100000) != 0,
+            .fd_filestat_get = (value & 0x200000) != 0,
+            .fd_filestat_set_size = (value & 0x400000) != 0,
+            .fd_filestat_set_times = (value & 0x800000) != 0,
+
+            .path_symlink = (value & 0x1000000) != 0,
+            .path_remove_directory = (value & 0x2000000) != 0,
+            .path_unlink_file = (value & 0x4000000) != 0,
+            .poll_fd_readwrite = (value & 0x8000000) != 0,
+
+            .sock_shutdown = (value & 0x10000000) != 0,
+            .sock_accept = (value & 0x20000000) != 0,
+        };
+    }
+
+    fn decodeFdFlags(value: i32) WasiFdFlags {
+        return WasiFdFlags{
+            .append = (value & 0x01) != 0,
+            .dsync = (value & 0x02) != 0,
+            .nonblock = (value & 0x04) != 0,
+            .rsync = (value & 0x08) != 0,
+            .sync = (value & 0x10) != 0,
+        };
     }
 };
 
@@ -274,7 +410,6 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
         const ns_per_second = 1000000000;
         var timestamp_ns: u64 = 0;
 
-        // zig's stdlib has support for realtime clock on windows
         if (builtin.os.tag == .windows) {
             switch (clockid) {
                 std.os.wasi.CLOCK.REALTIME => {
@@ -411,13 +546,15 @@ fn wasi_fd_read(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-
-fn wasi_fd_close(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_close(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 1);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    // TODO
+    const fd_wasi: u32 = @bitCast(u32, params[0].I32);
+    const fd_os: std.os.fd_t = module.fdRemove(fd_wasi);
+    std.os.close(fd_os);
+
     var errno = Errno.SUCCESS;
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -508,7 +645,7 @@ fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, r
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_open(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_open(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 9);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
@@ -521,7 +658,76 @@ fn wasi_path_open(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, retur
     std.debug.assert(std.meta.activeTag(params[8]) == .I32);
     std.debug.assert(returns.len == 1);
 
+    // TODO move the wasi-specific stuff out of module instance and into a userdata passed down by ModuleImports
+    const fd_root_wasi: u32 = @bitCast(u32, params[0].I32);
+    // const dirflags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
+    const path_mem_offset: u32 = @bitCast(u32, params[2].I32);
+    const path_mem_length: u32 = @bitCast(u32, params[3].I32);
+    const openflags: WasiOpenFlags = Helpers.decodeOpenFlags(params[4].I32);
+    const rights_base: WasiRights = Helpers.decodeRights(params[5].I64);
+    // const rights_inheriting: WasiRights = Helpers.decodeRights(params[6].I64);
+    const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[7].I32);
+    const fd_out_mem_offset = @bitCast(u32, params[8].I32);
+
+    const fd_root: std.os.fd_t = module.fdLookup(fd_root_wasi);
+    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length - 1); // wasi strings are null terminated
+
     var errno = Errno.SUCCESS;
+    if (module.hasPathAccess(fd_root, path)) {
+        var flags: u32 = 0;
+        if (openflags.creat) {
+            flags |= std.os.O.CREAT;
+        }
+        if (openflags.directory) {
+            flags |= std.os.O.DIRECTORY;
+        }
+        if (openflags.excl) {
+            flags |= std.os.O.EXCL;
+        }
+        if (openflags.trunc) {
+            flags |= std.os.O.TRUNC;
+        }
+
+        if (fdflags.append) {
+            flags |= std.os.O.APPEND;
+        }
+        if (fdflags.dsync) {
+            flags |= std.os.O.DSYNC;
+        }
+        if (fdflags.nonblock) {
+            flags |= std.os.O.NONBLOCK;
+        }
+        if (fdflags.rsync) {
+            flags |= std.os.O.RSYNC;
+        }
+        if (fdflags.sync) {
+            flags |= std.os.O.SYNC;
+        }
+
+        if (rights_base.fd_read and rights_base.fd_write) {
+            flags |= std.os.O.RDWR;
+        } else if (rights_base.fd_read) {
+            flags |= std.os.O.RDONLY;
+        } else if (rights_base.fd_write) {
+            flags |= std.os.O.WRONLY;
+        }
+
+        // 644 means rw perm owner, r perm group, r perm others
+        var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
+
+        if (std.os.openat(fd_root, path, flags, mode)) |fd_opened| {
+            if (module.fdAdd(fd_opened)) |fd_opened_wasi| {
+                module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
+            } else |err| {
+                errno = Errno.translateError(err);
+            }
+        } else |err| {
+            errno = Errno.translateError(err);
+        }
+    } else {
+        errno = Errno.ACCES;
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -549,28 +755,32 @@ pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
 
     const void_returns = &[0]ValType{};
 
-    try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_args_sizes_get);
-    try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_args_get);
-    try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_environ_sizes_get);
-    try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_environ_get);
-    try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_clock_res_get);
-    try imports.addHostFunction("clock_time_get", null, &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{ .I32 }, wasi_clock_time_get);
+    try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
+    try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
+    try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
+    try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
+    try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_clock_res_get);
+    try imports.addHostFunction("clock_time_get", null, &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get);
 
-    try imports.addHostFunction("fd_datasync", null, &[_]ValType{ .I32,}, &[_]ValType{ .I32 }, wasi_fd_datasync);
-    try imports.addHostFunction("fd_fdstat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_fdstat_get);
-    try imports.addHostFunction("fd_fdstat_set_flags", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_fdstat_set_flags);
-    try imports.addHostFunction("fd_prestat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_prestat_get);
-    try imports.addHostFunction("fd_prestat_dir_name", null, &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_prestat_dir_name);
-    try imports.addHostFunction("fd_read", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_read);
+    try imports.addHostFunction("fd_datasync", null, &[_]ValType{
+        .I32,
+    }, &[_]ValType{.I32}, wasi_fd_datasync);
+    try imports.addHostFunction("fd_fdstat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get);
+    try imports.addHostFunction("fd_fdstat_set_flags", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_set_flags);
+    try imports.addHostFunction("fd_prestat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
+    try imports.addHostFunction("fd_prestat_dir_name", null, &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
+    try imports.addHostFunction("fd_read", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
 
-    try imports.addHostFunction("fd_close", null, &[_]ValType{ .I32, }, &[_]ValType{ .I32 }, wasi_fd_close);
-    try imports.addHostFunction("fd_seek", null, &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_seek);
-    try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_fd_write);
+    try imports.addHostFunction("fd_close", null, &[_]ValType{
+        .I32,
+    }, &[_]ValType{.I32}, wasi_fd_close);
+    try imports.addHostFunction("fd_seek", null, &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
+    try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
 
-    try imports.addHostFunction("path_open", null, &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{ .I32 }, wasi_path_open);
+    try imports.addHostFunction("path_open", null, &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
 
-    try imports.addHostFunction("proc_exit", null, &[_]ValType{ .I32 }, void_returns, wasi_proc_exit);
-    try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{ .I32 }, wasi_random_get);
+    try imports.addHostFunction("proc_exit", null, &[_]ValType{.I32}, void_returns, wasi_proc_exit);
+    try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
 
     return imports;
 }

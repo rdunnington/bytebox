@@ -6119,8 +6119,11 @@ pub const ModuleInstance = struct {
     module_def: *const ModuleDefinition,
 
     is_instantiated: bool = false,
+
+    // TODO move into WASI context struct
     argv: [][]const u8 = &[_][]u8{},
     env: [][]const u8 = &[_][]u8{},
+    fd_table: std.AutoHashMap(u32, std.os.fd_t),
 
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
@@ -6128,6 +6131,8 @@ pub const ModuleInstance = struct {
             .stack = Stack.init(allocator),
             .store = Store.init(allocator),
             .module_def = module_def,
+
+            .fd_table = std.AutoHashMap(u32, std.os.fd_t).init(allocator),
         };
     }
 
@@ -6148,6 +6153,8 @@ pub const ModuleInstance = struct {
             }
             self.allocator.free(self.env);
         }
+
+        self.fd_table.deinit();
     }
 
     pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
@@ -6605,6 +6612,56 @@ pub const ModuleInstance = struct {
 
         var destination = self.memorySlice(offset, bytes.len);
         std.mem.copy(u8, destination, &bytes);
+    }
+
+    const FD_WASI_INVALID = std.math.maxInt(u32);
+    const FD_OS_INVALID = switch (builtin.os.tag) {
+        .windows => std.os.windows.INVALID_HANDLE_VALUE,
+        else => -1,
+    };
+
+    pub fn fdLookup(self: *const ModuleInstance, fd_wasi: u32) std.os.fd_t {
+        if (fd_wasi != FD_WASI_INVALID) {
+            if (self.fd_table.get(fd_wasi)) |fd_os| {
+                return fd_os;
+            }
+        }
+
+        return FD_OS_INVALID;
+    }
+
+    pub fn fdAdd(self: *ModuleInstance, fd: std.os.fd_t) std.mem.Allocator.Error!u32 {
+        // TODO ensure it hasn't been added already?
+
+        var fd_wasi: u32 = undefined;
+
+        while (true) {
+            std.debug.print("fd adddd\n", .{});
+            std.crypto.random.bytes(std.mem.asBytes(&fd_wasi));
+            var result = try self.fd_table.getOrPut(fd_wasi);
+            if (result.found_existing == false) {
+                result.value_ptr.* = fd;
+                return fd_wasi;
+            }
+        }
+
+        return FD_WASI_INVALID;
+    }
+
+    pub fn fdRemove(self: *ModuleInstance, wasi_fd: u32) std.os.fd_t {
+        if (self.fd_table.fetchRemove(wasi_fd)) |result| {
+            return result.value;
+        } else {
+            return FD_OS_INVALID;
+        }
+    }
+
+    pub fn hasPathAccess(self: *ModuleInstance, dir: std.os.fd_t, desired_path: []const u8) bool {
+        // TODO need to pass --dir for explicit path permissions and add it to an allowlist
+        _ = self;
+        _ = dir;
+        _ = desired_path;
+        return true;
     }
 
     fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
