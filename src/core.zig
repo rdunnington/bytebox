@@ -2794,7 +2794,7 @@ const InstructionFuncs = struct {
                         var params = stack.values[stack.num_values - params_len .. stack.num_values];
                         var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
 
-                        data.callback(data.userdata, module, params, returns_temp);
+                        data.callback(data.imports.userdata, module, params, returns_temp);
 
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
@@ -5854,7 +5854,7 @@ const ImportType = enum(u8) {
 const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void;
 
 const HostFunction = struct {
-    userdata: ?*anyopaque,
+    imports: *ModuleImports,
     func_def: FunctionTypeDefinition,
     callback: HostFunctionCallback,
 };
@@ -5948,16 +5948,18 @@ pub const GlobalImport = struct {
 pub const ModuleImports = struct {
     name: []const u8,
     instance: ?*ModuleInstance,
+    userdata: ?*anyopaque,
     functions: std.ArrayList(FunctionImport),
     tables: std.ArrayList(TableImport),
     memories: std.ArrayList(MemoryImport),
     globals: std.ArrayList(GlobalImport),
     allocator: std.mem.Allocator,
 
-    pub fn init(name: []const u8, instance: ?*ModuleInstance, allocator: std.mem.Allocator) !ModuleImports {
+    pub fn init(name: []const u8, instance: ?*ModuleInstance, userdata: ?*anyopaque, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImports {
         return ModuleImports{
             .name = try allocator.dupe(u8, name),
             .instance = instance,
+            .userdata = userdata,
             .functions = std.ArrayList(FunctionImport).init(allocator),
             .tables = std.ArrayList(TableImport).init(allocator),
             .memories = std.ArrayList(MemoryImport).init(allocator),
@@ -5966,7 +5968,7 @@ pub const ModuleImports = struct {
         };
     }
 
-    pub fn addHostFunction(self: *ModuleImports, name: []const u8, userdata: ?*anyopaque, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
+    pub fn addHostFunction(self: *ModuleImports, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
         var type_list = std.ArrayList(ValType).init(self.allocator);
@@ -5977,7 +5979,7 @@ pub const ModuleImports = struct {
             .name = try self.allocator.dupe(u8, name),
             .data = .{
                 .Host = HostFunction{
-                    .userdata = userdata,
+                    .imports = self,
                     .func_def = FunctionTypeDefinition{
                         .types = type_list,
                         .num_params = @intCast(u32, param_types.len),
@@ -6108,8 +6110,6 @@ pub const Store = struct {
 pub const ModuleInstantiateOpts = struct {
     /// imports is not owned by ModuleInstance - caller must ensure its memory outlives ModuleInstance
     imports: ?[]const ModuleImports = null,
-    argv: ?[][]const u8 = null,
-    env: ?[][]const u8 = null,
 };
 
 pub const ModuleInstance = struct {
@@ -6117,13 +6117,7 @@ pub const ModuleInstance = struct {
     stack: Stack,
     store: Store,
     module_def: *const ModuleDefinition,
-
     is_instantiated: bool = false,
-
-    // TODO move into WASI context struct
-    argv: [][]const u8 = &[_][]u8{},
-    env: [][]const u8 = &[_][]u8{},
-    fd_table: std.AutoHashMap(u32, std.os.fd_t),
 
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
@@ -6131,30 +6125,12 @@ pub const ModuleInstance = struct {
             .stack = Stack.init(allocator),
             .store = Store.init(allocator),
             .module_def = module_def,
-
-            .fd_table = std.AutoHashMap(u32, std.os.fd_t).init(allocator),
         };
     }
 
     pub fn deinit(self: *ModuleInstance) void {
         self.stack.deinit();
         self.store.deinit();
-
-        if (self.argv.len > 0) {
-            for (self.argv) |arg| {
-                self.allocator.free(arg);
-            }
-            self.allocator.free(self.argv);
-        }
-
-        if (self.env.len > 0) {
-            for (self.env) |e| {
-                self.allocator.free(e);
-            }
-            self.allocator.free(self.env);
-        }
-
-        self.fd_table.deinit();
     }
 
     pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
@@ -6277,20 +6253,6 @@ pub const ModuleInstance = struct {
         var store: *Store = &self.store;
         var module_def: *const ModuleDefinition = self.module_def;
         var allocator = self.allocator;
-
-        if (opts.argv) |argv| {
-            self.argv = try self.allocator.dupe([]const u8, argv);
-            for (argv) |arg, i| {
-                self.argv[i] = try self.allocator.dupe(u8, arg);
-            }
-        }
-
-        if (opts.env) |env| {
-            self.env = try self.allocator.dupe([]const u8, env);
-            for (env) |e, i| {
-                self.env[i] = try self.allocator.dupe(u8, e);
-            }
-        }
 
         for (module_def.imports.functions.items) |*func_import_def| {
             var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, opts.imports);
@@ -6513,7 +6475,7 @@ pub const ModuleInstance = struct {
     }
 
     pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImports {
-        var imports = try ModuleImports.init(name, self, self.allocator);
+        var imports = try ModuleImports.init(name, self, null, self.allocator);
 
         for (self.module_def.exports.functions.items) |*item| {
             try imports.functions.append(FunctionImport{
@@ -6614,56 +6576,6 @@ pub const ModuleInstance = struct {
         std.mem.copy(u8, destination, &bytes);
     }
 
-    const FD_WASI_INVALID = std.math.maxInt(u32);
-    const FD_OS_INVALID = switch (builtin.os.tag) {
-        .windows => std.os.windows.INVALID_HANDLE_VALUE,
-        else => -1,
-    };
-
-    pub fn fdLookup(self: *const ModuleInstance, fd_wasi: u32) std.os.fd_t {
-        if (fd_wasi != FD_WASI_INVALID) {
-            if (self.fd_table.get(fd_wasi)) |fd_os| {
-                return fd_os;
-            }
-        }
-
-        return FD_OS_INVALID;
-    }
-
-    pub fn fdAdd(self: *ModuleInstance, fd: std.os.fd_t) std.mem.Allocator.Error!u32 {
-        // TODO ensure it hasn't been added already?
-
-        var fd_wasi: u32 = undefined;
-
-        while (true) {
-            std.debug.print("fd adddd\n", .{});
-            std.crypto.random.bytes(std.mem.asBytes(&fd_wasi));
-            var result = try self.fd_table.getOrPut(fd_wasi);
-            if (result.found_existing == false) {
-                result.value_ptr.* = fd;
-                return fd_wasi;
-            }
-        }
-
-        return FD_WASI_INVALID;
-    }
-
-    pub fn fdRemove(self: *ModuleInstance, wasi_fd: u32) std.os.fd_t {
-        if (self.fd_table.fetchRemove(wasi_fd)) |result| {
-            return result.value;
-        } else {
-            return FD_OS_INVALID;
-        }
-    }
-
-    pub fn hasPathAccess(self: *ModuleInstance, dir: std.os.fd_t, desired_path: []const u8) bool {
-        // TODO need to pass --dir for explicit path permissions and add it to an allowlist
-        _ = self;
-        _ = dir;
-        _ = desired_path;
-        return true;
-    }
-
     fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
         const func: FunctionInstance = self.store.functions.items[func_instance_index];
         const func_def: FunctionDefinition = self.module_def.functions.items[func.def_index];
@@ -6711,7 +6623,7 @@ pub const ModuleInstance = struct {
                     return error.ValidationTypeMismatch;
                 }
 
-                data.callback(data.userdata, self, params, returns);
+                data.callback(data.imports.userdata, self, params, returns);
 
                 // validate return types
                 for (returns) |val, i| {

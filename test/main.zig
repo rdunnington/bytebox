@@ -563,18 +563,18 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
             });
         }
     };
-    var imports: bytebox.ModuleImports = try bytebox.ModuleImports.init("spectest", null, allocator);
+    var imports: bytebox.ModuleImports = try bytebox.ModuleImports.init("spectest", null, null, allocator);
 
     const no_returns = &[0]ValType{};
 
-    try imports.addHostFunction("print_i32", null, &[_]ValType{.I32}, no_returns, Functions.printI32);
-    try imports.addHostFunction("print_i64", null, &[_]ValType{.I64}, no_returns, Functions.printI64);
-    try imports.addHostFunction("print_f32", null, &[_]ValType{.F32}, no_returns, Functions.printF32);
-    try imports.addHostFunction("print_f64", null, &[_]ValType{.F64}, no_returns, Functions.printF64);
-    try imports.addHostFunction("print_i32_f32", null, &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
-    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
-    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
-    try imports.addHostFunction("print", null, &[_]ValType{}, no_returns, Functions.print);
+    try imports.addHostFunction("print_i32", &[_]ValType{.I32}, no_returns, Functions.printI32);
+    try imports.addHostFunction("print_i64", &[_]ValType{.I64}, no_returns, Functions.printI64);
+    try imports.addHostFunction("print_f32", &[_]ValType{.F32}, no_returns, Functions.printF32);
+    try imports.addHostFunction("print_f64", &[_]ValType{.F64}, no_returns, Functions.printF64);
+    try imports.addHostFunction("print_i32_f32", &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
+    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
+    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
+    try imports.addHostFunction("print", &[_]ValType{}, no_returns, Functions.print);
 
     const TableInstance = bytebox.TableInstance;
 

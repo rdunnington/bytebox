@@ -9,13 +9,15 @@ const CmdOpts = struct {
     print_help: bool = false,
     print_version: bool = false,
     print_dump: bool = false,
-    filename: ?[]const u8 = null,
-    wasm_argv: ?[][]const u8 = null,
-    wasm_env: ?[][]const u8 = null,
-    invoke: ?InvokeArgs = null,
 
+    filename: ?[]const u8 = null,
+    invoke: ?InvokeArgs = null,
     invalid_arg: ?[]const u8 = null,
     missing_options: ?[]const u8 = null,
+
+    wasm_argv: ?[][]const u8 = null,
+    wasm_env: ?[][]const u8 = null,
+    wasm_dirs: ?[][]const u8 = null,
 };
 
 const InvokeArgs = struct {
@@ -27,7 +29,7 @@ fn isArgvOption(arg: []const u8) bool {
     return arg.len > 0 and arg[0] == '-';
 }
 
-fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8)) CmdOpts {
+fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_buffer: *std.ArrayList([]const u8)) CmdOpts {
     var opts = CmdOpts{};
 
     if (args.len < 2) {
@@ -47,13 +49,13 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8)) CmdO
             while (wasm_argv_end + 1 < args.len and !isArgvOption(args[wasm_argv_end + 1])) {
                 wasm_argv_end += 1;
             }
-            opts.wasm_argv = args[wasm_argv_begin..wasm_argv_end+1];
+            opts.wasm_argv = args[wasm_argv_begin .. wasm_argv_end + 1];
             arg_index = wasm_argv_end;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             opts.print_help = true;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             opts.print_version = true;
-        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dump")) {
+        } else if (std.mem.eql(u8, arg, "--dump")) {
             if (opts.filename != null) {
                 opts.print_dump = true;
             } else {
@@ -73,6 +75,9 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8)) CmdO
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--env")) {
             arg_index += 1;
             env_buffer.appendAssumeCapacity(args[arg_index]);
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dir")) {
+            arg_index += 1;
+            dir_buffer.appendAssumeCapacity(args[arg_index]);
         } else {
             opts.invalid_arg = arg;
             break;
@@ -102,7 +107,7 @@ fn printHelp(args: [][]const u8) !void {
         \\    -v, --version
         \\      Print version information.
         \\
-        \\    -d, --dump
+        \\    --dump
         \\      Prints the given module definition's imports and exports. Imports are qualified
         \\      with the import module name.
         \\    
@@ -114,7 +119,12 @@ fn printHelp(args: [][]const u8) !void {
         \\    -e, --env <ENVAR>
         \\      Set an environment variable for the execution environment. Typically retrieved
         \\      via the WASI API environ_sizes_get() and environ_get(). Multiple instances of
-        \\      of this flag is needed to pass multiple variables.
+        \\      this flag is needed to pass multiple variables.
+        \\
+        \\   -d, --dir <PATH>
+        \\     Allow WASI programs to access this directory and paths within it. Can be relative
+        \\     to the current working directory or absolute. Multiple instances of this flag can
+        \\     be used to pass multiple dirs.
         \\
         \\
     ;
@@ -134,7 +144,11 @@ pub fn main() !void {
     defer env_buffer.deinit();
     try env_buffer.ensureTotalCapacity(4096); // 4096 vars should be enough for most insane script file scenarios.
 
-    const opts: CmdOpts = parseCmdOpts(args, &env_buffer);
+    var dir_buffer = std.ArrayList([]const u8).init(allocator);
+    defer dir_buffer.deinit();
+    try dir_buffer.ensureTotalCapacity(4096);
+
+    const opts: CmdOpts = parseCmdOpts(args, &env_buffer, &dir_buffer);
 
     const stdout = std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
@@ -187,10 +201,15 @@ pub fn main() !void {
     var module_instance = bytebox.ModuleInstance.init(&module_def, allocator);
     defer module_instance.deinit();
 
-    var instantiate_opts = bytebox.ModuleInstantiateOpts{
-        .imports = &[_]bytebox.ModuleImports{ try wasi.makeImports(allocator) },
+    var imports_wasi: bytebox.ModuleImports = try wasi.initImports(.{
         .argv = opts.wasm_argv,
         .env = opts.wasm_env,
+        .dirs = opts.wasm_dirs,
+    }, allocator);
+    defer wasi.deinitImports(&imports_wasi);
+
+    var instantiate_opts = bytebox.ModuleInstantiateOpts{
+        .imports = &[_]bytebox.ModuleImports{imports_wasi},
     };
 
     module_instance.instantiate(instantiate_opts) catch |e| {

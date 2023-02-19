@@ -7,6 +7,120 @@ const ValType = core.ValType;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImports = core.ModuleImports;
 
+const WasiContext = struct {
+    argv: [][]const u8 = &[_][]u8{},
+    env: [][]const u8 = &[_][]u8{},
+    dirs: [][]const u8 = &[_][]u8{},
+    fd_table: std.AutoHashMap(u32, std.os.fd_t),
+    allocator: std.mem.Allocator,
+
+    fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) std.mem.Allocator.Error!WasiContext {
+        var context = WasiContext{
+            .fd_table = std.AutoHashMap(u32, std.os.fd_t).init(allocator),
+            .allocator = allocator,
+        };
+
+        if (opts.argv) |argv| {
+            context.argv = try context.allocator.dupe([]const u8, argv);
+            for (argv) |arg, i| {
+                context.argv[i] = try context.allocator.dupe(u8, arg);
+            }
+        }
+
+        if (opts.env) |env| {
+            context.env = try context.allocator.dupe([]const u8, env);
+            for (env) |e, i| {
+                context.env[i] = try context.allocator.dupe(u8, e);
+            }
+        }
+
+        if (opts.dirs) |dirs| {
+            context.dirs = try context.allocator.dupe([]const u8, dirs);
+            for (dirs) |e, i| {
+                context.dirs[i] = try context.allocator.dupe(u8, e);
+            }
+        }
+
+        return context;
+    }
+
+    fn deinit(self: *WasiContext) void {
+        if (self.argv.len > 0) {
+            for (self.argv) |arg| {
+                self.allocator.free(arg);
+            }
+            self.allocator.free(self.argv);
+        }
+
+        if (self.env.len > 0) {
+            for (self.env) |e| {
+                self.allocator.free(e);
+            }
+            self.allocator.free(self.env);
+        }
+
+        if (self.dirs.len > 0) {
+            for (self.dirs) |e| {
+                self.allocator.free(e);
+            }
+            self.allocator.free(self.dirs);
+        }
+
+        self.fd_table.deinit();
+    }
+
+    fn fdLookup(self: *const WasiContext, fd_wasi: u32) std.os.fd_t {
+        if (fd_wasi != FD_WASI_INVALID) {
+            if (self.fd_table.get(fd_wasi)) |fd_os| {
+                return fd_os;
+            }
+        }
+
+        return FD_OS_INVALID;
+    }
+
+    fn fdAdd(self: *WasiContext, fd_os: std.os.fd_t) std.mem.Allocator.Error!u32 {
+        // TODO ensure it hasn't been added already?
+
+        var fd_wasi: u32 = undefined;
+
+        while (true) {
+            std.debug.print("fd adddd: {}\n", .{fd_os});
+
+            // WASI fd IDs are randomized to prevent prediction attacks
+            std.crypto.random.bytes(std.mem.asBytes(&fd_wasi));
+            var result = try self.fd_table.getOrPut(fd_wasi);
+            if (result.found_existing == false) {
+                result.value_ptr.* = fd_os;
+                return fd_wasi;
+            }
+        }
+
+        return FD_WASI_INVALID;
+    }
+
+    fn fdRemove(self: *WasiContext, wasi_fd: u32) std.os.fd_t {
+        if (self.fd_table.fetchRemove(wasi_fd)) |result| {
+            return result.value;
+        } else {
+            return FD_OS_INVALID;
+        }
+    }
+
+    fn hasPathAccess(self: *WasiContext, dir: std.os.fd_t, desired_path: []const u8) bool {
+        // TODO need to pass --dir for explicit path permissions and add it to an allowlist
+        _ = self;
+        _ = dir;
+        _ = desired_path;
+        return true;
+    }
+
+    fn fromUserdata(userdata: ?*anyopaque) *WasiContext {
+        std.debug.assert(userdata != null);
+        return @ptrCast(*WasiContext, @alignCast(8, userdata.?));
+    }
+};
+
 // Values taken from https://github.com/AssemblyScript/wasi-shim/blob/main/assembly/bindings/
 const Errno = enum(u8) {
     SUCCESS = 0, // No error occurred. System call completed successfully.
@@ -185,6 +299,12 @@ const WindowsApi = struct {
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
 
+const FD_WASI_INVALID = std.math.maxInt(u32);
+const FD_OS_INVALID = switch (builtin.os.tag) {
+    .windows => std.os.windows.INVALID_HANDLE_VALUE,
+    else => -1,
+};
+
 const Helpers = struct {
     fn strings_sizes_get(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
         std.debug.assert(params.len == 2);
@@ -326,20 +446,24 @@ fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, retur
     std.os.exit(exit_code);
 }
 
-fn wasi_args_sizes_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    Helpers.strings_sizes_get(module, module.argv, params, returns);
+fn wasi_args_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var context = WasiContext.fromUserdata(userdata);
+    Helpers.strings_sizes_get(module, context.argv, params, returns);
 }
 
-fn wasi_args_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    Helpers.strings_get(module, module.argv, params, returns);
+fn wasi_args_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var context = WasiContext.fromUserdata(userdata);
+    Helpers.strings_get(module, context.argv, params, returns);
 }
 
-fn wasi_environ_sizes_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    Helpers.strings_sizes_get(module, module.env, params, returns);
+fn wasi_environ_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var context = WasiContext.fromUserdata(userdata);
+    Helpers.strings_sizes_get(module, context.env, params, returns);
 }
 
-fn wasi_environ_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    Helpers.strings_get(module, module.env, params, returns);
+fn wasi_environ_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var context = WasiContext.fromUserdata(userdata);
+    Helpers.strings_get(module, context.env, params, returns);
 }
 
 fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -546,13 +670,15 @@ fn wasi_fd_read(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_close(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 1);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(returns.len == 1);
 
+    var context = WasiContext.fromUserdata(userdata);
+
     const fd_wasi: u32 = @bitCast(u32, params[0].I32);
-    const fd_os: std.os.fd_t = module.fdRemove(fd_wasi);
+    const fd_os: std.os.fd_t = context.fdRemove(fd_wasi);
     std.os.close(fd_os);
 
     var errno = Errno.SUCCESS;
@@ -572,13 +698,16 @@ fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 4);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
     std.debug.assert(std.meta.activeTag(params[2]) == .I32);
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
+
+    _ = userdata;
+    // var context = WasiContext.fromUserdata(userdata);
 
     const fd_raw = @bitCast(u32, params[0].I32);
     const iovec_array_begin = @bitCast(u32, params[1].I32);
@@ -645,7 +774,7 @@ fn wasi_fd_write(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, r
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_open(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 9);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
@@ -658,6 +787,8 @@ fn wasi_path_open(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, 
     std.debug.assert(std.meta.activeTag(params[8]) == .I32);
     std.debug.assert(returns.len == 1);
 
+    var context = WasiContext.fromUserdata(userdata);
+
     // TODO move the wasi-specific stuff out of module instance and into a userdata passed down by ModuleImports
     const fd_root_wasi: u32 = @bitCast(u32, params[0].I32);
     // const dirflags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
@@ -669,11 +800,11 @@ fn wasi_path_open(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, 
     const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[7].I32);
     const fd_out_mem_offset = @bitCast(u32, params[8].I32);
 
-    const fd_root: std.os.fd_t = module.fdLookup(fd_root_wasi);
+    const fd_root: std.os.fd_t = context.fdLookup(fd_root_wasi);
     const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length - 1); // wasi strings are null terminated
 
     var errno = Errno.SUCCESS;
-    if (module.hasPathAccess(fd_root, path)) {
+    if (context.hasPathAccess(fd_root, path)) {
         var flags: u32 = 0;
         if (openflags.creat) {
             flags |= std.os.O.CREAT;
@@ -716,7 +847,7 @@ fn wasi_path_open(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, 
         var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
 
         if (std.os.openat(fd_root, path, flags, mode)) |fd_opened| {
-            if (module.fdAdd(fd_opened)) |fd_opened_wasi| {
+            if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
                 module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
             } else |err| {
                 errno = Errno.translateError(err);
@@ -750,37 +881,50 @@ fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val,
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-pub fn makeImports(allocator: std.mem.Allocator) !ModuleImports {
-    var imports: ModuleImports = try ModuleImports.init("wasi_snapshot_preview1", null, allocator);
+pub const WasiOpts = struct {
+    argv: ?[][]const u8 = null,
+    env: ?[][]const u8 = null,
+    dirs: ?[][]const u8 = null,
+};
+
+pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImports {
+    var context: *WasiContext = try allocator.create(WasiContext);
+    errdefer allocator.destroy(context);
+    context.* = try WasiContext.init(&opts, allocator);
+    errdefer context.deinit();
+
+    var imports: ModuleImports = try ModuleImports.init("wasi_snapshot_preview1", null, context, allocator);
 
     const void_returns = &[0]ValType{};
 
-    try imports.addHostFunction("args_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
-    try imports.addHostFunction("args_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
-    try imports.addHostFunction("environ_sizes_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
-    try imports.addHostFunction("environ_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
-    try imports.addHostFunction("clock_res_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_clock_res_get);
-    try imports.addHostFunction("clock_time_get", null, &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get);
+    try imports.addHostFunction("args_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
+    try imports.addHostFunction("args_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
+    try imports.addHostFunction("environ_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
+    try imports.addHostFunction("environ_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
+    try imports.addHostFunction("clock_res_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_clock_res_get);
+    try imports.addHostFunction("clock_time_get", &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get);
 
-    try imports.addHostFunction("fd_datasync", null, &[_]ValType{
-        .I32,
-    }, &[_]ValType{.I32}, wasi_fd_datasync);
-    try imports.addHostFunction("fd_fdstat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get);
-    try imports.addHostFunction("fd_fdstat_set_flags", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_set_flags);
-    try imports.addHostFunction("fd_prestat_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
-    try imports.addHostFunction("fd_prestat_dir_name", null, &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
-    try imports.addHostFunction("fd_read", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
+    try imports.addHostFunction("fd_datasync", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_datasync);
+    try imports.addHostFunction("fd_fdstat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get);
+    try imports.addHostFunction("fd_fdstat_set_flags", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_set_flags);
+    try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
+    try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
+    try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
 
-    try imports.addHostFunction("fd_close", null, &[_]ValType{
-        .I32,
-    }, &[_]ValType{.I32}, wasi_fd_close);
-    try imports.addHostFunction("fd_seek", null, &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
-    try imports.addHostFunction("fd_write", null, &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
+    try imports.addHostFunction("fd_close", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_close);
+    try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
+    try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
 
-    try imports.addHostFunction("path_open", null, &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
+    try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
 
-    try imports.addHostFunction("proc_exit", null, &[_]ValType{.I32}, void_returns, wasi_proc_exit);
-    try imports.addHostFunction("random_get", null, &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
+    try imports.addHostFunction("proc_exit", &[_]ValType{.I32}, void_returns, wasi_proc_exit);
+    try imports.addHostFunction("random_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
 
     return imports;
+}
+
+pub fn deinitImports(imports: *ModuleImports) void {
+    var context = WasiContext.fromUserdata(imports.userdata);
+    context.deinit();
+    imports.deinit();
 }
