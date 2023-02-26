@@ -2794,7 +2794,7 @@ const InstructionFuncs = struct {
                         var params = stack.values[stack.num_values - params_len .. stack.num_values];
                         var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
 
-                        data.callback(data.imports.userdata, module, params, returns_temp);
+                        data.callback(data.userdata, module, params, returns_temp);
 
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
@@ -5036,6 +5036,8 @@ pub const ModuleDefinition = struct {
                         .data = std.ArrayList(u8).init(allocator),
                     };
 
+                    std.debug.print("custom section: {s}\n", .{section.name});
+
                     const name_length: usize = stream.pos - section_start_pos;
                     const data_length: usize = section_size_bytes - name_length;
                     try section.data.resize(data_length);
@@ -5854,7 +5856,7 @@ const ImportType = enum(u8) {
 const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void;
 
 const HostFunction = struct {
-    imports: *ModuleImports,
+    userdata: ?*anyopaque,
     func_def: FunctionTypeDefinition,
     callback: HostFunctionCallback,
 };
@@ -5979,7 +5981,7 @@ pub const ModuleImports = struct {
             .name = try self.allocator.dupe(u8, name),
             .data = .{
                 .Host = HostFunction{
-                    .imports = self,
+                    .userdata = self.userdata,
                     .func_def = FunctionTypeDefinition{
                         .types = type_list,
                         .num_params = @intCast(u32, param_types.len),
@@ -6623,7 +6625,7 @@ pub const ModuleInstance = struct {
                     return error.ValidationTypeMismatch;
                 }
 
-                data.callback(data.imports.userdata, self, params, returns);
+                data.callback(data.userdata, self, params, returns);
 
                 // validate return types
                 for (returns) |val, i| {

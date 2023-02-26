@@ -90,6 +90,10 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
         opts.wasm_env = env_buffer.items;
     }
 
+    if (dir_buffer.items.len > 0) {
+        opts.wasm_dirs = dir_buffer.items;
+    }
+
     return opts;
 }
 
@@ -186,7 +190,7 @@ pub fn main() !void {
     defer module_def.deinit();
 
     module_def.decode(wasm_data) catch |e| {
-        std.log.err("Caught error {} decoding module - invalid wasm.", .{e});
+        std.log.err("Caught {} decoding module - invalid wasm.", .{e});
         return;
     };
 
@@ -294,7 +298,7 @@ pub fn main() !void {
     try returns.resize(func_info.?.returns.len);
 
     module_instance.invoke(invoke_funcname, params.items, returns.items) catch |e| {
-        std.log.err("Caught error {} during function invoke. The wasm program may have a bug.", .{e});
+        std.log.err("Caught {} during function invoke.", .{e});
         return;
     };
 

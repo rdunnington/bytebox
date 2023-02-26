@@ -7,14 +7,17 @@ const ValType = core.ValType;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImports = core.ModuleImports;
 
+const WasiInitError = std.mem.Allocator.Error || std.os.OpenError;
+
 const WasiContext = struct {
     argv: [][]const u8 = &[_][]u8{},
     env: [][]const u8 = &[_][]u8{},
     dirs: [][]const u8 = &[_][]u8{},
-    fd_table: std.AutoHashMap(u32, std.os.fd_t),
+    fd_table: std.AutoHashMap(u32, std.os.fd_t), // TODO switch to array
+    next_fd_id: u32 = 3,
     allocator: std.mem.Allocator,
 
-    fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) std.mem.Allocator.Error!WasiContext {
+    fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) WasiInitError!WasiContext {
         var context = WasiContext{
             .fd_table = std.AutoHashMap(u32, std.os.fd_t).init(allocator),
             .allocator = allocator,
@@ -39,6 +42,16 @@ const WasiContext = struct {
             for (dirs) |e, i| {
                 context.dirs[i] = try context.allocator.dupe(u8, e);
             }
+        }
+
+        try context.fd_table.put(0, std.io.getStdIn().handle);
+        try context.fd_table.put(1, std.io.getStdOut().handle);
+        try context.fd_table.put(2, std.io.getStdErr().handle);
+
+        var cwd = std.fs.cwd();
+        for (context.dirs) |dir_path| {
+            const dir: std.fs.Dir = try cwd.openDir(dir_path, .{});
+            _ = try context.fdAdd(dir.fd);
         }
 
         return context;
@@ -80,23 +93,13 @@ const WasiContext = struct {
     }
 
     fn fdAdd(self: *WasiContext, fd_os: std.os.fd_t) std.mem.Allocator.Error!u32 {
-        // TODO ensure it hasn't been added already?
+        var fd_wasi: u32 = self.next_fd_id;
+        self.fd_table.put(fd_wasi, fd_os) catch {
+            fd_wasi = FD_WASI_INVALID;
+        };
+        self.next_fd_id += 1;
 
-        var fd_wasi: u32 = undefined;
-
-        while (true) {
-            std.debug.print("fd adddd: {}\n", .{fd_os});
-
-            // WASI fd IDs are randomized to prevent prediction attacks
-            std.crypto.random.bytes(std.mem.asBytes(&fd_wasi));
-            var result = try self.fd_table.getOrPut(fd_wasi);
-            if (result.found_existing == false) {
-                result.value_ptr.* = fd_os;
-                return fd_wasi;
-            }
-        }
-
-        return FD_WASI_INVALID;
+        return fd_wasi;
     }
 
     fn fdRemove(self: *WasiContext, wasi_fd: u32) std.os.fd_t {
@@ -107,12 +110,23 @@ const WasiContext = struct {
         }
     }
 
-    fn hasPathAccess(self: *WasiContext, dir: std.os.fd_t, desired_path: []const u8) bool {
-        // TODO need to pass --dir for explicit path permissions and add it to an allowlist
-        _ = self;
-        _ = dir;
-        _ = desired_path;
-        return true;
+    fn hasPathAccess(self: *WasiContext, fd_root: std.os.fd_t, relative_path: []const u8) bool {
+        if (self.dirs.len > 0) {
+            const dir = std.fs.Dir{ .fd = fd_root };
+            var path_buffer_relative: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const absolute_path: []const u8 = dir.realpath(relative_path, &path_buffer_relative) catch unreachable;
+
+            const cwd: std.fs.Dir = std.fs.cwd();
+            for (self.dirs) |allowdir| {
+                var path_buffer_allowed: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                const path_allowed: []const u8 = cwd.realpath(allowdir, &path_buffer_allowed) catch unreachable;
+                if (std.mem.startsWith(u8, absolute_path, path_allowed)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     fn fromUserdata(userdata: ?*anyopaque) *WasiContext {
@@ -607,6 +621,8 @@ fn wasi_fd_datasync(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, ret
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(returns.len == 1);
 
+    std.debug.print("called wasi_fd_datasync\n", .{});
+
     // TODO
     var errno = Errno.SUCCESS;
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -617,6 +633,8 @@ fn wasi_fd_fdstat_get(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, r
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
     std.debug.assert(returns.len == 1);
+
+    std.debug.print("called wasi_fd_fdstat_get\n", .{});
 
     // TODO
     var errno = Errno.SUCCESS;
@@ -629,31 +647,71 @@ fn wasi_fd_fdstat_set_flags(_: ?*anyopaque, _: *ModuleInstance, params: []const 
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
     std.debug.assert(returns.len == 1);
 
+    std.debug.print("called wasi_fd_fdstat_set_flags\n", .{});
+
     // TODO
     var errno = Errno.SUCCESS;
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_prestat_get(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+const WasiPreopenType = enum(u8) {
+    Dir,
+};
+
+fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 2);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    // TODO
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const prestat_mem_offset = @bitCast(u32, params[1].I32);
+
     var errno = Errno.SUCCESS;
+
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
+    if (fd_wasi < 3 or fd_os != FD_OS_INVALID) { // std handles are 0, 1, 2 so skip those
+        var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const path: []const u8 = std.os.getFdPath(fd_os, &name_buffer) catch unreachable;
+        const pr_name_len: u32 = @intCast(u32, path.len); // allow space for null terminator
+
+        module.memoryWriteInt(u32, @enumToInt(WasiPreopenType.Dir), prestat_mem_offset);
+        module.memoryWriteInt(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32));
+    } else {
+        errno = Errno.BADF;
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_prestat_dir_name(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 3);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
     std.debug.assert(std.meta.activeTag(params[2]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    // TODO
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const path_mem_offset = @bitCast(u32, params[1].I32);
+    const path_mem_length = @bitCast(u32, params[2].I32);
+
+    std.debug.print("called wasi_fd_prestat_dir_name\n", .{});
+
     var errno = Errno.SUCCESS;
+
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
+    if (fd_os != FD_OS_INVALID) {
+        var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const path_source: []const u8 = std.os.getFdPath(fd_os, &name_buffer) catch unreachable;
+
+        var path_dest: []u8 = module.memorySlice(path_mem_offset, path_mem_length);
+        std.mem.copy(u8, path_dest, path_source);
+    } else {
+        errno = Errno.BADF;
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -665,6 +723,8 @@ fn wasi_fd_read(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
 
+    std.debug.print("called wasi_fd_read\n", .{});
+
     // TODO
     var errno = Errno.SUCCESS;
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -675,13 +735,20 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    var context = WasiContext.fromUserdata(userdata);
+    std.debug.print("called wasi_fd_close\n", .{});
 
+    var context = WasiContext.fromUserdata(userdata);
     const fd_wasi: u32 = @bitCast(u32, params[0].I32);
-    const fd_os: std.os.fd_t = context.fdRemove(fd_wasi);
-    std.os.close(fd_os);
 
     var errno = Errno.SUCCESS;
+
+    const fd_os: std.os.fd_t = context.fdRemove(fd_wasi);
+    if (fd_os != FD_OS_INVALID) {
+        std.os.close(fd_os);
+    } else {
+        errno = Errno.BADF;
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -692,6 +759,8 @@ fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
     std.debug.assert(std.meta.activeTag(params[2]) == .I32);
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
+
+    std.debug.print("called wasi_fd_seek\n", .{});
 
     // TODO
     var errno = Errno.SUCCESS;
@@ -706,70 +775,57 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    _ = userdata;
-    // var context = WasiContext.fromUserdata(userdata);
+    std.debug.print("called wasi_fd_write\n", .{});
 
-    const fd_raw = @bitCast(u32, params[0].I32);
+    var context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
     const iovec_array_begin = @bitCast(u32, params[1].I32);
     const iovec_array_count = @bitCast(u32, params[2].I32);
     const bytes_written_offset = @bitCast(u32, params[3].I32);
 
-    const fd: std.os.fd_t = switch (fd_raw) {
-        0 => std.io.getStdIn().handle,
-        1 => std.io.getStdOut().handle,
-        2 => std.io.getStdErr().handle,
-        else => unreachable, // TODO handle this
-    };
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
 
-    var stack_iov = [_]std.os.iovec_const{undefined} ** 32;
-    if (stack_iov.len < iovec_array_count) {
-        unreachable; // TODO handle this
-    }
-
-    // std.debug.print("fd_raw: {}, iovec_array_begin: {}, iovec_array_count: {}, bytes_written_offset: {}\n", .{fd_raw,
-    //     iovec_array_begin,
-    //     iovec_array_count,
-    //     bytes_written_offset,});
+    std.debug.print("fd_wasi: {}\n", .{fd_wasi});
 
     var errno = Errno.SUCCESS;
 
-    const iov = stack_iov[0..iovec_array_count];
-    {
-        const iovec_array_bytes_length = @sizeOf(u32) * 2 * iovec_array_count;
-        const iovec_mem: []const u8 = module.memorySlice(iovec_array_begin, iovec_array_bytes_length);
-        var stream = std.io.fixedBufferStream(iovec_mem);
-        var reader = stream.reader();
+    if (fd_os != FD_OS_INVALID) {
+        var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
+        if (iovec_array_count < stack_iov.len) {
+            const iov = stack_iov[0..iovec_array_count];
+            const iovec_array_bytes_length = @sizeOf(u32) * 2 * iovec_array_count;
+            const iovec_mem: []const u8 = module.memorySlice(iovec_array_begin, iovec_array_bytes_length);
+            var stream = std.io.fixedBufferStream(iovec_mem);
+            var reader = stream.reader();
 
-        for (iov) |*vec| {
-            const iov_base: u32 = reader.readIntLittle(u32) catch {
-                errno = Errno.INVAL;
-                // std.debug.print("fail reading iov_base\n" , .{});
-                break;
-            };
-            const iov_len: u32 = reader.readIntLittle(u32) catch {
-                errno = Errno.INVAL;
-                // std.debug.print("fail reading iov_len\n", .{});
-                break;
-            };
-            // std.debug.print("iov_base: {}, iov_len: {}\n", .{iov_base, iov_len});
-            const mem: []const u8 = module.memorySlice(iov_base, iov_len);
-            // std.debug.print("iovec mem: {s}\n", .{mem});
+            for (iov) |*vec| {
+                const iov_base: u32 = reader.readIntLittle(u32) catch {
+                    errno = Errno.INVAL;
+                    break;
+                };
+                const iov_len: u32 = reader.readIntLittle(u32) catch {
+                    errno = Errno.INVAL;
+                    break;
+                };
+                const mem: []const u8 = module.memorySlice(iov_base, iov_len);
 
-            vec.iov_base = mem.ptr;
-            vec.iov_len = mem.len;
+                vec.iov_base = mem.ptr;
+                vec.iov_len = mem.len;
+            }
+
+            if (errno == Errno.SUCCESS) {
+                if (std.os.writev(fd_os, iov)) |written_bytes| {
+                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_offset);
+                } else |err| {
+                    errno = Errno.translateError(err);
+                }
+            }
+        } else {
+            errno = Errno.TOOBIG;
         }
+    } else {
+        errno = Errno.BADF;
     }
-
-    if (errno == Errno.SUCCESS) {
-        if (std.os.writev(fd, iov)) |written_bytes| {
-            module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_offset);
-        } else |err| {
-            errno = Errno.translateError(err);
-            // std.debug.print("fail writev\n", .{});
-        }
-    }
-
-    // std.debug.print("errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -787,8 +843,9 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     std.debug.assert(std.meta.activeTag(params[8]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    var context = WasiContext.fromUserdata(userdata);
+    std.debug.print("called wasi_path_open\n", .{});
 
+    var context = WasiContext.fromUserdata(userdata);
     // TODO move the wasi-specific stuff out of module instance and into a userdata passed down by ModuleImports
     const fd_root_wasi: u32 = @bitCast(u32, params[0].I32);
     // const dirflags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
@@ -856,7 +913,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
             errno = Errno.translateError(err);
         }
     } else {
-        errno = Errno.ACCES;
+        errno = Errno.NOTCAPABLE;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -887,7 +944,7 @@ pub const WasiOpts = struct {
     dirs: ?[][]const u8 = null,
 };
 
-pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImports {
+pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!ModuleImports {
     var context: *WasiContext = try allocator.create(WasiContext);
     errdefer allocator.destroy(context);
     context.* = try WasiContext.init(&opts, allocator);
@@ -926,5 +983,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) std.mem.Allocat
 pub fn deinitImports(imports: *ModuleImports) void {
     var context = WasiContext.fromUserdata(imports.userdata);
     context.deinit();
+    imports.allocator.destroy(context);
+
     imports.deinit();
 }
