@@ -114,6 +114,75 @@ pub const TrapError = error{
 
 pub const WasmError = MalformedError || ValidationError || UnlinkableError || UninstantiableError || AssertError || TrapError;
 
+pub const DebugTrace = struct {
+    pub const Mode = enum {
+        None,
+        Function,
+        Instruction,
+    };
+
+    pub fn setMode(new_mode: Mode) bool {
+        if (builtin.mode == .Debug) {
+            mode = new_mode;
+            return true;
+        }
+
+        return false;
+    }
+
+    fn shouldTraceFunctions() bool {
+        return builtin.mode == .Debug and mode == .Function;
+    }
+
+    fn shouldTraceInstructions() bool {
+        return builtin.mode == .Debug and mode == .Instruction;
+    }
+
+    fn printIndent(indent: u32) void {
+        var indent_level: u32 = 0;
+        while (indent_level < indent) : (indent_level += 1) {
+            std.debug.print("\t", .{});
+        }
+    }
+
+    fn traceHostFunction(module_instance: *const ModuleInstance, indent: u32, import_name: []const u8) void {
+        if (shouldTraceFunctions()) {
+            const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+
+            printIndent(indent);
+            std.debug.print("{s}!{s}\n", .{ module_name, import_name });
+        }
+    }
+
+    fn traceFunction(module_instance: *const ModuleInstance, indent: u32, func_index: u32) void {
+        if (shouldTraceFunctions()) {
+            const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+            const function_name = name_section.findFunctionName(func_index);
+
+            var indent_level: u32 = 0;
+            while (indent_level < indent) : (indent_level += 1) {
+                std.debug.print("\t", .{});
+            }
+            std.debug.print("{s}!{s}\n", .{ module_name, function_name });
+        }
+    }
+
+    fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Stack) void {
+        if (shouldTraceInstructions()) {
+            const frame: *const CallFrame = stack.topFrame();
+            const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+            const function_name = name_section.findFunctionName(frame.func.def_index);
+
+            std.debug.print("\t0x{x} - {s}!{s}: {s}\n", .{ pc, module_name, function_name, instruction_name });
+        }
+    }
+
+    var mode: Mode = .None;
+};
+
 pub const ScratchAllocator = struct {
     buffer: StableArray(u8),
 
@@ -1753,9 +1822,9 @@ const NameCustomSection = struct {
         return "<unknown_function>";
     }
 
-    fn findFunctionLocalName(self: *NameCustomSection, func_index: u32, local_index: u32) []const u8 {
-        return "<unknown_local>";
-    }
+    // fn findFunctionLocalName(self: *NameCustomSection, func_index: u32, local_index: u32) []const u8 {
+    //     return "<unknown_local>";
+    // }
 };
 
 const ModuleValidator = struct {
@@ -2899,6 +2968,8 @@ const InstructionFuncs = struct {
             try stack.pushFrame(func, module_instance, param_types, func.local_types.items, functype.calcNumReturns());
             try stack.pushLabel(@intCast(u32, return_types.len), continuation);
 
+            DebugTrace.traceFunction(module_instance, stack.num_frames, func.def_index);
+
             return FuncCallData{
                 .code = module_instance.module_def.code.instructions.items.ptr,
                 .continuation = func.offset_into_instructions,
@@ -2915,6 +2986,8 @@ const InstructionFuncs = struct {
                         var module: *ModuleInstance = stack.topFrame().module_instance;
                         var params = stack.values[stack.num_values - params_len .. stack.num_values];
                         var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
+
+                        DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
 
                         data.callback(data.userdata, module, params, returns_temp);
 
@@ -2963,24 +3036,18 @@ const InstructionFuncs = struct {
     };
 
     fn debugPreamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) void {
-        // std.debug.print("\tinstruction: {s} ({}) at {} with code {*} ({*}).\n", .{ name, code[pc].opcode, pc, code, stack.topFrame().module_instance });
-        _ = name;
-        _ = pc;
         _ = code;
-        _ = stack;
+
+        DebugTrace.traceInstruction(name, pc, stack);
     }
 
     fn op_Invalid(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        _ = pc;
-        _ = code;
-        _ = stack;
+        debugPreamble("Invalid", pc, code, stack);
         unreachable;
     }
 
     fn op_Unreachable(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        _ = pc;
-        _ = code;
-        _ = stack;
+        debugPreamble("Unreachable", pc, code, stack);
         return error.TrapUnreachable;
     }
 
@@ -6739,7 +6806,8 @@ pub const ModuleInstance = struct {
         const param_types: []const ValType = func_type.getParams();
         const return_types: []const ValType = func_type.getReturns();
 
-        // ensure any leftover stack state doesn't pollute future invokes
+        // Ensure any leftover stack state doesn't pollute this invoke. Can happen if the previous invoke returned
+        // an error.
         self.stack.popAll();
 
         // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
@@ -6750,6 +6818,8 @@ pub const ModuleInstance = struct {
 
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items, func_type.calcNumReturns());
         try self.stack.pushLabel(@intCast(u32, return_types.len), func_def.continuation);
+
+        DebugTrace.traceFunction(self, self.stack.num_frames, func.def_index);
 
         try InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack);
 
@@ -6778,6 +6848,8 @@ pub const ModuleInstance = struct {
                 if (returns.len != return_types.len) {
                     return error.ValidationTypeMismatch;
                 }
+
+                DebugTrace.traceHostFunction(self, 1, func_import.name);
 
                 data.callback(data.userdata, self, params, returns);
 

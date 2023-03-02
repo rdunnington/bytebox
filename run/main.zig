@@ -4,11 +4,13 @@ const wasi = bytebox.wasi;
 
 const Val = bytebox.Val;
 const ValType = bytebox.ValType;
+const TraceMode = bytebox.DebugTrace.Mode;
 
 const CmdOpts = struct {
     print_help: bool = false,
     print_version: bool = false,
     print_dump: bool = false,
+    trace: TraceMode = .None,
 
     filename: ?[]const u8 = null,
     invoke: ?InvokeArgs = null,
@@ -78,6 +80,18 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dir")) {
             arg_index += 1;
             dir_buffer.appendAssumeCapacity(args[arg_index]);
+        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--trace")) {
+            arg_index += 1;
+            const mode_str: []const u8 = args[arg_index];
+            if (std.ascii.eqlIgnoreCase(mode_str, "function") or std.ascii.eqlIgnoreCase(mode_str, "func")) {
+                opts.trace = TraceMode.Function;
+            } else if (std.ascii.eqlIgnoreCase(mode_str, "instruction") or std.ascii.eqlIgnoreCase(mode_str, "instr")) {
+                opts.trace = TraceMode.Instruction;
+            } else if (std.ascii.eqlIgnoreCase(mode_str, "none")) {
+                opts.trace = TraceMode.None;
+            } else {
+                opts.invalid_arg = mode_str;
+            }
         } else {
             opts.invalid_arg = arg;
             break;
@@ -130,6 +144,12 @@ fn printHelp(args: [][]const u8) !void {
         \\     to the current working directory or absolute. Multiple instances of this flag can
         \\     be used to pass multiple dirs.
         \\
+        \\  -t, --trace <MODE>
+        \\     Print a trace of the wasm program as it executes. MODE can be:
+        \\       * none (default)
+        \\       * function
+        \\       * instruction
+        \\
         \\
     ;
 
@@ -175,6 +195,14 @@ pub fn main() !void {
         try stderr.print("Cannot invoke {s} without a file to load.", .{opts.invoke.?.funcname});
         try printHelp(args);
         return;
+    }
+
+    if (opts.trace != .None) {
+        if (bytebox.DebugTrace.setMode(opts.trace)) {
+            try stdout.print("Set debug trace mode to {}\n", .{opts.trace});
+        } else {
+            try stderr.print("Failed to set trace mode to {}. Option unavailable in non-debug builds.\n", .{opts.trace});
+        }
     }
 
     std.debug.assert(opts.filename != null);
