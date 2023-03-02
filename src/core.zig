@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 pub const wasi = @import("wasi.zig");
 const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
+const StringPool = @import("stringpool.zig").StringPool;
 
 const opcodes = @import("opcode.zig");
 const Opcode = opcodes.Opcode;
@@ -31,6 +32,7 @@ pub const MalformedError = error{
     MalformedElementType,
     MalformedUTF8Encoding,
     MalformedMutability,
+    MalformedCustomSection,
 };
 
 pub const UnlinkableError = error{
@@ -1634,6 +1636,126 @@ const Instruction = struct {
 const CustomSection = struct {
     name: []const u8,
     data: std.ArrayList(u8),
+};
+
+const NameCustomSection = struct {
+    const NameAssoc = struct {
+        name: []const u8,
+        func_index: u32,
+
+        fn cmp(_: void, a: NameAssoc, b: NameAssoc) bool {
+            return a.func_index < b.func_index;
+        }
+
+        fn order(_: void, a: NameAssoc, b: NameAssoc) std.math.Order {
+            if (a.func_index < b.func_index) {
+                return .lt;
+            } else if (a.func_index > b.func_index) {
+                return .gt;
+            } else {
+                return .eq;
+            }
+        }
+    };
+
+    // all string slices here are static strings or point into CustomSection.data - no need to free
+    module_name: []const u8,
+    function_names: std.ArrayList(NameAssoc),
+
+    // function_index_to_local_names_begin: std.hash_map.AutoHashMap(u32, u32),
+    // local_names: std.ArrayList([]const u8),
+
+    fn init(allocator: std.mem.Allocator) NameCustomSection {
+        return NameCustomSection{
+            .module_name = "<unknown_module>",
+            .function_names = std.ArrayList(NameAssoc).init(allocator),
+        };
+    }
+
+    fn deinit(self: *NameCustomSection) void {
+        self.function_names.deinit();
+    }
+
+    fn decode(self: *NameCustomSection, bytes: []const u8) MalformedError!void {
+        self.decodeInternal(bytes) catch |err| {
+            std.debug.print("NameCustomSection.decode: caught error from internal: {}", .{err});
+            return MalformedError.MalformedCustomSection;
+        };
+    }
+
+    fn decodeInternal(self: *NameCustomSection, bytes: []const u8) !void {
+        const DecodeHelpers = struct {
+            fn readName(stream: anytype) ![]const u8 {
+                var reader = stream.reader();
+                const name_length = try decodeLEB128(u32, reader);
+                const name: []const u8 = stream.buffer[stream.pos .. stream.pos + name_length];
+                try stream.seekBy(name_length);
+                return name;
+            }
+        };
+
+        var fixed_buffer_stream = std.io.fixedBufferStream(bytes);
+        var reader = fixed_buffer_stream.reader();
+
+        while (try fixed_buffer_stream.getPos() != try fixed_buffer_stream.getEndPos()) {
+            const section_code = try reader.readByte();
+            const section_size = try decodeLEB128(u32, reader);
+
+            switch (section_code) {
+                0 => {
+                    self.module_name = try DecodeHelpers.readName(&fixed_buffer_stream);
+                },
+                1 => {
+                    const num_func_names = try decodeLEB128(u32, reader);
+                    try self.function_names.ensureTotalCapacity(num_func_names);
+
+                    var index: u32 = 0;
+                    while (index < num_func_names) : (index += 1) {
+                        const func_index = try decodeLEB128(u32, reader);
+                        const func_name: []const u8 = try DecodeHelpers.readName(&fixed_buffer_stream);
+                        self.function_names.appendAssumeCapacity(NameAssoc{
+                            .name = func_name,
+                            .func_index = func_index,
+                        });
+                    }
+
+                    std.sort.sort(NameAssoc, self.function_names.items, {}, NameAssoc.cmp);
+                },
+                2 => { // TODO locals
+                    try fixed_buffer_stream.seekBy(section_size);
+                },
+                else => {
+                    try fixed_buffer_stream.seekBy(section_size);
+                },
+            }
+        }
+    }
+
+    fn getModuleName(self: *const NameCustomSection) []const u8 {
+        return self.module_name;
+    }
+
+    fn findFunctionName(self: *const NameCustomSection, func_index: u32) []const u8 {
+        if (func_index < self.function_names.items.len) {
+            if (self.function_names.items[func_index].func_index == func_index) {
+                return self.function_names.items[func_index].name;
+            } else {
+                const temp_nameassoc = NameAssoc{
+                    .name = "",
+                    .func_index = func_index,
+                };
+
+                if (std.sort.binarySearch(NameAssoc, temp_nameassoc, self.function_names.items, {}, NameAssoc.order)) |found_index| {
+                    return self.function_names.items[found_index].name;
+                }
+            }
+        }
+        return "<unknown_function>";
+    }
+
+    fn findFunctionLocalName(self: *NameCustomSection, func_index: u32, local_index: u32) []const u8 {
+        return "<unknown_local>";
+    }
 };
 
 const ModuleValidator = struct {
@@ -4908,6 +5030,8 @@ pub const ModuleDefinition = struct {
     datas: std.ArrayList(DataDefinition),
     custom_sections: std.ArrayList(CustomSection),
 
+    name_section: NameCustomSection,
+
     start_func_index: ?u32 = null,
     data_count: ?u32 = null,
 
@@ -4940,6 +5064,7 @@ pub const ModuleDefinition = struct {
             },
             .datas = std.ArrayList(DataDefinition).init(allocator),
             .custom_sections = std.ArrayList(CustomSection).init(allocator),
+            .name_section = NameCustomSection.init(allocator),
         };
 
         return module;
@@ -4976,6 +5101,7 @@ pub const ModuleDefinition = struct {
                 }
             }
 
+            // TODO move these names into a string pool
             fn readName(reader: anytype, _allocator: std.mem.Allocator) ![]const u8 {
                 const name_length = try decodeLEB128(u32, reader);
 
@@ -5036,8 +5162,6 @@ pub const ModuleDefinition = struct {
                         .data = std.ArrayList(u8).init(allocator),
                     };
 
-                    std.debug.print("custom section: {s}\n", .{section.name});
-
                     const name_length: usize = stream.pos - section_start_pos;
                     const data_length: usize = section_size_bytes - name_length;
                     try section.data.resize(data_length);
@@ -5047,6 +5171,10 @@ pub const ModuleDefinition = struct {
                     }
 
                     try self.custom_sections.append(section);
+
+                    if (std.mem.eql(u8, section.name, "name")) {
+                        try self.name_section.decode(section.data.items);
+                    }
                 },
                 .FunctionType => {
                     const num_types = try decodeLEB128(u32, reader);
@@ -5661,6 +5789,7 @@ pub const ModuleDefinition = struct {
         self.exports.memories.deinit();
         self.exports.globals.deinit();
         self.datas.deinit();
+        self.name_section.deinit();
 
         for (self.custom_sections.items) |*item| {
             self.allocator.free(item.name);
@@ -6578,12 +6707,40 @@ pub const ModuleInstance = struct {
         std.mem.copy(u8, destination, &bytes);
     }
 
+    /// Caller owns returned memory and must free via allocator.free()
+    pub fn formatBacktrace(self: *ModuleInstance, indent: u8, allocator: std.mem.Allocator) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(allocator);
+        try buffer.ensureTotalCapacity(512);
+        var writer = buffer.writer();
+
+        for (self.stack.frames[0..self.stack.num_frames]) |_, i| {
+            const reverse_index = (self.stack.num_frames - 1) - i;
+            const frame: *const CallFrame = &self.stack.frames[reverse_index];
+
+            var indent_level: usize = 0;
+            while (indent_level < indent) : (indent_level += 1) {
+                try writer.print("\t", .{});
+            }
+
+            const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+            const function_name = name_section.findFunctionName(frame.func.def_index);
+
+            try writer.print("{}: {s}!{s}\n", .{ reverse_index, module_name, function_name });
+        }
+
+        return buffer;
+    }
+
     fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
         const func: FunctionInstance = self.store.functions.items[func_instance_index];
         const func_def: FunctionDefinition = self.module_def.functions.items[func.def_index];
         const func_type: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
         const param_types: []const ValType = func_type.getParams();
         const return_types: []const ValType = func_type.getReturns();
+
+        // ensure any leftover stack state doesn't pollute future invokes
+        self.stack.popAll();
 
         // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
         // on the value stack
@@ -6594,10 +6751,7 @@ pub const ModuleInstance = struct {
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items, func_type.calcNumReturns());
         try self.stack.pushLabel(@intCast(u32, return_types.len), func_def.continuation);
 
-        InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack) catch |err| {
-            self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
-            return err;
-        };
+        try InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack);
 
         if (returns.len > 0) {
             var index: i32 = @intCast(i32, returns.len - 1);
