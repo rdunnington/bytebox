@@ -298,7 +298,9 @@ pub fn main() !void {
     try returns.resize(func_info.?.returns.len);
 
     module_instance.invoke(invoke_funcname, params.items, returns.items) catch |e| {
-        std.log.err("Caught {} during function invoke.", .{e});
+        var backtrace = module_instance.formatBacktrace(1, allocator) catch unreachable;
+        std.log.err("Caught {} during function invoke. Backtrace:\n{s}\n", .{ e, backtrace.items });
+        backtrace.deinit();
         return;
     };
 
