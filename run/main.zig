@@ -214,7 +214,10 @@ pub fn main() !void {
     };
     defer allocator.free(wasm_data);
 
-    var module_def = bytebox.ModuleDefinition.init(allocator);
+    const module_def_opts = bytebox.ModuleDefinitionOpts{
+        .debug_name = std.fs.path.basename(opts.filename.?),
+    };
+    var module_def = bytebox.ModuleDefinition.init(allocator, module_def_opts);
     defer module_def.deinit();
 
     module_def.decode(wasm_data) catch |e| {

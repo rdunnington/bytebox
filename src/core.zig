@@ -147,8 +147,8 @@ pub const DebugTrace = struct {
 
     fn traceHostFunction(module_instance: *const ModuleInstance, indent: u32, import_name: []const u8) void {
         if (shouldTraceFunctions()) {
-            const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
-            const module_name = name_section.getModuleName();
+            _ = module_instance;
+            const module_name = "<unknown_host_module>";
 
             printIndent(indent);
             std.debug.print("{s}!{s}\n", .{ module_name, import_name });
@@ -304,7 +304,7 @@ pub const ValType = enum(u8) {
 // Empty instances of these help avoid nullable pointers. Nullable pointers make structs bigger which
 // fights cache coherency.
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-var empty_module_definition = ModuleDefinition.init(gpa.allocator());
+var empty_module_definition = ModuleDefinition.init(gpa.allocator(), .{});
 var empty_module_instance = ModuleInstance.init(&empty_module_definition, gpa.allocator());
 
 pub const Val = union(ValType) {
@@ -1735,7 +1735,7 @@ const NameCustomSection = struct {
 
     fn init(allocator: std.mem.Allocator) NameCustomSection {
         return NameCustomSection{
-            .module_name = "<unknown_module>",
+            .module_name = "",
             .function_names = std.ArrayList(NameAssoc).init(allocator),
         };
     }
@@ -1744,14 +1744,14 @@ const NameCustomSection = struct {
         self.function_names.deinit();
     }
 
-    fn decode(self: *NameCustomSection, bytes: []const u8) MalformedError!void {
-        self.decodeInternal(bytes) catch |err| {
+    fn decode(self: *NameCustomSection, module_definition: *const ModuleDefinition, bytes: []const u8) MalformedError!void {
+        self.decodeInternal(module_definition, bytes) catch |err| {
             std.debug.print("NameCustomSection.decode: caught error from internal: {}", .{err});
             return MalformedError.MalformedCustomSection;
         };
     }
 
-    fn decodeInternal(self: *NameCustomSection, bytes: []const u8) !void {
+    fn decodeInternal(self: *NameCustomSection, module_definition: *const ModuleDefinition, bytes: []const u8) !void {
         const DecodeHelpers = struct {
             fn readName(stream: anytype) ![]const u8 {
                 var reader = stream.reader();
@@ -1795,6 +1795,14 @@ const NameCustomSection = struct {
                 else => {
                     try fixed_buffer_stream.seekBy(section_size);
                 },
+            }
+        }
+
+        if (self.module_name.len == 0) {
+            if (module_definition.debug_name.len > 0) {
+                self.module_name = module_definition.debug_name;
+            } else {
+                self.module_name = "<unknown_module>";
             }
         }
     }
@@ -5059,6 +5067,10 @@ const InstructionFuncs = struct {
     }
 };
 
+pub const ModuleDefinitionOpts = struct {
+    debug_name: []const u8 = "",
+};
+
 pub const ModuleDefinition = struct {
     const Code = struct {
         instructions: std.ArrayList(Instruction),
@@ -5098,12 +5110,13 @@ pub const ModuleDefinition = struct {
 
     name_section: NameCustomSection,
 
+    debug_name: []const u8,
     start_func_index: ?u32 = null,
     data_count: ?u32 = null,
 
     is_decoded: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator) ModuleDefinition {
+    pub fn init(allocator: std.mem.Allocator, opts: ModuleDefinitionOpts) ModuleDefinition {
         var module = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
@@ -5131,6 +5144,7 @@ pub const ModuleDefinition = struct {
             .datas = std.ArrayList(DataDefinition).init(allocator),
             .custom_sections = std.ArrayList(CustomSection).init(allocator),
             .name_section = NameCustomSection.init(allocator),
+            .debug_name = opts.debug_name,
         };
 
         return module;
@@ -5239,7 +5253,7 @@ pub const ModuleDefinition = struct {
                     try self.custom_sections.append(section);
 
                     if (std.mem.eql(u8, section.name, "name")) {
-                        try self.name_section.decode(section.data.items);
+                        try self.name_section.decode(self, section.data.items);
                     }
                 },
                 .FunctionType => {

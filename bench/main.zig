@@ -21,7 +21,7 @@ fn run(allocator: std.mem.Allocator, benchmark: Benchmark) !void {
 
     var timer = try Timer.start();
 
-    var module_def = bytebox.ModuleDefinition.init(allocator);
+    var module_def = bytebox.ModuleDefinition.init(allocator, .{});
     defer module_def.deinit();
     try module_def.decode(wasm_data);
 

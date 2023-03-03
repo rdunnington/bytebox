@@ -737,7 +737,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
             module.filename = try allocator.dupe(u8, module_filename);
 
-            module.def = bytebox.ModuleDefinition.init(allocator);
+            module.def = bytebox.ModuleDefinition.init(allocator, .{ .debug_name = std.fs.path.basename(module_filename) });
             (module.def.?).decode(module_data) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
