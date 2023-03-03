@@ -141,7 +141,7 @@ pub const DebugTrace = struct {
     fn printIndent(indent: u32) void {
         var indent_level: u32 = 0;
         while (indent_level < indent) : (indent_level += 1) {
-            std.debug.print("\t", .{});
+            std.debug.print("  ", .{});
         }
     }
 
@@ -157,14 +157,13 @@ pub const DebugTrace = struct {
 
     fn traceFunction(module_instance: *const ModuleInstance, indent: u32, func_index: u32) void {
         if (shouldTraceFunctions()) {
+            const func_name_index: u32 = func_index + @intCast(u32, module_instance.module_def.imports.functions.items.len);
+
             const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
             const module_name = name_section.getModuleName();
-            const function_name = name_section.findFunctionName(func_index);
+            const function_name = name_section.findFunctionName(func_name_index);
 
-            var indent_level: u32 = 0;
-            while (indent_level < indent) : (indent_level += 1) {
-                std.debug.print("\t", .{});
-            }
+            printIndent(indent);
             std.debug.print("{s}!{s}\n", .{ module_name, function_name });
         }
     }
