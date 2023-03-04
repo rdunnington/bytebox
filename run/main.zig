@@ -6,6 +6,13 @@ const Val = bytebox.Val;
 const ValType = bytebox.ValType;
 const TraceMode = bytebox.DebugTrace.Mode;
 
+const RunErrors = error{
+    IoError,
+    MissingFunction,
+    FunctionParamMismatch,
+    BadFunctionParam,
+};
+
 const CmdOpts = struct {
     print_help: bool = false,
     print_version: bool = false,
@@ -223,7 +230,7 @@ pub fn main() !void {
     var cwd = std.fs.cwd();
     var wasm_data: []u8 = cwd.readFileAlloc(allocator, opts.filename.?, 1024 * 1024 * 128) catch |e| {
         std.log.err("Failed to read file '{s}' into memory: {}", .{ opts.filename.?, e });
-        return;
+        return RunErrors.IoError;
     };
     defer allocator.free(wasm_data);
 
@@ -235,7 +242,7 @@ pub fn main() !void {
 
     module_def.decode(wasm_data) catch |e| {
         std.log.err("Caught {} decoding module - invalid wasm.", .{e});
-        return;
+        return e;
     };
 
     if (opts.print_dump) {
@@ -262,7 +269,7 @@ pub fn main() !void {
 
     module_instance.instantiate(instantiate_opts) catch |e| {
         std.log.err("Caught {} instantiating module - invalid wasm.", .{e});
-        return;
+        return e;
     };
 
     const invoke_funcname: []const u8 = if (opts.invoke) |invoke| invoke.funcname else "_start";
@@ -274,7 +281,7 @@ pub fn main() !void {
         if (opts.invoke != null) {
             std.log.err("Failed to find function '{s}' - either it doesn't exist or is not a public export.", .{invoke_funcname});
         }
-        return;
+        return RunErrors.MissingFunction;
     }
 
     const num_params: usize = invoke_args.len;
@@ -288,7 +295,7 @@ pub fn main() !void {
             invoke_funcname,
             strbuf.items,
         });
-        return;
+        return RunErrors.FunctionParamMismatch;
     }
 
     std.debug.assert(invoke_args.len == num_params);
@@ -302,38 +309,38 @@ pub fn main() !void {
             .I32 => {
                 var parsed: i32 = std.fmt.parseInt(i32, arg, 0) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as an i32: {}", .{ i, arg, e });
-                    return;
+                    return RunErrors.BadFunctionParam;
                 };
                 params.items[i] = Val{ .I32 = parsed };
             },
             .I64 => {
                 var parsed: i64 = std.fmt.parseInt(i64, arg, 0) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as an i64: {}", .{ i, arg, e });
-                    return;
+                    return RunErrors.BadFunctionParam;
                 };
                 params.items[i] = Val{ .I64 = parsed };
             },
             .F32 => {
                 var parsed: f32 = std.fmt.parseFloat(f32, arg) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as a f32: {}", .{ i, arg, e });
-                    return;
+                    return RunErrors.BadFunctionParam;
                 };
                 params.items[i] = Val{ .F32 = parsed };
             },
             .F64 => {
                 var parsed: f64 = std.fmt.parseFloat(f64, arg) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as a f64: {}", .{ i, arg, e });
-                    return;
+                    return RunErrors.BadFunctionParam;
                 };
                 params.items[i] = Val{ .F64 = parsed };
             },
             .FuncRef => {
                 std.log.err("Param at index {} is a funcref, making this function only invokeable from code.", .{i});
-                return;
+                return RunErrors.BadFunctionParam;
             },
             .ExternRef => {
                 std.log.err("Param at index {} is an externref, making this function only invokeable from code.", .{i});
-                return;
+                return RunErrors.BadFunctionParam;
             },
         }
     }
@@ -345,7 +352,7 @@ pub fn main() !void {
         var backtrace = module_instance.formatBacktrace(1, allocator) catch unreachable;
         std.log.err("Caught {} during function invoke. Backtrace:\n{s}\n", .{ e, backtrace.items });
         backtrace.deinit();
-        return;
+        return e;
     };
 
     {

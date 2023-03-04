@@ -21,7 +21,6 @@ parser.add_argument("--dir", action="append", default=[])
 args = parser.parse_args()
 
 if args.version:
-    sys.stderr.write("bytebox path: " + BYTEBOX)
     subprocess.run(BYTEBOX + " --version")
     sys.exit(0)
 
