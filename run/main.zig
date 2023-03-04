@@ -31,6 +31,10 @@ fn isArgvOption(arg: []const u8) bool {
     return arg.len > 0 and arg[0] == '-';
 }
 
+fn getArgSafe(index: usize, args: [][]const u8) ?[]const u8 {
+    return if (index < args.len) args[index] else null;
+}
+
 fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_buffer: *std.ArrayList([]const u8)) CmdOpts {
     var opts = CmdOpts{};
 
@@ -76,21 +80,32 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
             arg_index = args.len;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--env")) {
             arg_index += 1;
-            env_buffer.appendAssumeCapacity(args[arg_index]);
+            if (getArgSafe(arg_index, args)) |env| {
+                env_buffer.appendAssumeCapacity(env);
+            } else {
+                opts.missing_options = arg;
+            }
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dir")) {
             arg_index += 1;
-            dir_buffer.appendAssumeCapacity(args[arg_index]);
+            if (getArgSafe(arg_index, args)) |dir| {
+                dir_buffer.appendAssumeCapacity(dir);
+            } else {
+                opts.missing_options = arg;
+            }
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--trace")) {
             arg_index += 1;
-            const mode_str: []const u8 = args[arg_index];
-            if (std.ascii.eqlIgnoreCase(mode_str, "function") or std.ascii.eqlIgnoreCase(mode_str, "func")) {
-                opts.trace = TraceMode.Function;
-            } else if (std.ascii.eqlIgnoreCase(mode_str, "instruction") or std.ascii.eqlIgnoreCase(mode_str, "instr")) {
-                opts.trace = TraceMode.Instruction;
-            } else if (std.ascii.eqlIgnoreCase(mode_str, "none")) {
-                opts.trace = TraceMode.None;
+            if (getArgSafe(arg_index, args)) |mode_str| {
+                if (std.ascii.eqlIgnoreCase(mode_str, "function") or std.ascii.eqlIgnoreCase(mode_str, "func")) {
+                    opts.trace = TraceMode.Function;
+                } else if (std.ascii.eqlIgnoreCase(mode_str, "instruction") or std.ascii.eqlIgnoreCase(mode_str, "instr")) {
+                    opts.trace = TraceMode.Instruction;
+                } else if (std.ascii.eqlIgnoreCase(mode_str, "none")) {
+                    opts.trace = TraceMode.None;
+                } else {
+                    opts.invalid_arg = mode_str;
+                }
             } else {
-                opts.invalid_arg = mode_str;
+                opts.missing_options = arg;
             }
         } else {
             opts.invalid_arg = arg;
@@ -199,8 +214,6 @@ pub fn main() !void {
 
     if (opts.trace != .None) {
         if (bytebox.DebugTrace.setMode(opts.trace)) {
-            try stdout.print("Set debug trace mode to {}\n", .{opts.trace});
-        } else {
             try stderr.print("Failed to set trace mode to {}. Option unavailable in non-debug builds.\n", .{opts.trace});
         }
     }
