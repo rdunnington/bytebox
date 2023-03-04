@@ -92,6 +92,17 @@ const WasiContext = struct {
         return FD_OS_INVALID;
     }
 
+    fn fdDirPath(self: *WasiContext, fd_wasi: u32) ?[]const u8 {
+        if (fd_wasi != FD_WASI_INVALID) {
+            const dirs_index = fd_wasi - 3;
+            if (dirs_index < self.dirs.len) {
+                return self.dirs[dirs_index];
+            }
+        }
+
+        return null;
+    }
+
     fn fdAdd(self: *WasiContext, fd_os: std.os.fd_t) std.mem.Allocator.Error!u32 {
         var fd_wasi: u32 = self.next_fd_id;
         self.fd_table.put(fd_wasi, fd_os) catch {
@@ -110,9 +121,9 @@ const WasiContext = struct {
         }
     }
 
-    fn hasPathAccess(self: *WasiContext, fd_root: std.os.fd_t, relative_path: []const u8) bool {
+    fn hasPathAccess(self: *WasiContext, fd_dir: std.os.fd_t, relative_path: []const u8) bool {
         if (self.dirs.len > 0) {
-            const dir = std.fs.Dir{ .fd = fd_root };
+            const dir = std.fs.Dir{ .fd = fd_dir };
             var path_buffer_relative: [std.fs.MAX_PATH_BYTES]u8 = undefined;
             const absolute_path: []const u8 = dir.realpath(relative_path, &path_buffer_relative) catch unreachable;
 
@@ -671,10 +682,10 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
     var errno = Errno.SUCCESS;
 
     const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_wasi < 3 or fd_os != FD_OS_INVALID) { // std handles are 0, 1, 2 so skip those
+    if (fd_os != FD_OS_INVALID and fd_wasi >= 3) { // std handles are 0, 1, 2 so skip those
         var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const path: []const u8 = std.os.getFdPath(fd_os, &name_buffer) catch unreachable;
-        const pr_name_len: u32 = @intCast(u32, path.len); // allow space for null terminator
+        const pr_name_len: u32 = @intCast(u32, path.len + 1); // allow space for null terminator
 
         module.memoryWriteInt(u32, @enumToInt(WasiPreopenType.Dir), prestat_mem_offset);
         module.memoryWriteInt(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32));
@@ -693,21 +704,17 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
     std.debug.assert(returns.len == 1);
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_dir_wasi = @bitCast(u32, params[0].I32);
     const path_mem_offset = @bitCast(u32, params[1].I32);
     const path_mem_length = @bitCast(u32, params[2].I32);
 
-    std.debug.print("called wasi_fd_prestat_dir_name\n", .{});
-
     var errno = Errno.SUCCESS;
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_os != FD_OS_INVALID) {
-        var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const path_source: []const u8 = std.os.getFdPath(fd_os, &name_buffer) catch unreachable;
-
+    if (context.fdDirPath(fd_dir_wasi)) |path_source| {
         var path_dest: []u8 = module.memorySlice(path_mem_offset, path_mem_length);
         std.mem.copy(u8, path_dest, path_source);
+        const null_offset: usize = std.math.min(path_source.len, path_dest.len);
+        path_dest[null_offset] = 0; // null terminator
     } else {
         errno = Errno.BADF;
     }
@@ -734,8 +741,6 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
     std.debug.assert(params.len == 1);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(returns.len == 1);
-
-    std.debug.print("called wasi_fd_close\n", .{});
 
     var context = WasiContext.fromUserdata(userdata);
     const fd_wasi: u32 = @bitCast(u32, params[0].I32);
@@ -775,8 +780,6 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    std.debug.print("called wasi_fd_write\n", .{});
-
     var context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
     const iovec_array_begin = @bitCast(u32, params[1].I32);
@@ -784,8 +787,6 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     const bytes_written_offset = @bitCast(u32, params[3].I32);
 
     const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-
-    std.debug.print("fd_wasi: {}\n", .{fd_wasi});
 
     var errno = Errno.SUCCESS;
 
@@ -843,11 +844,8 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     std.debug.assert(std.meta.activeTag(params[8]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    std.debug.print("called wasi_path_open\n", .{});
-
     var context = WasiContext.fromUserdata(userdata);
-    // TODO move the wasi-specific stuff out of module instance and into a userdata passed down by ModuleImports
-    const fd_root_wasi: u32 = @bitCast(u32, params[0].I32);
+    const fd_dir_wasi: u32 = @bitCast(u32, params[0].I32);
     // const dirflags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
     const path_mem_offset: u32 = @bitCast(u32, params[2].I32);
     const path_mem_length: u32 = @bitCast(u32, params[3].I32);
@@ -857,11 +855,11 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[7].I32);
     const fd_out_mem_offset = @bitCast(u32, params[8].I32);
 
-    const fd_root: std.os.fd_t = context.fdLookup(fd_root_wasi);
-    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length - 1); // wasi strings are null terminated
+    const fd_dir: std.os.fd_t = context.fdLookup(fd_dir_wasi);
+    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
 
     var errno = Errno.SUCCESS;
-    if (context.hasPathAccess(fd_root, path)) {
+    if (context.hasPathAccess(fd_dir, path)) {
         var flags: u32 = 0;
         if (openflags.creat) {
             flags |= std.os.O.CREAT;
@@ -903,7 +901,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
         // 644 means rw perm owner, r perm group, r perm others
         var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
 
-        if (std.os.openat(fd_root, path, flags, mode)) |fd_opened| {
+        if (std.os.openat(fd_dir, path, flags, mode)) |fd_opened| {
             if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
                 module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
             } else |err| {
