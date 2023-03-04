@@ -353,7 +353,6 @@ pub fn main() !void {
         defer strbuf.deinit();
         var writer = strbuf.writer();
 
-        try std.fmt.format(writer, "'{s}' completed with {} returns", .{ invoke_funcname, returns.items.len });
         if (returns.items.len > 0) {
             try std.fmt.format(writer, ":\n", .{});
             for (returns.items) |val| {
@@ -368,7 +367,9 @@ pub fn main() !void {
             }
             try std.fmt.format(writer, "\n", .{});
         }
-        try stdout.print("{s}\n", .{strbuf.items});
+        if (strbuf.items.len > 0) {
+            try stdout.print("{s}\n", .{strbuf.items});
+        }
     }
 }
 
