@@ -984,6 +984,42 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 5);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[3]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[4]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    var context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const iovec_array_begin = @bitCast(u32, params[1].I32);
+    const iovec_array_count = @bitCast(u32, params[2].I32);
+    const write_offset = @bitCast(u64, params[3].I64);
+    const bytes_written_out_offset = @bitCast(u32, params[4].I32);
+
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
+
+    var errno = Errno.SUCCESS;
+
+    if (fd_os != FD_OS_INVALID) {
+        var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
+        if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+            if (std.os.pwritev(fd_os, iov, write_offset)) |written_bytes| {
+                module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
+            } else |err| {
+                errno = Errno.translateError(err);
+            }
+        }
+    } else {
+        errno = Errno.BADF;
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 9);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
@@ -1070,6 +1106,58 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 3);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    var context = WasiContext.fromUserdata(userdata);
+
+    const fd_dir_wasi = @bitCast(u32, params[0].I32);
+    const path_mem_offset = @bitCast(u32, params[1].I32);
+    const path_mem_length = @bitCast(u32, params[2].I32);
+
+    var errno = Errno.SUCCESS;
+
+    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
+    const fd_dir: std.os.fd_t = context.fdLookup(fd_dir_wasi);
+    if (context.hasPathAccess(fd_dir, path)) {
+        std.os.unlinkat(fd_dir, path, std.os.AT.REMOVEDIR) catch |err| {
+            errno = Errno.translateError(err);
+        };
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 3);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    var context = WasiContext.fromUserdata(userdata);
+
+    const fd_dir_wasi = @bitCast(u32, params[0].I32);
+    const path_mem_offset = @bitCast(u32, params[1].I32);
+    const path_mem_length = @bitCast(u32, params[2].I32);
+
+    var errno = Errno.SUCCESS;
+
+    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
+    const fd_dir: std.os.fd_t = context.fdLookup(fd_dir_wasi);
+    if (context.hasPathAccess(fd_dir, path)) {
+        std.os.unlinkat(fd_dir, path, 0) catch |err| {
+            errno = Errno.translateError(err);
+        };
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 2);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
@@ -1122,8 +1210,11 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
     try imports.addHostFunction("fd_tell", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_tell);
     try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
+    try imports.addHostFunction("fd_pwrite", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pwrite);
     try imports.addHostFunction("random_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
     try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
+    try imports.addHostFunction("path_remove_directory", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_remove_directory);
+    try imports.addHostFunction("path_unlink_file", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_unlink_file);
     try imports.addHostFunction("proc_exit", &[_]ValType{.I32}, void_returns, wasi_proc_exit);
 
     return imports;
