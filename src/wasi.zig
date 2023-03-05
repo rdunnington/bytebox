@@ -246,6 +246,7 @@ const Errno = enum(u8) {
             error.FileLocksNotSupported => .NOTSUP,
             error.WouldBlock => .AGAIN,
             error.FileBusy => .TXTBSY,
+            error.Unseekable => .SPIPE,
             else => .INVAL,
         };
     }
@@ -301,6 +302,21 @@ const WasiFdFlags = packed struct {
     nonblock: bool,
     rsync: bool,
     sync: bool,
+};
+
+const Whence = enum(u8) {
+    Set,
+    Cur,
+    End,
+
+    fn fromInt(int: i32) ?Whence {
+        return switch (int) {
+            0 => .Set,
+            1 => .Cur,
+            2 => .End,
+            else => null,
+        };
+    }
 };
 
 const WindowsApi = struct {
@@ -722,7 +738,7 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_read(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 4);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
@@ -732,8 +748,57 @@ fn wasi_fd_read(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
 
     std.debug.print("called wasi_fd_read\n", .{});
 
-    // TODO
+    var context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const iovec_array_begin = @bitCast(u32, params[1].I32);
+    const iovec_array_count = @bitCast(u32, params[2].I32);
+    const bytes_read_out_offset = @bitCast(u32, params[3].I32);
+
     var errno = Errno.SUCCESS;
+
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
+    if (fd_os != FD_OS_INVALID) {
+        var stack_iov = [_]std.os.iovec{undefined} ** 1024;
+        if (iovec_array_count < stack_iov.len) {
+            const iov = stack_iov[0..iovec_array_count];
+            const iovec_array_bytes_length = @sizeOf(u32) * 2 * iovec_array_count;
+            const iovec_mem: []const u8 = module.memorySlice(iovec_array_begin, iovec_array_bytes_length);
+            var stream = std.io.fixedBufferStream(iovec_mem);
+            var reader = stream.reader();
+
+            for (iov) |*vec| {
+                const iov_base: u32 = reader.readIntLittle(u32) catch {
+                    errno = Errno.INVAL;
+                    break;
+                };
+                const iov_len: u32 = reader.readIntLittle(u32) catch {
+                    errno = Errno.INVAL;
+                    break;
+                };
+                const mem: []u8 = module.memorySlice(iov_base, iov_len);
+
+                vec.iov_base = mem.ptr;
+                vec.iov_len = mem.len;
+            }
+
+            if (errno == Errno.SUCCESS) {
+                if (std.os.readv(fd_os, iov)) |read_bytes| {
+                    if (read_bytes <= std.math.maxInt(u32)) {
+                        module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
+                    } else {
+                        errno = Errno.TOOBIG;
+                    }
+                } else |err| {
+                    errno = Errno.translateError(err);
+                }
+            }
+        } else {
+            errno = Errno.TOOBIG;
+        }
+    } else {
+        errno = Errno.BADF;
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -743,7 +808,8 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
     std.debug.assert(returns.len == 1);
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi: u32 = @bitCast(u32, params[0].I32);
+
+    const fd_wasi = @bitCast(u32, params[0].I32);
 
     var errno = Errno.SUCCESS;
 
@@ -757,7 +823,7 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     std.debug.assert(params.len == 4);
     std.debug.assert(std.meta.activeTag(params[0]) == .I32);
     std.debug.assert(std.meta.activeTag(params[1]) == .I64);
@@ -765,10 +831,82 @@ fn wasi_fd_seek(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
 
+    var context = WasiContext.fromUserdata(userdata);
+
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const offset = params[1].I64;
+    const whence_raw = params[2].I32;
+    const filepos_out_offset = @bitCast(u32, params[3].I32);
+
     std.debug.print("called wasi_fd_seek\n", .{});
 
-    // TODO
     var errno = Errno.SUCCESS;
+
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
+    if (fd_os != FD_OS_INVALID) {
+        if (Whence.fromInt(whence_raw)) |whence| {
+            switch (whence) {
+                .Set => {
+                    if (offset >= 0) {
+                        const offset_unsigned = @intCast(u64, offset);
+                        std.os.lseek_SET(fd_os, offset_unsigned) catch |err| {
+                            errno = Errno.translateError(err);
+                        };
+                    }
+                },
+                .Cur => {
+                    std.os.lseek_CUR(fd_os, offset) catch |err| {
+                        errno = Errno.translateError(err);
+                    };
+                },
+                .End => {
+                    std.os.lseek_END(fd_os, offset) catch |err| {
+                        errno = Errno.translateError(err);
+                    };
+                },
+            }
+
+            if (std.os.lseek_CUR_get(fd_os)) |filepos| {
+                module.memoryWriteInt(u64, filepos, filepos_out_offset);
+            } else |err| {
+                errno = Errno.translateError(err);
+            }
+        } else {
+            errno = Errno.INVAL;
+        }
+    } else {
+        errno = Errno.BADF;
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 2);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    const context = WasiContext.fromUserdata(userdata);
+
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const filepos_out_offset = @bitCast(u32, params[1].I32);
+
+    var errno = Errno.SUCCESS;
+
+    std.debug.print("called wasi_fd_tell\n", .{});
+
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
+    if (fd_os != FD_OS_INVALID) {
+        if (std.os.lseek_CUR_get(fd_os)) |filepos| {
+            module.memoryWriteInt(u64, filepos, filepos_out_offset);
+        } else |err| {
+            errno = Errno.translateError(err);
+        }
+    } else {
+        errno = Errno.BADF;
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -784,7 +922,7 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     const fd_wasi = @bitCast(u32, params[0].I32);
     const iovec_array_begin = @bitCast(u32, params[1].I32);
     const iovec_array_count = @bitCast(u32, params[2].I32);
-    const bytes_written_offset = @bitCast(u32, params[3].I32);
+    const bytes_written_out_offset = @bitCast(u32, params[3].I32);
 
     const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
 
@@ -816,7 +954,7 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
 
             if (errno == Errno.SUCCESS) {
                 if (std.os.writev(fd_os, iov)) |written_bytes| {
-                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_offset);
+                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
@@ -952,28 +1090,25 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
 
     const void_returns = &[0]ValType{};
 
-    try imports.addHostFunction("args_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
     try imports.addHostFunction("args_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_get);
-    try imports.addHostFunction("environ_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
-    try imports.addHostFunction("environ_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
+    try imports.addHostFunction("args_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_args_sizes_get);
     try imports.addHostFunction("clock_res_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_clock_res_get);
     try imports.addHostFunction("clock_time_get", &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get);
-
+    try imports.addHostFunction("environ_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
+    try imports.addHostFunction("environ_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
+    try imports.addHostFunction("fd_close", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_close);
     try imports.addHostFunction("fd_datasync", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_datasync);
     try imports.addHostFunction("fd_fdstat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get);
     try imports.addHostFunction("fd_fdstat_set_flags", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_set_flags);
     try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
     try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
     try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
-
-    try imports.addHostFunction("fd_close", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_close);
     try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
+    try imports.addHostFunction("fd_tell", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_tell);
     try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
-
-    try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
-
-    try imports.addHostFunction("proc_exit", &[_]ValType{.I32}, void_returns, wasi_proc_exit);
     try imports.addHostFunction("random_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
+    try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
+    try imports.addHostFunction("proc_exit", &[_]ValType{.I32}, void_returns, wasi_proc_exit);
 
     return imports;
 }
