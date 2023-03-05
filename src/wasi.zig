@@ -82,14 +82,14 @@ const WasiContext = struct {
         self.fd_table.deinit();
     }
 
-    fn fdLookup(self: *const WasiContext, fd_wasi: u32) std.os.fd_t {
+    fn fdLookup(self: *const WasiContext, fd_wasi: u32) ?std.os.fd_t {
         if (fd_wasi != FD_WASI_INVALID) {
             if (self.fd_table.get(fd_wasi)) |fd_os| {
                 return fd_os;
             }
         }
 
-        return FD_OS_INVALID;
+        return null;
     }
 
     fn fdDirPath(self: *WasiContext, fd_wasi: u32) ?[]const u8 {
@@ -113,11 +113,11 @@ const WasiContext = struct {
         return fd_wasi;
     }
 
-    fn fdRemove(self: *WasiContext, wasi_fd: u32) std.os.fd_t {
+    fn fdRemove(self: *WasiContext, wasi_fd: u32) ?std.os.fd_t {
         if (self.fd_table.fetchRemove(wasi_fd)) |result| {
             return result.value;
         } else {
-            return FD_OS_INVALID;
+            return null;
         }
     }
 
@@ -247,6 +247,7 @@ const Errno = enum(u8) {
             error.WouldBlock => .AGAIN,
             error.FileBusy => .TXTBSY,
             error.Unseekable => .SPIPE,
+            error.DirNotEmpty => .NOTEMPTY,
             else => .INVAL,
         };
     }
@@ -729,10 +730,10 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
 
     var errno = Errno.SUCCESS;
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_os != FD_OS_INVALID and fd_wasi >= 3) { // std handles are 0, 1, 2 so skip those
+    const fd_os: ?std.os.fd_t = context.fdLookup(fd_wasi);
+    if (fd_wasi >= 3 and fd_os != null) { // std handles are 0, 1, 2 so skip those
         var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const path: []const u8 = std.os.getFdPath(fd_os, &name_buffer) catch unreachable;
+        const path: []const u8 = std.os.getFdPath(fd_os.?, &name_buffer) catch unreachable;
         const pr_name_len: u32 = @intCast(u32, path.len + 1); // allow space for null terminator
 
         module.memoryWriteInt(u32, @enumToInt(WasiPreopenType.Dir), prestat_mem_offset);
@@ -786,8 +787,7 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     var errno = Errno.SUCCESS;
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_os != FD_OS_INVALID) {
+    if (context.fdLookup(fd_wasi)) |fd_os| {
         var stack_iov = [_]std.os.iovec{undefined} ** 1024;
         if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
             if (std.os.readv(fd_os, iov)) |read_bytes| {
@@ -825,8 +825,7 @@ fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
 
     var errno = Errno.SUCCESS;
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_os != FD_OS_INVALID) {
+    if (context.fdLookup(fd_wasi)) |fd_os| {
         var stack_iov = [_]std.os.iovec{undefined} ** 1024;
         if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
             if (std.os.preadv(fd_os, iov, read_offset)) |read_bytes| {
@@ -857,8 +856,7 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
 
     var errno = Errno.SUCCESS;
 
-    const fd_os: std.os.fd_t = context.fdRemove(fd_wasi);
-    if (fd_os != FD_OS_INVALID) {
+    if (context.fdRemove(fd_wasi)) |fd_os| {
         std.os.close(fd_os);
     } else {
         errno = Errno.BADF;
@@ -884,8 +882,7 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     var errno = Errno.SUCCESS;
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_os != FD_OS_INVALID) {
+    if (context.fdLookup(fd_wasi)) |fd_os| {
         if (Whence.fromInt(whence_raw)) |whence| {
             switch (whence) {
                 .Set => {
@@ -936,8 +933,7 @@ fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     var errno = Errno.SUCCESS;
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_os != FD_OS_INVALID) {
+    if (context.fdLookup(fd_wasi)) |fd_os| {
         if (std.os.lseek_CUR_get(fd_os)) |filepos| {
             module.memoryWriteInt(u64, filepos, filepos_out_offset);
         } else |err| {
@@ -964,11 +960,9 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     const iovec_array_count = @bitCast(u32, params[2].I32);
     const bytes_written_out_offset = @bitCast(u32, params[3].I32);
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-
     var errno = Errno.SUCCESS;
 
-    if (fd_os != FD_OS_INVALID) {
+    if (context.fdLookup(fd_wasi)) |fd_os| {
         var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
         if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
             if (std.os.writev(fd_os, iov)) |written_bytes| {
@@ -1000,11 +994,9 @@ fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     const write_offset = @bitCast(u64, params[3].I64);
     const bytes_written_out_offset = @bitCast(u32, params[4].I32);
 
-    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
-
     var errno = Errno.SUCCESS;
 
-    if (fd_os != FD_OS_INVALID) {
+    if (context.fdLookup(fd_wasi)) |fd_os| {
         var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
         if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
             if (std.os.pwritev(fd_os, iov, write_offset)) |written_bytes| {
@@ -1044,63 +1036,66 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[7].I32);
     const fd_out_mem_offset = @bitCast(u32, params[8].I32);
 
-    const fd_dir: std.os.fd_t = context.fdLookup(fd_dir_wasi);
     const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
 
     var errno = Errno.SUCCESS;
-    if (context.hasPathAccess(fd_dir, path)) {
-        var flags: u32 = 0;
-        if (openflags.creat) {
-            flags |= std.os.O.CREAT;
-        }
-        if (openflags.directory) {
-            flags |= std.os.O.DIRECTORY;
-        }
-        if (openflags.excl) {
-            flags |= std.os.O.EXCL;
-        }
-        if (openflags.trunc) {
-            flags |= std.os.O.TRUNC;
-        }
+    if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
+        if (context.hasPathAccess(fd_dir, path)) {
+            var flags: u32 = 0;
+            if (openflags.creat) {
+                flags |= std.os.O.CREAT;
+            }
+            if (openflags.directory) {
+                flags |= std.os.O.DIRECTORY;
+            }
+            if (openflags.excl) {
+                flags |= std.os.O.EXCL;
+            }
+            if (openflags.trunc) {
+                flags |= std.os.O.TRUNC;
+            }
 
-        if (fdflags.append) {
-            flags |= std.os.O.APPEND;
-        }
-        if (fdflags.dsync) {
-            flags |= std.os.O.DSYNC;
-        }
-        if (fdflags.nonblock) {
-            flags |= std.os.O.NONBLOCK;
-        }
-        if (fdflags.rsync) {
-            flags |= std.os.O.RSYNC;
-        }
-        if (fdflags.sync) {
-            flags |= std.os.O.SYNC;
-        }
+            if (fdflags.append) {
+                flags |= std.os.O.APPEND;
+            }
+            if (fdflags.dsync) {
+                flags |= std.os.O.DSYNC;
+            }
+            if (fdflags.nonblock) {
+                flags |= std.os.O.NONBLOCK;
+            }
+            if (fdflags.rsync) {
+                flags |= std.os.O.RSYNC;
+            }
+            if (fdflags.sync) {
+                flags |= std.os.O.SYNC;
+            }
 
-        if (rights_base.fd_read and rights_base.fd_write) {
-            flags |= std.os.O.RDWR;
-        } else if (rights_base.fd_read) {
-            flags |= std.os.O.RDONLY;
-        } else if (rights_base.fd_write) {
-            flags |= std.os.O.WRONLY;
-        }
+            if (rights_base.fd_read and rights_base.fd_write) {
+                flags |= std.os.O.RDWR;
+            } else if (rights_base.fd_read) {
+                flags |= std.os.O.RDONLY;
+            } else if (rights_base.fd_write) {
+                flags |= std.os.O.WRONLY;
+            }
 
-        // 644 means rw perm owner, r perm group, r perm others
-        var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
+            // 644 means rw perm owner, r perm group, r perm others
+            var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
 
-        if (std.os.openat(fd_dir, path, flags, mode)) |fd_opened| {
-            if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
-                module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
+            if (std.os.openat(fd_dir, path, flags, mode)) |fd_opened| {
+                if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
+                    module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
+                } else |err| {
+                    errno = Errno.translateError(err);
+                }
             } else |err| {
                 errno = Errno.translateError(err);
             }
-        } else |err| {
-            errno = Errno.translateError(err);
+        } else {
+            errno = Errno.NOTCAPABLE;
         }
     } else {
-        errno = Errno.NOTCAPABLE;
+        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -1122,11 +1117,16 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
     var errno = Errno.SUCCESS;
 
     const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-    const fd_dir: std.os.fd_t = context.fdLookup(fd_dir_wasi);
-    if (context.hasPathAccess(fd_dir, path)) {
-        std.os.unlinkat(fd_dir, path, std.os.AT.REMOVEDIR) catch |err| {
-            errno = Errno.translateError(err);
-        };
+    if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
+        if (context.hasPathAccess(fd_dir, path)) {
+            std.os.unlinkat(fd_dir, path, std.os.AT.REMOVEDIR) catch |err| {
+                errno = Errno.translateError(err);
+            };
+        } else {
+            errno = Errno.NOTCAPABLE;
+        }
+    } else {
+        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -1148,11 +1148,16 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
     var errno = Errno.SUCCESS;
 
     const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-    const fd_dir: std.os.fd_t = context.fdLookup(fd_dir_wasi);
-    if (context.hasPathAccess(fd_dir, path)) {
-        std.os.unlinkat(fd_dir, path, 0) catch |err| {
-            errno = Errno.translateError(err);
-        };
+    if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
+        if (context.hasPathAccess(fd_dir, path)) {
+            std.os.unlinkat(fd_dir, path, 0) catch |err| {
+                errno = Errno.translateError(err);
+            };
+        } else {
+            errno = Errno.NOTCAPABLE;
+        }
+    } else {
+        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
