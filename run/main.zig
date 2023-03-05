@@ -220,7 +220,7 @@ pub fn main() !void {
     }
 
     if (opts.trace != .None) {
-        if (bytebox.DebugTrace.setMode(opts.trace)) {
+        if (bytebox.DebugTrace.setMode(opts.trace) == false) {
             try stderr.print("Failed to set trace mode to {}. Option unavailable in non-debug builds.\n", .{opts.trace});
         }
     }
