@@ -6804,7 +6804,9 @@ pub const ModuleInstance = struct {
 
             const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
             const module_name = name_section.getModuleName();
-            const function_name = name_section.findFunctionName(frame.func.def_index);
+
+            const func_name_index: u32 = frame.func.def_index + @intCast(u32, frame.module_instance.module_def.imports.functions.items.len);
+            const function_name = name_section.findFunctionName(func_name_index);
 
             try writer.print("{}: {s}!{s}\n", .{ reverse_index, module_name, function_name });
         }
