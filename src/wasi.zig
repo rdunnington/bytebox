@@ -347,7 +347,7 @@ const FD_OS_INVALID = switch (builtin.os.tag) {
 };
 
 const Helpers = struct {
-    fn strings_sizes_get(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
+    fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
         std.debug.assert(params.len == 2);
         std.debug.assert(std.meta.activeTag(params[0]) == .I32);
         std.debug.assert(std.meta.activeTag(params[1]) == .I32);
@@ -368,7 +368,7 @@ const Helpers = struct {
         returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
     }
 
-    fn strings_get(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
+    fn stringsGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
         std.debug.assert(params.len == 2);
         std.debug.assert(std.meta.activeTag(params[0]) == .I32);
         std.debug.assert(std.meta.activeTag(params[1]) == .I32);
@@ -394,7 +394,7 @@ const Helpers = struct {
         returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
     }
 
-    fn convert_clockid(wasi_clockid: i32) ?i32 {
+    fn convertClockId(wasi_clockid: i32) ?i32 {
         var system_clockid: ?i32 = switch (wasi_clockid) {
             std.os.wasi.CLOCK.REALTIME => if (builtin.os.tag != .windows) std.os.system.CLOCK.REALTIME else WindowsApi.CLOCK.REALTIME,
             std.os.wasi.CLOCK.MONOTONIC => if (builtin.os.tag != .windows) std.os.system.CLOCK.MONOTONIC else WindowsApi.CLOCK.MONOTONIC,
@@ -476,6 +476,38 @@ const Helpers = struct {
             .sync = (value & 0x10) != 0,
         };
     }
+
+    fn initIovecs(comptime iov_type: type, stack_iov: []iov_type, errno: *Errno, module: *ModuleInstance, iovec_array_begin: u32, iovec_array_count: u32) ?[]iov_type {
+        if (iovec_array_count < stack_iov.len) {
+            const iov = stack_iov[0..iovec_array_count];
+            const iovec_array_bytes_length = @sizeOf(u32) * 2 * iovec_array_count;
+            const iovec_mem: []const u8 = module.memorySlice(iovec_array_begin, iovec_array_bytes_length);
+            var stream = std.io.fixedBufferStream(iovec_mem);
+            var reader = stream.reader();
+
+            for (iov) |*iovec| {
+                const iov_base: u32 = reader.readIntLittle(u32) catch {
+                    errno.* = Errno.INVAL;
+                    return null;
+                };
+
+                const iov_len: u32 = reader.readIntLittle(u32) catch {
+                    errno.* = Errno.INVAL;
+                    return null;
+                };
+
+                const mem: []u8 = module.memorySlice(iov_base, iov_len);
+                iovec.iov_base = mem.ptr;
+                iovec.iov_len = mem.len;
+            }
+
+            return iov;
+        } else {
+            errno.* = Errno.TOOBIG;
+        }
+
+        return null;
+    }
 };
 
 fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -489,22 +521,22 @@ fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, retur
 
 fn wasi_args_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var context = WasiContext.fromUserdata(userdata);
-    Helpers.strings_sizes_get(module, context.argv, params, returns);
+    Helpers.stringsSizesGet(module, context.argv, params, returns);
 }
 
 fn wasi_args_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var context = WasiContext.fromUserdata(userdata);
-    Helpers.strings_get(module, context.argv, params, returns);
+    Helpers.stringsGet(module, context.argv, params, returns);
 }
 
 fn wasi_environ_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var context = WasiContext.fromUserdata(userdata);
-    Helpers.strings_sizes_get(module, context.env, params, returns);
+    Helpers.stringsSizesGet(module, context.env, params, returns);
 }
 
 fn wasi_environ_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var context = WasiContext.fromUserdata(userdata);
-    Helpers.strings_get(module, context.env, params, returns);
+    Helpers.stringsGet(module, context.env, params, returns);
 }
 
 fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -516,7 +548,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
     const wasi_clockid = params[0].I32;
     const timestamp_mem_begin = @bitCast(u32, params[1].I32);
 
-    const system_clockid: ?i32 = Helpers.convert_clockid(wasi_clockid);
+    const system_clockid: ?i32 = Helpers.convertClockId(wasi_clockid);
 
     var errno = Errno.SUCCESS;
     if (system_clockid) |clockid| {
@@ -568,7 +600,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
     //const precision = params[1].I64; // unused
     const timestamp_mem_begin = @bitCast(u32, params[2].I32);
 
-    const system_clockid: ?i32 = Helpers.convert_clockid(wasi_clockid);
+    const system_clockid: ?i32 = Helpers.convertClockId(wasi_clockid);
 
     var errno = Errno.SUCCESS;
     if (system_clockid) |clockid| {
@@ -746,8 +778,6 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
     std.debug.assert(std.meta.activeTag(params[3]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    std.debug.print("called wasi_fd_read\n", .{});
-
     var context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
     const iovec_array_begin = @bitCast(u32, params[1].I32);
@@ -759,41 +789,55 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
     const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
     if (fd_os != FD_OS_INVALID) {
         var stack_iov = [_]std.os.iovec{undefined} ** 1024;
-        if (iovec_array_count < stack_iov.len) {
-            const iov = stack_iov[0..iovec_array_count];
-            const iovec_array_bytes_length = @sizeOf(u32) * 2 * iovec_array_count;
-            const iovec_mem: []const u8 = module.memorySlice(iovec_array_begin, iovec_array_bytes_length);
-            var stream = std.io.fixedBufferStream(iovec_mem);
-            var reader = stream.reader();
-
-            for (iov) |*vec| {
-                const iov_base: u32 = reader.readIntLittle(u32) catch {
-                    errno = Errno.INVAL;
-                    break;
-                };
-                const iov_len: u32 = reader.readIntLittle(u32) catch {
-                    errno = Errno.INVAL;
-                    break;
-                };
-                const mem: []u8 = module.memorySlice(iov_base, iov_len);
-
-                vec.iov_base = mem.ptr;
-                vec.iov_len = mem.len;
-            }
-
-            if (errno == Errno.SUCCESS) {
-                if (std.os.readv(fd_os, iov)) |read_bytes| {
-                    if (read_bytes <= std.math.maxInt(u32)) {
-                        module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
-                    } else {
-                        errno = Errno.TOOBIG;
-                    }
-                } else |err| {
-                    errno = Errno.translateError(err);
+        if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+            if (std.os.readv(fd_os, iov)) |read_bytes| {
+                if (read_bytes <= std.math.maxInt(u32)) {
+                    module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
+                } else {
+                    errno = Errno.TOOBIG;
                 }
+            } else |err| {
+                errno = Errno.translateError(err);
             }
-        } else {
-            errno = Errno.TOOBIG;
+        }
+    } else {
+        errno = Errno.BADF;
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    std.debug.assert(params.len == 5);
+    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
+    std.debug.assert(std.meta.activeTag(params[3]) == .I64);
+    std.debug.assert(std.meta.activeTag(params[4]) == .I32);
+    std.debug.assert(returns.len == 1);
+
+    var context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const iovec_array_begin = @bitCast(u32, params[1].I32);
+    const iovec_array_count = @bitCast(u32, params[2].I32);
+    const read_offset = @bitCast(u64, params[3].I64);
+    const bytes_read_out_offset = @bitCast(u32, params[4].I32);
+
+    var errno = Errno.SUCCESS;
+
+    const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
+    if (fd_os != FD_OS_INVALID) {
+        var stack_iov = [_]std.os.iovec{undefined} ** 1024;
+        if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+            if (std.os.preadv(fd_os, iov, read_offset)) |read_bytes| {
+                if (read_bytes <= std.math.maxInt(u32)) {
+                    module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
+                } else {
+                    errno = Errno.TOOBIG;
+                }
+            } else |err| {
+                errno = Errno.translateError(err);
+            }
         }
     } else {
         errno = Errno.BADF;
@@ -837,8 +881,6 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
     const offset = params[1].I64;
     const whence_raw = params[2].I32;
     const filepos_out_offset = @bitCast(u32, params[3].I32);
-
-    std.debug.print("called wasi_fd_seek\n", .{});
 
     var errno = Errno.SUCCESS;
 
@@ -894,8 +936,6 @@ fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     var errno = Errno.SUCCESS;
 
-    std.debug.print("called wasi_fd_tell\n", .{});
-
     const fd_os: std.os.fd_t = context.fdLookup(fd_wasi);
     if (fd_os != FD_OS_INVALID) {
         if (std.os.lseek_CUR_get(fd_os)) |filepos| {
@@ -930,37 +970,12 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
 
     if (fd_os != FD_OS_INVALID) {
         var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
-        if (iovec_array_count < stack_iov.len) {
-            const iov = stack_iov[0..iovec_array_count];
-            const iovec_array_bytes_length = @sizeOf(u32) * 2 * iovec_array_count;
-            const iovec_mem: []const u8 = module.memorySlice(iovec_array_begin, iovec_array_bytes_length);
-            var stream = std.io.fixedBufferStream(iovec_mem);
-            var reader = stream.reader();
-
-            for (iov) |*vec| {
-                const iov_base: u32 = reader.readIntLittle(u32) catch {
-                    errno = Errno.INVAL;
-                    break;
-                };
-                const iov_len: u32 = reader.readIntLittle(u32) catch {
-                    errno = Errno.INVAL;
-                    break;
-                };
-                const mem: []const u8 = module.memorySlice(iov_base, iov_len);
-
-                vec.iov_base = mem.ptr;
-                vec.iov_len = mem.len;
+        if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+            if (std.os.writev(fd_os, iov)) |written_bytes| {
+                module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
+            } else |err| {
+                errno = Errno.translateError(err);
             }
-
-            if (errno == Errno.SUCCESS) {
-                if (std.os.writev(fd_os, iov)) |written_bytes| {
-                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
-                } else |err| {
-                    errno = Errno.translateError(err);
-                }
-            }
-        } else {
-            errno = Errno.TOOBIG;
         }
     } else {
         errno = Errno.BADF;
@@ -1103,6 +1118,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
     try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
     try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
+    try imports.addHostFunction("fd_pread", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pread);
     try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
     try imports.addHostFunction("fd_tell", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_tell);
     try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
