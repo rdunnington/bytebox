@@ -6775,8 +6775,12 @@ pub const ModuleInstance = struct {
     pub fn memorySlice(self: *ModuleInstance, offset: usize, length: usize) []u8 {
         const memory: *MemoryInstance = self.store.getMemory(0);
 
-        var data: []u8 = memory.mem.items[offset .. offset + length];
-        return data;
+        if (offset + length < memory.mem.items.len) {
+            var data: []u8 = memory.mem.items[offset .. offset + length];
+            return data;
+        }
+
+        return "";
     }
 
     pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) void {
