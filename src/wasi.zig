@@ -348,62 +348,70 @@ const FD_OS_INVALID = switch (builtin.os.tag) {
 };
 
 const Helpers = struct {
-    fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
-        std.debug.assert(params.len == 2);
-        std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-        std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-        std.debug.assert(returns.len == 1);
+    fn signedCast(comptime T: type, value: anytype, errno: *Errno) T {
+        if (value >= 0) {
+            return @intCast(T, value);
+        }
+        errno.* = Errno.INVAL;
+        return 0;
+    }
 
+    fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
         const strings_count: u32 = @intCast(u32, strings.len);
         var strings_length: u32 = 0;
         for (strings) |string| {
             strings_length += @intCast(u32, string.len) + 1; // +1 for required null terminator of each string
         }
 
-        const dest_string_count = @bitCast(u32, params[0].I32);
-        const dest_string_length = @bitCast(u32, params[1].I32);
+        var errno = Errno.SUCCESS;
 
-        module.memoryWriteInt(u32, strings_count, dest_string_count);
-        module.memoryWriteInt(u32, strings_length, dest_string_length);
+        const dest_string_count = Helpers.signedCast(u32, params[0].I32, &errno);
+        const dest_string_length = Helpers.signedCast(u32, params[1].I32, &errno);
 
-        returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
+        if (errno == .SUCCESS) {
+            module.memoryWriteInt(u32, strings_count, dest_string_count);
+            module.memoryWriteInt(u32, strings_length, dest_string_length);
+        }
+
+        returns[0] = Val{ .I32 = @enumToInt(errno) };
     }
 
     fn stringsGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
-        std.debug.assert(params.len == 2);
-        std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-        std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-        std.debug.assert(returns.len == 1);
+        var errno = Errno.SUCCESS;
 
-        const dest_string_ptrs_begin = @bitCast(u32, params[0].I32);
-        const dest_string_mem_begin = @bitCast(u32, params[1].I32);
+        const dest_string_ptrs_begin = Helpers.signedCast(u32, params[0].I32, &errno);
+        const dest_string_mem_begin = Helpers.signedCast(u32, params[1].I32, &errno);
 
-        var dest_string_ptrs: u32 = dest_string_ptrs_begin;
-        var dest_string_strings: u32 = dest_string_mem_begin;
+        if (errno == .SUCCESS) {
+            var dest_string_ptrs: u32 = dest_string_ptrs_begin;
+            var dest_string_strings: u32 = dest_string_mem_begin;
 
-        for (strings) |string| {
-            module.memoryWriteInt(u32, dest_string_strings, dest_string_ptrs);
+            for (strings) |string| {
+                module.memoryWriteInt(u32, dest_string_strings, dest_string_ptrs);
 
-            var mem: []u8 = module.memorySlice(dest_string_strings, string.len + 1);
-            std.mem.copy(u8, mem[0..string.len], string);
-            mem[string.len] = 0; // null terminator
+                var mem: []u8 = module.memorySlice(dest_string_strings, string.len + 1);
+                std.mem.copy(u8, mem[0..string.len], string);
+                mem[string.len] = 0; // null terminator
 
-            dest_string_ptrs += @sizeOf(u32);
-            dest_string_strings += @intCast(u32, string.len + 1);
+                dest_string_ptrs += @sizeOf(u32);
+                dest_string_strings += @intCast(u32, string.len + 1);
+            }
         }
 
-        returns[0] = Val{ .I32 = @enumToInt(Errno.SUCCESS) };
+        returns[0] = Val{ .I32 = @enumToInt(errno) };
     }
 
-    fn convertClockId(wasi_clockid: i32) ?i32 {
-        var system_clockid: ?i32 = switch (wasi_clockid) {
+    fn convertClockId(wasi_clockid: i32, errno: *Errno) i32 {
+        return switch (wasi_clockid) {
             std.os.wasi.CLOCK.REALTIME => if (builtin.os.tag != .windows) std.os.system.CLOCK.REALTIME else WindowsApi.CLOCK.REALTIME,
             std.os.wasi.CLOCK.MONOTONIC => if (builtin.os.tag != .windows) std.os.system.CLOCK.MONOTONIC else WindowsApi.CLOCK.MONOTONIC,
             std.os.wasi.CLOCK.PROCESS_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.PROCESS_CPUTIME_ID else WindowsApi.CLOCK.PROCESS_CPUTIME_ID,
             std.os.wasi.CLOCK.THREAD_CPUTIME_ID => if (builtin.os.tag != .windows) std.os.system.CLOCK.THREAD_CPUTIME_ID else WindowsApi.CLOCK.THREAD_CPUTIME_ID,
-            else => null,
+            else => {
+                errno.* = Errno.INVAL;
+                return 0;
+            },
         };
-        return system_clockid;
     }
 
     fn filetimeToU64(ft: std.os.windows.FILETIME) u64 {
@@ -511,13 +519,15 @@ const Helpers = struct {
     }
 };
 
-fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 1);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(returns.len == 0);
+fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, _: []Val) void {
+    const raw_exit_code = params[0].I32;
 
-    var exit_code: u8 = @truncate(u8, @bitCast(u32, params[0].I32));
-    std.os.exit(exit_code);
+    if (raw_exit_code >= 0 and raw_exit_code < std.math.maxInt(u8)) {
+        const exit_code = @intCast(u8, raw_exit_code);
+        std.os.exit(exit_code);
+    } else {
+        std.os.exit(1);
+    }
 }
 
 fn wasi_args_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -541,22 +551,16 @@ fn wasi_environ_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []co
 }
 
 fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
-
-    const wasi_clockid = params[0].I32;
-    const timestamp_mem_begin = @bitCast(u32, params[1].I32);
-
-    const system_clockid: ?i32 = Helpers.convertClockId(wasi_clockid);
-
     var errno = Errno.SUCCESS;
-    if (system_clockid) |clockid| {
+
+    const system_clockid: i32 = Helpers.convertClockId(params[0].I32, &errno);
+    const timestamp_mem_begin = Helpers.signedCast(u32, params[1].I32, &errno);
+
+    if (errno == .SUCCESS) {
         var freqency_ns: u64 = 0;
         if (builtin.os.tag == .windows) {
             // Follow the mingw pattern since clock_getres() isn't linked in libc for windows
-            if (clockid == std.os.wasi.CLOCK.REALTIME or clockid == std.os.wasi.CLOCK.MONOTONIC) {
+            if (system_clockid == std.os.wasi.CLOCK.REALTIME or system_clockid == std.os.wasi.CLOCK.MONOTONIC) {
                 const ns_per_second: u64 = 1000000000;
                 const tick_frequency: u64 = std.os.windows.QueryPerformanceFrequency();
                 freqency_ns = (ns_per_second + (tick_frequency >> 1)) / tick_frequency;
@@ -575,7 +579,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
             }
         } else {
             var ts: std.os.system.timespec = undefined;
-            if (std.os.clock_getres(clockid, &ts)) {
+            if (std.os.clock_getres(system_clockid, &ts)) {
                 freqency_ns = @intCast(u64, ts.tv_nsec);
             } else |_| {
                 errno = Errno.INVAL;
@@ -583,33 +587,24 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
         }
 
         module.memoryWriteInt(u64, freqency_ns, timestamp_mem_begin);
-    } else {
-        errno = Errno.INVAL;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 3);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I64);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(returns.len == 1);
-
-    const wasi_clockid = params[0].I32;
-    //const precision = params[1].I64; // unused
-    const timestamp_mem_begin = @bitCast(u32, params[2].I32);
-
-    const system_clockid: ?i32 = Helpers.convertClockId(wasi_clockid);
-
     var errno = Errno.SUCCESS;
-    if (system_clockid) |clockid| {
+
+    const system_clockid: i32 = Helpers.convertClockId(params[0].I32, &errno);
+    //const precision = params[1].I64; // unused
+    const timestamp_mem_begin = Helpers.signedCast(u32, params[2].I32, &errno);
+
+    if (errno == .SUCCESS) {
         const ns_per_second = 1000000000;
         var timestamp_ns: u64 = 0;
 
         if (builtin.os.tag == .windows) {
-            switch (clockid) {
+            switch (system_clockid) {
                 std.os.wasi.CLOCK.REALTIME => {
                     var ft: WindowsApi.FILETIME = undefined;
                     std.os.windows.kernel32.GetSystemTimeAsFileTime(&ft);
@@ -659,7 +654,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
             }
         } else {
             var ts: std.os.system.timespec = undefined;
-            if (std.os.clock_gettime(clockid, &ts)) {
+            if (std.os.clock_gettime(system_clockid, &ts)) {
                 const sec_part = @intCast(u64, ts.tv_sec);
                 const nsec_part = @intCast(u64, ts.tv_nsec);
                 timestamp_ns = (sec_part * ns_per_second) + nsec_part;
@@ -669,8 +664,6 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
         }
 
         module.memoryWriteInt(u64, timestamp_ns, timestamp_mem_begin);
-    } else {
-        errno = Errno.INVAL;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -719,464 +712,403 @@ const WasiPreopenType = enum(u8) {
 };
 
 fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
-    const prestat_mem_offset = @bitCast(u32, params[1].I32);
+    const prestat_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
-    var errno = Errno.SUCCESS;
+    if (errno == .SUCCESS) {
+        const fd_os: ?std.os.fd_t = context.fdLookup(fd_wasi);
+        if (fd_wasi >= 3 and fd_os != null) { // std handles are 0, 1, 2 so skip those
+            var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const path: []const u8 = std.os.getFdPath(fd_os.?, &name_buffer) catch unreachable;
+            const pr_name_len: u32 = @intCast(u32, path.len + 1); // allow space for null terminator
 
-    const fd_os: ?std.os.fd_t = context.fdLookup(fd_wasi);
-    if (fd_wasi >= 3 and fd_os != null) { // std handles are 0, 1, 2 so skip those
-        var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const path: []const u8 = std.os.getFdPath(fd_os.?, &name_buffer) catch unreachable;
-        const pr_name_len: u32 = @intCast(u32, path.len + 1); // allow space for null terminator
-
-        module.memoryWriteInt(u32, @enumToInt(WasiPreopenType.Dir), prestat_mem_offset);
-        module.memoryWriteInt(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32));
-    } else {
-        errno = Errno.BADF;
+            module.memoryWriteInt(u32, @enumToInt(WasiPreopenType.Dir), prestat_mem_offset);
+            module.memoryWriteInt(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32));
+        } else {
+            errno = Errno.BADF;
+        }
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 3);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(returns.len == 1);
-
-    const context = WasiContext.fromUserdata(userdata);
-    const fd_dir_wasi = @bitCast(u32, params[0].I32);
-    const path_mem_offset = @bitCast(u32, params[1].I32);
-    const path_mem_length = @bitCast(u32, params[2].I32);
-
     var errno = Errno.SUCCESS;
 
-    if (context.fdDirPath(fd_dir_wasi)) |path_source| {
-        var path_dest: []u8 = module.memorySlice(path_mem_offset, path_mem_length);
-        std.mem.copy(u8, path_dest, path_source);
-        const null_offset: usize = std.math.min(path_source.len, path_dest.len);
-        path_dest[null_offset] = 0; // null terminator
-    } else {
-        errno = Errno.BADF;
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_dir_wasi = Helpers.signedCast(u32, params[0].I32, &errno);
+    const path_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
+    const path_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (context.fdDirPath(fd_dir_wasi)) |path_source| {
+            var path_dest: []u8 = module.memorySlice(path_mem_offset, path_mem_length);
+            std.mem.copy(u8, path_dest, path_source);
+            const null_offset: usize = std.math.min(path_source.len, path_dest.len);
+            path_dest[null_offset] = 0; // null terminator
+        } else {
+            errno = Errno.BADF;
+        }
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 4);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[3]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
-    const iovec_array_begin = @bitCast(u32, params[1].I32);
-    const iovec_array_count = @bitCast(u32, params[2].I32);
-    const bytes_read_out_offset = @bitCast(u32, params[3].I32);
+    const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
+    const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
+    const bytes_read_out_offset = Helpers.signedCast(u32, params[3].I32, &errno);
 
-    var errno = Errno.SUCCESS;
-
-    if (context.fdLookup(fd_wasi)) |fd_os| {
-        var stack_iov = [_]std.os.iovec{undefined} ** 1024;
-        if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
-            if (std.os.readv(fd_os, iov)) |read_bytes| {
-                if (read_bytes <= std.math.maxInt(u32)) {
-                    module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
-                } else {
-                    errno = Errno.TOOBIG;
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi)) |fd_os| {
+            var stack_iov = [_]std.os.iovec{undefined} ** 1024;
+            if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+                if (std.os.readv(fd_os, iov)) |read_bytes| {
+                    if (read_bytes <= std.math.maxInt(u32)) {
+                        module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
+                    } else {
+                        errno = Errno.TOOBIG;
+                    }
+                } else |err| {
+                    errno = Errno.translateError(err);
                 }
-            } else |err| {
-                errno = Errno.translateError(err);
             }
+        } else {
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 5);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[3]) == .I64);
-    std.debug.assert(std.meta.activeTag(params[4]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
-    const iovec_array_begin = @bitCast(u32, params[1].I32);
-    const iovec_array_count = @bitCast(u32, params[2].I32);
+    const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
+    const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
     const read_offset = @bitCast(u64, params[3].I64);
-    const bytes_read_out_offset = @bitCast(u32, params[4].I32);
+    const bytes_read_out_offset = Helpers.signedCast(u32, params[4].I32, &errno);
 
-    var errno = Errno.SUCCESS;
-
-    if (context.fdLookup(fd_wasi)) |fd_os| {
-        var stack_iov = [_]std.os.iovec{undefined} ** 1024;
-        if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
-            if (std.os.preadv(fd_os, iov, read_offset)) |read_bytes| {
-                if (read_bytes <= std.math.maxInt(u32)) {
-                    module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
-                } else {
-                    errno = Errno.TOOBIG;
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi)) |fd_os| {
+            var stack_iov = [_]std.os.iovec{undefined} ** 1024;
+            if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+                if (std.os.preadv(fd_os, iov, read_offset)) |read_bytes| {
+                    if (read_bytes <= std.math.maxInt(u32)) {
+                        module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
+                    } else {
+                        errno = Errno.TOOBIG;
+                    }
+                } else |err| {
+                    errno = Errno.translateError(err);
                 }
-            } else |err| {
-                errno = Errno.translateError(err);
             }
+        } else {
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 1);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
 
     const fd_wasi = @bitCast(u32, params[0].I32);
 
-    var errno = Errno.SUCCESS;
-
-    if (context.fdRemove(fd_wasi)) |fd_os| {
-        std.os.close(fd_os);
-    } else {
-        errno = Errno.BADF;
+    if (errno == .SUCCESS) {
+        if (context.fdRemove(fd_wasi)) |fd_os| {
+            std.os.close(fd_os);
+        } else {
+            errno = Errno.BADF;
+        }
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 4);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I64);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[3]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-
     const fd_wasi = @bitCast(u32, params[0].I32);
     const offset = params[1].I64;
     const whence_raw = params[2].I32;
-    const filepos_out_offset = @bitCast(u32, params[3].I32);
+    const filepos_out_offset = Helpers.signedCast(u32, params[3].I32, &errno);
 
-    var errno = Errno.SUCCESS;
-
-    if (context.fdLookup(fd_wasi)) |fd_os| {
-        if (Whence.fromInt(whence_raw)) |whence| {
-            switch (whence) {
-                .Set => {
-                    if (offset >= 0) {
-                        const offset_unsigned = @intCast(u64, offset);
-                        std.os.lseek_SET(fd_os, offset_unsigned) catch |err| {
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi)) |fd_os| {
+            if (Whence.fromInt(whence_raw)) |whence| {
+                switch (whence) {
+                    .Set => {
+                        if (offset >= 0) {
+                            const offset_unsigned = @intCast(u64, offset);
+                            std.os.lseek_SET(fd_os, offset_unsigned) catch |err| {
+                                errno = Errno.translateError(err);
+                            };
+                        }
+                    },
+                    .Cur => {
+                        std.os.lseek_CUR(fd_os, offset) catch |err| {
                             errno = Errno.translateError(err);
                         };
-                    }
-                },
-                .Cur => {
-                    std.os.lseek_CUR(fd_os, offset) catch |err| {
-                        errno = Errno.translateError(err);
-                    };
-                },
-                .End => {
-                    std.os.lseek_END(fd_os, offset) catch |err| {
-                        errno = Errno.translateError(err);
-                    };
-                },
-            }
+                    },
+                    .End => {
+                        std.os.lseek_END(fd_os, offset) catch |err| {
+                            errno = Errno.translateError(err);
+                        };
+                    },
+                }
 
+                if (std.os.lseek_CUR_get(fd_os)) |filepos| {
+                    module.memoryWriteInt(u64, filepos, filepos_out_offset);
+                } else |err| {
+                    errno = Errno.translateError(err);
+                }
+            } else {
+                errno = Errno.INVAL;
+            }
+        } else {
+            errno = Errno.BADF;
+        }
+    }
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    const context = WasiContext.fromUserdata(userdata);
+
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const filepos_out_offset = Helpers.signedCast(u32, params[1].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi)) |fd_os| {
             if (std.os.lseek_CUR_get(fd_os)) |filepos| {
                 module.memoryWriteInt(u64, filepos, filepos_out_offset);
             } else |err| {
                 errno = Errno.translateError(err);
             }
         } else {
-            errno = Errno.INVAL;
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
-    }
-
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
-}
-
-fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
-
-    const context = WasiContext.fromUserdata(userdata);
-
-    const fd_wasi = @bitCast(u32, params[0].I32);
-    const filepos_out_offset = @bitCast(u32, params[1].I32);
-
-    var errno = Errno.SUCCESS;
-
-    if (context.fdLookup(fd_wasi)) |fd_os| {
-        if (std.os.lseek_CUR_get(fd_os)) |filepos| {
-            module.memoryWriteInt(u64, filepos, filepos_out_offset);
-        } else |err| {
-            errno = Errno.translateError(err);
-        }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 4);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[3]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
-    const iovec_array_begin = @bitCast(u32, params[1].I32);
-    const iovec_array_count = @bitCast(u32, params[2].I32);
-    const bytes_written_out_offset = @bitCast(u32, params[3].I32);
+    const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
+    const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
+    const bytes_written_out_offset = Helpers.signedCast(u32, params[3].I32, &errno);
 
-    var errno = Errno.SUCCESS;
-
-    if (context.fdLookup(fd_wasi)) |fd_os| {
-        var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
-        if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
-            if (std.os.writev(fd_os, iov)) |written_bytes| {
-                module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
-            } else |err| {
-                errno = Errno.translateError(err);
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi)) |fd_os| {
+            var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
+            if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+                if (std.os.writev(fd_os, iov)) |written_bytes| {
+                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
+                } else |err| {
+                    errno = Errno.translateError(err);
+                }
             }
+        } else {
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 5);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[3]) == .I64);
-    std.debug.assert(std.meta.activeTag(params[4]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
-    const iovec_array_begin = @bitCast(u32, params[1].I32);
-    const iovec_array_count = @bitCast(u32, params[2].I32);
-    const write_offset = @bitCast(u64, params[3].I64);
-    const bytes_written_out_offset = @bitCast(u32, params[4].I32);
+    const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
+    const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
+    const write_offset = Helpers.signedCast(u64, params[3].I64, &errno);
+    const bytes_written_out_offset = Helpers.signedCast(u32, params[4].I32, &errno);
 
-    var errno = Errno.SUCCESS;
-
-    if (context.fdLookup(fd_wasi)) |fd_os| {
-        var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
-        if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
-            if (std.os.pwritev(fd_os, iov, write_offset)) |written_bytes| {
-                module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
-            } else |err| {
-                errno = Errno.translateError(err);
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi)) |fd_os| {
+            var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
+            if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
+                if (std.os.pwritev(fd_os, iov, write_offset)) |written_bytes| {
+                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
+                } else |err| {
+                    errno = Errno.translateError(err);
+                }
             }
+        } else {
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 9);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[3]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[4]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[5]) == .I64);
-    std.debug.assert(std.meta.activeTag(params[6]) == .I64);
-    std.debug.assert(std.meta.activeTag(params[7]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[8]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_dir_wasi: u32 = @bitCast(u32, params[0].I32);
+    const fd_dir_wasi: u32 = Helpers.signedCast(u32, params[0].I32, &errno);
     // const dirflags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
-    const path_mem_offset: u32 = @bitCast(u32, params[2].I32);
-    const path_mem_length: u32 = @bitCast(u32, params[3].I32);
+    const path_mem_offset: u32 = Helpers.signedCast(u32, params[2].I32, &errno);
+    const path_mem_length: u32 = Helpers.signedCast(u32, params[3].I32, &errno);
     const openflags: WasiOpenFlags = Helpers.decodeOpenFlags(params[4].I32);
     const rights_base: WasiRights = Helpers.decodeRights(params[5].I64);
     // const rights_inheriting: WasiRights = Helpers.decodeRights(params[6].I64);
     const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[7].I32);
-    const fd_out_mem_offset = @bitCast(u32, params[8].I32);
+    const fd_out_mem_offset = Helpers.signedCast(u32, params[8].I32, &errno);
 
-    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
+    if (errno == .SUCCESS) {
+        const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
 
-    var errno = Errno.SUCCESS;
-    if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
-        if (context.hasPathAccess(fd_dir, path)) {
-            var flags: u32 = 0;
-            if (openflags.creat) {
-                flags |= std.os.O.CREAT;
-            }
-            if (openflags.directory) {
-                flags |= std.os.O.DIRECTORY;
-            }
-            if (openflags.excl) {
-                flags |= std.os.O.EXCL;
-            }
-            if (openflags.trunc) {
-                flags |= std.os.O.TRUNC;
-            }
+        if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
+            if (context.hasPathAccess(fd_dir, path)) {
+                var flags: u32 = 0;
+                if (openflags.creat) {
+                    flags |= std.os.O.CREAT;
+                }
+                if (openflags.directory) {
+                    flags |= std.os.O.DIRECTORY;
+                }
+                if (openflags.excl) {
+                    flags |= std.os.O.EXCL;
+                }
+                if (openflags.trunc) {
+                    flags |= std.os.O.TRUNC;
+                }
 
-            if (fdflags.append) {
-                flags |= std.os.O.APPEND;
-            }
-            if (fdflags.dsync) {
-                flags |= std.os.O.DSYNC;
-            }
-            if (fdflags.nonblock) {
-                flags |= std.os.O.NONBLOCK;
-            }
-            if (fdflags.rsync) {
-                flags |= std.os.O.RSYNC;
-            }
-            if (fdflags.sync) {
-                flags |= std.os.O.SYNC;
-            }
+                if (fdflags.append) {
+                    flags |= std.os.O.APPEND;
+                }
+                if (fdflags.dsync) {
+                    flags |= std.os.O.DSYNC;
+                }
+                if (fdflags.nonblock) {
+                    flags |= std.os.O.NONBLOCK;
+                }
+                if (fdflags.rsync) {
+                    flags |= std.os.O.RSYNC;
+                }
+                if (fdflags.sync) {
+                    flags |= std.os.O.SYNC;
+                }
 
-            if (rights_base.fd_read and rights_base.fd_write) {
-                flags |= std.os.O.RDWR;
-            } else if (rights_base.fd_read) {
-                flags |= std.os.O.RDONLY;
-            } else if (rights_base.fd_write) {
-                flags |= std.os.O.WRONLY;
-            }
+                if (rights_base.fd_read and rights_base.fd_write) {
+                    flags |= std.os.O.RDWR;
+                } else if (rights_base.fd_read) {
+                    flags |= std.os.O.RDONLY;
+                } else if (rights_base.fd_write) {
+                    flags |= std.os.O.WRONLY;
+                }
 
-            // 644 means rw perm owner, r perm group, r perm others
-            var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
+                // 644 means rw perm owner, r perm group, r perm others
+                var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
 
-            if (std.os.openat(fd_dir, path, flags, mode)) |fd_opened| {
-                if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
-                    module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
+                if (std.os.openat(fd_dir, path, flags, mode)) |fd_opened| {
+                    if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
+                        module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
+                    } else |err| {
+                        errno = Errno.translateError(err);
+                    }
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
-            } else |err| {
-                errno = Errno.translateError(err);
+            } else {
+                errno = Errno.NOTCAPABLE;
             }
         } else {
-            errno = Errno.NOTCAPABLE;
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 3);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
 
-    const fd_dir_wasi = @bitCast(u32, params[0].I32);
-    const path_mem_offset = @bitCast(u32, params[1].I32);
-    const path_mem_length = @bitCast(u32, params[2].I32);
+    const fd_dir_wasi = Helpers.signedCast(u32, params[0].I32, &errno);
+    const path_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
+    const path_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
 
-    var errno = Errno.SUCCESS;
-
-    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-    if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
-        if (context.hasPathAccess(fd_dir, path)) {
-            std.os.unlinkat(fd_dir, path, std.os.AT.REMOVEDIR) catch |err| {
-                errno = Errno.translateError(err);
-            };
+    if (errno == .SUCCESS) {
+        const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
+        if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
+            if (context.hasPathAccess(fd_dir, path)) {
+                std.os.unlinkat(fd_dir, path, std.os.AT.REMOVEDIR) catch |err| {
+                    errno = Errno.translateError(err);
+                };
+            } else {
+                errno = Errno.NOTCAPABLE;
+            }
         } else {
-            errno = Errno.NOTCAPABLE;
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 3);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[2]) == .I32);
-    std.debug.assert(returns.len == 1);
+    var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
 
-    const fd_dir_wasi = @bitCast(u32, params[0].I32);
-    const path_mem_offset = @bitCast(u32, params[1].I32);
-    const path_mem_length = @bitCast(u32, params[2].I32);
+    const fd_dir_wasi = Helpers.signedCast(u32, params[0].I32, &errno);
+    const path_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
+    const path_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
 
-    var errno = Errno.SUCCESS;
-
-    const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-    if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
-        if (context.hasPathAccess(fd_dir, path)) {
-            std.os.unlinkat(fd_dir, path, 0) catch |err| {
-                errno = Errno.translateError(err);
-            };
+    if (errno == .SUCCESS) {
+        const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
+        if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
+            if (context.hasPathAccess(fd_dir, path)) {
+                std.os.unlinkat(fd_dir, path, 0) catch |err| {
+                    errno = Errno.translateError(err);
+                };
+            } else {
+                errno = Errno.NOTCAPABLE;
+            }
         } else {
-            errno = Errno.NOTCAPABLE;
+            errno = Errno.BADF;
         }
-    } else {
-        errno = Errno.BADF;
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
 fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
-
-    const array_begin_offset: u32 = @bitCast(u32, params[0].I32);
-    const array_length: u32 = @bitCast(u32, params[1].I32);
-
     var errno = Errno.SUCCESS;
 
-    if (array_length > 0) {
-        var mem: []u8 = module.memorySlice(array_begin_offset, array_length);
-        std.crypto.random.bytes(mem);
+    const array_begin_offset: u32 = Helpers.signedCast(u32, params[0].I32, &errno);
+    const array_length: u32 = Helpers.signedCast(u32, params[1].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (array_length > 0) {
+            var mem: []u8 = module.memorySlice(array_begin_offset, array_length);
+            std.crypto.random.bytes(mem);
+        }
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
