@@ -248,6 +248,8 @@ const Errno = enum(u8) {
             error.FileBusy => .TXTBSY,
             error.Unseekable => .SPIPE,
             error.DirNotEmpty => .NOTEMPTY,
+            error.InputOutput => .IO,
+            error.DiskQuota => .DQUOT,
             else => .INVAL,
         };
     }
@@ -669,15 +671,20 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_datasync(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 1);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(returns.len == 1);
+fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
 
-    std.debug.print("called wasi_fd_datasync\n", .{});
-
-    // TODO
     var errno = Errno.SUCCESS;
+
+    if (context.fdLookup(fd_wasi)) |fd_os| {
+        std.os.fdatasync(fd_os) catch |err| {
+            errno = Errno.translateError(err);
+        };
+    } else {
+        errno = Errno.BADF;
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
