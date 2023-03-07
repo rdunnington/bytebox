@@ -358,6 +358,12 @@ const Helpers = struct {
         return 0;
     }
 
+    fn writeIntToMemory(comptime T: type, value: T, offset: usize, module: *ModuleInstance, errno: *Errno) void {
+        if (module.memoryWriteInt(T, value, offset) == false) {
+            errno.* = Errno.INVAL;
+        }
+    }
+
     fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
         const strings_count: u32 = @intCast(u32, strings.len);
         var strings_length: u32 = 0;
@@ -371,8 +377,8 @@ const Helpers = struct {
         const dest_string_length = Helpers.signedCast(u32, params[1].I32, &errno);
 
         if (errno == .SUCCESS) {
-            module.memoryWriteInt(u32, strings_count, dest_string_count);
-            module.memoryWriteInt(u32, strings_length, dest_string_length);
+            writeIntToMemory(u32, strings_count, dest_string_count, module, &errno);
+            writeIntToMemory(u32, strings_length, dest_string_length, module, &errno);
         }
 
         returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -389,7 +395,7 @@ const Helpers = struct {
             var dest_string_strings: u32 = dest_string_mem_begin;
 
             for (strings) |string| {
-                module.memoryWriteInt(u32, dest_string_strings, dest_string_ptrs);
+                writeIntToMemory(u32, dest_string_strings, dest_string_ptrs, module, &errno);
 
                 var mem: []u8 = module.memorySlice(dest_string_strings, string.len + 1);
                 std.mem.copy(u8, mem[0..string.len], string);
@@ -486,6 +492,95 @@ const Helpers = struct {
             .rsync = (value & 0x08) != 0,
             .sync = (value & 0x10) != 0,
         };
+    }
+
+    fn fdstat_get_windows(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
+        var stat_wasi = std.os.wasi.fdstat_t{
+            .fs_filetype = std.os.wasi.filetype_t.REGULAR_FILE,
+            .fs_flags = 0,
+            .fs_rights_base = std.os.wasi.RIGHT.ALL,
+            .fs_rights_inheriting = std.os.wasi.RIGHT.ALL,
+        };
+
+        if (std.os.windows.GetFileInformationByHandle(fd)) |info| {
+            const attributes = info.dwFileAttributes;
+
+            if (attributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
+                stat_wasi.fs_filetype = std.os.wasi.filetype_t.DIRECTORY;
+            } else if (attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+                stat_wasi.fs_filetype = std.os.wasi.filetype_t.SYMBOLIC_LINK;
+            }
+
+            if (attributes & std.os.windows.FILE_ATTRIBUTE_READONLY != 0) {
+                stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_WRITE;
+            }
+        } else |err| {
+            errno.* = Errno.translateError(err);
+        }
+
+        return stat_wasi;
+    }
+
+    fn fdstat_get_posix(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
+        var stat_wasi = std.os.wasi.fdstat_t{
+            .fs_filetype = std.os.wasi.filetype_t.UNKNOWN,
+            .fs_flags = 0,
+            .fs_rights_base = std.os.wasi.RIGHT.ALL,
+            .fs_rights_inheriting = std.os.wasi.RIGHT.ALL,
+        };
+
+        if (std.os.fcntl(fd, std.os.F.GETFL, 0)) |fd_flags| {
+            if (std.os.fstat(fd)) |fd_stat| {
+
+                // filetype
+                if (std.os.S.ISREG(fd_stat.mode)) {
+                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.REGULAR_FILE;
+                } else if (std.os.S.ISDIR(fd_stat.mode)) {
+                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.DIRECTORY;
+                } else if (std.os.S.ISCHR(fd_stat.mode)) {
+                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.CHARACTER_DEVICE;
+                } else if (std.os.S.ISBLK(fd_stat.mode)) {
+                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.BLOCK_DEVICE;
+                } else if (std.os.S.ISLNK(fd_stat.mode)) {
+                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.SYMBOLIC_LINK;
+                }
+                // if (std.os.S.ISSOCK(fd_stat.mode)) {
+                //     stat_wasi.fs_filetype = std.os.wasi.filetype_t.SOCKET_STREAM; // not sure if this is SOCKET_STREAM or SOCKET_DGRAM
+                // }
+
+                // flags
+                if (fd_flags & std.os.O.APPEND) {
+                    stat_wasi.fs_flags |= std.os.wasi.FDFLAG.APPEND;
+                }
+                if (fd_flags & std.os.O.DSYNC) {
+                    stat_wasi.fs_flags |= std.os.wasi.FDFLAG.DSYNC;
+                }
+                if (fd_flags & std.os.O.NONBLOCK) {
+                    stat_wasi.fs_flags |= std.os.wasi.FDFLAG.NONBLOCK;
+                }
+                if (fd_flags & std.os.O.RSYNC) {
+                    stat_wasi.fs_flags |= std.os.wasi.FDFLAG.RSYNC;
+                }
+                if (fd_flags & std.os.O.SYNC) {
+                    stat_wasi.fs_flags |= std.os.wasi.FDFLAG.SYNC;
+                }
+
+                // rights
+                if (fd_flags & std.os.O.RDWR) {
+                    // noop since all rights includes this by default
+                } else if (fd_flags & std.os.O.RDONLY) {
+                    stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_WRITE;
+                } else if (fd_flags & std.os.O.WRONLY) {
+                    stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_READ;
+                }
+            } else |err| {
+                errno = Errno.translateError(err);
+            }
+        } else |err| {
+            errno = Errno.translateError(err);
+        }
+
+        return stat_wasi;
     }
 
     fn initIovecs(comptime iov_type: type, stack_iov: []iov_type, errno: *Errno, module: *ModuleInstance, iovec_array_begin: u32, iovec_array_count: u32) ?[]iov_type {
@@ -588,7 +683,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
             }
         }
 
-        module.memoryWriteInt(u64, freqency_ns, timestamp_mem_begin);
+        Helpers.writeIntToMemory(u64, freqency_ns, timestamp_mem_begin, module, &errno);
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -665,7 +760,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
             }
         }
 
-        module.memoryWriteInt(u64, timestamp_ns, timestamp_mem_begin);
+        Helpers.writeIntToMemory(u64, timestamp_ns, timestamp_mem_begin, module, &errno);
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -688,16 +783,28 @@ fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: []const V
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_fdstat_get(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
-
-    std.debug.print("called wasi_fd_fdstat_get\n", .{});
-
-    // TODO
+fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var errno = Errno.SUCCESS;
+
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fdstat_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi)) |fd_os| {
+            const stat: std.os.wasi.fdstat_t = if (builtin.os.tag == .windows) Helpers.fdstat_get_windows(fd_os, &errno) else Helpers.fdstat_get_posix(fd_os, &errno);
+
+            if (errno == .SUCCESS) {
+                Helpers.writeIntToMemory(u8, @enumToInt(stat.fs_filetype), fdstat_mem_offset + 0, module, &errno);
+                Helpers.writeIntToMemory(u16, stat.fs_flags, fdstat_mem_offset + 2, module, &errno);
+                Helpers.writeIntToMemory(u64, stat.fs_rights_base, fdstat_mem_offset + 8, module, &errno);
+                Helpers.writeIntToMemory(u64, stat.fs_rights_inheriting, fdstat_mem_offset + 16, module, &errno);
+            }
+        } else {
+            errno = .BADF;
+        }
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -714,10 +821,6 @@ fn wasi_fd_fdstat_set_flags(_: ?*anyopaque, _: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-const WasiPreopenType = enum(u8) {
-    Dir,
-};
-
 fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var errno = Errno.SUCCESS;
 
@@ -732,8 +835,8 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
             const path: []const u8 = std.os.getFdPath(fd_os.?, &name_buffer) catch unreachable;
             const pr_name_len: u32 = @intCast(u32, path.len + 1); // allow space for null terminator
 
-            module.memoryWriteInt(u32, @enumToInt(WasiPreopenType.Dir), prestat_mem_offset);
-            module.memoryWriteInt(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32));
+            Helpers.writeIntToMemory(u32, std.os.wasi.PREOPENTYPE_DIR, prestat_mem_offset + 0, module, &errno);
+            Helpers.writeIntToMemory(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32), module, &errno);
         } else {
             errno = Errno.BADF;
         }
@@ -779,7 +882,7 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
             if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.readv(fd_os, iov)) |read_bytes| {
                     if (read_bytes <= std.math.maxInt(u32)) {
-                        module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
+                        Helpers.writeIntToMemory(u32, @intCast(u32, read_bytes), bytes_read_out_offset, module, &errno);
                     } else {
                         errno = Errno.TOOBIG;
                     }
@@ -811,7 +914,7 @@ fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
             if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.preadv(fd_os, iov, read_offset)) |read_bytes| {
                     if (read_bytes <= std.math.maxInt(u32)) {
-                        module.memoryWriteInt(u32, @intCast(u32, read_bytes), bytes_read_out_offset);
+                        Helpers.writeIntToMemory(u32, @intCast(u32, read_bytes), bytes_read_out_offset, module, &errno);
                     } else {
                         errno = Errno.TOOBIG;
                     }
@@ -879,7 +982,7 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
                 }
 
                 if (std.os.lseek_CUR_get(fd_os)) |filepos| {
-                    module.memoryWriteInt(u64, filepos, filepos_out_offset);
+                    Helpers.writeIntToMemory(u64, filepos, filepos_out_offset, module, &errno);
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
@@ -904,7 +1007,7 @@ fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi)) |fd_os| {
             if (std.os.lseek_CUR_get(fd_os)) |filepos| {
-                module.memoryWriteInt(u64, filepos, filepos_out_offset);
+                Helpers.writeIntToMemory(u64, filepos, filepos_out_offset, module, &errno);
             } else |err| {
                 errno = Errno.translateError(err);
             }
@@ -930,7 +1033,7 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
             var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
             if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.writev(fd_os, iov)) |written_bytes| {
-                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
+                    Helpers.writeIntToMemory(u32, @intCast(u32, written_bytes), bytes_written_out_offset, module, &errno);
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
@@ -958,7 +1061,7 @@ fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
             var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
             if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.pwritev(fd_os, iov, write_offset)) |written_bytes| {
-                    module.memoryWriteInt(u32, @intCast(u32, written_bytes), bytes_written_out_offset);
+                    Helpers.writeIntToMemory(u32, @intCast(u32, written_bytes), bytes_written_out_offset, module, &errno);
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
@@ -1033,7 +1136,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
 
                 if (std.os.openat(fd_dir, path, flags, mode)) |fd_opened| {
                     if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
-                        module.memoryWriteInt(u32, fd_opened_wasi, fd_out_mem_offset);
+                        Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                     } else |err| {
                         errno = Errno.translateError(err);
                     }
