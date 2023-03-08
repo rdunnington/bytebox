@@ -338,8 +338,22 @@ const WindowsApi = struct {
         const THREAD_CPUTIME_ID = 3;
     };
 
+    const BY_HANDLE_FILE_INFORMATION = extern struct {
+        dwFileAttributes: DWORD,
+        ftCreationTime: FILETIME,
+        ftLastAccessTime: FILETIME,
+        ftLastWriteTime: FILETIME,
+        dwVolumeSerialNumber: DWORD,
+        nFileSizeHigh: DWORD,
+        nFileSizeLow: DWORD,
+        nNumberOfLinks: DWORD,
+        nFileIndexHigh: DWORD,
+        nFileIndexLow: DWORD,
+    };
+
     extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
     extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(WINAPI) BOOL;
+    extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
 
@@ -502,7 +516,8 @@ const Helpers = struct {
             .fs_rights_inheriting = std.os.wasi.RIGHT.ALL,
         };
 
-        if (std.os.windows.GetFileInformationByHandle(fd)) |info| {
+        var info: WindowsApi.BY_HANDLE_FILE_INFORMATION = undefined;
+        if (WindowsApi.GetFileInformationByHandle(fd, &info) == std.os.windows.TRUE) {
             const attributes = info.dwFileAttributes;
 
             if (attributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
