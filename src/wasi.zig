@@ -434,6 +434,18 @@ const Helpers = struct {
         }
     }
 
+    fn writeFilestatToMemory(stat: *const std.os.wasi.filestat_t, offset: u32, module: *ModuleInstance, errno: *Errno) void {
+        const filetype = @enumToInt(stat.filetype);
+        Helpers.writeIntToMemory(u64, stat.dev, offset + 0, module, errno);
+        Helpers.writeIntToMemory(u64, stat.ino, offset + 8, module, errno);
+        Helpers.writeIntToMemory(u8, filetype, offset + 16, module, errno);
+        Helpers.writeIntToMemory(u64, stat.nlink, offset + 24, module, errno);
+        Helpers.writeIntToMemory(u64, stat.size, offset + 32, module, errno);
+        Helpers.writeIntToMemory(u64, stat.atim, offset + 40, module, errno);
+        Helpers.writeIntToMemory(u64, stat.mtim, offset + 48, module, errno);
+        Helpers.writeIntToMemory(u64, stat.ctim, offset + 56, module, errno);
+    }
+
     fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
         const strings_count: u32 = @intCast(u32, strings.len);
         var strings_length: u32 = 0;
@@ -962,11 +974,13 @@ fn wasi_fd_fdstat_set_flags(_: ?*anyopaque, _: *ModuleInstance, params: []const 
     std.debug.assert(std.meta.activeTag(params[1]) == .I32);
     std.debug.assert(returns.len == 1);
 
-    std.debug.print("called wasi_fd_fdstat_set_flags\n", .{});
+    // std.debug.print("called wasi_fd_fdstat_set_flags\n", .{});
 
     // TODO
     var errno = Errno.SUCCESS;
     returns[0] = Val{ .I32 = @enumToInt(errno) };
+
+    unreachable;
 }
 
 fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -1088,6 +1102,27 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
             std.os.close(fd_os);
         } else {
             errno = Errno.BADF;
+        }
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const filestat_out_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+            const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_info.fd, &errno) else Helpers.filestat_get_posix(fd_info.fd, &errno);
+            if (errno == .SUCCESS) {
+                Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
+            } else |err| {
+                errno = Errno.translateError(err);
+            }
         }
     }
 
@@ -1239,15 +1274,7 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
 
                     const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_opened, &errno) else Helpers.filestat_get_posix(fd_opened, &errno);
                     if (errno == .SUCCESS) {
-                        const filetype = @enumToInt(stat.filetype);
-                        Helpers.writeIntToMemory(u64, stat.dev, filestat_out_mem_offset + 0, module, &errno);
-                        Helpers.writeIntToMemory(u64, stat.ino, filestat_out_mem_offset + 8, module, &errno);
-                        Helpers.writeIntToMemory(u8, filetype, filestat_out_mem_offset + 16, module, &errno);
-                        Helpers.writeIntToMemory(u64, stat.nlink, filestat_out_mem_offset + 24, module, &errno);
-                        Helpers.writeIntToMemory(u64, stat.size, filestat_out_mem_offset + 32, module, &errno);
-                        Helpers.writeIntToMemory(u64, stat.atim, filestat_out_mem_offset + 40, module, &errno);
-                        Helpers.writeIntToMemory(u64, stat.mtim, filestat_out_mem_offset + 48, module, &errno);
-                        Helpers.writeIntToMemory(u64, stat.ctim, filestat_out_mem_offset + 56, module, &errno);
+                        Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
                     }
                 } else |err| {
                     errno = Errno.translateError(err);
@@ -1426,6 +1453,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_datasync", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_datasync);
     try imports.addHostFunction("fd_fdstat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get);
     try imports.addHostFunction("fd_fdstat_set_flags", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_set_flags);
+    try imports.addHostFunction("fd_filestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_filestat_get);
     try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
     try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
     try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
