@@ -158,7 +158,7 @@ const WasiContext = struct {
 
                 return fd_wasi;
             } else |err| {
-                std.debug.print("\terr: {}\n", .{err}); // TODO why is the file not found? create flags missing?
+                std.debug.print("\terr: {}\n", .{err});
                 errno.* = Errno.translateError(err);
             }
         } else |err| {
@@ -176,8 +176,7 @@ const WasiContext = struct {
         }
     }
 
-    // TODO accept an errno pointer
-    fn hasPathAccess(self: *WasiContext, fd_info: *const FdInfo, relative_path: []const u8) bool {
+    fn hasPathAccess(self: *WasiContext, fd_info: *const FdInfo, relative_path: []const u8, errno: *Errno) bool {
         if (self.dirs.len > 0) {
             const paths = [_][]const u8{ fd_info.path_absolute, relative_path };
             if (std.fs.path.resolve(self.allocator, &paths)) |resolved_path| {
@@ -193,6 +192,7 @@ const WasiContext = struct {
             }
         }
 
+        errno.* = Errno.NOTCAPABLE;
         return false;
     }
 
@@ -1226,7 +1226,7 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
             const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-            if (context.hasPathAccess(fd_info, path)) {
+            if (context.hasPathAccess(fd_info, path, &errno)) {
                 var flags: u32 = std.os.O.RDONLY;
                 if ((lookup_flags & std.os.wasi.LOOKUP_SYMLINK_FOLLOW) == 0) {
                     flags |= std.os.O.NOFOLLOW;
@@ -1252,8 +1252,6 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
-            } else {
-                errno = .NOTCAPABLE;
             }
         }
     }
@@ -1281,7 +1279,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
         const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
 
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
-            if (context.hasPathAccess(fd_info, path)) {
+            if (context.hasPathAccess(fd_info, path, &errno)) {
                 var flags: u32 = 0;
                 if (openflags.creat) {
                     flags |= std.os.O.CREAT;
@@ -1330,8 +1328,6 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
                 if (context.fdOpen(fd_info.fd, path, flags, mode, &errno)) |fd_opened_wasi| {
                     Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                 }
-            } else {
-                errno = Errno.NOTCAPABLE;
             }
         }
     }
@@ -1351,12 +1347,10 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
     if (errno == .SUCCESS) {
         const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
-            if (context.hasPathAccess(fd_info, path)) {
+            if (context.hasPathAccess(fd_info, path, &errno)) {
                 std.os.unlinkat(fd_info.fd, path, std.os.AT.REMOVEDIR) catch |err| {
                     errno = Errno.translateError(err);
                 };
-            } else {
-                errno = Errno.NOTCAPABLE;
             }
         }
     }
@@ -1378,13 +1372,11 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
         // std.debug.print("unlink file '{s}'\n", .{path});
 
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
-            if (context.hasPathAccess(fd_info, path)) {
+            if (context.hasPathAccess(fd_info, path, &errno)) {
                 std.os.unlinkat(fd_info.fd, path, 0) catch |err| {
                     // std.debug.print("unlinkat error: {} at dir {s} with path {s}\n", .{ err, fd_info.path_absolute, path });
                     errno = Errno.translateError(err);
                 };
-            } else {
-                errno = Errno.NOTCAPABLE;
             }
         }
     }
