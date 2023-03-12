@@ -2,138 +2,206 @@ const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("core.zig");
 
+const StringPool = @import("stringpool.zig");
+
 const Val = core.Val;
 const ValType = core.ValType;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImports = core.ModuleImports;
 
-const WasiInitError = std.mem.Allocator.Error || std.os.OpenError;
+const WasiError = error{PathResolveError};
+const WasiInitError = std.mem.Allocator.Error || std.os.OpenError || std.os.GetCwdError || StringPool.PutError || WasiError;
+
+var static_path_resolve_buffer: [1024 * 4]u8 = undefined;
 
 const WasiContext = struct {
+    const FdInfo = struct {
+        fd: std.os.fd_t,
+        path_absolute: []const u8,
+    };
+
+    cwd: []const u8,
     argv: [][]const u8 = &[_][]u8{},
     env: [][]const u8 = &[_][]u8{},
     dirs: [][]const u8 = &[_][]u8{},
-    fd_table: std.AutoHashMap(u32, std.os.fd_t), // TODO switch to array
+    fd_table: std.AutoHashMap(u32, FdInfo),
+    strings: StringPool,
     next_fd_id: u32 = 3,
     allocator: std.mem.Allocator,
 
     fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) WasiInitError!WasiContext {
         var context = WasiContext{
-            .fd_table = std.AutoHashMap(u32, std.os.fd_t).init(allocator),
+            .cwd = "",
+            .fd_table = std.AutoHashMap(u32, FdInfo).init(allocator),
+            .strings = StringPool.init(std.mem.page_size * 16, allocator),
             .allocator = allocator,
         };
+
+        {
+            var cwd_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const cwd: []const u8 = try std.os.getcwd(&cwd_buffer);
+            context.cwd = try context.strings.put(cwd);
+        }
 
         if (opts.argv) |argv| {
             context.argv = try context.allocator.dupe([]const u8, argv);
             for (argv) |arg, i| {
-                context.argv[i] = try context.allocator.dupe(u8, arg);
+                context.argv[i] = try context.strings.put(arg);
             }
         }
 
         if (opts.env) |env| {
             context.env = try context.allocator.dupe([]const u8, env);
             for (env) |e, i| {
-                context.env[i] = try context.allocator.dupe(u8, e);
+                context.env[i] = try context.strings.put(e);
             }
         }
 
         if (opts.dirs) |dirs| {
             context.dirs = try context.allocator.dupe([]const u8, dirs);
-            for (dirs) |e, i| {
-                context.dirs[i] = try context.allocator.dupe(u8, e);
+            for (dirs) |dir, i| {
+                context.dirs[i] = context.resolveAndCache(null, dir) catch {
+                    return WasiError.PathResolveError;
+                };
             }
         }
 
-        try context.fd_table.put(0, std.io.getStdIn().handle);
-        try context.fd_table.put(1, std.io.getStdOut().handle);
-        try context.fd_table.put(2, std.io.getStdErr().handle);
+        const path_stdin = try context.strings.put("stdin");
+        const path_stdout = try context.strings.put("stdout");
+        const path_stderr = try context.strings.put("stderr");
 
-        var cwd = std.fs.cwd();
+        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin });
+        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout });
+        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr });
+
         for (context.dirs) |dir_path| {
-            const dir: std.fs.Dir = try cwd.openDir(dir_path, .{});
-            _ = try context.fdAdd(dir.fd);
+            const fd_dir: ?std.os.fd_t = null;
+            const flags: u32 = std.os.O.DIRECTORY | std.os.O.RDWR;
+            const mode: std.os.mode_t = 0;
+            var unused: Errno = undefined;
+            _ = context.fdOpen(fd_dir, dir_path, flags, mode, &unused);
         }
 
         return context;
     }
 
     fn deinit(self: *WasiContext) void {
-        if (self.argv.len > 0) {
-            for (self.argv) |arg| {
-                self.allocator.free(arg);
-            }
-            self.allocator.free(self.argv);
-        }
-
-        if (self.env.len > 0) {
-            for (self.env) |e| {
-                self.allocator.free(e);
-            }
-            self.allocator.free(self.env);
-        }
-
-        if (self.dirs.len > 0) {
-            for (self.dirs) |e| {
-                self.allocator.free(e);
-            }
-            self.allocator.free(self.dirs);
-        }
-
+        self.strings.deinit();
         self.fd_table.deinit();
+    }
+
+    fn resolveAndCache(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8) ![]const u8 {
+        std.debug.assert(path[path.len - 1] != 0);
+        if (self.strings.find(path)) |found| {
+            return found;
+        }
+
+        var fba = std.heap.FixedBufferAllocator.init(&static_path_resolve_buffer);
+        const allocator = fba.allocator();
+
+        var path_dir: []const u8 = "";
+        if (fd_dir) |fd| {
+            var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            path_dir = try std.os.getFdPath(fd, &path_buffer);
+        }
+
+        const paths = [_][]const u8{ path_dir, path };
+
+        if (std.fs.path.resolve(allocator, &paths)) |resolved_path| {
+            const cached_path: []const u8 = try self.strings.put(resolved_path);
+            return cached_path;
+        } else |err| {
+            std.debug.print("failed to resolve path '{s}', caught {}\n", .{ path, err });
+            return err;
+        }
     }
 
     fn fdLookup(self: *const WasiContext, fd_wasi: u32) ?std.os.fd_t {
         if (fd_wasi != FD_WASI_INVALID) {
-            if (self.fd_table.get(fd_wasi)) |fd_os| {
-                return fd_os;
+            if (self.fd_table.get(fd_wasi)) |info| {
+                // std.debug.print("fd_wasi {s} -> info {}\n", .{ info.path_absolute, info.fd });
+                return info.fd;
             }
         }
 
         return null;
     }
 
-    fn fdDirPath(self: *WasiContext, fd_wasi: u32) ?[]const u8 {
+    // TODO merge this with fdLookup
+    fn fdLookupInfo(self: *const WasiContext, fd_wasi: u32, errno: *Errno) ?FdInfo {
         if (fd_wasi != FD_WASI_INVALID) {
-            const dirs_index = fd_wasi - 3;
-            if (dirs_index < self.dirs.len) {
-                return self.dirs[dirs_index];
+            if (self.fd_table.get(fd_wasi)) |info| {
+                // std.debug.print("fd_wasi {s} -> info {}\n", .{ info.path_absolute, info.fd });
+                return info;
             }
         }
 
+        errno.* = Errno.BADF;
         return null;
     }
 
-    fn fdAdd(self: *WasiContext, fd_os: std.os.fd_t) std.mem.Allocator.Error!u32 {
-        var fd_wasi: u32 = self.next_fd_id;
-        self.fd_table.put(fd_wasi, fd_os) catch {
-            fd_wasi = FD_WASI_INVALID;
-        };
-        self.next_fd_id += 1;
+    fn fdDirPath(self: *WasiContext, fd_wasi: u32, errno: *Errno) ?[]const u8 {
+        if (fd_wasi != FD_WASI_INVALID and fd_wasi >= 3) { // std handles are 0, 1, 2 so they're not valid paths
+            if (self.fd_table.get(fd_wasi)) |info| {
+                const path_relative = info.path_absolute[self.cwd.len + 1 ..]; // +1 to skip the last path separator
+                return path_relative;
+            }
+        }
 
-        return fd_wasi;
+        errno.* = Errno.BADF;
+        return null;
+    }
+
+    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, flags: u32, mode: std.os.mode_t, errno: *Errno) ?u32 {
+        if (self.resolveAndCache(fd_dir, path)) |resolved_path| {
+            // std.debug.print("fdOpen: fd_dir {?}\n\tpath: '{s}'\n\tresolved: '{s}'\n", .{ fd_dir, path, resolved_path });
+            if (std.os.open(resolved_path, flags, mode)) |fd_os| {
+                var fd_wasi: u32 = self.next_fd_id;
+                self.next_fd_id += 1;
+
+                const info = FdInfo{
+                    .fd = fd_os,
+                    .path_absolute = resolved_path,
+                };
+
+                self.fd_table.put(fd_wasi, info) catch {
+                    fd_wasi = FD_WASI_INVALID;
+                };
+
+                return fd_wasi;
+            } else |err| {
+                std.debug.print("\terr: {}\n", .{err}); // TODO why is the file not found? create flags missing?
+                errno.* = Errno.translateError(err);
+            }
+        } else |err| {
+            errno.* = Errno.translateError(err);
+        }
+
+        return null;
     }
 
     fn fdRemove(self: *WasiContext, wasi_fd: u32) ?std.os.fd_t {
         if (self.fd_table.fetchRemove(wasi_fd)) |result| {
-            return result.value;
+            return result.value.fd;
         } else {
             return null;
         }
     }
 
-    fn hasPathAccess(self: *WasiContext, fd_dir: std.os.fd_t, relative_path: []const u8) bool {
+    // TODO accept an errno pointer
+    fn hasPathAccess(self: *WasiContext, fd_info: *const FdInfo, relative_path: []const u8) bool {
         if (self.dirs.len > 0) {
-            const dir = std.fs.Dir{ .fd = fd_dir };
-            var path_buffer_relative: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            const absolute_path: []const u8 = dir.realpath(relative_path, &path_buffer_relative) catch unreachable;
-
-            const cwd: std.fs.Dir = std.fs.cwd();
-            for (self.dirs) |allowdir| {
-                var path_buffer_allowed: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-                const path_allowed: []const u8 = cwd.realpath(allowdir, &path_buffer_allowed) catch unreachable;
-                if (std.mem.startsWith(u8, absolute_path, path_allowed)) {
-                    return true;
+            const paths = [_][]const u8{ fd_info.path_absolute, relative_path };
+            if (std.fs.path.resolve(self.allocator, &paths)) |resolved_path| {
+                // std.debug.print("checking hasPathAccess for resolved path '{s}'\n", .{resolved_path});
+                for (self.dirs) |allowdir| {
+                    // can use startsWith to check because all the paths have been passed through resolve() already
+                    if (std.mem.startsWith(u8, resolved_path, allowdir)) {
+                        return true;
+                    }
                 }
+            } else |err| {
+                std.debug.print("Caught error {} resolving path. Was the fixed buffer allocator not big enough?", .{err});
             }
         }
 
@@ -436,9 +504,27 @@ const Helpers = struct {
         };
     }
 
+    fn posixTimespecToWasi(ts: std.os.system.timespec) std.os.wasi.timestamp_t {
+        const ns_per_second = 1000000000;
+        const sec_part = @intCast(u64, ts.tv_sec);
+        const nsec_part = @intCast(u64, ts.tv_nsec);
+        const timestamp_ns: u64 = (sec_part * ns_per_second) + nsec_part;
+        return timestamp_ns;
+    }
+
     fn filetimeToU64(ft: std.os.windows.FILETIME) u64 {
         const v: u64 = (@intCast(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
         return v;
+    }
+
+    fn windowsFiletimeToWasi(ft: std.os.windows.FILETIME) std.os.wasi.timestamp_t {
+        // Windows epoch starts on Jan 1, 1601. Unix epoch starts on Jan 1, 1970.
+        const win_epoch_to_unix_epoch_100ns: u64 = 116444736000000000;
+        const timestamp_windows_100ns: u64 = Helpers.filetimeToU64(ft);
+
+        const timestamp_100ns: u64 = timestamp_windows_100ns - win_epoch_to_unix_epoch_100ns;
+        const timestamp_ns: u64 = timestamp_100ns * 100;
+        return timestamp_ns;
     }
 
     fn decodeLookupFlags(value: i32) WasiLookupFlags {
@@ -508,7 +594,40 @@ const Helpers = struct {
         };
     }
 
+    fn windowsFileAttributeToWasiFiletype(fileAttributes: WindowsApi.DWORD) std.os.wasi.filetype_t {
+        if (fileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
+            return .DIRECTORY;
+        } else if (fileAttributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+            return .SYMBOLIC_LINK;
+        } else {
+            return .REGULAR_FILE;
+        }
+    }
+
+    fn posixModeToWasiFiletype(mode: std.os.mode_t) std.os.wasi.filetype_t {
+        if (std.os.S.ISREG(mode)) {
+            return .REGULAR_FILE;
+        } else if (std.os.S.ISDIR(mode)) {
+            return .DIRECTORY;
+        } else if (std.os.S.ISCHR(mode)) {
+            return .CHARACTER_DEVICE;
+        } else if (std.os.S.ISBLK(mode)) {
+            return .BLOCK_DEVICE;
+        } else if (std.os.S.ISLNK(mode)) {
+            return .SYMBOLIC_LINK;
+            // } else if (std.os.S.ISSOCK(mode)) {
+            //     stat_wasi.fs_filetype = std.os.wasi.filetype_t.SOCKET_STREAM; // not sure if this is SOCKET_STREAM or SOCKET_DGRAM
+            // }
+        } else {
+            return .UNKNOWN;
+        }
+    }
+
     fn fdstat_get_windows(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
+        if (builtin.os.tag != .windows) {
+            @compileError("This function should only be called on the Windows OS.");
+        }
+
         var stat_wasi = std.os.wasi.fdstat_t{
             .fs_filetype = std.os.wasi.filetype_t.REGULAR_FILE,
             .fs_flags = 0,
@@ -518,15 +637,9 @@ const Helpers = struct {
 
         var info: WindowsApi.BY_HANDLE_FILE_INFORMATION = undefined;
         if (WindowsApi.GetFileInformationByHandle(fd, &info) == std.os.windows.TRUE) {
-            const attributes = info.dwFileAttributes;
+            stat_wasi.fs_filetype = windowsFileAttributeToWasiFiletype(info.dwFileAttributes);
 
-            if (attributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
-                stat_wasi.fs_filetype = std.os.wasi.filetype_t.DIRECTORY;
-            } else if (attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
-                stat_wasi.fs_filetype = std.os.wasi.filetype_t.SYMBOLIC_LINK;
-            }
-
-            if (attributes & std.os.windows.FILE_ATTRIBUTE_READONLY != 0) {
+            if (info.dwFileAttributes & std.os.windows.FILE_ATTRIBUTE_READONLY != 0) {
                 stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_WRITE;
             }
         } else |err| {
@@ -537,6 +650,10 @@ const Helpers = struct {
     }
 
     fn fdstat_get_posix(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
+        if (builtin.os.tag == .windows) {
+            @compileError("This function should only be called on an OS that supports posix APIs.");
+        }
+
         var stat_wasi = std.os.wasi.fdstat_t{
             .fs_filetype = std.os.wasi.filetype_t.UNKNOWN,
             .fs_flags = 0,
@@ -548,20 +665,7 @@ const Helpers = struct {
             if (std.os.fstat(fd)) |fd_stat| {
 
                 // filetype
-                if (std.os.S.ISREG(fd_stat.mode)) {
-                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.REGULAR_FILE;
-                } else if (std.os.S.ISDIR(fd_stat.mode)) {
-                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.DIRECTORY;
-                } else if (std.os.S.ISCHR(fd_stat.mode)) {
-                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.CHARACTER_DEVICE;
-                } else if (std.os.S.ISBLK(fd_stat.mode)) {
-                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.BLOCK_DEVICE;
-                } else if (std.os.S.ISLNK(fd_stat.mode)) {
-                    stat_wasi.fs_filetype = std.os.wasi.filetype_t.SYMBOLIC_LINK;
-                }
-                // if (std.os.S.ISSOCK(fd_stat.mode)) {
-                //     stat_wasi.fs_filetype = std.os.wasi.filetype_t.SOCKET_STREAM; // not sure if this is SOCKET_STREAM or SOCKET_DGRAM
-                // }
+                stat_wasi.filetype = posixModeToWasiFiletype(fd_stat.mode);
 
                 // flags
                 if (fd_flags & std.os.O.APPEND) {
@@ -591,6 +695,57 @@ const Helpers = struct {
             } else |err| {
                 errno = Errno.translateError(err);
             }
+        } else |err| {
+            errno = Errno.translateError(err);
+        }
+
+        return stat_wasi;
+    }
+
+    fn partsToU64(high: u64, low: u64) u64 {
+        return (high << 32) | low;
+    }
+
+    fn filestat_get_windows(fd: std.os.fd_t, errno: *Errno) std.os.wasi.filestat_t {
+        if (builtin.os.tag != .windows) {
+            @compileError("This function should only be called on an OS that supports posix APIs.");
+        }
+
+        var stat_wasi: std.os.wasi.filestat_t = undefined;
+
+        var info: WindowsApi.BY_HANDLE_FILE_INFORMATION = undefined;
+        if (WindowsApi.GetFileInformationByHandle(fd, &info) == std.os.windows.TRUE) {
+            stat_wasi.dev = 0;
+            stat_wasi.ino = partsToU64(info.nFileIndexHigh, info.nFileIndexLow);
+            stat_wasi.filetype = windowsFileAttributeToWasiFiletype(info.dwFileAttributes);
+            stat_wasi.nlink = info.nNumberOfLinks;
+            stat_wasi.size = partsToU64(info.nFileSizeHigh, info.nFileSizeLow);
+            stat_wasi.atim = windowsFiletimeToWasi(info.ftLastAccessTime);
+            stat_wasi.mtim = windowsFiletimeToWasi(info.ftLastWriteTime);
+            stat_wasi.ctim = windowsFiletimeToWasi(info.ftCreationTime);
+        } else |err| {
+            errno.* = Errno.translateError(err);
+        }
+
+        return stat_wasi;
+    }
+
+    fn filestat_get_posix(fd: std.os.fd_t, errno: *Errno) std.os.wasi.filestat_t {
+        if (builtin.os.tag == .windows) {
+            @compileError("This function should only be called on an OS that supports posix APIs.");
+        }
+
+        var stat_wasi: std.os.wasi.filestat_t = undefined;
+
+        if (std.os.fstat(fd)) |stat| {
+            stat_wasi.dev = stat.dev;
+            stat_wasi.ino = stat.ino;
+            stat_wasi.filetype = posixModeToWasiFiletype(stat.mode);
+            stat_wasi.nlink = stat.nlink;
+            stat_wasi.size = stat.size;
+            stat_wasi.atim = posixTimespecToWasi(stat.atim);
+            stat_wasi.mtim = posixTimespecToWasi(stat.mtim);
+            stat_wasi.ctim = posixTimespecToWasi(stat.ctim);
         } else |err| {
             errno = Errno.translateError(err);
         }
@@ -721,12 +876,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
                     var ft: WindowsApi.FILETIME = undefined;
                     std.os.windows.kernel32.GetSystemTimeAsFileTime(&ft);
 
-                    // Windows epoch starts on Jan 1, 1601. Unix epoch starts on Jan 1, 1970.
-                    const win_epoch_to_unix_epoch_100ns: u64 = 116444736000000000;
-                    const timestamp_windows_100ns: u64 = Helpers.filetimeToU64(ft);
-
-                    const timestamp_100ns: u64 = timestamp_windows_100ns - win_epoch_to_unix_epoch_100ns;
-                    timestamp_ns = timestamp_100ns * 100;
+                    timestamp_ns = Helpers.windowsFiletimeToWasi(ft);
                 },
                 std.os.wasi.CLOCK.MONOTONIC => {
                     const ticks: u64 = std.os.windows.QueryPerformanceCounter();
@@ -767,9 +917,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
         } else {
             var ts: std.os.system.timespec = undefined;
             if (std.os.clock_gettime(system_clockid, &ts)) {
-                const sec_part = @intCast(u64, ts.tv_sec);
-                const nsec_part = @intCast(u64, ts.tv_nsec);
-                timestamp_ns = (sec_part * ns_per_second) + nsec_part;
+                timestamp_ns = Helpers.posixTimespecToWasi(ts);
             } else |_| {
                 errno = Errno.INVAL;
             }
@@ -840,22 +988,23 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_dir_wasi = @bitCast(u32, params[0].I32);
     const prestat_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
-        const fd_os: ?std.os.fd_t = context.fdLookup(fd_wasi);
-        if (fd_wasi >= 3 and fd_os != null) { // std handles are 0, 1, 2 so skip those
-            var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            const path: []const u8 = std.os.getFdPath(fd_os.?, &name_buffer) catch unreachable;
-            const pr_name_len: u32 = @intCast(u32, path.len + 1); // allow space for null terminator
+        // std.debug.print("attempt to lookup fd_dir_wasi {}\n", .{fd_dir_wasi});
+        if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
+            // var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            // const path: []const u8 = std.os.getFdPath(fd_os.?, &name_buffer) catch unreachable;
+            // std.debug.print("wasi_fd_prestat_get: fd_dir_wasi {} -> path: {s}\n", .{ fd_dir_wasi, path_source });
+            const pr_name_len: u32 = @intCast(u32, path_source.len + 1); // allow space for null terminator
 
             Helpers.writeIntToMemory(u32, std.os.wasi.PREOPENTYPE_DIR, prestat_mem_offset + 0, module, &errno);
             Helpers.writeIntToMemory(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32), module, &errno);
-        } else {
-            errno = Errno.BADF;
         }
     }
+
+    // std.debug.print("wasi_fd_prestat_get errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -869,15 +1018,16 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
     const path_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
 
     if (errno == .SUCCESS) {
-        if (context.fdDirPath(fd_dir_wasi)) |path_source| {
+        if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
+            // std.debug.print("wasi_fd_prestat_dir_name: fd_dir_wasi {} -> path: {s}\n", .{ fd_dir_wasi, path_source });
             var path_dest: []u8 = module.memorySlice(path_mem_offset, path_mem_length);
             std.mem.copy(u8, path_dest, path_source);
             const null_offset: usize = std.math.min(path_source.len, path_dest.len);
             path_dest[null_offset] = 0; // null terminator
-        } else {
-            errno = Errno.BADF;
         }
     }
+
+    // std.debug.print("wasi_fd_prestat_dir_name errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -1089,6 +1239,54 @@ fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_dir_wasi = @bitCast(u32, params[0].I32);
+    const lookup_flags = @bitCast(u32, params[1].I32);
+    const path_mem_offset: u32 = Helpers.signedCast(u32, params[2].I32, &errno);
+    const path_mem_length: u32 = Helpers.signedCast(u32, params[3].I32, &errno);
+    const filestat_out_mem_offset = Helpers.signedCast(u32, params[4].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (context.fdLookupInfo(fd_dir_wasi, &errno)) |fd_info| {
+            const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
+            if (context.hasPathAccess(&fd_info, path)) {
+                var flags: u32 = std.os.O.RDONLY;
+                if ((lookup_flags & std.os.wasi.LOOKUP_SYMLINK_FOLLOW) == 0) {
+                    flags |= std.os.O.NOFOLLOW;
+                }
+
+                const mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
+
+                if (std.os.openat(fd_info.fd, path, flags, mode)) |fd_opened| {
+                    defer std.os.close(fd_opened);
+
+                    const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_opened, &errno) else Helpers.filestat_get_posix(fd_opened, &errno);
+                    if (errno == .SUCCESS) {
+                        const filetype = @enumToInt(stat.filetype);
+                        Helpers.writeIntToMemory(u64, stat.dev, filestat_out_mem_offset + 0, module, &errno);
+                        Helpers.writeIntToMemory(u64, stat.ino, filestat_out_mem_offset + 8, module, &errno);
+                        Helpers.writeIntToMemory(u8, filetype, filestat_out_mem_offset + 16, module, &errno);
+                        Helpers.writeIntToMemory(u64, stat.nlink, filestat_out_mem_offset + 24, module, &errno);
+                        Helpers.writeIntToMemory(u64, stat.size, filestat_out_mem_offset + 32, module, &errno);
+                        Helpers.writeIntToMemory(u64, stat.atim, filestat_out_mem_offset + 40, module, &errno);
+                        Helpers.writeIntToMemory(u64, stat.mtim, filestat_out_mem_offset + 48, module, &errno);
+                        Helpers.writeIntToMemory(u64, stat.ctim, filestat_out_mem_offset + 56, module, &errno);
+                    }
+                } else |err| {
+                    errno = Errno.translateError(err);
+                }
+            } else {
+                errno = .NOTCAPABLE;
+            }
+        }
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var errno = Errno.SUCCESS;
 
@@ -1103,14 +1301,20 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[7].I32);
     const fd_out_mem_offset = Helpers.signedCast(u32, params[8].I32, &errno);
 
+    // std.debug.print("path_open oflags: {}, rights: {}, fdflags: {x}\n", .{ openflags, rights_base, params[7].I32 });
+
     if (errno == .SUCCESS) {
         const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
 
-        if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
-            if (context.hasPathAccess(fd_dir, path)) {
+        if (context.fdLookupInfo(fd_dir_wasi, &errno)) |fd_info| {
+            if (context.hasPathAccess(&fd_info, path)) {
                 var flags: u32 = 0;
                 if (openflags.creat) {
                     flags |= std.os.O.CREAT;
+                    // std.os.open() windows implementation requires exclusive flag to create files
+                    if (builtin.os.tag == .windows) {
+                        flags |= std.os.O.EXCL;
+                    }
                 }
                 if (openflags.directory) {
                     flags |= std.os.O.DIRECTORY;
@@ -1149,20 +1353,12 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
                 // 644 means rw perm owner, r perm group, r perm others
                 var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
 
-                if (std.os.openat(fd_dir, path, flags, mode)) |fd_opened| {
-                    if (context.fdAdd(fd_opened)) |fd_opened_wasi| {
-                        Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
-                    } else |err| {
-                        errno = Errno.translateError(err);
-                    }
-                } else |err| {
-                    errno = Errno.translateError(err);
+                if (context.fdOpen(fd_info.fd, path, flags, mode, &errno)) |fd_opened_wasi| {
+                    Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                 }
             } else {
                 errno = Errno.NOTCAPABLE;
             }
-        } else {
-            errno = Errno.BADF;
         }
     }
 
@@ -1180,16 +1376,14 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
 
     if (errno == .SUCCESS) {
         const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-        if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
-            if (context.hasPathAccess(fd_dir, path)) {
-                std.os.unlinkat(fd_dir, path, std.os.AT.REMOVEDIR) catch |err| {
+        if (context.fdLookupInfo(fd_dir_wasi, &errno)) |fd_info| {
+            if (context.hasPathAccess(&fd_info, path)) {
+                std.os.unlinkat(fd_info.fd, path, std.os.AT.REMOVEDIR) catch |err| {
                     errno = Errno.translateError(err);
                 };
             } else {
                 errno = Errno.NOTCAPABLE;
             }
-        } else {
-            errno = Errno.BADF;
         }
     }
 
@@ -1207,16 +1401,17 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
 
     if (errno == .SUCCESS) {
         const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-        if (context.fdLookup(fd_dir_wasi)) |fd_dir| {
-            if (context.hasPathAccess(fd_dir, path)) {
-                std.os.unlinkat(fd_dir, path, 0) catch |err| {
+        // std.debug.print("unlink file '{s}'\n", .{path});
+
+        if (context.fdLookupInfo(fd_dir_wasi, &errno)) |fd_info| {
+            if (context.hasPathAccess(&fd_info, path)) {
+                std.os.unlinkat(fd_info.fd, path, 0) catch |err| {
+                    // std.debug.print("unlinkat error: {} at dir {s} with path {s}\n", .{ err, fd_info.path_absolute, path });
                     errno = Errno.translateError(err);
                 };
             } else {
                 errno = Errno.NOTCAPABLE;
             }
-        } else {
-            errno = Errno.BADF;
         }
     }
 
@@ -1274,6 +1469,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
     try imports.addHostFunction("fd_pwrite", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pwrite);
     try imports.addHostFunction("random_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
+    try imports.addHostFunction("path_filestat_get", &[_]ValType{ .I32, .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_filestat_get);
     try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
     try imports.addHostFunction("path_remove_directory", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_remove_directory);
     try imports.addHostFunction("path_unlink_file", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_unlink_file);

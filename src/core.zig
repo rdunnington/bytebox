@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 pub const wasi = @import("wasi.zig");
 const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
-const StringPool = @import("stringpool.zig").StringPool;
 
 const opcodes = @import("opcode.zig");
 const Opcode = opcodes.Opcode;
@@ -6783,12 +6782,17 @@ pub const ModuleInstance = struct {
         return "";
     }
 
-    pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) void {
+    pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
         var bytes: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
         std.mem.writeIntLittle(T, &bytes, value);
 
         var destination = self.memorySlice(offset, bytes.len);
-        std.mem.copy(u8, destination, &bytes);
+        if (destination.len == bytes.len) {
+            std.mem.copy(u8, destination, &bytes);
+            return true;
+        }
+
+        return false;
     }
 
     /// Caller owns returned memory and must free via allocator.free()
