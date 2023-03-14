@@ -449,6 +449,15 @@ const Helpers = struct {
         return 0;
     }
 
+    fn getMemorySlice(module: *ModuleInstance, offset: usize, length: usize, errno: *Errno) ?[]u8 {
+        const mem: []u8 = module.memorySlice(offset, length);
+        if (mem.len != length) {
+            errno.* = Errno.INVAL;
+            return null;
+        }
+        return mem;
+    }
+
     fn writeIntToMemory(comptime T: type, value: T, offset: usize, module: *ModuleInstance, errno: *Errno) void {
         if (module.memoryWriteInt(T, value, offset) == false) {
             errno.* = Errno.INVAL;
@@ -500,12 +509,13 @@ const Helpers = struct {
             for (strings) |string| {
                 writeIntToMemory(u32, dest_string_strings, dest_string_ptrs, module, &errno);
 
-                var mem: []u8 = module.memorySlice(dest_string_strings, string.len + 1);
-                std.mem.copy(u8, mem[0..string.len], string);
-                mem[string.len] = 0; // null terminator
+                if (getMemorySlice(module, dest_string_strings, string.len + 1, &errno)) |mem| {
+                    std.mem.copy(u8, mem[0..string.len], string);
+                    mem[string.len] = 0; // null terminator
 
-                dest_string_ptrs += @sizeOf(u32);
-                dest_string_strings += @intCast(u32, string.len + 1);
+                    dest_string_ptrs += @sizeOf(u32);
+                    dest_string_strings += @intCast(u32, string.len + 1);
+                }
             }
         }
 
@@ -870,27 +880,29 @@ const Helpers = struct {
         if (iovec_array_count < stack_iov.len) {
             const iov = stack_iov[0..iovec_array_count];
             const iovec_array_bytes_length = @sizeOf(u32) * 2 * iovec_array_count;
-            const iovec_mem: []const u8 = module.memorySlice(iovec_array_begin, iovec_array_bytes_length);
-            var stream = std.io.fixedBufferStream(iovec_mem);
-            var reader = stream.reader();
+            if (getMemorySlice(module, iovec_array_begin, iovec_array_bytes_length, errno)) |iovec_mem| {
+                var stream = std.io.fixedBufferStream(iovec_mem);
+                var reader = stream.reader();
 
-            for (iov) |*iovec| {
-                const iov_base: u32 = reader.readIntLittle(u32) catch {
-                    errno.* = Errno.INVAL;
-                    return null;
-                };
+                for (iov) |*iovec| {
+                    const iov_base: u32 = reader.readIntLittle(u32) catch {
+                        errno.* = Errno.INVAL;
+                        return null;
+                    };
 
-                const iov_len: u32 = reader.readIntLittle(u32) catch {
-                    errno.* = Errno.INVAL;
-                    return null;
-                };
+                    const iov_len: u32 = reader.readIntLittle(u32) catch {
+                        errno.* = Errno.INVAL;
+                        return null;
+                    };
 
-                const mem: []u8 = module.memorySlice(iov_base, iov_len);
-                iovec.iov_base = mem.ptr;
-                iovec.iov_len = mem.len;
+                    if (getMemorySlice(module, iov_base, iov_len, errno)) |mem| {
+                        iovec.iov_base = mem.ptr;
+                        iovec.iov_len = mem.len;
+                    }
+                }
+
+                return iov;
             }
-
-            return iov;
         } else {
             errno.* = Errno.TOOBIG;
         }
@@ -1132,14 +1144,17 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
     if (errno == .SUCCESS) {
         if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
             // std.debug.print("wasi_fd_prestat_dir_name: fd_dir_wasi {} -> path: {s}\n", .{ fd_dir_wasi, path_source });
-            var path_dest: []u8 = module.memorySlice(path_mem_offset, path_mem_length);
-            std.mem.copy(u8, path_dest, path_source);
-            const null_offset: usize = std.math.min(path_source.len, path_dest.len);
-            path_dest[null_offset] = 0; // null terminator
+            if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path_dest| {
+                if (path_source.len <= path_dest.len) {
+                    std.mem.copy(u8, path_dest, path_source);
+                    const null_offset: usize = std.math.min(path_source.len, path_dest.len);
+                    path_dest[null_offset] = 0; // null terminator
+                } else {
+                    errno = Errno.NAMETOOLONG;
+                }
+            }
         }
     }
-
-    // std.debug.print("wasi_fd_prestat_dir_name errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -1185,11 +1200,11 @@ fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: []con
 
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
-            // TODO wrap access to memorySlice in a helper that sets errno
-            var dirent_buffer: []u8 = module.memorySlice(dirent_mem_offset, dirent_mem_length);
-            const enumFunc = if (builtin.os.tag == .windows) Helpers.enumerateDirEntriesWindows else Helpers.enumerateDirEntriesPosix;
-            var bytes_written = enumFunc(fd_info, cookie, dirent_buffer, &errno);
-            Helpers.writeIntToMemory(u32, bytes_written, bytes_written_out_offset, module, &errno);
+            if (Helpers.getMemorySlice(module, dirent_mem_offset, dirent_mem_length, &errno)) |dirent_buffer| {
+                const enumFunc = if (builtin.os.tag == .windows) Helpers.enumerateDirEntriesWindows else Helpers.enumerateDirEntriesPosix;
+                var bytes_written = enumFunc(fd_info, cookie, dirent_buffer, &errno);
+                Helpers.writeIntToMemory(u32, bytes_written, bytes_written_out_offset, module, &errno);
+            }
         }
     }
 
@@ -1396,24 +1411,25 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
 
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
-            const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-            if (context.hasPathAccess(fd_info, path, &errno)) {
-                var flags: u32 = std.os.O.RDONLY;
-                if ((lookup_flags & std.os.wasi.LOOKUP_SYMLINK_FOLLOW) == 0) {
-                    flags |= std.os.O.NOFOLLOW;
-                }
-
-                const mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
-
-                if (std.os.openat(fd_info.fd, path, flags, mode)) |fd_opened| {
-                    defer std.os.close(fd_opened);
-
-                    const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_opened, &errno) else Helpers.filestat_get_posix(fd_opened, &errno);
-                    if (errno == .SUCCESS) {
-                        Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
+            if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
+                if (context.hasPathAccess(fd_info, path, &errno)) {
+                    var flags: u32 = std.os.O.RDONLY;
+                    if ((lookup_flags & std.os.wasi.LOOKUP_SYMLINK_FOLLOW) == 0) {
+                        flags |= std.os.O.NOFOLLOW;
                     }
-                } else |err| {
-                    errno = Errno.translateError(err);
+
+                    const mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
+
+                    if (std.os.openat(fd_info.fd, path, flags, mode)) |fd_opened| {
+                        defer std.os.close(fd_opened);
+
+                        const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_opened, &errno) else Helpers.filestat_get_posix(fd_opened, &errno);
+                        if (errno == .SUCCESS) {
+                            Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
+                        }
+                    } else |err| {
+                        errno = Errno.translateError(err);
+                    }
                 }
             }
         }
@@ -1439,57 +1455,57 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     // std.debug.print("path_open oflags: {}, rights: {}, fdflags: {x}\n", .{ openflags, rights_base, params[7].I32 });
 
     if (errno == .SUCCESS) {
-        const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-
-        if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
-            if (context.hasPathAccess(fd_info, path, &errno)) {
-                var flags: u32 = 0;
-                if (openflags.creat) {
-                    flags |= std.os.O.CREAT;
-                    // std.os.open() windows implementation requires exclusive flag to create files
-                    if (builtin.os.tag == .windows) {
+        if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
+            if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
+                if (context.hasPathAccess(fd_info, path, &errno)) {
+                    var flags: u32 = 0;
+                    if (openflags.creat) {
+                        flags |= std.os.O.CREAT;
+                        // std.os.open() windows implementation requires exclusive flag to create files
+                        if (builtin.os.tag == .windows) {
+                            flags |= std.os.O.EXCL;
+                        }
+                    }
+                    if (openflags.directory) {
+                        flags |= std.os.O.DIRECTORY;
+                    }
+                    if (openflags.excl) {
                         flags |= std.os.O.EXCL;
                     }
-                }
-                if (openflags.directory) {
-                    flags |= std.os.O.DIRECTORY;
-                }
-                if (openflags.excl) {
-                    flags |= std.os.O.EXCL;
-                }
-                if (openflags.trunc) {
-                    flags |= std.os.O.TRUNC;
-                }
+                    if (openflags.trunc) {
+                        flags |= std.os.O.TRUNC;
+                    }
 
-                if (fdflags.append) {
-                    flags |= std.os.O.APPEND;
-                }
-                if (fdflags.dsync) {
-                    flags |= std.os.O.DSYNC;
-                }
-                if (fdflags.nonblock) {
-                    flags |= std.os.O.NONBLOCK;
-                }
-                if (fdflags.rsync) {
-                    flags |= std.os.O.RSYNC;
-                }
-                if (fdflags.sync) {
-                    flags |= std.os.O.SYNC;
-                }
+                    if (fdflags.append) {
+                        flags |= std.os.O.APPEND;
+                    }
+                    if (fdflags.dsync) {
+                        flags |= std.os.O.DSYNC;
+                    }
+                    if (fdflags.nonblock) {
+                        flags |= std.os.O.NONBLOCK;
+                    }
+                    if (fdflags.rsync) {
+                        flags |= std.os.O.RSYNC;
+                    }
+                    if (fdflags.sync) {
+                        flags |= std.os.O.SYNC;
+                    }
 
-                if (rights_base.fd_read and rights_base.fd_write) {
-                    flags |= std.os.O.RDWR;
-                } else if (rights_base.fd_read) {
-                    flags |= std.os.O.RDONLY;
-                } else if (rights_base.fd_write) {
-                    flags |= std.os.O.WRONLY;
-                }
+                    if (rights_base.fd_read and rights_base.fd_write) {
+                        flags |= std.os.O.RDWR;
+                    } else if (rights_base.fd_read) {
+                        flags |= std.os.O.RDONLY;
+                    } else if (rights_base.fd_write) {
+                        flags |= std.os.O.WRONLY;
+                    }
 
-                // 644 means rw perm owner, r perm group, r perm others
-                var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
+                    // 644 means rw perm owner, r perm group, r perm others
+                    var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
 
-                if (context.fdOpen(fd_info.fd, path, flags, mode, &errno)) |fd_opened_wasi| {
-                    Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
+                    if (context.fdOpen(fd_info.fd, path, flags, mode, &errno)) |fd_opened_wasi| {
+                        Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
+                    }
                 }
             }
         }
@@ -1508,12 +1524,13 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
     const path_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
 
     if (errno == .SUCCESS) {
-        const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-        if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
-            if (context.hasPathAccess(fd_info, path, &errno)) {
-                std.os.unlinkat(fd_info.fd, path, std.os.AT.REMOVEDIR) catch |err| {
-                    errno = Errno.translateError(err);
-                };
+        if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
+            if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
+                if (context.hasPathAccess(fd_info, path, &errno)) {
+                    std.os.unlinkat(fd_info.fd, path, std.os.AT.REMOVEDIR) catch |err| {
+                        errno = Errno.translateError(err);
+                    };
+                }
             }
         }
     }
@@ -1531,15 +1548,16 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
     const path_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
 
     if (errno == .SUCCESS) {
-        const path: []const u8 = module.memorySlice(path_mem_offset, path_mem_length);
-        // std.debug.print("unlink file '{s}'\n", .{path});
+        if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
+            // std.debug.print("unlink file '{s}'\n", .{path});
 
-        if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
-            if (context.hasPathAccess(fd_info, path, &errno)) {
-                std.os.unlinkat(fd_info.fd, path, 0) catch |err| {
-                    // std.debug.print("unlinkat error: {} at dir {s} with path {s}\n", .{ err, fd_info.path_absolute, path });
-                    errno = Errno.translateError(err);
-                };
+            if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
+                if (context.hasPathAccess(fd_info, path, &errno)) {
+                    std.os.unlinkat(fd_info.fd, path, 0) catch |err| {
+                        // std.debug.print("unlinkat error: {} at dir {s} with path {s}\n", .{ err, fd_info.path_absolute, path });
+                        errno = Errno.translateError(err);
+                    };
+                }
             }
         }
     }
@@ -1555,8 +1573,9 @@ fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val,
 
     if (errno == .SUCCESS) {
         if (array_length > 0) {
-            var mem: []u8 = module.memorySlice(array_begin_offset, array_length);
-            std.crypto.random.bytes(mem);
+            if (Helpers.getMemorySlice(module, array_begin_offset, array_length, &errno)) |mem| {
+                std.crypto.random.bytes(mem);
+            }
         }
     }
 
