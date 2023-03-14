@@ -116,11 +116,9 @@ const WasiContext = struct {
     }
 
     fn fdLookup(self: *const WasiContext, fd_wasi: u32, errno: *Errno) ?*const FdInfo {
-        if (fd_wasi != FD_WASI_INVALID) {
-            if (self.fd_table.getPtr(fd_wasi)) |info| {
-                // std.debug.print("fd_wasi {s} -> info {}\n", .{ info.path_absolute, info.fd });
-                return info;
-            }
+        if (self.fd_table.getPtr(fd_wasi)) |info| {
+            // std.debug.print("fd_wasi {s} -> info {}\n", .{ info.path_absolute, info.fd });
+            return info;
         }
 
         errno.* = Errno.BADF;
@@ -128,8 +126,9 @@ const WasiContext = struct {
     }
 
     fn fdDirPath(self: *WasiContext, fd_wasi: u32, errno: *Errno) ?[]const u8 {
-        if (fd_wasi != FD_WASI_INVALID and fd_wasi >= 3) { // std handles are 0, 1, 2 so they're not valid paths
+        if (Helpers.isStdioHandle(fd_wasi) == false) { // std handles are 0, 1, 2 so they're not valid paths
             if (self.fd_table.get(fd_wasi)) |info| {
+                // std.debug.print("path_absolute: {s}\n     path_cwd: {s}\n", .{ info.path_absolute, self.cwd });
                 const path_relative = info.path_absolute[self.cwd.len + 1 ..]; // +1 to skip the last path separator
                 return path_relative;
             }
@@ -152,7 +151,8 @@ const WasiContext = struct {
                 };
 
                 self.fd_table.put(fd_wasi, info) catch {
-                    fd_wasi = FD_WASI_INVALID;
+                    errno.* = Errno.NOMEM;
+                    return null;
                 };
 
                 return fd_wasi;
@@ -434,7 +434,6 @@ const WindowsApi = struct {
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
 
-const FD_WASI_INVALID = std.math.maxInt(u32);
 const FD_OS_INVALID = switch (builtin.os.tag) {
     .windows => std.os.windows.INVALID_HANDLE_VALUE,
     else => -1,
@@ -474,6 +473,10 @@ const Helpers = struct {
         Helpers.writeIntToMemory(u64, stat.atim, offset + 40, module, errno);
         Helpers.writeIntToMemory(u64, stat.mtim, offset + 48, module, errno);
         Helpers.writeIntToMemory(u64, stat.ctim, offset + 56, module, errno);
+    }
+
+    fn isStdioHandle(fd_wasi: u32) bool {
+        return fd_wasi < 3; // std handles are 0, 1, 2 (stdin, stdout, stderr)
     }
 
     fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
@@ -1102,7 +1105,7 @@ fn wasi_fd_fdstat_set_flags(_: ?*anyopaque, _: *ModuleInstance, params: []const 
     // std.debug.print("called wasi_fd_fdstat_set_flags\n", .{});
 
     // TODO
-    var errno = Errno.SUCCESS;
+    var errno = Errno.INVAL;
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 
     unreachable;
@@ -1267,12 +1270,15 @@ fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: 
     const filestat_out_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
-        if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
-            const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_info.fd, &errno) else Helpers.filestat_get_posix(fd_info.fd, &errno);
-            if (errno == .SUCCESS) {
-                Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
-            } else |err| {
-                errno = Errno.translateError(err);
+        if (Helpers.isStdioHandle(fd_wasi)) {
+            const zeroes = std.mem.zeroes(std.os.wasi.filestat_t);
+            Helpers.writeFilestatToMemory(&zeroes, filestat_out_mem_offset, module, &errno);
+        } else {
+            if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+                const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_info.fd, &errno) else Helpers.filestat_get_posix(fd_info.fd, &errno);
+                if (errno == .SUCCESS) {
+                    Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
+                }
             }
         }
     }
