@@ -90,9 +90,6 @@ const WasiContext = struct {
 
     fn resolveAndCache(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8) ![]const u8 {
         std.debug.assert(path[path.len - 1] != 0);
-        if (self.strings.find(path)) |found| {
-            return found;
-        }
 
         var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
@@ -107,7 +104,7 @@ const WasiContext = struct {
         const paths = [_][]const u8{ path_dir, path };
 
         if (std.fs.path.resolve(allocator, &paths)) |resolved_path| {
-            const cached_path: []const u8 = try self.strings.put(resolved_path);
+            const cached_path: []const u8 = try self.strings.findOrPut(resolved_path);
             return cached_path;
         } else |err| {
             std.debug.print("failed to resolve path '{s}', caught {}\n", .{ path, err });
@@ -128,7 +125,6 @@ const WasiContext = struct {
     fn fdDirPath(self: *WasiContext, fd_wasi: u32, errno: *Errno) ?[]const u8 {
         if (Helpers.isStdioHandle(fd_wasi) == false) { // std handles are 0, 1, 2 so they're not valid paths
             if (self.fd_table.get(fd_wasi)) |info| {
-                // std.debug.print("path_absolute: {s}\n     path_cwd: {s}\n", .{ info.path_absolute, self.cwd });
                 const path_relative = info.path_absolute[self.cwd.len + 1 ..]; // +1 to skip the last path separator
                 return path_relative;
             }
