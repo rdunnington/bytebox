@@ -12,8 +12,6 @@ const ModuleImports = core.ModuleImports;
 const WasiError = error{PathResolveError};
 const WasiInitError = std.mem.Allocator.Error || std.os.OpenError || std.os.GetCwdError || StringPool.PutError || WasiError;
 
-var static_path_resolve_buffer: [1024 * 4]u8 = undefined;
-
 const WasiContext = struct {
     const FdInfo = struct {
         fd: std.os.fd_t,
@@ -96,7 +94,8 @@ const WasiContext = struct {
             return found;
         }
 
-        var fba = std.heap.FixedBufferAllocator.init(&static_path_resolve_buffer);
+        var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
         const allocator = fba.allocator();
 
         var path_dir: []const u8 = "";
@@ -158,7 +157,7 @@ const WasiContext = struct {
 
                 return fd_wasi;
             } else |err| {
-                std.debug.print("\terr: {}\n", .{err});
+                // std.debug.print("\terr: {}\n", .{err});
                 errno.* = Errno.translateError(err);
             }
         } else |err| {
@@ -378,14 +377,20 @@ const Whence = enum(u8) {
     }
 };
 
+// Since the windows API is so large, wrapping the win32 API is not in the scope of the stdlib, so it
+// prefers to only declare windows functions it uses. In these cases we just declare the needed functions
+// and types here.
 const WindowsApi = struct {
     const windows = std.os.windows;
 
     const BOOL = windows.BOOL;
     const DWORD = windows.DWORD;
-    const WINAPI = windows.WINAPI;
-    const HANDLE = windows.HANDLE;
     const FILETIME = windows.FILETIME;
+    const HANDLE = windows.HANDLE;
+    const LARGE_INTEGER = windows.LARGE_INTEGER;
+    const ULONG = windows.ULONG;
+    const WCHAR = windows.WCHAR;
+    const WINAPI = windows.WINAPI;
 
     const CLOCK = struct {
         const REALTIME = 0;
@@ -405,6 +410,22 @@ const WindowsApi = struct {
         nNumberOfLinks: DWORD,
         nFileIndexHigh: DWORD,
         nFileIndexLow: DWORD,
+    };
+
+    const FILE_ID_FULL_DIR_INFORMATION = extern struct {
+        NextEntryOffset: ULONG,
+        FileIndex: ULONG,
+        CreationTime: LARGE_INTEGER,
+        LastAccessTime: LARGE_INTEGER,
+        LastWriteTime: LARGE_INTEGER,
+        ChangeTime: LARGE_INTEGER,
+        EndOfFile: LARGE_INTEGER,
+        AllocationSize: LARGE_INTEGER,
+        FileAttributes: ULONG,
+        FileNameLength: ULONG,
+        EaSize: ULONG,
+        FileId: LARGE_INTEGER,
+        FileName: [1]WCHAR,
     };
 
     extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
@@ -753,6 +774,98 @@ const Helpers = struct {
         return stat_wasi;
     }
 
+    fn enumerateDirEntriesWindows(fd_info: *const WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
+        var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+
+        var restart_scan: std.os.windows.BOOLEAN = std.os.windows.TRUE;
+        comptime std.debug.assert(std.os.wasi.DIRCOOKIE_START == 0);
+
+        // Always rescan up to the cookie index since win32 api doesn't have a way to specify a "start index"
+        // for the scan. :(
+        const entries_to_skip: u64 = cookie;
+
+        var fbs = std.io.fixedBufferStream(out_buffer);
+        var writer = fbs.writer();
+
+        var file_index: usize = 0;
+        var should_continue: bool = true;
+        while (should_continue) {
+            var file_info_buffer: [1024]u8 align(@alignOf(WindowsApi.FILE_ID_FULL_DIR_INFORMATION)) = undefined;
+            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+            var rc: std.os.windows.NTSTATUS = std.os.windows.ntdll.NtQueryDirectoryFile(
+                fd_info.fd,
+                null,
+                null,
+                null,
+                &io,
+                &file_info_buffer,
+                file_info_buffer.len,
+                .FileIdFullDirectoryInformation,
+                std.os.windows.TRUE,
+                null,
+                restart_scan,
+            );
+            switch (rc) {
+                .SUCCESS => {},
+                .NO_MORE_FILES => {
+                    should_continue = false;
+                },
+                .BUFFER_OVERFLOW => {
+                    std.debug.print("Internal buffer is too small.\n", .{});
+                    unreachable;
+                },
+                .INVALID_INFO_CLASS => unreachable,
+                .INVALID_PARAMETER => unreachable,
+                else => |err| {
+                    std.debug.print("NtQueryDirectoryFile: err {}", .{err});
+                    unreachable;
+                },
+            }
+
+            restart_scan = std.os.windows.FALSE;
+
+            if (entries_to_skip <= file_index and rc == .SUCCESS) {
+                const file_info = @ptrCast(*WindowsApi.FILE_ID_FULL_DIR_INFORMATION, &file_info_buffer);
+
+                const filename_utf16le = @ptrCast([*]u16, &file_info.FileName)[0 .. file_info.FileNameLength / @sizeOf(u16)];
+
+                var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
+                var allocator = fba.allocator();
+                const filename: []u8 = std.unicode.utf16leToUtf8Alloc(allocator, filename_utf16le) catch unreachable;
+
+                var filetype: std.os.wasi.filetype_t = .REGULAR_FILE;
+                if (file_info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
+                    filetype = .DIRECTORY;
+                } else if (file_info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+                    filetype = .SYMBOLIC_LINK;
+                }
+
+                writer.writeIntLittle(u64, file_index) catch break;
+                writer.writeIntLittle(u64, @bitCast(u64, file_info.FileId)) catch break; // inode
+                writer.writeIntLittle(u32, signedCast(u32, filename.len, errno)) catch break;
+                writer.writeIntLittle(u32, @enumToInt(filetype)) catch break;
+                _ = writer.write(filename) catch break;
+            }
+
+            file_index += 1;
+        }
+
+        var bytes_written = signedCast(u32, fbs.pos, errno);
+        return bytes_written;
+    }
+
+    fn enumerateDirEntriesPosix(fd_info: *const WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
+        _ = fd_info;
+        _ = cookie;
+        _ = out_buffer;
+        _ = errno;
+
+        // TODO
+        unreachable;
+
+        // return 0;
+    }
+
     fn initIovecs(comptime iov_type: type, stack_iov: []iov_type, errno: *Errno, module: *ModuleInstance, iovec_array_begin: u32, iovec_array_count: u32) ?[]iov_type {
         if (iovec_array_count < stack_iov.len) {
             const iov = stack_iov[0..iovec_array_count];
@@ -1054,6 +1167,29 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
                     errno = Errno.translateError(err);
                 }
             }
+        }
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    var context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const dirent_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
+    const dirent_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
+    const cookie = Helpers.signedCast(u64, params[3].I64, &errno);
+    const bytes_written_out_offset = Helpers.signedCast(u32, params[4].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+            // TODO wrap access to memorySlice in a helper that sets errno
+            var dirent_buffer: []u8 = module.memorySlice(dirent_mem_offset, dirent_mem_length);
+            const enumFunc = if (builtin.os.tag == .windows) Helpers.enumerateDirEntriesWindows else Helpers.enumerateDirEntriesPosix;
+            var bytes_written = enumFunc(fd_info, cookie, dirent_buffer, &errno);
+            Helpers.writeIntToMemory(u32, bytes_written, bytes_written_out_offset, module, &errno);
         }
     }
 
@@ -1457,6 +1593,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
     try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
     try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
+    try imports.addHostFunction("fd_readdir", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_readdir);
     try imports.addHostFunction("fd_pread", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pread);
     try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
     try imports.addHostFunction("fd_tell", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_tell);
