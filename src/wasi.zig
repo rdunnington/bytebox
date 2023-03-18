@@ -16,6 +16,7 @@ const WasiContext = struct {
     const FdInfo = struct {
         fd: std.os.fd_t,
         path_absolute: []const u8,
+        rights: WasiRights,
     };
 
     cwd: []const u8,
@@ -68,16 +69,31 @@ const WasiContext = struct {
         const path_stdout = try context.strings.put("stdout");
         const path_stderr = try context.strings.put("stderr");
 
-        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin });
-        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout });
-        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr });
+        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{} });
+        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{} });
+        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{} });
 
         for (context.dirs) |dir_path| {
             const fd_dir: ?std.os.fd_t = null;
-            const flags: u32 = std.os.O.DIRECTORY | std.os.O.RDWR;
-            const mode: std.os.mode_t = 0;
+            const openflags = WasiOpenFlags{
+                .creat = false,
+                .directory = true,
+                .excl = false,
+                .trunc = false,
+            };
+            const fdflags = WasiFdFlags{
+                .append = false,
+                .dsync = false,
+                .nonblock = false,
+                .rsync = false,
+                .sync = false,
+            };
+            const rights = WasiRights{
+                .fd_read = true,
+                .fd_write = true,
+            };
             var unused: Errno = undefined;
-            _ = context.fdOpen(fd_dir, dir_path, flags, mode, &unused);
+            _ = context.fdOpen(fd_dir, dir_path, openflags, fdflags, rights, &unused);
         }
 
         return context;
@@ -134,16 +150,18 @@ const WasiContext = struct {
         return null;
     }
 
-    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, flags: u32, mode: std.os.mode_t, errno: *Errno) ?u32 {
+    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?u32 {
         if (self.resolveAndCache(fd_dir, path)) |resolved_path| {
-            // std.debug.print("fdOpen: fd_dir {?}\n\tpath: '{s}'\n\tresolved: '{s}'\n", .{ fd_dir, path, resolved_path });
-            if (std.os.open(resolved_path, flags, mode)) |fd_os| {
+            const open_func = if (builtin.os.tag == .windows) Helpers.openPathWindows else Helpers.openPathPosix;
+
+            if (open_func(resolved_path, openflags, fdflags, rights, errno)) |fd_os| {
                 var fd_wasi: u32 = self.next_fd_id;
                 self.next_fd_id += 1;
 
                 const info = FdInfo{
                     .fd = fd_os,
                     .path_absolute = resolved_path,
+                    .rights = rights,
                 };
 
                 self.fd_table.put(fd_wasi, info) catch {
@@ -152,9 +170,6 @@ const WasiContext = struct {
                 };
 
                 return fd_wasi;
-            } else |err| {
-                // std.debug.print("\terr: {}\n", .{err});
-                errno.* = Errno.translateError(err);
             }
         } else |err| {
             errno.* = Errno.translateError(err);
@@ -168,6 +183,14 @@ const WasiContext = struct {
             return result.value.fd;
         } else {
             return null;
+        }
+    }
+
+    fn fdUpdate(self: *WasiContext, wasi_fd: u32, new_fd: std.os.fd_t) void {
+        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
+            fd_info.fd = new_fd;
+        } else {
+            unreachable; // fdUpdate should always be nested inside an fdLookup
         }
     }
 
@@ -318,36 +341,36 @@ const WasiOpenFlags = packed struct {
 };
 
 const WasiRights = packed struct {
-    fd_datasync: bool,
-    fd_read: bool,
-    fd_seek: bool,
-    fd_fdstat_set_flags: bool,
-    fd_sync: bool,
-    fd_tell: bool,
-    fd_write: bool,
-    fd_advise: bool,
-    fd_allocate: bool,
-    path_create_directory: bool,
-    path_create_file: bool,
-    path_link_source: bool,
-    path_link_target: bool,
-    path_open: bool,
-    fd_readdir: bool,
-    path_readlink: bool,
-    path_rename_source: bool,
-    path_rename_target: bool,
-    path_filestat_get: bool,
-    path_filestat_set_size: bool,
-    path_filestat_set_times: bool,
-    fd_filestat_get: bool,
-    fd_filestat_set_size: bool,
-    fd_filestat_set_times: bool,
-    path_symlink: bool,
-    path_remove_directory: bool,
-    path_unlink_file: bool,
-    poll_fd_readwrite: bool,
-    sock_shutdown: bool,
-    sock_accept: bool,
+    fd_datasync: bool = true,
+    fd_read: bool = true,
+    fd_seek: bool = true,
+    fd_fdstat_set_flags: bool = true,
+    fd_sync: bool = true,
+    fd_tell: bool = true,
+    fd_write: bool = true,
+    fd_advise: bool = true,
+    fd_allocate: bool = true,
+    path_create_directory: bool = true,
+    path_create_file: bool = true,
+    path_link_source: bool = true,
+    path_link_target: bool = true,
+    path_open: bool = true,
+    fd_readdir: bool = true,
+    path_readlink: bool = true,
+    path_rename_source: bool = true,
+    path_rename_target: bool = true,
+    path_filestat_get: bool = true,
+    path_filestat_set_size: bool = true,
+    path_filestat_set_times: bool = true,
+    fd_filestat_get: bool = true,
+    fd_filestat_set_size: bool = true,
+    fd_filestat_set_times: bool = true,
+    path_symlink: bool = true,
+    path_remove_directory: bool = true,
+    path_unlink_file: bool = true,
+    poll_fd_readwrite: bool = true,
+    sock_shutdown: bool = true,
+    sock_accept: bool = true,
 };
 
 const WasiFdFlags = packed struct {
@@ -427,6 +450,7 @@ const WindowsApi = struct {
     extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
     extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(WINAPI) BOOL;
     extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
+
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
 
@@ -624,6 +648,28 @@ const Helpers = struct {
         };
     }
 
+    fn fdflagsToFlagsPosix(fdflags: WasiFdFlags) u32 {
+        var flags: u32 = 0;
+
+        if (fdflags.append) {
+            flags |= std.os.O.APPEND;
+        }
+        if (fdflags.dsync) {
+            flags |= std.os.O.DSYNC;
+        }
+        if (fdflags.nonblock) {
+            flags |= std.os.O.NONBLOCK;
+        }
+        if (fdflags.rsync) {
+            flags |= std.os.O.RSYNC;
+        }
+        if (fdflags.sync) {
+            flags |= std.os.O.SYNC;
+        }
+
+        return flags;
+    }
+
     fn windowsFileAttributeToWasiFiletype(fileAttributes: WindowsApi.DWORD) std.os.wasi.filetype_t {
         if (fileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
             return .DIRECTORY;
@@ -653,7 +699,7 @@ const Helpers = struct {
         }
     }
 
-    fn fdstat_get_windows(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
+    fn fdstatGetWindows(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
         if (builtin.os.tag != .windows) {
             @compileError("This function should only be called on the Windows OS.");
         }
@@ -679,7 +725,7 @@ const Helpers = struct {
         return stat_wasi;
     }
 
-    fn fdstat_get_posix(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
+    fn fdstatGetPosix(fd: std.os.fd_t, errno: *Errno) std.os.wasi.fdstat_t {
         if (builtin.os.tag == .windows) {
             @compileError("This function should only be called on an OS that supports posix APIs.");
         }
@@ -732,11 +778,110 @@ const Helpers = struct {
         return stat_wasi;
     }
 
+    fn fdstatSetFlagsWindows(fd_info: *const WasiContext.FdInfo, fdflags: WasiFdFlags, errno: *Errno) ?std.os.fd_t {
+        const w = std.os.windows;
+
+        const file_pos = w.SetFilePointerEx_CURRENT_get(fd_info.fd) catch |err| {
+            errno.* = Errno.translateError(err);
+            return null;
+        };
+
+        w.CloseHandle(fd_info.fd);
+
+        const pathspace_w: w.PathSpace = w.sliceToPrefixedFileW(fd_info.path_absolute) catch |err| {
+            errno.* = Errno.translateError(err);
+            return null;
+        };
+        const path_w: [:0]const u16 = pathspace_w.span();
+
+        var access_mask: w.ULONG = w.READ_CONTROL | w.FILE_WRITE_ATTRIBUTES | w.SYNCHRONIZE;
+        const write_flags: w.ULONG = if (fdflags.append) w.FILE_APPEND_DATA else w.GENERIC_WRITE;
+        if (fd_info.rights.fd_read and fd_info.rights.fd_write) {
+            access_mask |= w.GENERIC_READ | write_flags;
+        } else if (fd_info.rights.fd_write) {
+            access_mask |= write_flags;
+        } else {
+            access_mask |= w.GENERIC_READ | write_flags;
+        }
+
+        const path_len_bytes = @intCast(u16, path_w.len * 2);
+        var unicode_str = w.UNICODE_STRING{
+            .Length = path_len_bytes,
+            .MaximumLength = path_len_bytes,
+            .Buffer = @intToPtr([*]u16, @ptrToInt(path_w.ptr)),
+        };
+        var attr = w.OBJECT_ATTRIBUTES{
+            .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
+            .RootDirectory = null,
+            .Attributes = w.OBJ_CASE_INSENSITIVE,
+            .ObjectName = &unicode_str,
+            .SecurityDescriptor = null,
+            .SecurityQualityOfService = null,
+        };
+
+        var fd_new: w.HANDLE = undefined;
+        var io: w.IO_STATUS_BLOCK = undefined;
+        const rc = w.ntdll.NtCreateFile(
+            &fd_new,
+            access_mask,
+            &attr,
+            &io,
+            null,
+            w.FILE_ATTRIBUTE_NORMAL,
+            w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+            w.FILE_OPEN,
+            w.FILE_NON_DIRECTORY_FILE | w.FILE_SYNCHRONOUS_IO_NONALERT,
+            null,
+            0,
+        );
+
+        switch (rc) {
+            .SUCCESS => {},
+            .OBJECT_NAME_INVALID => unreachable,
+            .INVALID_PARAMETER => unreachable,
+            .OBJECT_PATH_SYNTAX_BAD => unreachable,
+            .INVALID_HANDLE => unreachable,
+            .OBJECT_NAME_NOT_FOUND => errno.* = Errno.NOENT,
+            .OBJECT_PATH_NOT_FOUND => errno.* = Errno.NOENT,
+            .NO_MEDIA_IN_DEVICE => errno.* = Errno.NODEV,
+            .SHARING_VIOLATION => errno.* = Errno.ACCES,
+            .ACCESS_DENIED => errno.* = Errno.ACCES,
+            .USER_MAPPED_FILE => errno.* = Errno.ACCES,
+            .PIPE_BUSY => errno.* = Errno.BUSY,
+            .OBJECT_NAME_COLLISION => errno.* = Errno.EXIST,
+            .FILE_IS_A_DIRECTORY => errno.* = Errno.ISDIR,
+            .NOT_A_DIRECTORY => errno.* = Errno.ISDIR,
+            else => errno.* = Errno.INVAL,
+        }
+
+        if (errno.* != Errno.SUCCESS) {
+            return null;
+        }
+
+        // at this point we need to return fd_new, but don't want to silently swallow errors
+        w.SetFilePointerEx_BEGIN(fd_new, file_pos) catch |err| {
+            errno.* = Errno.translateError(err);
+        };
+
+        return fd_new;
+    }
+
+    fn fdstatSetFlagsPosix(fd_info: *const WasiContext.FdInfo, fdflags: *WasiFdFlags, errno: *Errno) ?std.os.fd_t {
+        const flags: u32 = fdflagsToFlagsPosix(fdflags);
+
+        if (std.os.fcntl(fd_info.fd, std.os.F.SETFL, flags)) |_| {} else |err| {
+            errno.* = Errno.translateError(err);
+        }
+
+        // don't need to update the fd on posix platforms, so just return null
+        return null;
+    }
+
     fn partsToU64(high: u64, low: u64) u64 {
         return (high << 32) | low;
     }
 
-    fn filestat_get_windows(fd: std.os.fd_t, errno: *Errno) std.os.wasi.filestat_t {
+    fn filestatGetWindows(fd: std.os.fd_t, errno: *Errno) std.os.wasi.filestat_t {
         if (builtin.os.tag != .windows) {
             @compileError("This function should only be called on an OS that supports posix APIs.");
         }
@@ -760,7 +905,7 @@ const Helpers = struct {
         return stat_wasi;
     }
 
-    fn filestat_get_posix(fd: std.os.fd_t, errno: *Errno) std.os.wasi.filestat_t {
+    fn filestatGetPosix(fd: std.os.fd_t, errno: *Errno) std.os.wasi.filestat_t {
         if (builtin.os.tag == .windows) {
             @compileError("This function should only be called on an OS that supports posix APIs.");
         }
@@ -781,6 +926,134 @@ const Helpers = struct {
         }
 
         return stat_wasi;
+    }
+
+    // As of this 0.10.1, the zig stdlib has a bug in std.os.open() that doesn't respect the append flag properly.
+    // To get this working, we'll just use NtCreateFile directly.
+    fn openPathWindows(path: []const u8, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
+        if (builtin.os.tag != .windows) {
+            @compileError("This function should only be called on an OS that supports windows APIs.");
+        }
+
+        const w = std.os.windows;
+
+        const pathspace_w: w.PathSpace = w.sliceToPrefixedFileW(path) catch |err| {
+            errno.* = Errno.translateError(err);
+            return null;
+        };
+        const path_w: [:0]const u16 = pathspace_w.span();
+
+        var access_mask: w.ULONG = w.READ_CONTROL | w.FILE_WRITE_ATTRIBUTES | w.SYNCHRONIZE;
+        const write_flags: w.ULONG = if (fdflags.append) w.FILE_APPEND_DATA else w.GENERIC_WRITE;
+        if (rights.fd_read and rights.fd_write) {
+            access_mask |= w.GENERIC_READ | write_flags;
+        } else if (rights.fd_write) {
+            access_mask |= write_flags;
+        } else {
+            access_mask |= w.GENERIC_READ | write_flags;
+        }
+
+        const creation: w.ULONG = if (openflags.creat) w.FILE_CREATE else w.FILE_OPEN;
+
+        const file_or_dir_flag: w.ULONG = if (openflags.directory) w.FILE_DIRECTORY_FILE else w.FILE_NON_DIRECTORY_FILE;
+        const io_mode_flag: w.ULONG = w.FILE_SYNCHRONOUS_IO_NONALERT;
+        const flags: w.ULONG = file_or_dir_flag | io_mode_flag;
+
+        if (path_w.len > std.math.maxInt(u16)) {
+            errno.* = Errno.NAMETOOLONG;
+            return null;
+        }
+
+        const path_len_bytes = @intCast(u16, path_w.len * 2);
+        var unicode_str = w.UNICODE_STRING{
+            .Length = path_len_bytes,
+            .MaximumLength = path_len_bytes,
+            .Buffer = @intToPtr([*]u16, @ptrToInt(path_w.ptr)),
+        };
+        var attr = w.OBJECT_ATTRIBUTES{
+            .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
+            .RootDirectory = null,
+            .Attributes = w.OBJ_CASE_INSENSITIVE,
+            .ObjectName = &unicode_str,
+            .SecurityDescriptor = null,
+            .SecurityQualityOfService = null,
+        };
+
+        var fd: w.HANDLE = undefined;
+        var io: w.IO_STATUS_BLOCK = undefined;
+        const rc = std.os.windows.ntdll.NtCreateFile(
+            &fd,
+            access_mask,
+            &attr,
+            &io,
+            null,
+            w.FILE_ATTRIBUTE_NORMAL,
+            w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+            creation,
+            flags,
+            null,
+            0,
+        );
+
+        switch (rc) {
+            .SUCCESS => return fd,
+            .OBJECT_NAME_INVALID => unreachable,
+            .INVALID_PARAMETER => unreachable,
+            .OBJECT_PATH_SYNTAX_BAD => unreachable,
+            .INVALID_HANDLE => unreachable,
+            .OBJECT_NAME_NOT_FOUND => errno.* = Errno.NOENT,
+            .OBJECT_PATH_NOT_FOUND => errno.* = Errno.NOENT,
+            .NO_MEDIA_IN_DEVICE => errno.* = Errno.NODEV,
+            .SHARING_VIOLATION => errno.* = Errno.ACCES,
+            .ACCESS_DENIED => errno.* = Errno.ACCES,
+            .USER_MAPPED_FILE => errno.* = Errno.ACCES,
+            .PIPE_BUSY => errno.* = Errno.BUSY,
+            .OBJECT_NAME_COLLISION => errno.* = Errno.EXIST,
+            .FILE_IS_A_DIRECTORY => errno.* = Errno.ISDIR,
+            .NOT_A_DIRECTORY => errno.* = Errno.ISDIR,
+            else => errno.* = Errno.INVAL,
+        }
+
+        return null;
+    }
+
+    fn openPathPosix(path: []const u8, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
+        if (builtin.os.tag == .windows) {
+            @compileError("This function should only be called on an OS that supports posix APIs.");
+        }
+        var flags: u32 = 0;
+        if (openflags.creat) {
+            flags |= std.os.O.CREAT;
+        }
+        if (openflags.directory) {
+            flags |= std.os.O.DIRECTORY;
+        }
+        if (openflags.excl) {
+            flags |= std.os.O.EXCL;
+        }
+        if (openflags.trunc) {
+            flags |= std.os.O.TRUNC;
+        }
+
+        const fdflags_os = fdflagsToFlagsPosix(fdflags);
+        flags |= fdflags_os;
+
+        if (rights.fd_read and rights.fd_write) {
+            flags |= std.os.O.RDWR;
+        } else if (rights.fd_read) {
+            flags |= std.os.O.RDONLY;
+        } else if (rights.fd_write) {
+            flags |= std.os.O.WRONLY;
+        }
+
+        // 644 means rw perm owner, r perm group, r perm others
+        var mode: std.os.mode_t = 644;
+        if (std.os.open(path, flags, mode)) |fd| {
+            return fd;
+        } else |err| {
+            errno.* = Errno.translateError(err);
+            return null;
+        }
     }
 
     fn enumerateDirEntriesWindows(fd_info: *const WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
@@ -1078,7 +1351,7 @@ fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
             const fd_os: std.os.fd_t = fd_info.fd;
-            const stat: std.os.wasi.fdstat_t = if (builtin.os.tag == .windows) Helpers.fdstat_get_windows(fd_os, &errno) else Helpers.fdstat_get_posix(fd_os, &errno);
+            const stat: std.os.wasi.fdstat_t = if (builtin.os.tag == .windows) Helpers.fdstatGetWindows(fd_os, &errno) else Helpers.fdstatGetPosix(fd_os, &errno);
 
             if (errno == .SUCCESS) {
                 Helpers.writeIntToMemory(u8, @enumToInt(stat.fs_filetype), fdstat_mem_offset + 0, module, &errno);
@@ -1092,19 +1365,21 @@ fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_fdstat_set_flags(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
-    std.debug.assert(params.len == 2);
-    std.debug.assert(std.meta.activeTag(params[0]) == .I32);
-    std.debug.assert(std.meta.activeTag(params[1]) == .I32);
-    std.debug.assert(returns.len == 1);
+fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
 
-    // std.debug.print("called wasi_fd_fdstat_set_flags\n", .{});
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[1].I32);
 
-    // TODO
-    var errno = Errno.INVAL;
+    if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+        const fdstat_set_flags_func = if (builtin.os.tag == .windows) Helpers.fdstatSetFlagsWindows else Helpers.fdstatSetFlagsPosix;
+        if (fdstat_set_flags_func(fd_info, fdflags, &errno)) |new_fd| {
+            context.fdUpdate(fd_wasi, new_fd);
+        }
+    }
+
     returns[0] = Val{ .I32 = @enumToInt(errno) };
-
-    unreachable;
 }
 
 fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
@@ -1117,13 +1392,11 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
     if (errno == .SUCCESS) {
         // std.debug.print("attempt to lookup fd_dir_wasi {}\n", .{fd_dir_wasi});
         if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
-            // var name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            // const path: []const u8 = std.os.getFdPath(fd_os.?, &name_buffer) catch unreachable;
             // std.debug.print("wasi_fd_prestat_get: fd_dir_wasi {} -> path: {s}\n", .{ fd_dir_wasi, path_source });
-            const pr_name_len: u32 = @intCast(u32, path_source.len + 1); // allow space for null terminator
+            const name_len: u32 = @intCast(u32, path_source.len);
 
             Helpers.writeIntToMemory(u32, std.os.wasi.PREOPENTYPE_DIR, prestat_mem_offset + 0, module, &errno);
-            Helpers.writeIntToMemory(u32, pr_name_len, prestat_mem_offset + @sizeOf(u32), module, &errno);
+            Helpers.writeIntToMemory(u32, name_len, prestat_mem_offset + @sizeOf(u32), module, &errno);
         }
     }
 
@@ -1146,14 +1419,18 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path_dest| {
                 if (path_source.len <= path_dest.len) {
                     std.mem.copy(u8, path_dest, path_source);
-                    const null_offset: usize = std.math.min(path_source.len, path_dest.len);
-                    path_dest[null_offset] = 0; // null terminator
+                    // add null terminator if there's room
+                    if (path_dest.len > path_source.len) {
+                        path_dest[path_source.len] = 0;
+                    }
                 } else {
                     errno = Errno.NAMETOOLONG;
                 }
             }
         }
     }
+
+    // std.debug.print("wasi_fd_prestat_dir_name errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -1169,9 +1446,12 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+            // std.debug.print("fd_read: '{s}'\n", .{fd_info.path_absolute});
+
             var stack_iov = [_]std.os.iovec{undefined} ** 1024;
             if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.readv(fd_info.fd, iov)) |read_bytes| {
+                    // std.debug.print("read {} bytes\n", .{read_bytes});
                     if (read_bytes <= std.math.maxInt(u32)) {
                         Helpers.writeIntToMemory(u32, @intCast(u32, read_bytes), bytes_read_out_offset, module, &errno);
                     } else {
@@ -1183,6 +1463,8 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
             }
         }
     }
+
+    // std.debug.print("fd_read: errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -1271,7 +1553,7 @@ fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: 
             Helpers.writeFilestatToMemory(&zeroes, filestat_out_mem_offset, module, &errno);
         } else {
             if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
-                const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_info.fd, &errno) else Helpers.filestat_get_posix(fd_info.fd, &errno);
+                const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestatGetWindows(fd_info.fd, &errno) else Helpers.filestatGetPosix(fd_info.fd, &errno);
                 if (errno == .SUCCESS) {
                     Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
                 }
@@ -1295,6 +1577,7 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
             const fd_os: std.os.fd_t = fd_info.fd;
             if (Whence.fromInt(whence_raw)) |whence| {
+                // std.debug.print("[fd_seek] whence: {}, offset: {}\n", .{ whence, offset });
                 switch (whence) {
                     .Set => {
                         if (offset >= 0) {
@@ -1326,6 +1609,8 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
             }
         }
     }
+
+    // std.debug.print("[fd_seek] errno: {}\n", .{errno});
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -1425,7 +1710,7 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
                     if (std.os.openat(fd_info.fd, path, flags, mode)) |fd_opened| {
                         defer std.os.close(fd_opened);
 
-                        const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestat_get_windows(fd_opened, &errno) else Helpers.filestat_get_posix(fd_opened, &errno);
+                        const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestatGetWindows(fd_opened, &errno) else Helpers.filestatGetPosix(fd_opened, &errno);
                         if (errno == .SUCCESS) {
                             Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
                         }
@@ -1460,52 +1745,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
         if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    var flags: u32 = 0;
-                    if (openflags.creat) {
-                        flags |= std.os.O.CREAT;
-                        // std.os.open() windows implementation requires exclusive flag to create files
-                        if (builtin.os.tag == .windows) {
-                            flags |= std.os.O.EXCL;
-                        }
-                    }
-                    if (openflags.directory) {
-                        flags |= std.os.O.DIRECTORY;
-                    }
-                    if (openflags.excl) {
-                        flags |= std.os.O.EXCL;
-                    }
-                    if (openflags.trunc) {
-                        flags |= std.os.O.TRUNC;
-                    }
-
-                    if (fdflags.append) {
-                        flags |= std.os.O.APPEND;
-                    }
-                    if (fdflags.dsync) {
-                        flags |= std.os.O.DSYNC;
-                    }
-                    if (fdflags.nonblock) {
-                        flags |= std.os.O.NONBLOCK;
-                    }
-                    if (fdflags.rsync) {
-                        flags |= std.os.O.RSYNC;
-                    }
-                    if (fdflags.sync) {
-                        flags |= std.os.O.SYNC;
-                    }
-
-                    if (rights_base.fd_read and rights_base.fd_write) {
-                        flags |= std.os.O.RDWR;
-                    } else if (rights_base.fd_read) {
-                        flags |= std.os.O.RDONLY;
-                    } else if (rights_base.fd_write) {
-                        flags |= std.os.O.WRONLY;
-                    }
-
-                    // 644 means rw perm owner, r perm group, r perm others
-                    var mode: std.os.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
-
-                    if (context.fdOpen(fd_info.fd, path, flags, mode, &errno)) |fd_opened_wasi| {
+                    if (context.fdOpen(fd_info.fd, path, openflags, fdflags, rights_base, &errno)) |fd_opened_wasi| {
                         Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                     }
                 }
