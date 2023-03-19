@@ -91,6 +91,7 @@ const WasiContext = struct {
             const rights = WasiRights{
                 .fd_read = true,
                 .fd_write = true,
+                .fd_seek = false, // directories don't have seek rights
             };
             var unused: Errno = undefined;
             _ = context.fdOpen(fd_dir, dir_path, openflags, fdflags, rights, &unused);
@@ -717,12 +718,18 @@ const Helpers = struct {
         if (WindowsApi.GetFileInformationByHandle(fd, &info) == std.os.windows.TRUE) {
             stat_wasi.fs_filetype = windowsFileAttributeToWasiFiletype(info.dwFileAttributes);
 
+            if (stat_wasi.fs_filetype == .DIRECTORY) {
+                stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_SEEK;
+            }
+
             if (info.dwFileAttributes & std.os.windows.FILE_ATTRIBUTE_READONLY != 0) {
                 stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_WRITE;
             }
         } else |err| {
             errno.* = Errno.translateError(err);
         }
+
+        stat_wasi.fs_rights_inheriting = stat_wasi.fs_rights_base;
 
         return stat_wasi;
     }
@@ -769,6 +776,10 @@ const Helpers = struct {
                     stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_WRITE;
                 } else if (fd_flags & std.os.O.WRONLY) {
                     stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_READ;
+                }
+
+                if (stat_wasi.fs_filetype == .DIRECTORY) {
+                    stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_SEEK;
                 }
             } else |err| {
                 errno = Errno.translateError(err);
@@ -1577,37 +1588,41 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
-            const fd_os: std.os.fd_t = fd_info.fd;
-            if (Whence.fromInt(whence_raw)) |whence| {
-                // std.debug.print("[fd_seek] whence: {}, offset: {}\n", .{ whence, offset });
-                switch (whence) {
-                    .Set => {
-                        if (offset >= 0) {
-                            const offset_unsigned = @intCast(u64, offset);
-                            std.os.lseek_SET(fd_os, offset_unsigned) catch |err| {
+            if (fd_info.rights.fd_seek) {
+                const fd_os: std.os.fd_t = fd_info.fd;
+                if (Whence.fromInt(whence_raw)) |whence| {
+                    // std.debug.print("[fd_seek] whence: {}, offset: {}\n", .{ whence, offset });
+                    switch (whence) {
+                        .Set => {
+                            if (offset >= 0) {
+                                const offset_unsigned = @intCast(u64, offset);
+                                std.os.lseek_SET(fd_os, offset_unsigned) catch |err| {
+                                    errno = Errno.translateError(err);
+                                };
+                            }
+                        },
+                        .Cur => {
+                            std.os.lseek_CUR(fd_os, offset) catch |err| {
                                 errno = Errno.translateError(err);
                             };
-                        }
-                    },
-                    .Cur => {
-                        std.os.lseek_CUR(fd_os, offset) catch |err| {
-                            errno = Errno.translateError(err);
-                        };
-                    },
-                    .End => {
-                        std.os.lseek_END(fd_os, offset) catch |err| {
-                            errno = Errno.translateError(err);
-                        };
-                    },
-                }
+                        },
+                        .End => {
+                            std.os.lseek_END(fd_os, offset) catch |err| {
+                                errno = Errno.translateError(err);
+                            };
+                        },
+                    }
 
-                if (std.os.lseek_CUR_get(fd_os)) |filepos| {
-                    Helpers.writeIntToMemory(u64, filepos, filepos_out_offset, module, &errno);
-                } else |err| {
-                    errno = Errno.translateError(err);
+                    if (std.os.lseek_CUR_get(fd_os)) |filepos| {
+                        Helpers.writeIntToMemory(u64, filepos, filepos_out_offset, module, &errno);
+                    } else |err| {
+                        errno = Errno.translateError(err);
+                    }
+                } else {
+                    errno = Errno.INVAL;
                 }
             } else {
-                errno = Errno.INVAL;
+                errno = Errno.ISDIR;
             }
         }
     }
@@ -1771,7 +1786,10 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
         if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    if (context.fdOpen(fd_info.fd, path, openflags, fdflags, rights_base, &errno)) |fd_opened_wasi| {
+                    var rights_sanitized = rights_base;
+                    rights_sanitized.fd_seek = !openflags.directory; // directories don't have seek rights
+
+                    if (context.fdOpen(fd_info.fd, path, openflags, fdflags, rights_sanitized, &errno)) |fd_opened_wasi| {
                         Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                     }
                 }
