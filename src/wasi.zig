@@ -32,7 +32,7 @@ const WasiContext = struct {
         var context = WasiContext{
             .cwd = "",
             .fd_table = std.AutoHashMap(u32, FdInfo).init(allocator),
-            .strings = StringPool.init(std.mem.page_size * 16, allocator),
+            .strings = StringPool.init(1024 * 1024 * 4, allocator), // 4MB for absolute paths
             .allocator = allocator,
         };
 
@@ -302,28 +302,30 @@ const Errno = enum(u8) {
 
     fn translateError(err: anyerror) Errno {
         return switch (err) {
-            error.OutOfMemory => .NOMEM,
             error.AccessDenied => .ACCES,
-            error.FileTooBig => .FBIG,
-            error.IsDir => .ISDIR,
-            error.SymLinkLoop => .LOOP,
-            error.ProcessFdQuotaExceeded => .MFILE,
-            error.NameTooLong => .NAMETOOLONG,
-            error.SystemFdQuotaExceeded => .NFILE,
-            error.NoDevice => .NODEV,
+            error.DeviceBusy => .BUSY,
+            error.DirNotEmpty => .NOTEMPTY,
+            error.DiskQuota => .DQUOT,
+            error.FileBusy => .TXTBSY,
+            error.FileLocksNotSupported => .NOTSUP,
             error.FileNotFound => .NOENT,
-            error.SystemResources => .NOMEM,
+            error.FileTooBig => .FBIG,
+            error.InputOutput => .IO,
+            error.IsDir => .ISDIR,
+            error.LinkQuotaExceeded => .MLINK,
+            error.NameTooLong => .NAMETOOLONG,
+            error.NoDevice => .NODEV,
             error.NoSpaceLeft => .NOSPC,
             error.NotDir => .NOTDIR,
+            error.OutOfMemory => .NOMEM,
             error.PathAlreadyExists => .EXIST,
-            error.DeviceBusy => .BUSY,
-            error.FileLocksNotSupported => .NOTSUP,
-            error.WouldBlock => .AGAIN,
-            error.FileBusy => .TXTBSY,
+            error.ProcessFdQuotaExceeded => .MFILE,
+            error.ReadOnlyFileSystem => .ROFS,
+            error.SymLinkLoop => .LOOP,
+            error.SystemFdQuotaExceeded => .NFILE,
+            error.SystemResources => .NOMEM,
             error.Unseekable => .SPIPE,
-            error.DirNotEmpty => .NOTEMPTY,
-            error.InputOutput => .IO,
-            error.DiskQuota => .DQUOT,
+            error.WouldBlock => .AGAIN,
             else => .INVAL,
         };
     }
@@ -1106,7 +1108,9 @@ const Helpers = struct {
 
             restart_scan = std.os.windows.FALSE;
 
-            if (entries_to_skip <= file_index and rc == .SUCCESS) {
+            file_index += 1;
+
+            if (entries_to_skip < file_index and rc == .SUCCESS) {
                 const file_info = @ptrCast(*WindowsApi.FILE_ID_FULL_DIR_INFORMATION, &file_info_buffer);
 
                 const filename_utf16le = @ptrCast([*]u16, &file_info.FileName)[0 .. file_info.FileNameLength / @sizeOf(u16)];
@@ -1128,8 +1132,6 @@ const Helpers = struct {
                 writer.writeIntLittle(u32, @enumToInt(filetype)) catch break;
                 _ = writer.write(filename) catch break;
             }
-
-            file_index += 1;
         }
 
         var bytes_written = signedCast(u32, fbs.pos, errno);
@@ -1686,6 +1688,30 @@ fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_dir_wasi = @bitCast(u32, params[0].I32);
+    const path_mem_offset: u32 = Helpers.signedCast(u32, params[1].I32, &errno);
+    const path_mem_length: u32 = Helpers.signedCast(u32, params[2].I32, &errno);
+
+    if (errno == .SUCCESS) {
+        if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
+            if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
+                if (context.hasPathAccess(fd_info, path, &errno)) {
+                    const mode: u32 = 644;
+                    std.os.mkdirat(fd_info.fd, path, mode) catch |err| {
+                        errno = Errno.translateError(err);
+                    };
+                }
+            }
+        }
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var errno = Errno.SUCCESS;
 
@@ -1861,6 +1887,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
     try imports.addHostFunction("fd_pwrite", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pwrite);
     try imports.addHostFunction("random_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
+    try imports.addHostFunction("path_create_directory", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_create_directory);
     try imports.addHostFunction("path_filestat_get", &[_]ValType{ .I32, .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_filestat_get);
     try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
     try imports.addHostFunction("path_remove_directory", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_remove_directory);
