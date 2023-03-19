@@ -241,7 +241,7 @@ pub fn main() !void {
     defer module_def.deinit();
 
     module_def.decode(wasm_data) catch |e| {
-        std.log.err("Caught {} decoding module - invalid wasm.", .{e});
+        std.log.err("Caught error decoding module: {}", .{e});
         return e;
     };
 
