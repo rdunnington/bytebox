@@ -187,6 +187,17 @@ const WasiContext = struct {
         }
     }
 
+    // The main intention for this function is to close all fd when a path is unlinked.
+    fn fdCleanup(self: *WasiContext, path_absolute: []const u8) void {
+        var iter = self.fd_table.iterator();
+        while (iter.next()) |kv| {
+            if (std.mem.eql(u8, kv.value_ptr.path_absolute, path_absolute)) {
+                std.os.close(kv.value_ptr.fd);
+                self.fd_table.removeByPtr(kv.key_ptr);
+            }
+        }
+    }
+
     fn fdUpdate(self: *WasiContext, wasi_fd: u32, new_fd: std.os.fd_t) void {
         if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
             fd_info.fd = new_fd;
@@ -469,6 +480,20 @@ const Helpers = struct {
         }
         errno.* = Errno.INVAL;
         return 0;
+    }
+
+    fn resolvePath(fd_os_dir: std.os.fd_t, path_relative: []const u8, path_buffer: []u8, errno: *Errno) ?[]const u8 {
+        const path_dir = std.os.getFdPath(fd_os_dir, path_buffer[0..std.fs.MAX_PATH_BYTES]) catch |err| {
+            errno.* = Errno.translateError(err);
+            return null;
+        };
+
+        var fba = std.heap.FixedBufferAllocator.init(path_buffer[std.fs.MAX_PATH_BYTES..]);
+        const allocator = fba.allocator();
+
+        const paths = [_][]const u8{ path_dir, path_relative };
+        const resolved_path = std.fs.path.resolve(allocator, &paths) catch unreachable;
+        return resolved_path;
     }
 
     fn getMemorySlice(module: *ModuleInstance, offset: usize, length: usize, errno: *Errno) ?[]u8 {
@@ -1024,7 +1049,9 @@ const Helpers = struct {
             .OBJECT_NAME_COLLISION => errno.* = Errno.EXIST,
             .FILE_IS_A_DIRECTORY => errno.* = Errno.ISDIR,
             .NOT_A_DIRECTORY => errno.* = Errno.ISDIR,
-            else => errno.* = Errno.INVAL,
+            else => |err| {
+                errno.* = Errno.INVAL;
+            },
         }
 
         return null;
@@ -1813,9 +1840,16 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
         if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    std.os.unlinkat(fd_info.fd, path, std.os.AT.REMOVEDIR) catch |err| {
-                        errno = Errno.translateError(err);
-                    };
+                    var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+                    if (Helpers.resolvePath(fd_info.fd, path, &static_path_buffer, &errno)) |resolved_path| {
+                        std.os.unlinkat(FD_OS_INVALID, resolved_path, std.os.AT.REMOVEDIR) catch |err| {
+                            errno = Errno.translateError(err);
+                        };
+
+                        if (errno == .SUCCESS) {
+                            context.fdCleanup(resolved_path);
+                        }
+                    }
                 }
             }
         }
@@ -1839,10 +1873,16 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
 
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    std.os.unlinkat(fd_info.fd, path, 0) catch |err| {
-                        // std.debug.print("unlinkat error: {} at dir {s} with path {s}\n", .{ err, fd_info.path_absolute, path });
-                        errno = Errno.translateError(err);
-                    };
+                    var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+                    if (Helpers.resolvePath(fd_info.fd, path, &static_path_buffer, &errno)) |resolved_path| {
+                        std.os.unlinkat(FD_OS_INVALID, resolved_path, 0) catch |err| {
+                            errno = Errno.translateError(err);
+                        };
+
+                        if (errno == .SUCCESS) {
+                            context.fdCleanup(resolved_path);
+                        }
+                    }
                 }
             }
         }
