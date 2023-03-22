@@ -915,6 +915,82 @@ const Helpers = struct {
         return null;
     }
 
+    fn fdFilestatSetTimesWindows(fd: std.os.fd_t, timestamp_wasi_access: u64, timestamp_wasi_modified: u64, fstflags: u32, errno: *Errno) void {
+        var filetime_now: WindowsApi.FILETIME = undefined; // helps avoid 2 calls to GetSystemTimeAsFiletime
+        var filetime_now_needs_set: bool = true;
+
+        var access_time: std.os.windows.FILETIME = undefined;
+        var access_time_was_set: bool = false;
+        if (fstflags & std.os.wasi.FILESTAT_SET_ATIM != 0) {
+            access_time = std.os.windows.nanoSecondsToFileTime(timestamp_wasi_access);
+            access_time_was_set = true;
+        }
+        if (fstflags & std.os.wasi.FILESTAT_SET_ATIM_NOW != 0) {
+            std.os.windows.kernel32.GetSystemTimeAsFileTime(&filetime_now);
+            filetime_now_needs_set = false;
+            access_time = filetime_now;
+            access_time_was_set = true;
+        }
+
+        var modify_time: std.os.windows.FILETIME = undefined;
+        var modify_time_was_set: bool = false;
+        if (fstflags & std.os.wasi.FILESTAT_SET_MTIM != 0) {
+            modify_time = std.os.windows.nanoSecondsToFileTime(timestamp_wasi_modified);
+            modify_time_was_set = true;
+        }
+        if (fstflags & std.os.wasi.FILESTAT_SET_MTIM_NOW != 0) {
+            if (filetime_now_needs_set) {
+                std.os.windows.kernel32.GetSystemTimeAsFileTime(&filetime_now);
+            }
+            modify_time = filetime_now;
+            modify_time_was_set = true;
+        }
+
+        const access_time_ptr: ?*std.os.windows.FILETIME = if (access_time_was_set) &access_time else null;
+        const modify_time_ptr: ?*std.os.windows.FILETIME = if (modify_time_was_set) &modify_time else null;
+
+        std.os.windows.SetFileTime(fd, null, access_time_ptr, modify_time_ptr) catch |err| {
+            errno.* = Errno.translateError(err);
+        };
+    }
+
+    fn fdFilestatSetTimesPosix(fd: std.os.fd_t, timestamp_wasi_access: u64, timestamp_wasi_modified: u64, fstflags: u32, errno: *Errno) void {
+        const UTIME_NOW: i64 = -2;
+        const UTIME_OMIT: i64 = -1;
+
+        var times = [2]std.os.timespec{
+            .{ // access time
+                .tv_sec = 0,
+                .tv_nsec = UTIME_OMIT,
+            },
+            .{ // modification time
+                .tv_sec = 0,
+                .tv_nsec = UTIME_OMIT,
+            },
+        };
+
+        if (fstflags & std.os.wasi.FILESTAT_SET_ATIM != 0) {
+            var ts: std.os.wasi.timespec = std.os.wasi.timespec.fromTimestamp(timestamp_wasi_access);
+            times[0].tv_sec = ts.tv_sec;
+            times[0].tv_nsec = ts.tv_nsec;
+        }
+        if (fstflags & std.os.wasi.FILESTAT_SET_ATIM_NOW != 0) {
+            times[0].tv_nsec = UTIME_NOW;
+        }
+        if (fstflags & std.os.wasi.FILESTAT_SET_MTIM != 0) {
+            var ts: std.os.wasi.timespec = std.os.wasi.timespec.fromTimestamp(timestamp_wasi_modified);
+            times[1].tv_sec = ts.tv_sec;
+            times[1].tv_nsec = ts.tv_nsec;
+        }
+        if (fstflags & std.os.wasi.FILESTAT_SET_MTIM_NOW != 0) {
+            times[1].tv_nsec = UTIME_NOW;
+        }
+
+        std.os.futimens(fd, &times) catch |err| {
+            errno.* = Errno.translateError(err);
+        };
+    }
+
     fn partsToU64(high: u64, low: u64) u64 {
         return (high << 32) | low;
     }
@@ -1624,6 +1700,37 @@ fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    const context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const timestamp_wasi_access = Helpers.signedCast(u64, params[1].I64, &errno);
+    const timestamp_wasi_modified = Helpers.signedCast(u64, params[2].I64, &errno);
+    const fstflags = @bitCast(u32, params[3].I32);
+
+    if (errno == .SUCCESS) {
+        if (fstflags & std.os.wasi.FILESTAT_SET_ATIM != 0 and fstflags & std.os.wasi.FILESTAT_SET_ATIM_NOW != 0) {
+            errno = Errno.INVAL;
+        }
+
+        if (fstflags & std.os.wasi.FILESTAT_SET_MTIM != 0 and fstflags & std.os.wasi.FILESTAT_SET_MTIM_NOW != 0) {
+            errno = Errno.INVAL;
+        }
+    }
+
+    if (errno == .SUCCESS) {
+        if (Helpers.isStdioHandle(fd_wasi)) {
+            errno = Errno.BADF;
+        } else if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+            const fd_filestat_set_times_func = if (builtin.os.tag == .windows) Helpers.fdFilestatSetTimesWindows else Helpers.fdFilestatSetTimesPosix;
+            fd_filestat_set_times_func(fd_info.fd, timestamp_wasi_access, timestamp_wasi_modified, fstflags, &errno);
+        }
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var errno = Errno.SUCCESS;
 
@@ -1956,6 +2063,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_fdstat_set_flags", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_set_flags);
     try imports.addHostFunction("fd_filestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_filestat_get);
     try imports.addHostFunction("fd_filestat_set_size", &[_]ValType{ .I32, .I64 }, &[_]ValType{.I32}, wasi_fd_filestat_set_size);
+    try imports.addHostFunction("fd_filestat_set_times", &[_]ValType{ .I32, .I64, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_filestat_set_times);
     try imports.addHostFunction("fd_pread", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pread);
     try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name);
     try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get);
