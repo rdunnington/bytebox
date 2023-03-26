@@ -17,6 +17,7 @@ const WasiContext = struct {
         fd: std.os.fd_t,
         path_absolute: []const u8,
         rights: WasiRights,
+        is_preopen: bool,
     };
 
     cwd: []const u8,
@@ -69,9 +70,9 @@ const WasiContext = struct {
         const path_stdout = try context.strings.put("stdout");
         const path_stderr = try context.strings.put("stderr");
 
-        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{} });
-        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{} });
-        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{} });
+        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true });
+        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true });
+        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true });
 
         for (context.dirs) |dir_path| {
             const fd_dir: ?std.os.fd_t = null;
@@ -97,7 +98,8 @@ const WasiContext = struct {
                 .symlink_follow = true,
             };
             var unused: Errno = undefined;
-            _ = context.fdOpen(fd_dir, dir_path, lookupflags, openflags, fdflags, rights, &unused);
+            const is_preopen = true;
+            _ = context.fdOpen(fd_dir, dir_path, lookupflags, openflags, fdflags, rights, is_preopen, &unused);
         }
 
         return context;
@@ -154,7 +156,7 @@ const WasiContext = struct {
         return null;
     }
 
-    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?u32 {
+    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, is_preopen: bool, errno: *Errno) ?u32 {
         if (self.resolveAndCache(fd_dir, path)) |resolved_path| {
             const open_func = if (builtin.os.tag == .windows) Helpers.openPathWindows else Helpers.openPathPosix;
 
@@ -166,6 +168,7 @@ const WasiContext = struct {
                     .fd = fd_os,
                     .path_absolute = resolved_path,
                     .rights = rights,
+                    .is_preopen = is_preopen,
                 };
 
                 self.fd_table.put(fd_wasi, info) catch {
@@ -182,11 +185,51 @@ const WasiContext = struct {
         return null;
     }
 
-    fn fdRemove(self: *WasiContext, wasi_fd: u32) ?std.os.fd_t {
-        if (self.fd_table.fetchRemove(wasi_fd)) |result| {
-            return result.value.fd;
+    fn fdUpdate(self: *WasiContext, wasi_fd: u32, new_fd: std.os.fd_t) void {
+        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
+            fd_info.fd = new_fd;
         } else {
-            return null;
+            unreachable; // fdUpdate should always be nested inside an fdLookup
+        }
+    }
+
+    fn fdRenumber(self: *WasiContext, wasi_fd: u32, wasi_fd_new: u32, errno: *Errno) void {
+        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
+            if (fd_info.is_preopen) {
+                errno.* = Errno.NOTSUP;
+                return;
+            }
+
+            if (self.fd_table.getPtr(wasi_fd_new)) |found_info| {
+                if (found_info.is_preopen) {
+                    errno.* = Errno.NOTSUP;
+                    return;
+                }
+
+                std.os.close(found_info.fd);
+                _ = self.fd_table.remove(wasi_fd_new);
+            }
+
+            self.fd_table.put(wasi_fd_new, fd_info.*) catch |err| {
+                errno.* = Errno.translateError(err);
+                return;
+            };
+            _ = self.fd_table.remove(wasi_fd);
+        } else {
+            errno.* = Errno.BADF;
+        }
+    }
+
+    fn fdClose(self: *WasiContext, wasi_fd: u32, errno: *Errno) void {
+        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
+            if (fd_info.is_preopen == false) {
+                std.os.close(fd_info.fd);
+                _ = self.fd_table.remove(wasi_fd);
+            } else {
+                errno.* = Errno.NOTSUP;
+            }
+        } else {
+            errno.* = Errno.BADF;
         }
     }
 
@@ -198,14 +241,6 @@ const WasiContext = struct {
                 std.os.close(kv.value_ptr.fd);
                 self.fd_table.removeByPtr(kv.key_ptr);
             }
-        }
-    }
-
-    fn fdUpdate(self: *WasiContext, wasi_fd: u32, new_fd: std.os.fd_t) void {
-        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
-            fd_info.fd = new_fd;
-        } else {
-            unreachable; // fdUpdate should always be nested inside an fdLookup
         }
     }
 
@@ -1639,6 +1674,18 @@ fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: []con
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_fd_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    var context = WasiContext.fromUserdata(userdata);
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_to_wasi = @bitCast(u32, params[1].I32);
+
+    context.fdRenumber(fd_wasi, fd_to_wasi, &errno);
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
     var errno = Errno.SUCCESS;
 
@@ -1677,11 +1724,7 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
     const fd_wasi = @bitCast(u32, params[0].I32);
 
     if (errno == .SUCCESS) {
-        if (context.fdRemove(fd_wasi)) |fd_os| {
-            std.os.close(fd_os);
-        } else {
-            errno = Errno.BADF;
-        }
+        context.fdClose(fd_wasi, &errno);
     }
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
@@ -1979,7 +2022,8 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
                     var rights_sanitized = rights_base;
                     rights_sanitized.fd_seek = !openflags.directory; // directories don't have seek rights
 
-                    if (context.fdOpen(fd_info.fd, path, lookupflags, openflags, fdflags, rights_sanitized, &errno)) |fd_opened_wasi| {
+                    const is_preopen = false;
+                    if (context.fdOpen(fd_info.fd, path, lookupflags, openflags, fdflags, rights_sanitized, is_preopen, &errno)) |fd_opened_wasi| {
                         Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                     }
                 }
@@ -2160,6 +2204,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("fd_pwrite", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pwrite);
     try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read);
     try imports.addHostFunction("fd_readdir", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_readdir);
+    try imports.addHostFunction("fd_renumber", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_renumber);
     try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek);
     try imports.addHostFunction("fd_tell", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_tell);
     try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write);
