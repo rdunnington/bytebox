@@ -268,7 +268,7 @@ pub fn main() !void {
     };
 
     module_instance.instantiate(instantiate_opts) catch |e| {
-        std.log.err("Caught {} instantiating module - invalid wasm.", .{e});
+        std.log.err("Caught {} instantiating module.", .{e});
         return e;
     };
 
