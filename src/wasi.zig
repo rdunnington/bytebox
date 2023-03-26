@@ -93,8 +93,11 @@ const WasiContext = struct {
                 .fd_write = true,
                 .fd_seek = false, // directories don't have seek rights
             };
+            const lookupflags = WasiLookupFlags{
+                .symlink_follow = true,
+            };
             var unused: Errno = undefined;
-            _ = context.fdOpen(fd_dir, dir_path, openflags, fdflags, rights, &unused);
+            _ = context.fdOpen(fd_dir, dir_path, lookupflags, openflags, fdflags, rights, &unused);
         }
 
         return context;
@@ -151,11 +154,11 @@ const WasiContext = struct {
         return null;
     }
 
-    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?u32 {
+    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?u32 {
         if (self.resolveAndCache(fd_dir, path)) |resolved_path| {
             const open_func = if (builtin.os.tag == .windows) Helpers.openPathWindows else Helpers.openPathPosix;
 
-            if (open_func(resolved_path, openflags, fdflags, rights, errno)) |fd_os| {
+            if (open_func(resolved_path, lookupflags, openflags, fdflags, rights, errno)) |fd_os| {
                 var fd_wasi: u32 = self.next_fd_id;
                 self.next_fd_id += 1;
 
@@ -218,7 +221,7 @@ const WasiContext = struct {
                     }
                 }
             } else |err| {
-                std.debug.print("Caught error {} resolving path. Was the fixed buffer allocator not big enough?", .{err});
+                std.debug.print("Caught error {} resolving path.", .{err});
             }
         }
 
@@ -424,6 +427,7 @@ const WindowsApi = struct {
     const ULONG = windows.ULONG;
     const WCHAR = windows.WCHAR;
     const WINAPI = windows.WINAPI;
+    const LPCWSTR = windows.LPCWSTR;
 
     const CLOCK = struct {
         const REALTIME = 0;
@@ -461,9 +465,14 @@ const WindowsApi = struct {
         FileName: [1]WCHAR,
     };
 
+    const SYMBOLIC_LINK_FLAG_FILE: DWORD = 0x0;
+    const SYMBOLIC_LINK_FLAG_DIRECTORY: DWORD = 0x1;
+    const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: DWORD = 0x2;
+
     extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
     extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(WINAPI) BOOL;
     extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
+    extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(WINAPI) BOOL;
 
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
@@ -499,7 +508,7 @@ const Helpers = struct {
     fn getMemorySlice(module: *ModuleInstance, offset: usize, length: usize, errno: *Errno) ?[]u8 {
         const mem: []u8 = module.memorySlice(offset, length);
         if (mem.len != length) {
-            errno.* = Errno.INVAL;
+            errno.* = Errno.FAULT;
             return null;
         }
         return mem;
@@ -507,7 +516,7 @@ const Helpers = struct {
 
     fn writeIntToMemory(comptime T: type, value: T, offset: usize, module: *ModuleInstance, errno: *Errno) void {
         if (module.memoryWriteInt(T, value, offset) == false) {
-            errno.* = Errno.INVAL;
+            errno.* = Errno.FAULT;
         }
     }
 
@@ -611,7 +620,7 @@ const Helpers = struct {
 
     fn decodeLookupFlags(value: i32) WasiLookupFlags {
         return WasiLookupFlags{
-            .symlink_follow = (value & 0x01),
+            .symlink_follow = (value & 0x01) != 0,
         };
     }
 
@@ -888,11 +897,12 @@ const Helpers = struct {
             .PIPE_BUSY => errno.* = Errno.BUSY,
             .OBJECT_NAME_COLLISION => errno.* = Errno.EXIST,
             .FILE_IS_A_DIRECTORY => errno.* = Errno.ISDIR,
-            .NOT_A_DIRECTORY => errno.* = Errno.ISDIR,
+            .NOT_A_DIRECTORY => errno.* = Errno.NOTDIR,
             else => errno.* = Errno.INVAL,
         }
 
         if (errno.* != Errno.SUCCESS) {
+            // std.debug.print("createfile for path '{s}' failed with rc: {}\n", .{ fd_info.path_absolute, rc });
             return null;
         }
 
@@ -1044,7 +1054,7 @@ const Helpers = struct {
 
     // As of this 0.10.1, the zig stdlib has a bug in std.os.open() that doesn't respect the append flag properly.
     // To get this working, we'll just use NtCreateFile directly.
-    fn openPathWindows(path: []const u8, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
+    fn openPathWindows(path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
         if (builtin.os.tag != .windows) {
             @compileError("This function should only be called on an OS that supports windows APIs.");
         }
@@ -1071,7 +1081,8 @@ const Helpers = struct {
 
         const file_or_dir_flag: w.ULONG = if (openflags.directory) w.FILE_DIRECTORY_FILE else w.FILE_NON_DIRECTORY_FILE;
         const io_mode_flag: w.ULONG = w.FILE_SYNCHRONOUS_IO_NONALERT;
-        const flags: w.ULONG = file_or_dir_flag | io_mode_flag;
+        const reparse_flags: w.ULONG = if (lookupflags.symlink_follow) 0 else w.FILE_OPEN_REPARSE_POINT;
+        const flags: w.ULONG = file_or_dir_flag | io_mode_flag | reparse_flags;
 
         if (path_w.len > std.math.maxInt(u16)) {
             errno.* = Errno.NAMETOOLONG;
@@ -1109,6 +1120,22 @@ const Helpers = struct {
             0,
         );
 
+        // emulate the posix behavior on windows
+        if (lookupflags.symlink_follow == false) {
+            const attributes: w.DWORD = w.GetFileAttributesW(path_w) catch 0;
+            if (windowsFileAttributeToWasiFiletype(attributes) == .SYMBOLIC_LINK) {
+                if (openflags.directory) {
+                    errno.* = Errno.NOTDIR;
+                } else {
+                    errno.* = Errno.LOOP;
+                }
+                if (rc == .SUCCESS) {
+                    std.os.close(fd);
+                }
+                return null;
+            }
+        }
+
         switch (rc) {
             .SUCCESS => return fd,
             .OBJECT_NAME_INVALID => unreachable,
@@ -1124,7 +1151,7 @@ const Helpers = struct {
             .PIPE_BUSY => errno.* = Errno.BUSY,
             .OBJECT_NAME_COLLISION => errno.* = Errno.EXIST,
             .FILE_IS_A_DIRECTORY => errno.* = Errno.ISDIR,
-            .NOT_A_DIRECTORY => errno.* = Errno.ISDIR,
+            .NOT_A_DIRECTORY => errno.* = Errno.NOTDIR,
             else => {
                 errno.* = Errno.INVAL;
             },
@@ -1133,7 +1160,7 @@ const Helpers = struct {
         return null;
     }
 
-    fn openPathPosix(path: []const u8, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
+    fn openPathPosix(path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
         if (builtin.os.tag == .windows) {
             @compileError("This function should only be called on an OS that supports posix APIs.");
         }
@@ -1149,6 +1176,10 @@ const Helpers = struct {
         }
         if (openflags.trunc) {
             flags |= std.os.O.TRUNC;
+        }
+
+        if (lookupflags.symlink_follow == false) {
+            flags |= std.os.O.NOFOLLOW;
         }
 
         const fdflags_os = fdflagsToFlagsPosix(fdflags);
@@ -1886,7 +1917,7 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
 
     const context = WasiContext.fromUserdata(userdata);
     const fd_dir_wasi = @bitCast(u32, params[0].I32);
-    const lookup_flags = @bitCast(u32, params[1].I32);
+    const lookup_flags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
     const path_mem_offset: u32 = Helpers.signedCast(u32, params[2].I32, &errno);
     const path_mem_length: u32 = Helpers.signedCast(u32, params[3].I32, &errno);
     const filestat_out_mem_offset = Helpers.signedCast(u32, params[4].I32, &errno);
@@ -1896,7 +1927,7 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
                     var flags: u32 = std.os.O.RDONLY;
-                    if ((lookup_flags & std.os.wasi.LOOKUP_SYMLINK_FOLLOW) == 0) {
+                    if (lookup_flags.symlink_follow == false) {
                         flags |= std.os.O.NOFOLLOW;
                     }
 
@@ -1925,7 +1956,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
 
     var context = WasiContext.fromUserdata(userdata);
     const fd_dir_wasi: u32 = Helpers.signedCast(u32, params[0].I32, &errno);
-    // const dirflags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
+    const lookupflags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
     const path_mem_offset: u32 = Helpers.signedCast(u32, params[2].I32, &errno);
     const path_mem_length: u32 = Helpers.signedCast(u32, params[3].I32, &errno);
     const openflags: WasiOpenFlags = Helpers.decodeOpenFlags(params[4].I32);
@@ -1936,6 +1967,11 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
 
     // std.debug.print("path_open oflags: {}, rights: {}, fdflags: {x}\n", .{ openflags, rights_base, params[7].I32 });
 
+    // use pathCreateDirectory if creating a directory
+    if (openflags.creat and openflags.directory) {
+        errno = Errno.INVAL;
+    }
+
     if (errno == .SUCCESS) {
         if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
@@ -1943,7 +1979,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
                     var rights_sanitized = rights_base;
                     rights_sanitized.fd_seek = !openflags.directory; // directories don't have seek rights
 
-                    if (context.fdOpen(fd_info.fd, path, openflags, fdflags, rights_sanitized, &errno)) |fd_opened_wasi| {
+                    if (context.fdOpen(fd_info.fd, path, lookupflags, openflags, fdflags, rights_sanitized, &errno)) |fd_opened_wasi| {
                         Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                     }
                 }
@@ -1975,6 +2011,60 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
 
                         if (errno == .SUCCESS) {
                             context.fdCleanup(resolved_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    var context = WasiContext.fromUserdata(userdata);
+
+    const link_contents_mem_offset = Helpers.signedCast(u32, params[0].I32, &errno);
+    const link_contents_mem_length = Helpers.signedCast(u32, params[1].I32, &errno);
+    const fd_dir_wasi = Helpers.signedCast(u32, params[2].I32, &errno);
+    const link_path_mem_offset = Helpers.signedCast(u32, params[3].I32, &errno);
+    const link_path_mem_length = Helpers.signedCast(u32, params[4].I32, &errno);
+
+    if (Helpers.getMemorySlice(module, link_contents_mem_offset, link_contents_mem_length, &errno)) |link_contents| {
+        if (Helpers.getMemorySlice(module, link_path_mem_offset, link_path_mem_length, &errno)) |link_path| {
+            if (errno == .SUCCESS) {
+                if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
+                    if (context.hasPathAccess(fd_info, link_contents, &errno)) {
+                        if (context.hasPathAccess(fd_info, link_path, &errno)) {
+                            if (builtin.os.tag == .windows) {
+                                var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+                                if (Helpers.resolvePath(fd_info.fd, link_path, &static_path_buffer, &errno)) |resolved_link_path| {
+                                    const w = std.os.windows;
+
+                                    const link_contents_w: w.PathSpace = w.sliceToPrefixedFileW(link_contents) catch |err| blk: {
+                                        errno = Errno.translateError(err);
+                                        break :blk undefined;
+                                    };
+
+                                    const resolved_link_path_w: w.PathSpace = w.sliceToPrefixedFileW(resolved_link_path) catch |err| blk: {
+                                        errno = Errno.translateError(err);
+                                        break :blk undefined;
+                                    };
+
+                                    if (errno == .SUCCESS) {
+                                        const flags: w.DWORD = w.SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+                                        if (WindowsApi.CreateSymbolicLinkW(resolved_link_path_w.span(), link_contents_w.span(), flags) == w.FALSE) {
+                                            const err = std.os.windows.kernel32.GetLastError();
+                                            std.debug.print("GetLastError(): {}\n", .{err});
+                                            errno = Errno.NOTSUP;
+                                        }
+                                    }
+                                }
+                            } else {
+                                std.os.symlinkat(link_contents, fd_info.fd, link_path);
+                            }
                         }
                     }
                 }
@@ -2077,6 +2167,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("path_filestat_get", &[_]ValType{ .I32, .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_filestat_get);
     try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open);
     try imports.addHostFunction("path_remove_directory", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_remove_directory);
+    try imports.addHostFunction("path_symlink", &[_]ValType{ .I32, .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_symlink);
     try imports.addHostFunction("path_unlink_file", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_unlink_file);
     try imports.addHostFunction("proc_exit", &[_]ValType{.I32}, void_returns, wasi_proc_exit);
     try imports.addHostFunction("random_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_random_get);
