@@ -76,15 +76,66 @@ This project is unstable and still in development.
 
 | Status | Feature |
 | --- | --- |
-|☑|WebAssembly 1.0|
-|☑|Sign extension instructions|
-|☑|Non-trapping float-to-int conversion|
-|☑|Multiple values|
-|☑|Reference types|
-|☑|Table instructions|
-|☑|Multiple tables|
-|☑|Bulk memory and table instructions|
+|✅|WebAssembly 1.0|
+|✅|Sign extension instructions|
+|✅|Non-trapping float-to-int conversion|
+|✅|Multiple values|
+|✅|Reference types|
+|✅|Table instructions|
+|✅|Multiple tables|
+|✅|Bulk memory and table instructions|
 |☐|Vector instructions|
+
+### [WASI Preview 1](https://github.com/WebAssembly/WASI/tree/main) support:
+
+| Status | Feature |
+| --- | --- |
+|✅|args_get|
+|✅|args_sizes_get|
+|✅|environ_get|
+|✅|environ_sizes_get|
+|✅|clock_res_get|
+|✅|clock_time_get|
+|✅|fd_advise|
+|✅|fd_allocate|
+|✅|fd_close|
+|☐|fd_datasync|
+|✅|fd_fdstat_get|
+|✅|fd_fdstat_set_flags|
+|❌|fd_fdstat_set_rights|
+|✅|fd_filestat_get|
+|✅|fd_filestat_set_size|
+|✅|fd_filestat_set_times|
+|✅|fd_pread|
+|✅|fd_prestat_get|
+|✅|fd_prestat_dir_name|
+|✅|fd_pwrite|
+|✅|fd_read|
+|✅|fd_readdir|
+|✅|fd_renumber|
+|✅|fd_seek|
+|☐|fd_sync|
+|✅|fd_tell|
+|✅|fd_write|
+|✅|path_create_directory|
+|✅|path_filestat_get|
+|✅|path_filestat_set_times|
+|☐|path_link|
+|✅|path_open|
+|☐|path_readlink|
+|✅|path_remove_directory|
+|☐|path_rename|
+|✅|path_symlink|
+|✅|path_unlink_file|
+|☐|poll_oneoff|
+|✅|proc_exit|
+|❌|proc_raise|
+|☐|sched_yield|
+|✅|random_get|
+|☐|sock_accept|
+|☐|sock_recv|
+|☐|sock_send|
+|☐|sock_shutdown|
 
 ### Roadmap
 These tasks must be completed to enter alpha:
