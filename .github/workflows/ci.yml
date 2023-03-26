@@ -1,10 +1,6 @@
 name: CI
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+on: push
 
 jobs:
   test:
@@ -26,8 +22,8 @@ jobs:
       - run: zig build test
 
   wasi-testsuite:
-    fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
     strategy:
+      fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{matrix.os}}
