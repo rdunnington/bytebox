@@ -5,7 +5,7 @@ on: push
 jobs:
   test:
     strategy:
-      fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{matrix.os}}
@@ -23,7 +23,7 @@ jobs:
 
   wasi-testsuite:
     strategy:
-      fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{matrix.os}}
@@ -41,7 +41,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # latest version of python 3
+          python-version: '3.11'
           cache: pip
 
       - name: Install dependencies
@@ -49,4 +49,6 @@ jobs:
         run: python3 -m pip install -r requirements.txt
 
       - name: Run tests
-        run: python3 test/wasi/wasi-testsuite/test-runner/wasi_test_runner.py -t ./test/wasi/wasi-testsuite/tests/rust/testsuite/ ./test/wasi/wasi-testsuite/tests/c/testsuite/ ./test/wasi/wasi-testsuite/tests/assemblyscript/testsuite/ -r ./test/wasi/bytebox_adapter.py
+        run: |
+          zig build
+          python3 test/wasi/wasi-testsuite/test-runner/wasi_test_runner.py -t ./test/wasi/wasi-testsuite/tests/rust/testsuite/ ./test/wasi/wasi-testsuite/tests/c/testsuite/ ./test/wasi/wasi-testsuite/tests/assemblyscript/testsuite/ -r ./test/wasi/bytebox_adapter.py
