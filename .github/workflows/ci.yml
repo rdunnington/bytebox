@@ -9,6 +9,7 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{matrix.os}}
@@ -23,3 +24,33 @@ jobs:
         with:
           wabt-version: "1.0.31"
       - run: zig build test
+
+  wasi-testsuite:
+    fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{matrix.os}}
+    steps:
+      - name: Checkout bytebox
+        uses: actions/checkout@v2
+          with:
+            submodules: 'true'
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+          with:
+            version: 0.10.0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11' # latest version of python 3
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: test/wasi/wasi-testsuite/test-runner
+        run: python3 -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python3 test/wasi/wasi-testsuite/test-runner/wasi_test_runner.py -t ./test/wasi/wasi-testsuite/tests/rust/testsuite/ ./test/wasi/wasi-testsuite/tests/c/testsuite/ ./test/wasi/wasi-testsuite/tests/assemblyscript/testsuite/ -r ./test/wasi/bytebox_adapter.py
