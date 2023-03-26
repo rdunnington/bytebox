@@ -1716,6 +1716,46 @@ fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
+fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    var context = WasiContext.fromUserdata(userdata);
+
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const offset: i64 = params[1].I64;
+    const length: i64 = params[2].I64;
+    const advice_wasi = @bitCast(u32, params[3].I32);
+
+    if (Helpers.isStdioHandle(fd_wasi) == false) {
+
+        // fadvise isn't available on windows, but fadvise is just an optimization hint, so don't
+        // return a bad error code
+        if (builtin.os.tag != .windows) {
+            if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+                const advice: usize = switch (advice_wasi) {
+                    std.os.wasi.ADVICE_NORMAL => std.os.POSIX_FADV.NORMAL,
+                    std.os.wasi.ADVICE_SEQUENTIAL => std.os.POSIX_FADV.SEQUENTIAL,
+                    std.os.wasi.ADVICE_RANDOM => std.os.POSIX_FADV.RANDOM,
+                    std.os.wasi.ADVICE_WILLNEED => std.os.POSIX_FADV.WILLNEED,
+                    std.os.wasi.ADVICE_DONTNEED => std.os.POSIX_FADV.DONTNEED,
+                    std.os.wasi.ADVICE_NOREUSE => std.os.POSIX_FADV.NOREUSE,
+                };
+
+                const ret = std.os.fadvise(fd_info.fd, offset, length, advice);
+                errno = switch (ret) {
+                    0 => Errno.SUCCESS,
+                    std.os.SIG.PIPE => Errno.PIPE,
+                    else => unreachable,
+                };
+            }
+        } else {
+            errno = Errno.BADF;
+        }
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
 fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
     var errno = Errno.SUCCESS;
 
@@ -2191,6 +2231,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("clock_time_get", &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get);
     try imports.addHostFunction("environ_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
     try imports.addHostFunction("environ_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
+    try imports.addHostFunction("fd_advise", &[_]ValType{ .I32, .I64, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_advise);
     try imports.addHostFunction("fd_close", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_close);
     try imports.addHostFunction("fd_datasync", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_datasync);
     try imports.addHostFunction("fd_fdstat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get);
