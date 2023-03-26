@@ -508,6 +508,7 @@ const WindowsApi = struct {
     extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(WINAPI) BOOL;
     extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
     extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(WINAPI) BOOL;
+    extern "kernel32" fn SetEndOfFile(file: HANDLE) callconv(WINAPI) BOOL;
 
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
@@ -1744,12 +1745,48 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val
                 const ret = std.os.fadvise(fd_info.fd, offset, length, advice);
                 errno = switch (ret) {
                     0 => Errno.SUCCESS,
-                    std.os.SIG.PIPE => Errno.PIPE,
+                    std.os.E.SPIPE => Errno.SPIPE,
+                    std.os.E.INVAL => Errno.INVAL,
+                    std.os.E.BADF => unreachable, // should never happen since we protect against this in fdLookup
                     else => unreachable,
                 };
             }
+        }
+    } else {
+        errno = Errno.BADF;
+    }
+
+    returns[0] = Val{ .I32 = @enumToInt(errno) };
+}
+
+fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+    var errno = Errno.SUCCESS;
+
+    var context = WasiContext.fromUserdata(userdata);
+
+    const fd_wasi = @bitCast(u32, params[0].I32);
+    const offset: i64 = params[1].I64;
+    const length_relative: i64 = params[2].I64;
+
+    if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+        if (builtin.os.tag == .windows) {
+            const stat: std.os.wasi.filestat_t = Helpers.filestatGetWindows(fd_info.fd, &errno);
+            if (errno == .SUCCESS) {
+                if (stat.size < offset + length_relative) {
+                    const length_total: u64 = @intCast(u64, offset + length_relative);
+                    std.os.windows.SetFilePointerEx_BEGIN(fd_info.fd, length_total) catch |err| {
+                        errno = Errno.translateError(err);
+                    };
+
+                    if (errno == .SUCCESS) {
+                        if (WindowsApi.SetEndOfFile(fd_info.fd) != std.os.windows.TRUE) {
+                            errno = Errno.INVAL;
+                        }
+                    }
+                }
+            }
         } else {
-            errno = Errno.BADF;
+            unreachable; // TODO posix_fallocate
         }
     }
 
@@ -2140,8 +2177,6 @@ fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: []c
                                     if (errno == .SUCCESS) {
                                         const flags: w.DWORD = w.SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
                                         if (WindowsApi.CreateSymbolicLinkW(resolved_link_path_w.span(), link_contents_w.span(), flags) == w.FALSE) {
-                                            const err = std.os.windows.kernel32.GetLastError();
-                                            std.debug.print("GetLastError(): {}\n", .{err});
                                             errno = Errno.NOTSUP;
                                         }
                                     }
@@ -2232,6 +2267,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!M
     try imports.addHostFunction("environ_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get);
     try imports.addHostFunction("environ_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get);
     try imports.addHostFunction("fd_advise", &[_]ValType{ .I32, .I64, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_advise);
+    try imports.addHostFunction("fd_allocate", &[_]ValType{ .I32, .I64, .I64 }, &[_]ValType{.I32}, wasi_fd_allocate);
     try imports.addHostFunction("fd_close", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_close);
     try imports.addHostFunction("fd_datasync", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_datasync);
     try imports.addHostFunction("fd_fdstat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get);
