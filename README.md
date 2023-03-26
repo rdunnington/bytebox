@@ -22,7 +22,7 @@ zig build bench # run the benchmarks (not robust)
 
 ### Usage
 
-You can use the standalone runner to load and execute WebAssembly programs:
+You can use the standalone runtime to load and execute WebAssembly programs:
 ```sh
 zig build run -- <file> [function] [function args]...
 ```
@@ -58,19 +58,27 @@ pub fn main() !void {
     var wasm_data: []u8 = try std.fs.cwd().readFileAlloc(allocator, "example.wasm", 1024 * 128);
     defer allocator.free(wasm_data);
 
-    var module_definition = bytebox.ModuleDefinition.init(allocator);
-    try module_definition.decode(wasm_data);
+    var module_definition = bytebox.ModuleDefinition.init(allocator, .{});
     defer module_definition.deinit();
+    try module_definition.decode(wasm_data);
 
     var module_instance = bytebox.ModuleInstance.init(&module_definition, allocator);
-    try module_instance.instantiate(.{});
     defer module_instance.deinit();
+    try module_instance.instantiate(.{});
 }
 ```
 
+A C API wrapper is planned for easier integration with other languages.
+
 ## Status
 
-This project is unstable and still in development.
+This project is still in development. However, usage of the library and standalone runtime 
+
+| Legend | Meaning |
+| --- | --- |
+|✅|Implemented|
+|❌|TODO|
+|💀|Removed from spec|
 
 ### [WebAssembly](https://webassembly.github.io/spec/core/index.html) support:
 
@@ -84,7 +92,7 @@ This project is unstable and still in development.
 |✅|Table instructions|
 |✅|Multiple tables|
 |✅|Bulk memory and table instructions|
-|☐|Vector instructions|
+|❌|Vector instructions|
 
 ### [WASI Preview 1](https://github.com/WebAssembly/WASI/tree/main) support:
 
@@ -99,10 +107,10 @@ This project is unstable and still in development.
 |✅|fd_advise|
 |✅|fd_allocate|
 |✅|fd_close|
-|☐|fd_datasync|
+|❌|fd_datasync|
 |✅|fd_fdstat_get|
 |✅|fd_fdstat_set_flags|
-|❌|fd_fdstat_set_rights|
+|💀|fd_fdstat_set_rights|
 |✅|fd_filestat_get|
 |✅|fd_filestat_set_size|
 |✅|fd_filestat_set_times|
@@ -114,41 +122,41 @@ This project is unstable and still in development.
 |✅|fd_readdir|
 |✅|fd_renumber|
 |✅|fd_seek|
-|☐|fd_sync|
+|❌|fd_sync|
 |✅|fd_tell|
 |✅|fd_write|
 |✅|path_create_directory|
 |✅|path_filestat_get|
 |✅|path_filestat_set_times|
-|☐|path_link|
+|❌|path_link|
 |✅|path_open|
-|☐|path_readlink|
+|❌|path_readlink|
 |✅|path_remove_directory|
-|☐|path_rename|
+|❌|path_rename|
 |✅|path_symlink|
 |✅|path_unlink_file|
-|☐|poll_oneoff|
+|❌|poll_oneoff|
 |✅|proc_exit|
-|❌|proc_raise|
-|☐|sched_yield|
+|💀|proc_raise|
+|❌|sched_yield|
 |✅|random_get|
-|☐|sock_accept|
-|☐|sock_recv|
-|☐|sock_send|
-|☐|sock_shutdown|
+|❌|sock_accept|
+|❌|sock_recv|
+|❌|sock_send|
+|❌|sock_shutdown|
 
 ### Roadmap
 These tasks must be completed to enter alpha:
-* Documentation
+* WASI support on all platforms
 * Vector instructions
 * API ergonomics pass
-* Crash hardening
+* Documentation
 * General TODO/code cleanup
+* Crash hardening/fuzzing
 
 To enter beta:
-* No major breaking API changes after this point
-* Performance within 10% of other well-known interpreters (e.g. [micro-wasm-runtime](https://github.com/bytecodealliance/wasm-micro-runtime), [wasm3](https://github.com/wasm3/wasm3))
-* WASI support
+* No breaking API changes after this point
+* Performance competitive with other well-known interpreters (e.g. [micro-wasm-runtime](https://github.com/bytecodealliance/wasm-micro-runtime), [wasm3](https://github.com/wasm3/wasm3))
 
 To have a 1.0 release:
 * Tested with a wide variety of wasm programs
