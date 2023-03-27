@@ -3,7 +3,7 @@ name: CI
 on: push
 
 jobs:
-  test:
+  wasm-testsuite:
     strategy:
       fail-fast: false
       matrix:
