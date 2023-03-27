@@ -21,7 +21,7 @@ parser.add_argument("--dir", action="append", default=[])
 args = parser.parse_args()
 
 if args.version:
-    subprocess.run(BYTEBOX + " --version")
+    subprocess.run([BYTEBOX] + ["--version"])
     sys.exit(0)
 
 TEST_FILE = args.test_file
