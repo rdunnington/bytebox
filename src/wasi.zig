@@ -9,9 +9,6 @@ const ValType = core.ValType;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImports = core.ModuleImports;
 
-const WasiError = error{PathResolveError};
-const WasiInitError = std.mem.Allocator.Error || std.os.OpenError || std.os.GetCwdError || StringPool.PutError || WasiError;
-
 const WasiContext = struct {
     const FdInfo = struct {
         fd: std.os.fd_t,
@@ -29,7 +26,7 @@ const WasiContext = struct {
     next_fd_id: u32 = 3,
     allocator: std.mem.Allocator,
 
-    fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) WasiInitError!WasiContext {
+    fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) !WasiContext {
         var context = WasiContext{
             .cwd = "",
             .fd_table = std.AutoHashMap(u32, FdInfo).init(allocator),
@@ -60,9 +57,7 @@ const WasiContext = struct {
         if (opts.dirs) |dirs| {
             context.dirs = try context.allocator.dupe([]const u8, dirs);
             for (dirs) |dir, i| {
-                context.dirs[i] = context.resolveAndCache(null, dir) catch {
-                    return WasiError.PathResolveError;
-                };
+                context.dirs[i] = try context.resolveAndCache(null, dir);
             }
         }
 
@@ -360,6 +355,7 @@ const Errno = enum(u8) {
             error.FileLocksNotSupported => .NOTSUP,
             error.FileNotFound => .NOENT,
             error.FileTooBig => .FBIG,
+            error.FileSystem => .IO,
             error.InputOutput => .IO,
             error.IsDir => .ISDIR,
             error.LinkQuotaExceeded => .MLINK,
@@ -376,6 +372,8 @@ const Errno = enum(u8) {
             error.SystemResources => .NOMEM,
             error.Unseekable => .SPIPE,
             error.WouldBlock => .AGAIN,
+            error.InvalidUtf8 => .INVAL,
+            error.BadPathName => .INVAL,
             else => .INVAL,
         };
     }
@@ -820,31 +818,31 @@ const Helpers = struct {
             if (std.os.fstat(fd)) |fd_stat| {
 
                 // filetype
-                stat_wasi.filetype = posixModeToWasiFiletype(fd_stat.mode);
+                stat_wasi.fs_filetype = posixModeToWasiFiletype(fd_stat.mode);
 
                 // flags
-                if (fd_flags & std.os.O.APPEND) {
+                if (fd_flags & std.os.O.APPEND != 0) {
                     stat_wasi.fs_flags |= std.os.wasi.FDFLAG.APPEND;
                 }
-                if (fd_flags & std.os.O.DSYNC) {
+                if (fd_flags & std.os.O.DSYNC != 0) {
                     stat_wasi.fs_flags |= std.os.wasi.FDFLAG.DSYNC;
                 }
-                if (fd_flags & std.os.O.NONBLOCK) {
+                if (fd_flags & std.os.O.NONBLOCK != 0) {
                     stat_wasi.fs_flags |= std.os.wasi.FDFLAG.NONBLOCK;
                 }
-                if (fd_flags & std.os.O.RSYNC) {
+                if (fd_flags & std.os.O.RSYNC != 0) {
                     stat_wasi.fs_flags |= std.os.wasi.FDFLAG.RSYNC;
                 }
-                if (fd_flags & std.os.O.SYNC) {
+                if (fd_flags & std.os.O.SYNC != 0) {
                     stat_wasi.fs_flags |= std.os.wasi.FDFLAG.SYNC;
                 }
 
                 // rights
-                if (fd_flags & std.os.O.RDWR) {
+                if (fd_flags & std.os.O.RDWR != 0) {
                     // noop since all rights includes this by default
-                } else if (fd_flags & std.os.O.RDONLY) {
+                } else if (fd_flags & std.os.O.RDONLY != 0) {
                     stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_WRITE;
-                } else if (fd_flags & std.os.O.WRONLY) {
+                } else if (fd_flags & std.os.O.WRONLY != 0) {
                     stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_READ;
                 }
 
@@ -852,10 +850,10 @@ const Helpers = struct {
                     stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_SEEK;
                 }
             } else |err| {
-                errno = Errno.translateError(err);
+                errno.* = Errno.translateError(err);
             }
         } else |err| {
-            errno = Errno.translateError(err);
+            errno.* = Errno.translateError(err);
         }
 
         return stat_wasi;
@@ -950,7 +948,7 @@ const Helpers = struct {
         return fd_new;
     }
 
-    fn fdstatSetFlagsPosix(fd_info: *const WasiContext.FdInfo, fdflags: *WasiFdFlags, errno: *Errno) ?std.os.fd_t {
+    fn fdstatSetFlagsPosix(fd_info: *const WasiContext.FdInfo, fdflags: WasiFdFlags, errno: *Errno) ?std.os.fd_t {
         const flags: u32 = fdflagsToFlagsPosix(fdflags);
 
         if (std.os.fcntl(fd_info.fd, std.os.F.SETFL, flags)) |_| {} else |err| {
@@ -1077,12 +1075,12 @@ const Helpers = struct {
             stat_wasi.ino = stat.ino;
             stat_wasi.filetype = posixModeToWasiFiletype(stat.mode);
             stat_wasi.nlink = stat.nlink;
-            stat_wasi.size = stat.size;
+            stat_wasi.size = if (std.math.cast(u64, stat.size)) |s| s else 0;
             stat_wasi.atim = posixTimespecToWasi(stat.atim);
             stat_wasi.mtim = posixTimespecToWasi(stat.mtim);
             stat_wasi.ctim = posixTimespecToWasi(stat.ctim);
         } else |err| {
-            errno = Errno.translateError(err);
+            errno.* = Errno.translateError(err);
         }
 
         return stat_wasi;
@@ -1728,11 +1726,10 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val
     const advice_wasi = @bitCast(u32, params[3].I32);
 
     if (Helpers.isStdioHandle(fd_wasi) == false) {
-
-        // fadvise isn't available on windows, but fadvise is just an optimization hint, so don't
-        // return a bad error code
-        if (builtin.os.tag != .windows) {
-            if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+        if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
+            // fadvise isn't available on windows or macos, but fadvise is just an optimization hint, so don't
+            // return a bad error code
+            if (builtin.os.tag == .linux) {
                 const advice: usize = switch (advice_wasi) {
                     std.os.wasi.ADVICE_NORMAL => std.os.POSIX_FADV.NORMAL,
                     std.os.wasi.ADVICE_SEQUENTIAL => std.os.POSIX_FADV.SEQUENTIAL,
@@ -1740,16 +1737,22 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val
                     std.os.wasi.ADVICE_WILLNEED => std.os.POSIX_FADV.WILLNEED,
                     std.os.wasi.ADVICE_DONTNEED => std.os.POSIX_FADV.DONTNEED,
                     std.os.wasi.ADVICE_NOREUSE => std.os.POSIX_FADV.NOREUSE,
+                    else => blk: {
+                        errno = Errno.INVAL;
+                        break :blk 0;
+                    },
                 };
 
-                const ret = std.os.fadvise(fd_info.fd, offset, length, advice);
-                errno = switch (ret) {
-                    0 => Errno.SUCCESS,
-                    std.os.E.SPIPE => Errno.SPIPE,
-                    std.os.E.INVAL => Errno.INVAL,
-                    std.os.E.BADF => unreachable, // should never happen since we protect against this in fdLookup
-                    else => unreachable,
-                };
+                if (errno == .SUCCESS) {
+                    const ret = @intToEnum(std.os.linux.E, std.os.system.fadvise(fd_info.fd, offset, length, advice));
+                    errno = switch (ret) {
+                        .SUCCESS => Errno.SUCCESS,
+                        .SPIPE => Errno.SPIPE,
+                        .INVAL => Errno.INVAL,
+                        .BADF => unreachable, // should never happen since we protect against this in fdLookup
+                        else => unreachable,
+                    };
+                }
             }
         }
     } else {
@@ -2182,7 +2185,9 @@ fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: []c
                                     }
                                 }
                             } else {
-                                std.os.symlinkat(link_contents, fd_info.fd, link_path);
+                                std.os.symlinkat(link_contents, fd_info.fd, link_path) catch |err| {
+                                    errno = Errno.translateError(err);
+                                };
                             }
                         }
                     }
@@ -2250,7 +2255,7 @@ pub const WasiOpts = struct {
     dirs: ?[][]const u8 = null,
 };
 
-pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) WasiInitError!ModuleImports {
+pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) !ModuleImports {
     var context: *WasiContext = try allocator.create(WasiContext);
     errdefer allocator.destroy(context);
     context.* = try WasiContext.init(&opts, allocator);
