@@ -1071,7 +1071,7 @@ const Helpers = struct {
         var stat_wasi: std.os.wasi.filestat_t = undefined;
 
         if (std.os.fstat(fd)) |stat| {
-            stat_wasi.dev = @bitCast(u32, stat.dev);
+            stat_wasi.dev = if (builtin.os.tag == .macos) @bitCast(u32, stat.dev) else stat.dev;
             stat_wasi.ino = stat.ino;
             stat_wasi.filetype = posixModeToWasiFiletype(stat.mode);
             stat_wasi.nlink = stat.nlink;
