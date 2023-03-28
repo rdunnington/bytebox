@@ -86,7 +86,7 @@ const WasiContext = struct {
             };
             const rights = WasiRights{
                 .fd_read = true,
-                .fd_write = true,
+                .fd_write = false, // we don't need to edit the directory itself
                 .fd_seek = false, // directories don't have seek rights
             };
             const lookupflags = WasiLookupFlags{
