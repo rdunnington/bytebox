@@ -731,7 +731,7 @@ const Helpers = struct {
         if (fdflags.nonblock) {
             flags |= std.os.O.NONBLOCK;
         }
-        if (fdflags.rsync) {
+        if (builtin.os.tag != .macos and fdflags.rsync) {
             flags |= std.os.O.RSYNC;
         }
         if (fdflags.sync) {
@@ -830,7 +830,7 @@ const Helpers = struct {
                 if (fd_flags & std.os.O.NONBLOCK != 0) {
                     stat_wasi.fs_flags |= std.os.wasi.FDFLAG.NONBLOCK;
                 }
-                if (fd_flags & std.os.O.RSYNC != 0) {
+                if (builtin.os.tag != .macos and fd_flags & std.os.O.RSYNC != 0) {
                     stat_wasi.fs_flags |= std.os.wasi.FDFLAG.RSYNC;
                 }
                 if (fd_flags & std.os.O.SYNC != 0) {
@@ -1071,14 +1071,20 @@ const Helpers = struct {
         var stat_wasi: std.os.wasi.filestat_t = undefined;
 
         if (std.os.fstat(fd)) |stat| {
-            stat_wasi.dev = stat.dev;
+            stat_wasi.dev = @bitCast(u32, stat.dev);
             stat_wasi.ino = stat.ino;
             stat_wasi.filetype = posixModeToWasiFiletype(stat.mode);
             stat_wasi.nlink = stat.nlink;
             stat_wasi.size = if (std.math.cast(u64, stat.size)) |s| s else 0;
-            stat_wasi.atim = posixTimespecToWasi(stat.atim);
-            stat_wasi.mtim = posixTimespecToWasi(stat.mtim);
-            stat_wasi.ctim = posixTimespecToWasi(stat.ctim);
+            if (builtin.os.tag == .macos) {
+                stat_wasi.atim = posixTimespecToWasi(stat.atimespec);
+                stat_wasi.mtim = posixTimespecToWasi(stat.mtimespec);
+                stat_wasi.ctim = posixTimespecToWasi(stat.ctimespec);
+            } else {
+                stat_wasi.atim = posixTimespecToWasi(stat.atim);
+                stat_wasi.mtim = posixTimespecToWasi(stat.mtim);
+                stat_wasi.ctim = posixTimespecToWasi(stat.ctim);
+            }
         } else |err| {
             errno.* = Errno.translateError(err);
         }
