@@ -15,6 +15,7 @@ const WasiContext = struct {
         path_absolute: []const u8,
         rights: WasiRights,
         is_preopen: bool,
+        dir_entries: std.ArrayList(WasiDirEntry),
     };
 
     cwd: []const u8,
@@ -65,9 +66,10 @@ const WasiContext = struct {
         const path_stdout = try context.strings.put("stdout");
         const path_stderr = try context.strings.put("stderr");
 
-        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true });
-        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true });
-        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true });
+        var empty_dir_entries = std.ArrayList(WasiDirEntry).init(allocator);
+        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
 
         for (context.dirs) |dir_path| {
             const fd_dir: ?std.os.fd_t = null;
@@ -101,6 +103,10 @@ const WasiContext = struct {
     }
 
     fn deinit(self: *WasiContext) void {
+        var fd_table_values = self.fd_table.valueIterator();
+        while (fd_table_values.next()) |item| {
+            item.dir_entries.deinit();
+        }
         self.strings.deinit();
         self.fd_table.deinit();
     }
@@ -129,7 +135,7 @@ const WasiContext = struct {
         }
     }
 
-    fn fdLookup(self: *const WasiContext, fd_wasi: u32, errno: *Errno) ?*const FdInfo {
+    fn fdLookup(self: *const WasiContext, fd_wasi: u32, errno: *Errno) ?*FdInfo {
         if (self.fd_table.getPtr(fd_wasi)) |info| {
             // std.debug.print("fd_wasi {s} -> info {}\n", .{ info.path_absolute, info.fd });
             return info;
@@ -164,6 +170,7 @@ const WasiContext = struct {
                     .path_absolute = resolved_path,
                     .rights = rights,
                     .is_preopen = is_preopen,
+                    .dir_entries = std.ArrayList(WasiDirEntry).init(self.allocator),
                 };
 
                 self.fd_table.put(fd_wasi, info) catch {
@@ -429,6 +436,12 @@ const WasiFdFlags = packed struct {
     nonblock: bool,
     rsync: bool,
     sync: bool,
+};
+
+const WasiDirEntry = struct {
+    inode: u64,
+    filetype: std.os.wasi.filetype_t,
+    filename: []u8,
 };
 
 const Whence = enum(u8) {
@@ -1243,12 +1256,14 @@ const Helpers = struct {
         }
     }
 
-    fn enumerateDirEntriesWindows(fd_info: *const WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
+    fn enumerateDirEntriesWindows(fd_info: *WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
         var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
 
         var restart_scan: std.os.windows.BOOLEAN = std.os.windows.TRUE;
         comptime std.debug.assert(std.os.wasi.DIRCOOKIE_START == 0);
 
+        @compileError("Update this to use fd_info.dir_entries and remove this TODO");
+        // TODO find a way around this:
         // Always rescan up to the cookie index since win32 api doesn't have a way to specify a "start index"
         // for the scan. :(
         const entries_to_skip: u64 = cookie;
@@ -1323,7 +1338,7 @@ const Helpers = struct {
         return bytes_written;
     }
 
-    fn enumerateDirEntriesPosix(fd_info: *const WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
+    fn enumerateDirEntriesDarwin(fd_info: *const WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
         _ = fd_info;
         _ = cookie;
         _ = out_buffer;
@@ -1333,6 +1348,90 @@ const Helpers = struct {
         unreachable;
 
         // return 0;
+    }
+
+    fn enumerateDirEntriesLinux(fd_info: *WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
+        if (cookie == 0) {
+            fd_info.dir_entries.clearRetainingCapacity();
+
+            std.os.lseek_SET(fd_info.fd, 0) catch |err| {
+                errno.* = Errno.translateError(err);
+                return 0;
+            };
+        }
+
+        var file_index = cookie;
+
+        var fbs = std.io.fixedBufferStream(out_buffer);
+        var writer = fbs.writer();
+
+        while (fbs.pos < fbs.buffer.len) {
+            if (file_index < fd_info.dir_entries.items.len) {
+                for (fd_info.dir_entries.items[file_index..]) |entry, i| {
+                    writer.writeIntLittle(u64, i + 1) catch break;
+                    writer.writeIntLittle(u64, entry.inode) catch break;
+                    writer.writeIntLittle(u32, signedCast(u32, entry.filename.len, errno)) catch break;
+                    writer.writeIntLittle(u32, @enumToInt(entry.filetype)) catch break;
+                    _ = writer.write(entry.filename) catch break;
+                }
+                file_index = fd_info.dir_entries.items.len;
+            }
+
+            // load more entries for the next loop iteration
+            if (fbs.pos < fbs.buffer.len) {
+                var dirent_buffer: [1024]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+                const rc = std.os.linux.getdents64(fd_info.fd, &dirent_buffer, dirent_buffer.len);
+                errno.* = switch (std.os.linux.getErrno(rc)) {
+                    .SUCCESS => Errno.SUCCESS,
+                    .BADF => unreachable, // should never happen since this call is wrapped by fdLookup
+                    .FAULT => Errno.FAULT,
+                    .NOTDIR => Errno.NOTDIR,
+                    .NOENT => Errno.NOENT, // can happen if the fd_info.fd directory was deleted
+                    else => Errno.INVAL,
+                };
+
+                if (errno.* != .SUCCESS) {
+                    return 0;
+                }
+
+                var buffer_offset: usize = 0;
+                while (buffer_offset < dirent_buffer.len) {
+                    const dirent_entry = @ptrCast(*align(1) std.os.linux.dirent64, dirent_buffer[buffer_offset..]);
+                    buffer_offset += dirent_entry.d_reclen;
+
+                    // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
+                    const filename = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
+
+                    const filetype: std.os.wasi.filetype_t = switch (dirent_entry.d_type) {
+                        std.os.linux.DT.BLK => .BLOCK_DEVICE,
+                        std.os.linux.DT.CHR => .CHARACTER_DEVICE,
+                        std.os.linux.DT.DIR => .DIRECTORY,
+                        std.os.linux.DT.FIFO => .UNKNOWN,
+                        std.os.linux.DT.LNK => .SYMBOLIC_LINK,
+                        std.os.linux.DT.REG => .REGULAR_FILE,
+                        std.os.linux.DT.SOCK => .SOCKET_DGRAM, // TODO handle SOCKET_DGRAM
+                        else => .UNKNOWN,
+                    };
+
+                    var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
+                        errno.* = Errno.translateError(err);
+                        break;
+                    };
+
+                    fd_info.dir_entries.append(WasiDirEntry{
+                        .inode = @bitCast(u64, dirent_entry.d_ino),
+                        .filetype = filetype,
+                        .filename = filename_duped,
+                    }) catch |err| {
+                        errno.* = Errno.translateError(err);
+                        break;
+                    };
+                }
+            }
+        }
+
+        var bytes_written = signedCast(u32, fbs.pos, errno);
+        return bytes_written;
     }
 
     fn initIovecs(comptime iov_type: type, stack_iov: []iov_type, errno: *Errno, module: *ModuleInstance, iovec_array_begin: u32, iovec_array_count: u32) ?[]iov_type {
@@ -1669,7 +1768,12 @@ fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: []con
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
             if (Helpers.getMemorySlice(module, dirent_mem_offset, dirent_mem_length, &errno)) |dirent_buffer| {
-                const enumFunc = if (builtin.os.tag == .windows) Helpers.enumerateDirEntriesWindows else Helpers.enumerateDirEntriesPosix;
+                const enumFunc = switch (builtin.os.tag) {
+                    .windows => Helpers.enumerateDirEntriesWindows,
+                    // .darwin => Helpers.enumerateDirEntriesDarwin,
+                    .linux => Helpers.enumerateDirEntriesLinux,
+                    else => unreachable, // TODO add support for this platform
+                };
                 var bytes_written = enumFunc(fd_info, cookie, dirent_buffer, &errno);
                 Helpers.writeIntToMemory(u32, bytes_written, bytes_written_out_offset, module, &errno);
             }
