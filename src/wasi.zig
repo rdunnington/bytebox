@@ -1246,8 +1246,8 @@ const Helpers = struct {
             flags |= std.os.O.WRONLY;
         }
 
-        // 644 means rw perm owner, r perm group, r perm others
-        var mode: std.os.mode_t = 644;
+        const S = std.os.linux.S;
+        const mode: std.os.mode_t = S.IRUSR | S.IWUSR | S.IRGRP | S.IROTH;
         if (std.os.open(path, flags, mode)) |fd| {
             return fd;
         } else |err| {
