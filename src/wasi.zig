@@ -1256,182 +1256,203 @@ const Helpers = struct {
         }
     }
 
-    fn enumerateDirEntriesWindows(fd_info: *WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
-        var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
-
-        var restart_scan: std.os.windows.BOOLEAN = std.os.windows.TRUE;
+    fn enumerateDirEntries(fd_info: *WasiContext.FdInfo, start_cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
         comptime std.debug.assert(std.os.wasi.DIRCOOKIE_START == 0);
+        var restart_scan = (start_cookie == 0);
 
-        @compileError("Update this to use fd_info.dir_entries and remove this TODO");
-        // TODO find a way around this:
-        // Always rescan up to the cookie index since win32 api doesn't have a way to specify a "start index"
-        // for the scan. :(
-        const entries_to_skip: u64 = cookie;
-
-        var fbs = std.io.fixedBufferStream(out_buffer);
-        var writer = fbs.writer();
-
-        var file_index: usize = 0;
-        var should_continue: bool = true;
-        while (should_continue) {
-            var file_info_buffer: [1024]u8 align(@alignOf(WindowsApi.FILE_ID_FULL_DIR_INFORMATION)) = undefined;
-            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var rc: std.os.windows.NTSTATUS = std.os.windows.ntdll.NtQueryDirectoryFile(
-                fd_info.fd,
-                null,
-                null,
-                null,
-                &io,
-                &file_info_buffer,
-                file_info_buffer.len,
-                .FileIdFullDirectoryInformation,
-                std.os.windows.TRUE,
-                null,
-                restart_scan,
-            );
-            switch (rc) {
-                .SUCCESS => {},
-                .NO_MORE_FILES => {
-                    should_continue = false;
-                },
-                .BUFFER_OVERFLOW => {
-                    std.debug.print("Internal buffer is too small.\n", .{});
-                    unreachable;
-                },
-                .INVALID_INFO_CLASS => unreachable,
-                .INVALID_PARAMETER => unreachable,
-                else => |err| {
-                    std.debug.print("NtQueryDirectoryFile: err {}", .{err});
-                    unreachable;
-                },
-            }
-
-            restart_scan = std.os.windows.FALSE;
-
-            file_index += 1;
-
-            if (entries_to_skip < file_index and rc == .SUCCESS) {
-                const file_info = @ptrCast(*WindowsApi.FILE_ID_FULL_DIR_INFORMATION, &file_info_buffer);
-
-                const filename_utf16le = @ptrCast([*]u16, &file_info.FileName)[0 .. file_info.FileNameLength / @sizeOf(u16)];
-
-                var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
-                var allocator = fba.allocator();
-                const filename: []u8 = std.unicode.utf16leToUtf8Alloc(allocator, filename_utf16le) catch unreachable;
-
-                var filetype: std.os.wasi.filetype_t = .REGULAR_FILE;
-                if (file_info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
-                    filetype = .DIRECTORY;
-                } else if (file_info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
-                    filetype = .SYMBOLIC_LINK;
-                }
-
-                writer.writeIntLittle(u64, file_index) catch break;
-                writer.writeIntLittle(u64, @bitCast(u64, file_info.FileId)) catch break; // inode
-                writer.writeIntLittle(u32, signedCast(u32, filename.len, errno)) catch break;
-                writer.writeIntLittle(u32, @enumToInt(filetype)) catch break;
-                _ = writer.write(filename) catch break;
-            }
-        }
-
-        var bytes_written = signedCast(u32, fbs.pos, errno);
-        return bytes_written;
-    }
-
-    fn enumerateDirEntriesDarwin(fd_info: *const WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
-        _ = fd_info;
-        _ = cookie;
-        _ = out_buffer;
-        _ = errno;
-
-        // TODO
-        unreachable;
-
-        // return 0;
-    }
-
-    fn enumerateDirEntriesLinux(fd_info: *WasiContext.FdInfo, cookie: u64, out_buffer: []u8, errno: *Errno) u32 {
-        if (cookie == 0) {
+        if (restart_scan) {
             fd_info.dir_entries.clearRetainingCapacity();
-
-            std.os.lseek_SET(fd_info.fd, 0) catch |err| {
-                errno.* = Errno.translateError(err);
-                return 0;
-            };
         }
 
-        var file_index = cookie;
+        const osFunc = switch (builtin.os.tag) {
+            .windows => Helpers.enumerateDirEntriesWindows,
+            .linux => Helpers.enumerateDirEntriesLinux,
+            // .darwin => Helpers.enumerateDirEntriesDarwin,
+            else => unreachable, // TODO add support for this platform
+        };
+
+        var file_index = start_cookie;
 
         var fbs = std.io.fixedBufferStream(out_buffer);
         var writer = fbs.writer();
 
-        while (fbs.pos < fbs.buffer.len) {
+        while (fbs.pos < fbs.buffer.len and errno.* == .SUCCESS) {
             if (file_index < fd_info.dir_entries.items.len) {
-                for (fd_info.dir_entries.items[file_index..]) |entry, i| {
-                    writer.writeIntLittle(u64, i + 1) catch break;
+                for (fd_info.dir_entries.items[file_index..]) |entry| {
+                    const cookie = file_index + 1;
+                    writer.writeIntLittle(u64, cookie) catch break;
                     writer.writeIntLittle(u64, entry.inode) catch break;
                     writer.writeIntLittle(u32, signedCast(u32, entry.filename.len, errno)) catch break;
                     writer.writeIntLittle(u32, @enumToInt(entry.filetype)) catch break;
                     _ = writer.write(entry.filename) catch break;
+
+                    file_index += 1;
                 }
-                file_index = fd_info.dir_entries.items.len;
             }
 
             // load more entries for the next loop iteration
-            if (fbs.pos < fbs.buffer.len) {
-                var dirent_buffer: [1024]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
-                const rc = std.os.linux.getdents64(fd_info.fd, &dirent_buffer, dirent_buffer.len);
-                errno.* = switch (std.os.linux.getErrno(rc)) {
-                    .SUCCESS => Errno.SUCCESS,
-                    .BADF => unreachable, // should never happen since this call is wrapped by fdLookup
-                    .FAULT => Errno.FAULT,
-                    .NOTDIR => Errno.NOTDIR,
-                    .NOENT => Errno.NOENT, // can happen if the fd_info.fd directory was deleted
-                    else => Errno.INVAL,
-                };
-
-                if (errno.* != .SUCCESS) {
-                    return 0;
-                }
-
-                var buffer_offset: usize = 0;
-                while (buffer_offset < dirent_buffer.len) {
-                    const dirent_entry = @ptrCast(*align(1) std.os.linux.dirent64, dirent_buffer[buffer_offset..]);
-                    buffer_offset += dirent_entry.d_reclen;
-
-                    // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
-                    const filename = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
-
-                    const filetype: std.os.wasi.filetype_t = switch (dirent_entry.d_type) {
-                        std.os.linux.DT.BLK => .BLOCK_DEVICE,
-                        std.os.linux.DT.CHR => .CHARACTER_DEVICE,
-                        std.os.linux.DT.DIR => .DIRECTORY,
-                        std.os.linux.DT.FIFO => .UNKNOWN,
-                        std.os.linux.DT.LNK => .SYMBOLIC_LINK,
-                        std.os.linux.DT.REG => .REGULAR_FILE,
-                        std.os.linux.DT.SOCK => .SOCKET_DGRAM, // TODO handle SOCKET_DGRAM
-                        else => .UNKNOWN,
-                    };
-
-                    var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
-                        errno.* = Errno.translateError(err);
-                        break;
-                    };
-
-                    fd_info.dir_entries.append(WasiDirEntry{
-                        .inode = @bitCast(u64, dirent_entry.d_ino),
-                        .filetype = filetype,
-                        .filename = filename_duped,
-                    }) catch |err| {
-                        errno.* = Errno.translateError(err);
-                        break;
-                    };
+            if (fbs.pos < fbs.buffer.len and errno.* == .SUCCESS) {
+                if (osFunc(fd_info, restart_scan, errno) == false) {
+                    // no more files or error
+                    break;
                 }
             }
+            restart_scan = false;
         }
 
         var bytes_written = signedCast(u32, fbs.pos, errno);
         return bytes_written;
+    }
+
+    fn enumerateDirEntriesWindows(fd_info: *WasiContext.FdInfo, restart_scan: bool, errno: *Errno) bool {
+        comptime std.debug.assert(std.os.wasi.DIRCOOKIE_START == 0);
+
+        const restart_scan_win32: std.os.windows.BOOLEAN = if (restart_scan) std.os.windows.TRUE else std.os.windows.FALSE;
+
+        var file_info_buffer: [1024]u8 align(@alignOf(WindowsApi.FILE_ID_FULL_DIR_INFORMATION)) = undefined;
+        var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+        var rc: std.os.windows.NTSTATUS = std.os.windows.ntdll.NtQueryDirectoryFile(
+            fd_info.fd,
+            null,
+            null,
+            null,
+            &io,
+            &file_info_buffer,
+            file_info_buffer.len,
+            .FileIdFullDirectoryInformation,
+            std.os.windows.TRUE,
+            null,
+            restart_scan_win32,
+        );
+        switch (rc) {
+            .SUCCESS => {},
+            .NO_MORE_FILES => {
+                return false;
+            },
+            .BUFFER_OVERFLOW => {
+                std.debug.print("Internal buffer is too small.\n", .{});
+                unreachable;
+            },
+            .INVALID_INFO_CLASS => unreachable,
+            .INVALID_PARAMETER => unreachable,
+            else => |err| {
+                std.debug.print("NtQueryDirectoryFile: err {}", .{err});
+                unreachable;
+            },
+        }
+
+        if (rc == .SUCCESS) {
+            const file_info = @ptrCast(*WindowsApi.FILE_ID_FULL_DIR_INFORMATION, &file_info_buffer);
+
+            const filename_utf16le = @ptrCast([*]u16, &file_info.FileName)[0 .. file_info.FileNameLength / @sizeOf(u16)];
+
+            var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
+            var allocator = fba.allocator();
+            const filename: []u8 = std.unicode.utf16leToUtf8Alloc(allocator, filename_utf16le) catch unreachable;
+
+            var filetype: std.os.wasi.filetype_t = .REGULAR_FILE;
+            if (file_info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
+                filetype = .DIRECTORY;
+            } else if (file_info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+                filetype = .SYMBOLIC_LINK;
+            }
+
+            // writer.writeIntLittle(u64, file_index) catch break;
+            // writer.writeIntLittle(u64, @bitCast(u64, file_info.FileId)) catch break; // inode
+            // writer.writeIntLittle(u32, signedCast(u32, filename.len, errno)) catch break;
+            // writer.writeIntLittle(u32, @enumToInt(filetype)) catch break;
+            // _ = writer.write(filename) catch break;
+
+            var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
+                errno.* = Errno.translateError(err);
+                return false;
+            };
+
+            fd_info.dir_entries.append(WasiDirEntry{
+                .inode = @bitCast(u64, file_info.FileId),
+                .filetype = filetype,
+                .filename = filename_duped,
+            }) catch |err| {
+                errno.* = Errno.translateError(err);
+                return false;
+            };
+        }
+
+        return true;
+    }
+
+    fn enumerateDirEntriesDarwin(fd_info: *const WasiContext.FdInfo, restart_scan: bool, errno: *Errno) bool {
+        _ = fd_info;
+        _ = restart_scan;
+        _ = errno;
+
+        // TODO
+        unreachable;
+    }
+
+    fn enumerateDirEntriesLinux(fd_info: *WasiContext.FdInfo, restart_scan: bool, errno: *Errno) bool {
+        if (restart_scan) {
+            std.os.lseek_SET(fd_info.fd, 0) catch |err| {
+                errno.* = Errno.translateError(err);
+                return false;
+            };
+        }
+
+        var dirent_buffer: [1024]u8 align(@alignOf(std.os.linux.dirent64)) = undefined;
+        const rc = std.os.linux.getdents64(fd_info.fd, &dirent_buffer, dirent_buffer.len);
+        errno.* = switch (std.os.linux.getErrno(rc)) {
+            .SUCCESS => Errno.SUCCESS,
+            .BADF => unreachable, // should never happen since this call is wrapped by fdLookup
+            .FAULT => Errno.FAULT,
+            .NOTDIR => Errno.NOTDIR,
+            .NOENT => Errno.NOENT, // can happen if the fd_info.fd directory was deleted
+            else => Errno.INVAL,
+        };
+
+        if (errno.* != .SUCCESS) {
+            return false;
+        }
+
+        if (rc == 0) {
+            return false;
+        }
+
+        var buffer_offset: usize = 0;
+        while (buffer_offset < dirent_buffer.len) {
+            const dirent_entry = @ptrCast(*align(1) std.os.linux.dirent64, dirent_buffer[buffer_offset..]);
+            buffer_offset += dirent_entry.d_reclen;
+
+            // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
+            const filename = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
+
+            const filetype: std.os.wasi.filetype_t = switch (dirent_entry.d_type) {
+                std.os.linux.DT.BLK => .BLOCK_DEVICE,
+                std.os.linux.DT.CHR => .CHARACTER_DEVICE,
+                std.os.linux.DT.DIR => .DIRECTORY,
+                std.os.linux.DT.FIFO => .UNKNOWN,
+                std.os.linux.DT.LNK => .SYMBOLIC_LINK,
+                std.os.linux.DT.REG => .REGULAR_FILE,
+                std.os.linux.DT.SOCK => .SOCKET_DGRAM, // TODO handle SOCKET_DGRAM
+                else => .UNKNOWN,
+            };
+
+            var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
+                errno.* = Errno.translateError(err);
+                break;
+            };
+
+            fd_info.dir_entries.append(WasiDirEntry{
+                .inode = @bitCast(u64, dirent_entry.d_ino),
+                .filetype = filetype,
+                .filename = filename_duped,
+            }) catch |err| {
+                errno.* = Errno.translateError(err);
+                break;
+            };
+        }
+
+        return true;
     }
 
     fn initIovecs(comptime iov_type: type, stack_iov: []iov_type, errno: *Errno, module: *ModuleInstance, iovec_array_begin: u32, iovec_array_count: u32) ?[]iov_type {
@@ -1768,13 +1789,7 @@ fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: []con
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
             if (Helpers.getMemorySlice(module, dirent_mem_offset, dirent_mem_length, &errno)) |dirent_buffer| {
-                const enumFunc = switch (builtin.os.tag) {
-                    .windows => Helpers.enumerateDirEntriesWindows,
-                    // .darwin => Helpers.enumerateDirEntriesDarwin,
-                    .linux => Helpers.enumerateDirEntriesLinux,
-                    else => unreachable, // TODO add support for this platform
-                };
-                var bytes_written = enumFunc(fd_info, cookie, dirent_buffer, &errno);
+                var bytes_written = Helpers.enumerateDirEntries(fd_info, cookie, dirent_buffer, &errno);
                 Helpers.writeIntToMemory(u32, bytes_written, bytes_written_out_offset, module, &errno);
             }
         }
