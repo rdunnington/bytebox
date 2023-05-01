@@ -1239,7 +1239,11 @@ const Helpers = struct {
         flags |= fdflags_os;
 
         if (rights.fd_read and rights.fd_write) {
-            flags |= std.os.O.RDWR;
+            if (openflags.directory) {
+                flags |= std.os.O.RDONLY;
+            } else {
+                flags |= std.os.O.RDWR;
+            }
         } else if (rights.fd_read) {
             flags |= std.os.O.RDONLY;
         } else if (rights.fd_write) {
