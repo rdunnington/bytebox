@@ -1358,12 +1358,6 @@ const Helpers = struct {
                 filetype = .SYMBOLIC_LINK;
             }
 
-            // writer.writeIntLittle(u64, file_index) catch break;
-            // writer.writeIntLittle(u64, @bitCast(u64, file_info.FileId)) catch break; // inode
-            // writer.writeIntLittle(u32, signedCast(u32, filename.len, errno)) catch break;
-            // writer.writeIntLittle(u32, @enumToInt(filetype)) catch break;
-            // _ = writer.write(filename) catch break;
-
             var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
                 errno.* = Errno.translateError(err);
                 return false;
@@ -1419,12 +1413,12 @@ const Helpers = struct {
         }
 
         var buffer_offset: usize = 0;
-        while (buffer_offset < dirent_buffer.len) {
+        while (buffer_offset < rc) {
             const dirent_entry = @ptrCast(*align(1) std.os.linux.dirent64, dirent_buffer[buffer_offset..]);
             buffer_offset += dirent_entry.d_reclen;
 
             // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
-            const filename = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
+            const filename: []u8 = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
 
             const filetype: std.os.wasi.filetype_t = switch (dirent_entry.d_type) {
                 std.os.linux.DT.BLK => .BLOCK_DEVICE,
