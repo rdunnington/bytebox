@@ -1911,7 +1911,7 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: []const V
                     }
                 }
             }
-        } else {
+        } else if (builtin.os.tag == .linux) {
             const mode = 0;
             const rc = std.os.linux.fallocate(fd_info.fd, mode, offset, length_relative);
             errno = switch (std.os.linux.getErrno(rc)) {
@@ -2163,7 +2163,7 @@ fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
                     const S = std.os.linux.S;
-                    const mode: std.os.mode_t = S.IRWXU | S.IRWXG | S.IROTH;
+                    const mode: std.os.mode_t = if (builtin.os.tag == .windows) undefined else S.IRWXU | S.IRWXG | S.IROTH;
                     std.os.mkdirat(fd_info.fd, path, mode) catch |err| {
                         errno = Errno.translateError(err);
                     };
