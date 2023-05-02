@@ -9,15 +9,16 @@ Bytebox is a Webassembly VM.
 ## Getting started
 
 ### Requirements
-Bytebox currently builds with [Zig 0.10.0](https://ziglang.org/download). Other versions have not been tested - use at your discretion.
+Bytebox currently builds with [Zig 0.10.x](https://ziglang.org/download) to avoid churn on zig master.
 
 ### Run
 
 ```sh
 git clone --recurse-submodules https://github.com/rdunnington/bytebox.git
 cd bytebox
-zig build test  # run the official WebAssembly spec testsuite
-zig build bench # run the benchmarks (not robust)
+zig build test  # run the WebAssembly spec testsuite
+# run the wasi testsuite
+python3 test/wasi/wasi-testsuite/test-runner/wasi_test_runner.py -r test/wasi/bytebox_adapter.py -t ./test/wasi/wasi-testsuite/tests/assemblyscript/testsuite/ ./test/wasi/wasi-testsuite/tests/c/testsuite/ ./test/wasi/wasi-testsuite/tests/rust/testsuite/
 ```
 
 ### Usage
@@ -68,11 +69,9 @@ pub fn main() !void {
 }
 ```
 
-A C API wrapper is planned for easier integration with other languages.
-
 ## Status
 
-This project is still in development. However, usage of the library and standalone runtime 
+This project is still in the alpha stage.
 
 | Legend | Meaning |
 | --- | --- |
@@ -157,6 +156,7 @@ These tasks must be completed to enter alpha:
 To enter beta:
 * No breaking API changes after this point
 * Performance competitive with other well-known interpreters (e.g. [micro-wasm-runtime](https://github.com/bytecodealliance/wasm-micro-runtime), [wasm3](https://github.com/wasm3/wasm3))
+* C API for easier integration with other languages.
 
 To have a 1.0 release:
 * Tested with a wide variety of wasm programs
