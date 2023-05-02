@@ -1912,7 +1912,23 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: []const V
                 }
             }
         } else {
-            unreachable; // TODO posix_fallocate
+            const mode = 0;
+            const rc = std.os.linux.fallocate(fd_info.fd, mode, offset, length_relative);
+            errno = switch (std.os.linux.getErrno(rc)) {
+                .SUCCESS => Errno.SUCCESS,
+                .BADF => unreachable, // should never happen since this call is wrapped by fdLookup
+                .FBIG => Errno.FBIG,
+                .INTR => Errno.INTR,
+                .IO => Errno.IO,
+                .NODEV => Errno.NODEV,
+                .NOSPC => Errno.NOSPC,
+                .NOSYS => Errno.NOSYS,
+                .OPNOTSUPP => Errno.NOTSUP,
+                .PERM => Errno.PERM,
+                .SPIPE => Errno.SPIPE,
+                .TXTBSY => Errno.TXTBSY,
+                else => Errno.INVAL,
+            };
         }
     }
 
