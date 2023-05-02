@@ -1251,7 +1251,7 @@ const Helpers = struct {
         }
 
         const S = std.os.linux.S;
-        const mode: std.os.mode_t = S.IRUSR | S.IWUSR | S.IRGRP | S.IROTH;
+        const mode: std.os.mode_t = S.IRUSR | S.IWUSR | S.IRGRP | S.IWGRP | S.IROTH;
         if (std.os.open(path, flags, mode)) |fd| {
             return fd;
         } else |err| {
@@ -2146,7 +2146,8 @@ fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    const mode: u32 = 644;
+                    const S = std.os.linux.S;
+                    const mode: std.os.mode_t = S.IRWXU | S.IRWXG | S.IROTH;
                     std.os.mkdirat(fd_info.fd, path, mode) catch |err| {
                         errno = Errno.translateError(err);
                     };
