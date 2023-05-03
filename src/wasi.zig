@@ -1993,6 +1993,20 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: []const V
                 .TXTBSY => Errno.TXTBSY,
                 else => Errno.INVAL,
             };
+        } else if (builtin.os.tag.isDarwin()) {
+            var stat: std.c.Stat = undefined;
+            if (std.c.fstat(fd_info.fd, &stat) != -1) {
+                // fallocate() doesn't truncate the file if the total is less than the actual file length
+                // so we need to emulate that behavior here
+                const length_total = @intCast(u64, @as(i128, offset) + length_relative);
+                if (stat.size < length_total) {
+                    std.os.ftruncate(fd_info.fd, length_total) catch |err| {
+                        errno = Errno.translateError(err);
+                    };
+                }
+            }
+        } else {
+            unreachable; // TODO implement support for this platform
         }
     }
 
