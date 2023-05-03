@@ -130,7 +130,7 @@ const WasiContext = struct {
             const cached_path: []const u8 = try self.strings.findOrPut(resolved_path);
             return cached_path;
         } else |err| {
-            std.debug.print("failed to resolve path '{s}', caught {}\n", .{ path, err });
+            // std.debug.print("failed to resolve path '{s}', caught {}\n", .{ path, err });
             return err;
         }
     }
@@ -254,7 +254,8 @@ const WasiContext = struct {
                     }
                 }
             } else |err| {
-                std.debug.print("Caught error {} resolving path.", .{err});
+                errno.* = Errno.translateError(err);
+                // std.debug.print("Caught error {} resolving path.", .{err});
             }
         }
 
