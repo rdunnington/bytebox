@@ -1399,6 +1399,7 @@ const Helpers = struct {
         var unused_seek: i64 = 0;
         const rc = std.os.system.__getdirentries64(fd_info.fd, &dirent_buffer, dirent_buffer.len, &unused_seek);
         errno.* = switch (std.c.getErrno(rc)) {
+            .SUCCESS => .SUCCESS,
             .BADF => .BADF,
             .FAULT => .FAULT,
             .IO => .IO,
