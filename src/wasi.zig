@@ -1271,8 +1271,12 @@ const Helpers = struct {
         const osFunc = switch (builtin.os.tag) {
             .windows => Helpers.enumerateDirEntriesWindows,
             .linux => Helpers.enumerateDirEntriesLinux,
-            // .darwin => Helpers.enumerateDirEntriesDarwin,
-            else => unreachable, // TODO add support for this platform
+            else => comptime blk: {
+                if (builtin.os.tag.isDarwin()) {
+                    break :blk Helpers.enumerateDirEntriesDarwin;
+                }
+                unreachable; // TODO add support for this platform
+            },
         };
 
         var file_index = start_cookie;
@@ -1380,13 +1384,73 @@ const Helpers = struct {
         return true;
     }
 
-    fn enumerateDirEntriesDarwin(fd_info: *const WasiContext.FdInfo, restart_scan: bool, errno: *Errno) bool {
-        _ = fd_info;
-        _ = restart_scan;
-        _ = errno;
+    fn enumerateDirEntriesDarwin(fd_info: *WasiContext.FdInfo, restart_scan: bool, errno: *Errno) bool {
+        if (restart_scan) {
+            std.os.lseek_SET(fd_info.fd, 0) catch |err| {
+                errno.* = Errno.translateError(err);
+                return false;
+            };
+        }
 
-        // TODO
-        unreachable;
+        const dirent_t = std.c.dirent;
+
+        var dirent_buffer: [1024]u8 align(@alignOf(dirent_t)) = undefined;
+        var unused_seek: i64 = 0;
+        const rc = std.os.system.__getdirentries64(fd_info.fd, &dirent_buffer, dirent_buffer.len, &unused_seek);
+        errno.* = switch (std.c.getErrno(rc)) {
+            .BADF => .BADF,
+            .FAULT => .FAULT,
+            .IO => .IO,
+            .NOTDIR => .NOTDIR,
+            else => .INVAL,
+        };
+
+        if (errno.* != .SUCCESS) {
+            return false;
+        }
+
+        if (rc == 0) {
+            return false;
+        }
+
+        var buffer_offset: usize = 0;
+        while (buffer_offset < rc) {
+            const dirent_entry = @ptrCast(*align(1) dirent_t, dirent_buffer[buffer_offset..]);
+            buffer_offset += dirent_entry.d_reclen;
+
+            // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
+            // const filename: []u8 = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
+            const filename: []u8 = @ptrCast([*]u8, &dirent_entry.d_name)[0..dirent_entry.d_namlen];
+
+            const filetype: std.os.wasi.filetype_t = switch (dirent_entry.d_type) {
+                std.c.DT.UNKNOWN => .UNKNOWN,
+                std.c.DT.FIFO => .UNKNOWN,
+                std.c.DT.CHR => .CHARACTER_DEVICE,
+                std.c.DT.DIR => .DIRECTORY,
+                std.c.DT.BLK => .BLOCK_DEVICE,
+                std.c.DT.REG => .REGULAR_FILE,
+                std.c.DT.LNK => .SYMBOLIC_LINK,
+                std.c.DT.SOCK => .SOCKET_DGRAM,
+                std.c.DT.WHT => .UNKNOWN,
+                else => .UNKNOWN,
+            };
+
+            var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
+                errno.* = Errno.translateError(err);
+                break;
+            };
+
+            fd_info.dir_entries.append(WasiDirEntry{
+                .inode = dirent_entry.d_ino,
+                .filetype = filetype,
+                .filename = filename_duped,
+            }) catch |err| {
+                errno.* = Errno.translateError(err);
+                break;
+            };
+        }
+
+        return true;
     }
 
     fn enumerateDirEntriesLinux(fd_info: *WasiContext.FdInfo, restart_scan: bool, errno: *Errno) bool {
