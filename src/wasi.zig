@@ -1012,8 +1012,9 @@ const Helpers = struct {
     }
 
     fn fdFilestatSetTimesPosix(fd: std.os.fd_t, timestamp_wasi_access: u64, timestamp_wasi_modified: u64, fstflags: u32, errno: *Errno) void {
-        const UTIME_NOW: i64 = (1 << 30) - 1;
-        const UTIME_OMIT: i64 = (1 << 30) - 2;
+        const is_darwin = builtin.os.tag.isDarwin();
+        const UTIME_NOW: i64 = if (is_darwin) @as(i32, -1) else (1 << 30) - 1;
+        const UTIME_OMIT: i64 = if (is_darwin) @as(i32, -2) else (1 << 30) - 2;
 
         var times = [2]std.os.timespec{
             .{ // access time
