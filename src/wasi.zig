@@ -224,12 +224,8 @@ const WasiContext = struct {
 
     fn fdClose(self: *WasiContext, wasi_fd: u32, errno: *Errno) void {
         if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
-            if (fd_info.is_preopen == false) {
-                std.os.close(fd_info.fd);
-                _ = self.fd_table.remove(wasi_fd);
-            } else {
-                errno.* = Errno.NOTSUP;
-            }
+            std.os.close(fd_info.fd);
+            _ = self.fd_table.remove(wasi_fd);
         } else {
             errno.* = Errno.BADF;
         }
