@@ -112,7 +112,25 @@ const WasiContext = struct {
     }
 
     fn resolveAndCache(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8) ![]const u8 {
-        std.debug.assert(path[path.len - 1] != 0);
+        if (std.mem.indexOf(u8, path, &[_]u8{0})) |_| {
+            return error.NullTerminatedPath;
+        }
+
+        // validate the scope of the path never leaves the preopen root
+        {
+            var depth: i32 = 0;
+            var token_iter = std.mem.tokenize(u8, path, &[_]u8{ '/', '\\' });
+            while (token_iter.next()) |item| {
+                if (std.mem.eql(u8, item, "..")) {
+                    depth -= 1;
+                } else {
+                    depth += 1;
+                }
+                if (depth < 0) {
+                    return error.PathInvalidDepth;
+                }
+            }
+        }
 
         var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
@@ -127,7 +145,15 @@ const WasiContext = struct {
         const paths = [_][]const u8{ path_dir, path };
 
         if (std.fs.path.resolve(allocator, &paths)) |resolved_path| {
-            const cached_path: []const u8 = try self.strings.findOrPut(resolved_path);
+            // preserve trailing slash
+            var final_path = resolved_path;
+            const last_char = path[path.len - 1];
+            if (last_char == '/' or last_char == '\\') {
+                final_path = try allocator.realloc(resolved_path, resolved_path.len + 1);
+                final_path[final_path.len - 1] = last_char;
+            }
+
+            const cached_path: []const u8 = try self.strings.findOrPut(final_path);
             return cached_path;
         } else |err| {
             // std.debug.print("failed to resolve path '{s}', caught {}\n", .{ path, err });
@@ -259,7 +285,7 @@ const WasiContext = struct {
             }
         }
 
-        errno.* = Errno.NOTCAPABLE;
+        errno.* = Errno.PERM;
         return false;
     }
 
@@ -378,6 +404,8 @@ const Errno = enum(u8) {
             error.WouldBlock => .AGAIN,
             error.InvalidUtf8 => .INVAL,
             error.BadPathName => .INVAL,
+            error.NullTerminatedPath => .ILSEQ,
+            error.PathInvalidDepth => .PERM,
             else => .INVAL,
         };
     }
@@ -1215,6 +1243,7 @@ const Helpers = struct {
         if (builtin.os.tag == .windows) {
             @compileError("This function should only be called on an OS that supports posix APIs.");
         }
+
         var flags: u32 = 0;
         if (openflags.creat) {
             flags |= std.os.O.CREAT;
@@ -2304,8 +2333,6 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     // const rights_inheriting: WasiRights = Helpers.decodeRights(params[6].I64);
     const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[7].I32);
     const fd_out_mem_offset = Helpers.signedCast(u32, params[8].I32, &errno);
-
-    // std.debug.print("path_open oflags: {}, rights: {}, fdflags: {x}\n", .{ openflags, rights_base, params[7].I32 });
 
     // use pathCreateDirectory if creating a directory
     if (openflags.creat and openflags.directory) {
