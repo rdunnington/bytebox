@@ -156,14 +156,12 @@ const WasiContext = struct {
             const cached_path: []const u8 = try self.strings.findOrPut(final_path);
             return cached_path;
         } else |err| {
-            // std.debug.print("failed to resolve path '{s}', caught {}\n", .{ path, err });
             return err;
         }
     }
 
     fn fdLookup(self: *const WasiContext, fd_wasi: u32, errno: *Errno) ?*FdInfo {
         if (self.fd_table.getPtr(fd_wasi)) |info| {
-            // std.debug.print("fd_wasi {s} -> info {}\n", .{ info.path_absolute, info.fd });
             return info;
         }
 
@@ -272,7 +270,6 @@ const WasiContext = struct {
         if (self.dirs.len > 0) {
             const paths = [_][]const u8{ fd_info.path_absolute, relative_path };
             if (std.fs.path.resolve(self.allocator, &paths)) |resolved_path| {
-                // std.debug.print("checking hasPathAccess for resolved path '{s}'\n", .{resolved_path});
                 for (self.dirs) |allowdir| {
                     // can use startsWith to check because all the paths have been passed through resolve() already
                     if (std.mem.startsWith(u8, resolved_path, allowdir)) {
@@ -281,7 +278,6 @@ const WasiContext = struct {
                 }
             } else |err| {
                 errno.* = Errno.translateError(err);
-                // std.debug.print("Caught error {} resolving path.", .{err});
             }
         }
 
@@ -974,7 +970,6 @@ const Helpers = struct {
         }
 
         if (errno.* != Errno.SUCCESS) {
-            // std.debug.print("createfile for path '{s}' failed with rc: {}\n", .{ fd_info.path_absolute, rc });
             return null;
         }
 
@@ -1365,13 +1360,11 @@ const Helpers = struct {
                 return false;
             },
             .BUFFER_OVERFLOW => {
-                std.debug.print("Internal buffer is too small.\n", .{});
                 unreachable;
             },
             .INVALID_INFO_CLASS => unreachable,
             .INVALID_PARAMETER => unreachable,
-            else => |err| {
-                std.debug.print("NtQueryDirectoryFile: err {}", .{err});
+            else => {
                 unreachable;
             },
         }
@@ -1787,17 +1780,13 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
     const prestat_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
-        // std.debug.print("attempt to lookup fd_dir_wasi {}\n", .{fd_dir_wasi});
         if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
-            // std.debug.print("wasi_fd_prestat_get: fd_dir_wasi {} -> path: {s}\n", .{ fd_dir_wasi, path_source });
             const name_len: u32 = @intCast(u32, path_source.len);
 
             Helpers.writeIntToMemory(u32, std.os.wasi.PREOPENTYPE_DIR, prestat_mem_offset + 0, module, &errno);
             Helpers.writeIntToMemory(u32, name_len, prestat_mem_offset + @sizeOf(u32), module, &errno);
         }
     }
-
-    // std.debug.print("wasi_fd_prestat_get errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -1812,10 +1801,10 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
 
     if (errno == .SUCCESS) {
         if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
-            // std.debug.print("wasi_fd_prestat_dir_name: fd_dir_wasi {} -> path: {s}\n", .{ fd_dir_wasi, path_source });
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path_dest| {
                 if (path_source.len <= path_dest.len) {
                     std.mem.copy(u8, path_dest, path_source);
+
                     // add null terminator if there's room
                     if (path_dest.len > path_source.len) {
                         path_dest[path_source.len] = 0;
@@ -1826,8 +1815,6 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
             }
         }
     }
-
-    // std.debug.print("wasi_fd_prestat_dir_name errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -1843,12 +1830,9 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
 
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
-            // std.debug.print("fd_read: '{s}'\n", .{fd_info.path_absolute});
-
             var stack_iov = [_]std.os.iovec{undefined} ** 1024;
             if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.readv(fd_info.fd, iov)) |read_bytes| {
-                    // std.debug.print("read {} bytes\n", .{read_bytes});
                     if (read_bytes <= std.math.maxInt(u32)) {
                         Helpers.writeIntToMemory(u32, @intCast(u32, read_bytes), bytes_read_out_offset, module, &errno);
                     } else {
@@ -1860,8 +1844,6 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
             }
         }
     }
-
-    // std.debug.print("fd_read: errno: {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
@@ -2144,7 +2126,6 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
             if (fd_info.rights.fd_seek) {
                 const fd_os: std.os.fd_t = fd_info.fd;
                 if (Whence.fromInt(whence_raw)) |whence| {
-                    // std.debug.print("[fd_seek] whence: {}, offset: {}\n", .{ whence, offset });
                     switch (whence) {
                         .Set => {
                             if (offset >= 0) {
@@ -2180,7 +2161,6 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
         }
     }
 
-    // std.debug.print("[fd_seek] errno: {}\n", .{errno});
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
@@ -2454,8 +2434,6 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
 
     if (errno == .SUCCESS) {
         if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
-            // std.debug.print("unlink file '{s}'\n", .{path});
-
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
                     var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
