@@ -150,7 +150,7 @@ const WasiContext = struct {
             const last_char = path[path.len - 1];
             if (last_char == '/' or last_char == '\\') {
                 final_path = try allocator.realloc(resolved_path, resolved_path.len + 1);
-                final_path[final_path.len - 1] = last_char;
+                final_path[final_path.len - 1] = std.fs.path.sep;
             }
 
             const cached_path: []const u8 = try self.strings.findOrPut(final_path);
@@ -185,7 +185,14 @@ const WasiContext = struct {
         if (self.resolveAndCache(fd_dir, path)) |resolved_path| {
             const open_func = if (builtin.os.tag == .windows) Helpers.openPathWindows else Helpers.openPathPosix;
 
-            if (open_func(resolved_path, lookupflags, openflags, fdflags, rights, errno)) |fd_os| {
+            // if a path ends with a separator, posix treats it as a directory even if the flag isn't set, so make sure
+            // we explicitly set the directory flag for similar behavior on windows
+            var openflags2 = openflags;
+            if (std.mem.endsWith(u8, resolved_path, std.fs.path.sep_str)) {
+                openflags2.directory = true;
+            }
+
+            if (open_func(resolved_path, lookupflags, openflags2, fdflags, rights, errno)) |fd_os| {
                 var fd_wasi: u32 = self.next_fd_id;
                 self.next_fd_id += 1;
 
@@ -1196,27 +1203,29 @@ const Helpers = struct {
 
         // emulate the posix behavior on windows
         if (lookupflags.symlink_follow == false) {
-            const attributes: w.DWORD = w.GetFileAttributesW(path_w) catch 0;
-            if (windowsFileAttributeToWasiFiletype(attributes) == .SYMBOLIC_LINK) {
-                if (openflags.directory) {
-                    errno.* = Errno.NOTDIR;
-                } else {
-                    errno.* = Errno.LOOP;
+            if (rc != .OBJECT_NAME_INVALID) {
+                const attributes: w.DWORD = w.GetFileAttributesW(path_w) catch 0;
+                if (windowsFileAttributeToWasiFiletype(attributes) == .SYMBOLIC_LINK) {
+                    if (openflags.directory) {
+                        errno.* = Errno.NOTDIR;
+                    } else {
+                        errno.* = Errno.LOOP;
+                    }
+                    if (rc == .SUCCESS) {
+                        std.os.close(fd);
+                    }
+                    return null;
                 }
-                if (rc == .SUCCESS) {
-                    std.os.close(fd);
-                }
-                return null;
             }
         }
 
         switch (rc) {
             .SUCCESS => return fd,
-            .OBJECT_NAME_INVALID => unreachable,
             .INVALID_PARAMETER => unreachable,
             .OBJECT_PATH_SYNTAX_BAD => unreachable,
             .INVALID_HANDLE => unreachable,
             .OBJECT_NAME_NOT_FOUND => errno.* = Errno.NOENT,
+            .OBJECT_NAME_INVALID => errno.* = Errno.NOENT,
             .OBJECT_PATH_NOT_FOUND => errno.* = Errno.NOENT,
             .NO_MEDIA_IN_DEVICE => errno.* = Errno.NODEV,
             .SHARING_VIOLATION => errno.* = Errno.ACCES,
