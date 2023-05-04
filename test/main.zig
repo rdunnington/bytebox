@@ -492,35 +492,35 @@ const TestOpts = struct {
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
     const Functions = struct {
-        fn printI32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+        fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
             // std.debug.print("{}", .{params[0].I32});
         }
 
-        fn printI64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+        fn printI64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I64);
             // std.debug.print("{}", .{params[0].I64});
         }
 
-        fn printF32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+        fn printF32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F32);
             // std.debug.print("{}", .{params[0].F32});
         }
 
-        fn printF64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+        fn printF64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
             // std.debug.print("{}", .{params[0].F64});
         }
 
-        fn printI32F32(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+        fn printI32F32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 2);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
@@ -528,7 +528,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
             // std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
         }
 
-        fn printF64F64(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+        fn printF64F64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 2);
             std.debug.assert(returns.len == 0);
             std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
@@ -536,7 +536,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
             // std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
         }
 
-        fn print(_: ?*anyopaque, params: []const Val, returns: []Val) void {
+        fn print(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 0);
             std.debug.assert(returns.len == 0);
             // std.debug.print("\n", .{});
@@ -563,18 +563,18 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
             });
         }
     };
-    var imports: bytebox.ModuleImports = try bytebox.ModuleImports.init("spectest", null, allocator);
+    var imports: bytebox.ModuleImports = try bytebox.ModuleImports.init("spectest", null, null, allocator);
 
     const no_returns = &[0]ValType{};
 
-    try imports.addHostFunction("print_i32", null, &[_]ValType{.I32}, no_returns, Functions.printI32);
-    try imports.addHostFunction("print_i64", null, &[_]ValType{.I64}, no_returns, Functions.printI64);
-    try imports.addHostFunction("print_f32", null, &[_]ValType{.F32}, no_returns, Functions.printF32);
-    try imports.addHostFunction("print_f64", null, &[_]ValType{.F64}, no_returns, Functions.printF64);
-    try imports.addHostFunction("print_i32_f32", null, &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
-    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
-    try imports.addHostFunction("print_f64_f64", null, &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
-    try imports.addHostFunction("print", null, &[_]ValType{}, no_returns, Functions.print);
+    try imports.addHostFunction("print_i32", &[_]ValType{.I32}, no_returns, Functions.printI32);
+    try imports.addHostFunction("print_i64", &[_]ValType{.I64}, no_returns, Functions.printI64);
+    try imports.addHostFunction("print_f32", &[_]ValType{.F32}, no_returns, Functions.printF32);
+    try imports.addHostFunction("print_f64", &[_]ValType{.F64}, no_returns, Functions.printF64);
+    try imports.addHostFunction("print_i32_f32", &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
+    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
+    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
+    try imports.addHostFunction("print", &[_]ValType{}, no_returns, Functions.print);
 
     const TableInstance = bytebox.TableInstance;
 
@@ -737,7 +737,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
             module.filename = try allocator.dupe(u8, module_filename);
 
-            module.def = bytebox.ModuleDefinition.init(allocator);
+            module.def = bytebox.ModuleDefinition.init(allocator, .{ .debug_name = std.fs.path.basename(module_filename) });
             (module.def.?).decode(module_data) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {

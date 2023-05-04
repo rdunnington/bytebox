@@ -20,7 +20,7 @@ pub fn build(b: *Builder) void {
     var bench_mandelbrot_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/mandelbrot.zig");
 
     buildExeWithStep(b, target, .{
-        .exe_name = "run",
+        .exe_name = "bytebox",
         .root_src = "run/main.zig",
         .step_name = "run",
         .description = "Run a wasm program",

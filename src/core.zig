@@ -1,10 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
+pub const wasi = @import("wasi.zig");
 const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
 
 const opcodes = @import("opcode.zig");
 const Opcode = opcodes.Opcode;
 const WasmOpcode = opcodes.WasmOpcode;
+
+const AllocError = std.mem.Allocator.Error;
 
 pub const MalformedError = error{
     MalformedMagicSignature,
@@ -28,6 +31,7 @@ pub const MalformedError = error{
     MalformedElementType,
     MalformedUTF8Encoding,
     MalformedMutability,
+    MalformedCustomSection,
 };
 
 pub const UnlinkableError = error{
@@ -109,7 +113,75 @@ pub const TrapError = error{
 
 pub const WasmError = MalformedError || ValidationError || UnlinkableError || UninstantiableError || AssertError || TrapError;
 
-const ScratchAllocator = struct {
+pub const DebugTrace = struct {
+    pub const Mode = enum {
+        None,
+        Function,
+        Instruction,
+    };
+
+    pub fn setMode(new_mode: Mode) bool {
+        if (builtin.mode == .Debug) {
+            mode = new_mode;
+            return true;
+        }
+
+        return false;
+    }
+
+    fn shouldTraceFunctions() bool {
+        return builtin.mode == .Debug and mode == .Function;
+    }
+
+    fn shouldTraceInstructions() bool {
+        return builtin.mode == .Debug and mode == .Instruction;
+    }
+
+    fn printIndent(indent: u32) void {
+        var indent_level: u32 = 0;
+        while (indent_level < indent) : (indent_level += 1) {
+            std.debug.print("  ", .{});
+        }
+    }
+
+    fn traceHostFunction(module_instance: *const ModuleInstance, indent: u32, import_name: []const u8) void {
+        if (shouldTraceFunctions()) {
+            _ = module_instance;
+            const module_name = "<unknown_host_module>";
+
+            printIndent(indent);
+            std.debug.print("{s}!{s}\n", .{ module_name, import_name });
+        }
+    }
+
+    fn traceFunction(module_instance: *const ModuleInstance, indent: u32, func_index: u32) void {
+        if (shouldTraceFunctions()) {
+            const func_name_index: u32 = func_index + @intCast(u32, module_instance.module_def.imports.functions.items.len);
+
+            const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+            const function_name = name_section.findFunctionName(func_name_index);
+
+            printIndent(indent);
+            std.debug.print("{s}!{s}\n", .{ module_name, function_name });
+        }
+    }
+
+    fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Stack) void {
+        if (shouldTraceInstructions()) {
+            const frame: *const CallFrame = stack.topFrame();
+            const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+            const function_name = name_section.findFunctionName(frame.func.def_index);
+
+            std.debug.print("\t0x{x} - {s}!{s}: {s}\n", .{ pc, module_name, function_name, instruction_name });
+        }
+    }
+
+    var mode: Mode = .None;
+};
+
+pub const ScratchAllocator = struct {
     buffer: StableArray(u8),
 
     const InitOpts = struct {
@@ -122,7 +194,7 @@ const ScratchAllocator = struct {
         };
     }
 
-    fn allocator(self: *ScratchAllocator) std.mem.Allocator {
+    pub fn allocator(self: *ScratchAllocator) std.mem.Allocator {
         return std.mem.Allocator.init(self, alloc, resize, free);
     }
 
@@ -231,7 +303,7 @@ pub const ValType = enum(u8) {
 // Empty instances of these help avoid nullable pointers. Nullable pointers make structs bigger which
 // fights cache coherency.
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-var empty_module_definition = ModuleDefinition.init(gpa.allocator());
+var empty_module_definition = ModuleDefinition.init(gpa.allocator(), .{});
 var empty_module_instance = ModuleInstance.init(&empty_module_definition, gpa.allocator());
 
 pub const Val = union(ValType) {
@@ -1633,6 +1705,134 @@ const CustomSection = struct {
     data: std.ArrayList(u8),
 };
 
+const NameCustomSection = struct {
+    const NameAssoc = struct {
+        name: []const u8,
+        func_index: u32,
+
+        fn cmp(_: void, a: NameAssoc, b: NameAssoc) bool {
+            return a.func_index < b.func_index;
+        }
+
+        fn order(_: void, a: NameAssoc, b: NameAssoc) std.math.Order {
+            if (a.func_index < b.func_index) {
+                return .lt;
+            } else if (a.func_index > b.func_index) {
+                return .gt;
+            } else {
+                return .eq;
+            }
+        }
+    };
+
+    // all string slices here are static strings or point into CustomSection.data - no need to free
+    module_name: []const u8,
+    function_names: std.ArrayList(NameAssoc),
+
+    // function_index_to_local_names_begin: std.hash_map.AutoHashMap(u32, u32),
+    // local_names: std.ArrayList([]const u8),
+
+    fn init(allocator: std.mem.Allocator) NameCustomSection {
+        return NameCustomSection{
+            .module_name = "",
+            .function_names = std.ArrayList(NameAssoc).init(allocator),
+        };
+    }
+
+    fn deinit(self: *NameCustomSection) void {
+        self.function_names.deinit();
+    }
+
+    fn decode(self: *NameCustomSection, module_definition: *const ModuleDefinition, bytes: []const u8) MalformedError!void {
+        self.decodeInternal(module_definition, bytes) catch |err| {
+            std.debug.print("NameCustomSection.decode: caught error from internal: {}", .{err});
+            return MalformedError.MalformedCustomSection;
+        };
+    }
+
+    fn decodeInternal(self: *NameCustomSection, module_definition: *const ModuleDefinition, bytes: []const u8) !void {
+        const DecodeHelpers = struct {
+            fn readName(stream: anytype) ![]const u8 {
+                var reader = stream.reader();
+                const name_length = try decodeLEB128(u32, reader);
+                const name: []const u8 = stream.buffer[stream.pos .. stream.pos + name_length];
+                try stream.seekBy(name_length);
+                return name;
+            }
+        };
+
+        var fixed_buffer_stream = std.io.fixedBufferStream(bytes);
+        var reader = fixed_buffer_stream.reader();
+
+        while (try fixed_buffer_stream.getPos() != try fixed_buffer_stream.getEndPos()) {
+            const section_code = try reader.readByte();
+            const section_size = try decodeLEB128(u32, reader);
+
+            switch (section_code) {
+                0 => {
+                    self.module_name = try DecodeHelpers.readName(&fixed_buffer_stream);
+                },
+                1 => {
+                    const num_func_names = try decodeLEB128(u32, reader);
+                    try self.function_names.ensureTotalCapacity(num_func_names);
+
+                    var index: u32 = 0;
+                    while (index < num_func_names) : (index += 1) {
+                        const func_index = try decodeLEB128(u32, reader);
+                        const func_name: []const u8 = try DecodeHelpers.readName(&fixed_buffer_stream);
+                        self.function_names.appendAssumeCapacity(NameAssoc{
+                            .name = func_name,
+                            .func_index = func_index,
+                        });
+                    }
+
+                    std.sort.sort(NameAssoc, self.function_names.items, {}, NameAssoc.cmp);
+                },
+                2 => { // TODO locals
+                    try fixed_buffer_stream.seekBy(section_size);
+                },
+                else => {
+                    try fixed_buffer_stream.seekBy(section_size);
+                },
+            }
+        }
+
+        if (self.module_name.len == 0) {
+            if (module_definition.debug_name.len > 0) {
+                self.module_name = module_definition.debug_name;
+            } else {
+                self.module_name = "<unknown_module>";
+            }
+        }
+    }
+
+    fn getModuleName(self: *const NameCustomSection) []const u8 {
+        return self.module_name;
+    }
+
+    fn findFunctionName(self: *const NameCustomSection, func_index: u32) []const u8 {
+        if (func_index < self.function_names.items.len) {
+            if (self.function_names.items[func_index].func_index == func_index) {
+                return self.function_names.items[func_index].name;
+            } else {
+                const temp_nameassoc = NameAssoc{
+                    .name = "",
+                    .func_index = func_index,
+                };
+
+                if (std.sort.binarySearch(NameAssoc, temp_nameassoc, self.function_names.items, {}, NameAssoc.order)) |found_index| {
+                    return self.function_names.items[found_index].name;
+                }
+            }
+        }
+        return "<unknown_function>";
+    }
+
+    // fn findFunctionLocalName(self: *NameCustomSection, func_index: u32, local_index: u32) []const u8 {
+    //     return "<unknown_local>";
+    // }
+};
+
 const ModuleValidator = struct {
     const ControlFrame = struct {
         opcode: Opcode,
@@ -1938,16 +2138,7 @@ const ModuleValidator = struct {
                     return error.ValidationUnknownFunction;
                 }
 
-                var type_index: u32 = undefined;
-                if (func_index < module.imports.functions.items.len) {
-                    const func_def: *const FunctionImportDefinition = &module.imports.functions.items[func_index];
-                    type_index = func_def.type_index;
-                } else {
-                    const module_func_index = func_index - module.imports.functions.items.len;
-                    const func_def: *const FunctionDefinition = &module.functions.items[module_func_index];
-                    type_index = func_def.type_index;
-                }
-
+                var type_index: u32 = module.getFuncTypeIndex(func_index);
                 try Helpers.popPushFuncTypes(self, type_index, module);
             },
             .Call_Indirect => {
@@ -2783,6 +2974,8 @@ const InstructionFuncs = struct {
             try stack.pushFrame(func, module_instance, param_types, func.local_types.items, functype.calcNumReturns());
             try stack.pushLabel(@intCast(u32, return_types.len), continuation);
 
+            DebugTrace.traceFunction(module_instance, stack.num_frames, func.def_index);
+
             return FuncCallData{
                 .code = module_instance.module_def.code.instructions.items.ptr,
                 .continuation = func.offset_into_instructions,
@@ -2796,10 +2989,13 @@ const InstructionFuncs = struct {
                     const returns_len: u32 = @intCast(u32, data.func_def.calcNumReturns());
 
                     if (stack.num_values + returns_len < stack.values.len) {
+                        var module: *ModuleInstance = stack.topFrame().module_instance;
                         var params = stack.values[stack.num_values - params_len .. stack.num_values];
                         var returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
 
-                        data.callback(data.userdata, params, returns_temp);
+                        DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
+
+                        data.callback(data.userdata, module, params, returns_temp);
 
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
@@ -2846,24 +3042,18 @@ const InstructionFuncs = struct {
     };
 
     fn debugPreamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) void {
-        // std.debug.print("\tinstruction: {s} ({}) at {} with code {*} ({*}).\n", .{ name, code[pc].opcode, pc, code, stack.topFrame().module_instance });
-        _ = name;
-        _ = pc;
         _ = code;
-        _ = stack;
+
+        DebugTrace.traceInstruction(name, pc, stack);
     }
 
     fn op_Invalid(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        _ = pc;
-        _ = code;
-        _ = stack;
+        debugPreamble("Invalid", pc, code, stack);
         unreachable;
     }
 
     fn op_Unreachable(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        _ = pc;
-        _ = code;
-        _ = stack;
+        debugPreamble("Unreachable", pc, code, stack);
         return error.TrapUnreachable;
     }
 
@@ -4876,6 +5066,10 @@ const InstructionFuncs = struct {
     }
 };
 
+pub const ModuleDefinitionOpts = struct {
+    debug_name: []const u8 = "",
+};
+
 pub const ModuleDefinition = struct {
     const Code = struct {
         instructions: std.ArrayList(Instruction),
@@ -4913,12 +5107,15 @@ pub const ModuleDefinition = struct {
     datas: std.ArrayList(DataDefinition),
     custom_sections: std.ArrayList(CustomSection),
 
+    name_section: NameCustomSection,
+
+    debug_name: []const u8,
     start_func_index: ?u32 = null,
     data_count: ?u32 = null,
 
     is_decoded: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator) ModuleDefinition {
+    pub fn init(allocator: std.mem.Allocator, opts: ModuleDefinitionOpts) ModuleDefinition {
         var module = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
@@ -4945,6 +5142,8 @@ pub const ModuleDefinition = struct {
             },
             .datas = std.ArrayList(DataDefinition).init(allocator),
             .custom_sections = std.ArrayList(CustomSection).init(allocator),
+            .name_section = NameCustomSection.init(allocator),
+            .debug_name = opts.debug_name,
         };
 
         return module;
@@ -4981,6 +5180,7 @@ pub const ModuleDefinition = struct {
                 }
             }
 
+            // TODO move these names into a string pool
             fn readName(reader: anytype, _allocator: std.mem.Allocator) ![]const u8 {
                 const name_length = try decodeLEB128(u32, reader);
 
@@ -5050,6 +5250,10 @@ pub const ModuleDefinition = struct {
                     }
 
                     try self.custom_sections.append(section);
+
+                    if (std.mem.eql(u8, section.name, "name")) {
+                        try self.name_section.decode(self, section.data.items);
+                    }
                 },
                 .FunctionType => {
                     const num_types = try decodeLEB128(u32, reader);
@@ -5664,6 +5868,7 @@ pub const ModuleDefinition = struct {
         self.exports.memories.deinit();
         self.exports.globals.deinit();
         self.datas.deinit();
+        self.name_section.deinit();
 
         for (self.custom_sections.items) |*item| {
             self.allocator.free(item.name);
@@ -5698,6 +5903,157 @@ pub const ModuleDefinition = struct {
 
         return null;
     }
+
+    pub fn dump(self: *const ModuleDefinition, writer: anytype) !void {
+        const Helpers = struct {
+            fn function(_writer: anytype, functype: *const FunctionTypeDefinition) !void {
+                const params: []const ValType = functype.getParams();
+                const returns: []const ValType = functype.getReturns();
+
+                try _writer.print("(", .{});
+                for (params) |v, i| {
+                    try _writer.print("{s}", .{valtype(v)});
+                    if (i != params.len - 1) {
+                        try _writer.print(", ", .{});
+                    }
+                }
+                try _writer.print(") -> ", .{});
+
+                if (returns.len == 0) {
+                    try _writer.print("void", .{});
+                } else {
+                    for (returns) |v, i| {
+                        try _writer.print("{s}", .{valtype(v)});
+                        if (i != returns.len - 1) {
+                            try _writer.print(", ", .{});
+                        }
+                    }
+                }
+
+                try _writer.print("\n", .{});
+            }
+
+            fn limits(_writer: anytype, l: *const Limits) !void {
+                try _writer.print("limits (min {}, max {?})\n", .{ l.min, l.max });
+            }
+
+            fn valtype(v: ValType) []const u8 {
+                return switch (v) {
+                    .I32 => "i32",
+                    .I64 => "i64",
+                    .F32 => "f32",
+                    .F64 => "f64",
+                    .FuncRef => "funcref",
+                    .ExternRef => "externref",
+                };
+            }
+
+            fn mut(m: GlobalMut) []const u8 {
+                return switch (m) {
+                    .Immutable => "immutable",
+                    .Mutable => "mutable",
+                };
+            }
+        };
+
+        try writer.print("Imports:\n", .{});
+
+        try writer.print("\tFunctions: {}\n", .{self.imports.functions.items.len});
+        for (self.imports.functions.items) |*import| {
+            try writer.print("\t\t{s}.{s}", .{ import.names.module_name, import.names.import_name });
+            try Helpers.function(writer, &self.types.items[import.type_index]);
+        }
+
+        try writer.print("\tGlobals: {}\n", .{self.imports.globals.items.len});
+        for (self.imports.globals.items) |import| {
+            try writer.print("\t\t{s}.{s}: type {s}, mut: {s}\n", .{
+                import.names.module_name,
+                import.names.import_name,
+                Helpers.valtype(import.valtype),
+                Helpers.mut(import.mut),
+            });
+        }
+
+        try writer.print("\tMemories: {}\n", .{self.imports.memories.items.len});
+        for (self.imports.memories.items) |import| {
+            try writer.print("\t\t{s}.{s}: ", .{ import.names.module_name, import.names.import_name });
+            try Helpers.limits(writer, &import.limits);
+        }
+
+        try writer.print("\tTables: {}\n", .{self.imports.tables.items.len});
+        for (self.imports.tables.items) |import| {
+            try writer.print("\t\t{s}.{s}: type {s}, ", .{
+                import.names.module_name,
+                import.names.import_name,
+                Helpers.valtype(import.reftype),
+            });
+            try Helpers.limits(writer, &import.limits);
+        }
+
+        try writer.print("Exports:\n", .{});
+
+        try writer.print("\tFunctions: {}\n", .{self.exports.functions.items.len});
+        for (self.exports.functions.items) |*ex| {
+            try writer.print("\t\t{s}", .{ex.name});
+            const func_type: *const FunctionTypeDefinition = &self.types.items[self.getFuncTypeIndex(ex.index)];
+            try Helpers.function(writer, func_type);
+        }
+
+        try writer.print("\tGlobal: {}\n", .{self.exports.globals.items.len});
+        for (self.exports.globals.items) |*ex| {
+            var valtype: ValType = undefined;
+            var mut: GlobalMut = undefined;
+            if (ex.index < self.imports.globals.items.len) {
+                valtype = self.imports.globals.items[ex.index].valtype;
+                mut = self.imports.globals.items[ex.index].mut;
+            } else {
+                const instance_index: usize = ex.index - self.imports.globals.items.len;
+                valtype = self.globals.items[instance_index].valtype;
+                mut = self.globals.items[instance_index].mut;
+            }
+            try writer.print("\t\t{s}: type {s}, mut: {s}\n", .{ ex.name, Helpers.valtype(valtype), Helpers.mut(mut) });
+        }
+
+        try writer.print("\tMemories: {}\n", .{self.exports.memories.items.len});
+        for (self.exports.memories.items) |*ex| {
+            var limits: *const Limits = undefined;
+            if (ex.index < self.imports.memories.items.len) {
+                limits = &self.imports.memories.items[ex.index].limits;
+            } else {
+                const instance_index: usize = ex.index - self.imports.memories.items.len;
+                limits = &self.memories.items[instance_index].limits;
+            }
+            try writer.print("\t\t{s}: ", .{ex.name});
+            try Helpers.limits(writer, limits);
+        }
+
+        try writer.print("\tTables: {}\n", .{self.exports.tables.items.len});
+        for (self.exports.tables.items) |*ex| {
+            var reftype: ValType = undefined;
+            var limits: *const Limits = undefined;
+            if (ex.index < self.imports.tables.items.len) {
+                reftype = self.imports.tables.items[ex.index].reftype;
+                limits = &self.imports.tables.items[ex.index].limits;
+            } else {
+                const instance_index: usize = ex.index - self.imports.tables.items.len;
+                reftype = self.tables.items[instance_index].reftype;
+                limits = &self.tables.items[instance_index].limits;
+            }
+            try writer.print("\t\t{s}: type {s}, ", .{ ex.name, Helpers.valtype(reftype) });
+            try Helpers.limits(writer, limits);
+        }
+    }
+
+    fn getFuncTypeIndex(self: *const ModuleDefinition, func_index: usize) u32 {
+        if (func_index < self.imports.functions.items.len) {
+            const func_def: *const FunctionImportDefinition = &self.imports.functions.items[func_index];
+            return func_def.type_index;
+        } else {
+            const module_func_index = func_index - self.imports.functions.items.len;
+            const func_def: *const FunctionDefinition = &self.functions.items[module_func_index];
+            return func_def.type_index;
+        }
+    }
 };
 
 const ImportType = enum(u8) {
@@ -5705,7 +6061,7 @@ const ImportType = enum(u8) {
     Wasm,
 };
 
-const HostFunctionCallback = *const fn (userdata: ?*anyopaque, params: []const Val, returns: []Val) void;
+const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void;
 
 const HostFunction = struct {
     userdata: ?*anyopaque,
@@ -5802,16 +6158,18 @@ pub const GlobalImport = struct {
 pub const ModuleImports = struct {
     name: []const u8,
     instance: ?*ModuleInstance,
+    userdata: ?*anyopaque,
     functions: std.ArrayList(FunctionImport),
     tables: std.ArrayList(TableImport),
     memories: std.ArrayList(MemoryImport),
     globals: std.ArrayList(GlobalImport),
     allocator: std.mem.Allocator,
 
-    pub fn init(name: []const u8, instance: ?*ModuleInstance, allocator: std.mem.Allocator) !ModuleImports {
+    pub fn init(name: []const u8, instance: ?*ModuleInstance, userdata: ?*anyopaque, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImports {
         return ModuleImports{
             .name = try allocator.dupe(u8, name),
             .instance = instance,
+            .userdata = userdata,
             .functions = std.ArrayList(FunctionImport).init(allocator),
             .tables = std.ArrayList(TableImport).init(allocator),
             .memories = std.ArrayList(MemoryImport).init(allocator),
@@ -5820,7 +6178,7 @@ pub const ModuleImports = struct {
         };
     }
 
-    pub fn addHostFunction(self: *ModuleImports, name: []const u8, userdata: ?*anyopaque, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
+    pub fn addHostFunction(self: *ModuleImports, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
         var type_list = std.ArrayList(ValType).init(self.allocator);
@@ -5831,7 +6189,7 @@ pub const ModuleImports = struct {
             .name = try self.allocator.dupe(u8, name),
             .data = .{
                 .Host = HostFunction{
-                    .userdata = userdata,
+                    .userdata = self.userdata,
                     .func_def = FunctionTypeDefinition{
                         .types = type_list,
                         .num_params = @intCast(u32, param_types.len),
@@ -5959,6 +6317,11 @@ pub const Store = struct {
     }
 };
 
+pub const ModuleInstantiateOpts = struct {
+    /// imports is not owned by ModuleInstance - caller must ensure its memory outlives ModuleInstance
+    imports: ?[]const ModuleImports = null,
+};
+
 pub const ModuleInstance = struct {
     allocator: std.mem.Allocator,
     stack: Stack,
@@ -5966,7 +6329,6 @@ pub const ModuleInstance = struct {
     module_def: *const ModuleDefinition,
     is_instantiated: bool = false,
 
-    /// module_def is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
         return ModuleInstance{
             .allocator = allocator,
@@ -5981,8 +6343,7 @@ pub const ModuleInstance = struct {
         self.store.deinit();
     }
 
-    /// imports is not owned by ModuleInstance - caller must ensure it memory outlives ModuleInstance
-    pub fn instantiate(self: *ModuleInstance, opts: struct { imports: ?[]const ModuleImports = null }) !void {
+    pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def: *const Limits, instance: *const Limits) bool {
                 if (def.max != null and instance.max == null) {
@@ -6324,7 +6685,7 @@ pub const ModuleInstance = struct {
     }
 
     pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImports {
-        var imports = try ModuleImports.init(name, self, self.allocator);
+        var imports = try ModuleImports.init(name, self, null, self.allocator);
 
         for (self.module_def.exports.functions.items) |*item| {
             try imports.functions.append(FunctionImport{
@@ -6410,12 +6771,67 @@ pub const ModuleInstance = struct {
         return error.AssertUnknownExport;
     }
 
+    pub fn memorySlice(self: *ModuleInstance, offset: usize, length: usize) []u8 {
+        const memory: *MemoryInstance = self.store.getMemory(0);
+
+        if (offset + length < memory.mem.items.len) {
+            var data: []u8 = memory.mem.items[offset .. offset + length];
+            return data;
+        }
+
+        return "";
+    }
+
+    pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
+        var bytes: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
+        std.mem.writeIntLittle(T, &bytes, value);
+
+        var destination = self.memorySlice(offset, bytes.len);
+        if (destination.len == bytes.len) {
+            std.mem.copy(u8, destination, &bytes);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// Caller owns returned memory and must free via allocator.free()
+    pub fn formatBacktrace(self: *ModuleInstance, indent: u8, allocator: std.mem.Allocator) !std.ArrayList(u8) {
+        var buffer = std.ArrayList(u8).init(allocator);
+        try buffer.ensureTotalCapacity(512);
+        var writer = buffer.writer();
+
+        for (self.stack.frames[0..self.stack.num_frames]) |_, i| {
+            const reverse_index = (self.stack.num_frames - 1) - i;
+            const frame: *const CallFrame = &self.stack.frames[reverse_index];
+
+            var indent_level: usize = 0;
+            while (indent_level < indent) : (indent_level += 1) {
+                try writer.print("\t", .{});
+            }
+
+            const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+
+            const func_name_index: u32 = frame.func.def_index + @intCast(u32, frame.module_instance.module_def.imports.functions.items.len);
+            const function_name = name_section.findFunctionName(func_name_index);
+
+            try writer.print("{}: {s}!{s}\n", .{ reverse_index, module_name, function_name });
+        }
+
+        return buffer;
+    }
+
     fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
         const func: FunctionInstance = self.store.functions.items[func_instance_index];
         const func_def: FunctionDefinition = self.module_def.functions.items[func.def_index];
         const func_type: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
         const param_types: []const ValType = func_type.getParams();
         const return_types: []const ValType = func_type.getReturns();
+
+        // Ensure any leftover stack state doesn't pollute this invoke. Can happen if the previous invoke returned
+        // an error.
+        self.stack.popAll();
 
         // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
         // on the value stack
@@ -6426,10 +6842,9 @@ pub const ModuleInstance = struct {
         try self.stack.pushFrame(&func, self, param_types, func.local_types.items, func_type.calcNumReturns());
         try self.stack.pushLabel(@intCast(u32, return_types.len), func_def.continuation);
 
-        InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack) catch |err| {
-            self.stack.popAll(); // ensure current stack state doesn't pollute future invokes
-            return err;
-        };
+        DebugTrace.traceFunction(self, self.stack.num_frames, func.def_index);
+
+        try InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack);
 
         if (returns.len > 0) {
             var index: i32 = @intCast(i32, returns.len - 1);
@@ -6457,7 +6872,9 @@ pub const ModuleInstance = struct {
                     return error.ValidationTypeMismatch;
                 }
 
-                data.callback(data.userdata, params, returns);
+                DebugTrace.traceHostFunction(self, 1, func_import.name);
+
+                data.callback(data.userdata, self, params, returns);
 
                 // validate return types
                 for (returns) |val, i| {
