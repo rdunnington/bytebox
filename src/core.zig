@@ -1476,6 +1476,7 @@ const Instruction = struct {
                     },
                 };
             },
+            .IfNoElse => unreachable, // we convert the If opcode to IfNoElse only after reaching the end of the block, not when decoding the opcode and immediates
             .Branch => {
                 immediate = InstructionImmediates{ .LabelId = try decodeLEB128(u32, reader) };
             },
@@ -2051,13 +2052,13 @@ const ModuleValidator = struct {
             .Loop => {
                 try Helpers.enterBlock(self, module, instruction);
             },
-            .If => {
+            .If, .IfNoElse => {
                 try self.popType(.I32);
                 try Helpers.enterBlock(self, module, instruction);
             },
             .Else => {
                 const frame: ControlFrame = try self.popControl();
-                if (frame.opcode != .If) {
+                if (frame.opcode.isIf() == false) {
                     return error.ValidationIfElseMismatch;
                 }
                 try self.pushControl(.Else, frame.start_types, frame.end_types);
@@ -2066,7 +2067,7 @@ const ModuleValidator = struct {
                 const frame: ControlFrame = try self.popControl();
 
                 // if must have matching else block when returns are expected and the params don't match
-                if (frame.opcode == .If and !std.mem.eql(ValType, frame.start_types, frame.end_types)) {
+                if (frame.opcode.isIf() and !std.mem.eql(ValType, frame.start_types, frame.end_types)) {
                     return error.ValidationTypeMismatch;
                 }
 
@@ -2624,6 +2625,7 @@ const InstructionFuncs = struct {
         &op_Block,
         &op_Loop,
         &op_If,
+        &op_IfNoElse,
         &op_Else,
         &op_End,
         &op_Branch,
@@ -3083,9 +3085,22 @@ const InstructionFuncs = struct {
             try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
             next_pc = pc + 1;
         } else {
-            if (code[pc].immediate.If.else_continuation != code[pc].immediate.If.end_continuation) {
-                try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
-            }
+            try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
+            next_pc = code[pc].immediate.If.else_continuation + 1;
+        }
+
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[next_pc].opcode), .{ next_pc, code, stack });
+    }
+
+    fn op_IfNoElse(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("IfNoElse", pc, code, stack);
+        var next_pc: u32 = undefined;
+
+        const condition = try stack.popI32();
+        if (condition != 0) {
+            try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
+            next_pc = pc + 1;
+        } else {
             next_pc = code[pc].immediate.If.else_continuation + 1;
         }
 
@@ -5745,6 +5760,8 @@ pub const ModuleDefinition = struct {
                                             var else_instruction: *Instruction = &instructions.items[index];
                                             else_instruction.immediate = block_instruction.immediate;
                                             block_instruction.immediate.If.else_continuation = index;
+                                        } else if (block_instruction.opcode == .If) {
+                                            block_instruction.opcode = .IfNoElse;
                                         }
                                     }
                                 }

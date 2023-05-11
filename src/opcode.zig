@@ -8,6 +8,7 @@ pub const Opcode = enum(u16) {
     Block,
     Loop,
     If,
+    IfNoElse, // variant of If that assumes no else branch
     Else,
     End,
     Branch,
@@ -210,6 +211,13 @@ pub const Opcode = enum(u16) {
             .Block => true,
             .Loop => true,
             .If => true,
+            else => false,
+        };
+    }
+
+    pub fn isIf(opcode: Opcode) bool {
+        return switch (opcode) {
+            .If, .IfNoElse => true,
             else => false,
         };
     }
