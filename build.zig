@@ -10,9 +10,12 @@ const ExeOpts = struct {
     step_name: []const u8,
     description: []const u8,
     step_dependencies: ?[]*std.build.Step = null,
+    should_emit_asm: bool = false,
 };
 
 pub fn build(b: *Builder) void {
+    const should_emit_asm = b.option(bool, "asm", "Emit asm for the bytebox .exe") orelse false;
+
     const target = b.standardTargetOptions(.{});
 
     var bench_add_one_step: *LibExeObjStep = buildWasmLib(b, "bench/samples/add-one.zig");
@@ -24,6 +27,7 @@ pub fn build(b: *Builder) void {
         .root_src = "run/main.zig",
         .step_name = "run",
         .description = "Run a wasm program",
+        .should_emit_asm = should_emit_asm,
     });
     buildExeWithStep(b, target, .{
         .exe_name = "testsuite",
@@ -54,6 +58,7 @@ fn buildExeWithStep(b: *Builder, target: CrossTarget, opts: ExeOpts) void {
 
     const mode = b.standardReleaseOptions();
 
+    exe.emit_asm = if (opts.should_emit_asm) .emit else .default;
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
