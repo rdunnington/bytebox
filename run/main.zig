@@ -334,8 +334,12 @@ pub fn main() !void {
                 };
                 params.items[i] = Val{ .F64 = parsed };
             },
+            .Vec => {
+                std.log.err("Param at index {} is a v128, which is currently only invokeable from code.", .{i});
+                return RunErrors.BadFunctionParam;
+            },
             .FuncRef => {
-                std.log.err("Param at index {} is a funcref, making this function only invokeable from code.", .{i});
+                std.log.err("Param at index {} is a v128, making this function only invokeable from code.", .{i});
                 return RunErrors.BadFunctionParam;
             },
             .ExternRef => {
@@ -368,6 +372,7 @@ pub fn main() !void {
                     .I64 => |v| try std.fmt.format(writer, "  {} (i64)\n", .{v}),
                     .F32 => |v| try std.fmt.format(writer, "  {} (f32)\n", .{v}),
                     .F64 => |v| try std.fmt.format(writer, "  {} (f64)\n", .{v}),
+                    .Vec => unreachable, // TODO support
                     .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
                     .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
                 }

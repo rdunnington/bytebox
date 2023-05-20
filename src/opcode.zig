@@ -1,4 +1,5 @@
 const std = @import("std");
+const common = @import("common.zig");
 
 // A compressed version of the wasm opcodes for better table-oriented lookup (no holes). See WasmOpcode for the actual wasm representation.
 pub const Opcode = enum(u16) {
@@ -205,6 +206,10 @@ pub const Opcode = enum(u16) {
     Table_Grow,
     Table_Size,
     Table_Fill,
+
+    V128_Const,
+    I32x4_Add,
+    I64x2_Add,
 
     pub fn beginsBlock(opcode: Opcode) bool {
         return switch (opcode) {
@@ -425,12 +430,47 @@ pub const WasmOpcode = enum(u16) {
     Table_Grow = 0xFC0F,
     Table_Size = 0xFC10,
     Table_Fill = 0xFC11,
+    V128_Const = 0xFD0C,
+    I32x4_Add = 0xFDAE,
+    I64x2_Add = 0xFDCE,
 
     pub fn toOpcode(wasm: WasmOpcode) Opcode {
         const opcode_int = @enumToInt(wasm);
-        const opcode: Opcode = if (opcode_int < ConversionTables.wasmOpcodeToOpcodeTable.len) ConversionTables.wasmOpcodeToOpcodeTable[opcode_int] else ConversionTables.wasmFCOpcodeToOpcodeTable[opcode_int - 0xFC00];
+        var opcode: Opcode = undefined;
+        if (opcode_int < ConversionTables.wasmOpcodeToOpcodeTable.len) {
+            opcode = ConversionTables.wasmOpcodeToOpcodeTable[opcode_int];
+        } else if (opcode_int >= 0xFC00 and opcode_int < 0xFCD0) {
+            opcode = ConversionTables.wasmFCOpcodeToOpcodeTable[opcode_int - 0xFC00];
+        } else {
+            opcode = ConversionTables.wasmFDOpcodeToOpcodeTable[opcode_int - 0xFD00];
+        }
         std.debug.assert(opcode != .Invalid);
         return opcode;
+    }
+
+    pub fn decode(reader: anytype) !WasmOpcode {
+        var byte = try reader.readByte();
+        var wasm_op: WasmOpcode = undefined;
+        if (byte == 0xFC or byte == 0xFD) {
+            var type_opcode = try common.decodeLEB128(u32, reader);
+            if (type_opcode > std.math.maxInt(u8)) {
+                return error.MalformedIllegalOpcode;
+            }
+            var byte2 = @intCast(u8, type_opcode);
+            var extended: u16 = byte;
+            extended = extended << 8;
+            extended |= byte2;
+
+            wasm_op = std.meta.intToEnum(WasmOpcode, extended) catch {
+                std.debug.print(">>>> opcode: 0x{X}{X}\n", .{ byte, byte2 });
+                return error.MalformedIllegalOpcode;
+            };
+        } else {
+            wasm_op = std.meta.intToEnum(WasmOpcode, byte) catch {
+                return error.MalformedIllegalOpcode;
+            };
+        }
+        return wasm_op;
     }
 };
 
@@ -668,5 +708,264 @@ const ConversionTables = struct {
         Opcode.Table_Grow, // 0xFC0F
         Opcode.Table_Size, // 0xFC10
         Opcode.Table_Fill, // 0xFC11
+    };
+
+    const wasmFDOpcodeToOpcodeTable = [_]Opcode{
+        Opcode.Invalid, // 0xFD00
+        Opcode.Invalid, // 0xFD01
+        Opcode.Invalid, // 0xFD02
+        Opcode.Invalid, // 0xFD03
+        Opcode.Invalid, // 0xFD04
+        Opcode.Invalid, // 0xFD05
+        Opcode.Invalid, // 0xFD06
+        Opcode.Invalid, // 0xFD07
+        Opcode.Invalid, // 0xFD08
+        Opcode.Invalid, // 0xFD09
+        Opcode.Invalid, // 0xFD0A
+        Opcode.Invalid, // 0xFD0B
+        Opcode.V128_Const, // 0xFD0C
+        Opcode.Invalid, // 0xFD0D
+        Opcode.Invalid, // 0xFD0E
+        Opcode.Invalid, // 0xFD0F
+        Opcode.Invalid, // 0xFD10
+        Opcode.Invalid, // 0xFD11
+        Opcode.Invalid, // 0xFD12
+        Opcode.Invalid, // 0xFD13
+        Opcode.Invalid, // 0xFD14
+        Opcode.Invalid, // 0xFD15
+        Opcode.Invalid, // 0xFD16
+        Opcode.Invalid, // 0xFD17
+        Opcode.Invalid, // 0xFD18
+        Opcode.Invalid, // 0xFD19
+        Opcode.Invalid, // 0xFD1A
+        Opcode.Invalid, // 0xFD1B
+        Opcode.Invalid, // 0xFD1C
+        Opcode.Invalid, // 0xFD1D
+        Opcode.Invalid, // 0xFD1E
+        Opcode.Invalid, // 0xFD1F
+        Opcode.Invalid, // 0xFD20
+        Opcode.Invalid, // 0xFD21
+        Opcode.Invalid, // 0xFD22
+        Opcode.Invalid, // 0xFD23
+        Opcode.Invalid, // 0xFD24
+        Opcode.Invalid, // 0xFD25
+        Opcode.Invalid, // 0xFD26
+        Opcode.Invalid, // 0xFD27
+        Opcode.Invalid, // 0xFD28
+        Opcode.Invalid, // 0xFD29
+        Opcode.Invalid, // 0xFD2A
+        Opcode.Invalid, // 0xFD2B
+        Opcode.Invalid, // 0xFD2C
+        Opcode.Invalid, // 0xFD2D
+        Opcode.Invalid, // 0xFD2E
+        Opcode.Invalid, // 0xFD2F
+        Opcode.Invalid, // 0xFD30
+        Opcode.Invalid, // 0xFD31
+        Opcode.Invalid, // 0xFD32
+        Opcode.Invalid, // 0xFD33
+        Opcode.Invalid, // 0xFD34
+        Opcode.Invalid, // 0xFD35
+        Opcode.Invalid, // 0xFD36
+        Opcode.Invalid, // 0xFD37
+        Opcode.Invalid, // 0xFD38
+        Opcode.Invalid, // 0xFD39
+        Opcode.Invalid, // 0xFD3A
+        Opcode.Invalid, // 0xFD3B
+        Opcode.Invalid, // 0xFD3C
+        Opcode.Invalid, // 0xFD3D
+        Opcode.Invalid, // 0xFD3E
+        Opcode.Invalid, // 0xFD3F
+        Opcode.Invalid, // 0xFD40
+        Opcode.Invalid, // 0xFD41
+        Opcode.Invalid, // 0xFD42
+        Opcode.Invalid, // 0xFD43
+        Opcode.Invalid, // 0xFD44
+        Opcode.Invalid, // 0xFD45
+        Opcode.Invalid, // 0xFD46
+        Opcode.Invalid, // 0xFD47
+        Opcode.Invalid, // 0xFD48
+        Opcode.Invalid, // 0xFD49
+        Opcode.Invalid, // 0xFD4A
+        Opcode.Invalid, // 0xFD4B
+        Opcode.Invalid, // 0xFD4C
+        Opcode.Invalid, // 0xFD4D
+        Opcode.Invalid, // 0xFD4E
+        Opcode.Invalid, // 0xFD4F
+        Opcode.Invalid, // 0xFD50
+        Opcode.Invalid, // 0xFD51
+        Opcode.Invalid, // 0xFD52
+        Opcode.Invalid, // 0xFD53
+        Opcode.Invalid, // 0xFD54
+        Opcode.Invalid, // 0xFD55
+        Opcode.Invalid, // 0xFD56
+        Opcode.Invalid, // 0xFD57
+        Opcode.Invalid, // 0xFD58
+        Opcode.Invalid, // 0xFD59
+        Opcode.Invalid, // 0xFD5A
+        Opcode.Invalid, // 0xFD5B
+        Opcode.Invalid, // 0xFD5C
+        Opcode.Invalid, // 0xFD5D
+        Opcode.Invalid, // 0xFD5E
+        Opcode.Invalid, // 0xFD5F
+        Opcode.Invalid, // 0xFD60
+        Opcode.Invalid, // 0xFD61
+        Opcode.Invalid, // 0xFD62
+        Opcode.Invalid, // 0xFD63
+        Opcode.Invalid, // 0xFD64
+        Opcode.Invalid, // 0xFD65
+        Opcode.Invalid, // 0xFD66
+        Opcode.Invalid, // 0xFD67
+        Opcode.Invalid, // 0xFD68
+        Opcode.Invalid, // 0xFD69
+        Opcode.Invalid, // 0xFD6A
+        Opcode.Invalid, // 0xFD6B
+        Opcode.Invalid, // 0xFD6C
+        Opcode.Invalid, // 0xFD6D
+        Opcode.Invalid, // 0xFD6E
+        Opcode.Invalid, // 0xFD6F
+        Opcode.Invalid, // 0xFD70
+        Opcode.Invalid, // 0xFD71
+        Opcode.Invalid, // 0xFD72
+        Opcode.Invalid, // 0xFD73
+        Opcode.Invalid, // 0xFD74
+        Opcode.Invalid, // 0xFD75
+        Opcode.Invalid, // 0xFD76
+        Opcode.Invalid, // 0xFD77
+        Opcode.Invalid, // 0xFD78
+        Opcode.Invalid, // 0xFD79
+        Opcode.Invalid, // 0xFD7A
+        Opcode.Invalid, // 0xFD7B
+        Opcode.Invalid, // 0xFD7C
+        Opcode.Invalid, // 0xFD7D
+        Opcode.Invalid, // 0xFD7E
+        Opcode.Invalid, // 0xFD7F
+        Opcode.Invalid, // 0xFD80
+        Opcode.Invalid, // 0xFD81
+        Opcode.Invalid, // 0xFD82
+        Opcode.Invalid, // 0xFD83
+        Opcode.Invalid, // 0xFD84
+        Opcode.Invalid, // 0xFD85
+        Opcode.Invalid, // 0xFD86
+        Opcode.Invalid, // 0xFD87
+        Opcode.Invalid, // 0xFD88
+        Opcode.Invalid, // 0xFD89
+        Opcode.Invalid, // 0xFD8A
+        Opcode.Invalid, // 0xFD8B
+        Opcode.Invalid, // 0xFD8C
+        Opcode.Invalid, // 0xFD8D
+        Opcode.Invalid, // 0xFD8E
+        Opcode.Invalid, // 0xFD8F
+        Opcode.Invalid, // 0xFD90
+        Opcode.Invalid, // 0xFD91
+        Opcode.Invalid, // 0xFD92
+        Opcode.Invalid, // 0xFD93
+        Opcode.Invalid, // 0xFD94
+        Opcode.Invalid, // 0xFD95
+        Opcode.Invalid, // 0xFD96
+        Opcode.Invalid, // 0xFD97
+        Opcode.Invalid, // 0xFD98
+        Opcode.Invalid, // 0xFD99
+        Opcode.Invalid, // 0xFD9A
+        Opcode.Invalid, // 0xFD9B
+        Opcode.Invalid, // 0xFD9C
+        Opcode.Invalid, // 0xFD9D
+        Opcode.Invalid, // 0xFD9E
+        Opcode.Invalid, // 0xFD9F
+        Opcode.Invalid, // 0xFDA0
+        Opcode.Invalid, // 0xFDA1
+        Opcode.Invalid, // 0xFDA2
+        Opcode.Invalid, // 0xFDA3
+        Opcode.Invalid, // 0xFDA4
+        Opcode.Invalid, // 0xFDA5
+        Opcode.Invalid, // 0xFDA6
+        Opcode.Invalid, // 0xFDA7
+        Opcode.Invalid, // 0xFDA8
+        Opcode.Invalid, // 0xFDA9
+        Opcode.Invalid, // 0xFDAA
+        Opcode.Invalid, // 0xFDAB
+        Opcode.Invalid, // 0xFDAC
+        Opcode.Invalid, // 0xFDAD
+        Opcode.I32x4_Add, // 0xFDAE
+        Opcode.Invalid, // 0xFDAF
+        Opcode.Invalid, // 0xFDB0
+        Opcode.Invalid, // 0xFDB1
+        Opcode.Invalid, // 0xFDB2
+        Opcode.Invalid, // 0xFDB3
+        Opcode.Invalid, // 0xFDB4
+        Opcode.Invalid, // 0xFDB5
+        Opcode.Invalid, // 0xFDB6
+        Opcode.Invalid, // 0xFDB7
+        Opcode.Invalid, // 0xFDB8
+        Opcode.Invalid, // 0xFDB9
+        Opcode.Invalid, // 0xFDBA
+        Opcode.Invalid, // 0xFDBB
+        Opcode.Invalid, // 0xFDBC
+        Opcode.Invalid, // 0xFDBD
+        Opcode.Invalid, // 0xFDBE
+        Opcode.Invalid, // 0xFDBF
+        Opcode.Invalid, // 0xFDC0
+        Opcode.Invalid, // 0xFDC1
+        Opcode.Invalid, // 0xFDC2
+        Opcode.Invalid, // 0xFDC3
+        Opcode.Invalid, // 0xFDC4
+        Opcode.Invalid, // 0xFDC5
+        Opcode.Invalid, // 0xFDC6
+        Opcode.Invalid, // 0xFDC7
+        Opcode.Invalid, // 0xFDC8
+        Opcode.Invalid, // 0xFDC9
+        Opcode.Invalid, // 0xFDCA
+        Opcode.Invalid, // 0xFDCB
+        Opcode.Invalid, // 0xFDCC
+        Opcode.Invalid, // 0xFDCD
+        Opcode.I64x2_Add, // 0xFDCE
+        Opcode.Invalid, // 0xFDCF
+        Opcode.Invalid, // 0xFDD0
+        Opcode.Invalid, // 0xFDD1
+        Opcode.Invalid, // 0xFDD2
+        Opcode.Invalid, // 0xFDD3
+        Opcode.Invalid, // 0xFDD4
+        Opcode.Invalid, // 0xFDD5
+        Opcode.Invalid, // 0xFDD6
+        Opcode.Invalid, // 0xFDD7
+        Opcode.Invalid, // 0xFDD8
+        Opcode.Invalid, // 0xFDD9
+        Opcode.Invalid, // 0xFDDA
+        Opcode.Invalid, // 0xFDDB
+        Opcode.Invalid, // 0xFDDC
+        Opcode.Invalid, // 0xFDDD
+        Opcode.Invalid, // 0xFDDE
+        Opcode.Invalid, // 0xFDDF
+        Opcode.Invalid, // 0xFDE0
+        Opcode.Invalid, // 0xFDE1
+        Opcode.Invalid, // 0xFDE2
+        Opcode.Invalid, // 0xFDE3
+        Opcode.Invalid, // 0xFDE4
+        Opcode.Invalid, // 0xFDE5
+        Opcode.Invalid, // 0xFDE6
+        Opcode.Invalid, // 0xFDE7
+        Opcode.Invalid, // 0xFDE8
+        Opcode.Invalid, // 0xFDE9
+        Opcode.Invalid, // 0xFDEA
+        Opcode.Invalid, // 0xFDEB
+        Opcode.Invalid, // 0xFDEC
+        Opcode.Invalid, // 0xFDED
+        Opcode.Invalid, // 0xFDEE
+        Opcode.Invalid, // 0xFDEF
+        Opcode.Invalid, // 0xFDF0
+        Opcode.Invalid, // 0xFDF1
+        Opcode.Invalid, // 0xFDF2
+        Opcode.Invalid, // 0xFDF3
+        Opcode.Invalid, // 0xFDF4
+        Opcode.Invalid, // 0xFDF5
+        Opcode.Invalid, // 0xFDF6
+        Opcode.Invalid, // 0xFDF7
+        Opcode.Invalid, // 0xFDF8
+        Opcode.Invalid, // 0xFDF9
+        Opcode.Invalid, // 0xFDFA
+        Opcode.Invalid, // 0xFDFB
+        Opcode.Invalid, // 0xFDFC
+        Opcode.Invalid, // 0xFDFD
+        Opcode.Invalid, // 0xFDFE
+        Opcode.Invalid, // 0xFDFF
     };
 };
