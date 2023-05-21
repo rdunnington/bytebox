@@ -2509,6 +2509,10 @@ const ModuleValidator = struct {
             .V128_Const => {
                 try self.pushType(.V128);
             },
+            .V128_AnyTrue, .I8x16_AllTrue, .I8x16_Bitmask, .I16x8_AllTrue, .I16x8_Bitmask, .I32x4_AllTrue, .I32x4_Bitmask, .I64x2_AllTrue, .I64x2_Bitmask => {
+                try self.popType(.V128);
+                try self.pushType(.I32);
+            },
             .I32x4_Add, .I64x2_Add => {
                 try Helpers.validateNumericBinaryOp(self, .V128, .V128);
             },
@@ -2832,6 +2836,15 @@ const InstructionFuncs = struct {
         &op_Table_Size,
         &op_Table_Fill,
         &op_V128_Const,
+        &op_V128_AnyTrue,
+        &op_I8x16_AllTrue,
+        &op_I8x16_Bitmask,
+        &op_I16x8_AllTrue,
+        &op_I16x8_Bitmask,
+        &op_I32x4_AllTrue,
+        &op_I32x4_Bitmask,
+        &op_I64x2_AllTrue,
+        &op_I64x2_Bitmask,
         &op_I32x4_Add,
         &op_I64x2_Add,
     };
@@ -3052,6 +3065,73 @@ const InstructionFuncs = struct {
                 .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
                 .continuation = label.continuation + 1, // branching takes care of popping/pushing values so skip the End instruction
             };
+        }
+
+        fn vectorAllTrue(comptime T: type, vec: v128) i32 {
+            const element_count = @typeInfo(T).Vector.len;
+            const child_type = @typeInfo(T).Vector.child;
+
+            const v = @bitCast(T, vec);
+            const zeroes: T = @splat(element_count, @as(child_type, 0));
+            const bools = v != zeroes;
+            const any_true: bool = @reduce(.And, bools);
+            return if (any_true) 1 else 0;
+        }
+
+        fn vectorBitmask(comptime T: type, vec: v128) i32 {
+            switch (@typeInfo(T)) {
+                .Vector => |vec_type_info| {
+                    switch (@typeInfo(vec_type_info.child)) {
+                        .Int => {},
+                        else => @compileError("Vector child type must be an int"),
+                    }
+                },
+                else => @compileError("Expected T to be a vector type"),
+            }
+
+            const child_type: type = @typeInfo(T).Vector.child;
+
+            if (child_type == i8) {
+                const high_bit: u8 = 1 << (@bitSizeOf(u8) - 1);
+                const high_bits_mask = @splat(16, high_bit);
+
+                const shift_type = std.meta.Int(.unsigned, std.math.log2(@bitSizeOf(u16)));
+                const shifts_left = @splat(16, @as(shift_type, 8));
+                var shifts_right_array: [16]shift_type = undefined;
+                comptime for (shifts_right_array) |*element, i| {
+                    element.* = @intCast(shift_type, 15 - i);
+                };
+                const shifts_right = comptime @as(@Vector(16, shift_type), shifts_right_array);
+
+                const v = @bitCast(@Vector(16, u8), vec);
+                const v_high_bits = high_bits_mask & v;
+                const v_high_bits_u16: @Vector(16, u16) = v_high_bits;
+                const v_high_bits_shifted_left = @shlExact(v_high_bits_u16, shifts_left);
+                const v_high_bits_shifted_right = @shrExact(v_high_bits_shifted_left, shifts_right);
+                const reduction: u32 = @reduce(.Or, v_high_bits_shifted_right);
+                const bitmask = @bitCast(i32, reduction);
+                return bitmask;
+            } else {
+                const vec_len = @typeInfo(T).Vector.len;
+                const int_type: type = std.meta.Int(.unsigned, @bitSizeOf(child_type));
+
+                const high_bit: int_type = 1 << (@bitSizeOf(int_type) - 1);
+                const high_bits_mask = @splat(vec_len, high_bit);
+
+                const shift_type = std.meta.Int(.unsigned, std.math.log2(@bitSizeOf(int_type)));
+                var shifts_right_array: [vec_len]shift_type = undefined;
+                comptime for (shifts_right_array) |*element, i| {
+                    element.* = @intCast(shift_type, (@bitSizeOf(int_type) - 1) - i);
+                };
+                const shifts_right = comptime @as(@Vector(vec_len, shift_type), shifts_right_array);
+
+                const v = @bitCast(@Vector(vec_len, int_type), vec);
+                const v_high_bits = high_bits_mask & v;
+                const v_high_bits_shifted_right = @shrExact(v_high_bits, shifts_right);
+                const reduction: u32 = @intCast(u32, @reduce(.Or, v_high_bits_shifted_right)); // cast should be fine thanks to the rshift
+                const bitmask = @bitCast(i32, reduction);
+                return bitmask;
+            }
         }
     };
 
@@ -5106,6 +5186,70 @@ const InstructionFuncs = struct {
         try stack.checkExhausted(1);
         var v: v128 = code[pc].immediate.ValueVec;
         stack.pushV128(v);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_AnyTrue(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_AnyTrue", pc, code, stack);
+        var v = @bitCast(u128, stack.popV128());
+        const boolean: i32 = if (v != 0) 1 else 0;
+        stack.pushI32(boolean);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_AllTrue(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const boolean = OpHelpers.vectorAllTrue(i8x16, stack.popV128());
+        stack.pushI32(boolean);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_Bitmask(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const bitmask: i32 = OpHelpers.vectorBitmask(i8x16, stack.popV128());
+        stack.pushI32(bitmask);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_AllTrue(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const boolean: i32 = OpHelpers.vectorAllTrue(i16x8, stack.popV128());
+        stack.pushI32(boolean);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Bitmask(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const bitmask: i32 = OpHelpers.vectorBitmask(i16x8, stack.popV128());
+        stack.pushI32(bitmask);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_AllTrue(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const boolean: i32 = OpHelpers.vectorAllTrue(i32x4, stack.popV128());
+        stack.pushI32(boolean);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Bitmask(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const bitmask: i32 = OpHelpers.vectorBitmask(i32x4, stack.popV128());
+        stack.pushI32(bitmask);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_AllTrue(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const boolean = OpHelpers.vectorAllTrue(i64x2, stack.popV128());
+        stack.pushI32(boolean);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_Bitmask(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        const bitmask: i32 = OpHelpers.vectorBitmask(i64x2, stack.popV128());
+        stack.pushI32(bitmask);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 

@@ -1286,7 +1286,7 @@ pub fn main() !void {
         // "simd_align",
         // "simd_bitwise",
         // "simd_bit_shift",
-        // "simd_boolean",
+        "simd_boolean",
         "simd_const",
         // "simd_conversions",
         // "simd_f32x4",

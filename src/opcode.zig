@@ -208,6 +208,15 @@ pub const Opcode = enum(u16) {
     Table_Fill,
 
     V128_Const,
+    V128_AnyTrue,
+    I8x16_AllTrue,
+    I8x16_Bitmask,
+    I16x8_AllTrue,
+    I16x8_Bitmask,
+    I32x4_AllTrue,
+    I32x4_Bitmask,
+    I64x2_AllTrue,
+    I64x2_Bitmask,
     I32x4_Add,
     I64x2_Add,
 
@@ -431,6 +440,15 @@ pub const WasmOpcode = enum(u16) {
     Table_Size = 0xFC10,
     Table_Fill = 0xFC11,
     V128_Const = 0xFD0C,
+    V128_AnyTrue = 0xFD53,
+    I8x16_AllTrue = 0xFD63,
+    I8x16_Bitmask = 0xFD64,
+    I16x8_AllTrue = 0xFD83,
+    I16x8_Bitmask = 0xFD84,
+    I32x4_AllTrue = 0xFDA3,
+    I32x4_Bitmask = 0xFDA4,
+    I64x2_AllTrue = 0xFDC3,
+    I64x2_Bitmask = 0xFDC4,
     I32x4_Add = 0xFDAE,
     I64x2_Add = 0xFDCE,
 
@@ -794,7 +812,7 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD50
         Opcode.Invalid, // 0xFD51
         Opcode.Invalid, // 0xFD52
-        Opcode.Invalid, // 0xFD53
+        Opcode.V128_AnyTrue, // 0xFD53
         Opcode.Invalid, // 0xFD54
         Opcode.Invalid, // 0xFD55
         Opcode.Invalid, // 0xFD56
@@ -810,8 +828,8 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD60
         Opcode.Invalid, // 0xFD61
         Opcode.Invalid, // 0xFD62
-        Opcode.Invalid, // 0xFD63
-        Opcode.Invalid, // 0xFD64
+        Opcode.I8x16_AllTrue, // 0xFD63
+        Opcode.I8x16_Bitmask, // 0xFD64
         Opcode.Invalid, // 0xFD65
         Opcode.Invalid, // 0xFD66
         Opcode.Invalid, // 0xFD67
@@ -842,8 +860,8 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD80
         Opcode.Invalid, // 0xFD81
         Opcode.Invalid, // 0xFD82
-        Opcode.Invalid, // 0xFD83
-        Opcode.Invalid, // 0xFD84
+        Opcode.I16x8_AllTrue, // 0xFD83
+        Opcode.I16x8_Bitmask, // 0xFD84
         Opcode.Invalid, // 0xFD85
         Opcode.Invalid, // 0xFD86
         Opcode.Invalid, // 0xFD87
@@ -874,8 +892,8 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDA0
         Opcode.Invalid, // 0xFDA1
         Opcode.Invalid, // 0xFDA2
-        Opcode.Invalid, // 0xFDA3
-        Opcode.Invalid, // 0xFDA4
+        Opcode.I32x4_AllTrue, // 0xFDA3
+        Opcode.I32x4_Bitmask, // 0xFDA4
         Opcode.Invalid, // 0xFDA5
         Opcode.Invalid, // 0xFDA6
         Opcode.Invalid, // 0xFDA7
@@ -906,8 +924,8 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDC0
         Opcode.Invalid, // 0xFDC1
         Opcode.Invalid, // 0xFDC2
-        Opcode.Invalid, // 0xFDC3
-        Opcode.Invalid, // 0xFDC4
+        Opcode.I64x2_AllTrue, // 0xFDC3
+        Opcode.I64x2_Bitmask, // 0xFDC4
         Opcode.Invalid, // 0xFDC5
         Opcode.Invalid, // 0xFDC6
         Opcode.Invalid, // 0xFDC7
