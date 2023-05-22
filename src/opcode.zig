@@ -208,6 +208,12 @@ pub const Opcode = enum(u16) {
     Table_Fill,
 
     V128_Const,
+    V128_Not,
+    V128_And,
+    V128_AndNot,
+    V128_Or,
+    V128_Xor,
+    V128_Bitselect,
     V128_AnyTrue,
     I8x16_AllTrue,
     I8x16_Bitmask,
@@ -440,6 +446,12 @@ pub const WasmOpcode = enum(u16) {
     Table_Size = 0xFC10,
     Table_Fill = 0xFC11,
     V128_Const = 0xFD0C,
+    V128_Not = 0xFD4D,
+    V128_And = 0xFD4E,
+    V128_AndNot = 0xFD4F,
+    V128_Or = 0xFD50,
+    V128_Xor = 0xFD51,
+    V128_Bitselect = 0xFD52,
     V128_AnyTrue = 0xFD53,
     I8x16_AllTrue = 0xFD63,
     I8x16_Bitmask = 0xFD64,
@@ -806,12 +818,12 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD4A
         Opcode.Invalid, // 0xFD4B
         Opcode.Invalid, // 0xFD4C
-        Opcode.Invalid, // 0xFD4D
-        Opcode.Invalid, // 0xFD4E
-        Opcode.Invalid, // 0xFD4F
-        Opcode.Invalid, // 0xFD50
-        Opcode.Invalid, // 0xFD51
-        Opcode.Invalid, // 0xFD52
+        Opcode.V128_Not, // 0xFD4D
+        Opcode.V128_And, // 0xFD4E
+        Opcode.V128_AndNot, // 0xFD4F
+        Opcode.V128_Or, // 0xFD50
+        Opcode.V128_Xor, // 0xFD51
+        Opcode.V128_Bitselect, // 0xFD52
         Opcode.V128_AnyTrue, // 0xFD53
         Opcode.Invalid, // 0xFD54
         Opcode.Invalid, // 0xFD55
