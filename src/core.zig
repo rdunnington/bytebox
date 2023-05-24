@@ -1683,6 +1683,10 @@ const Instruction = struct {
             .Table_Fill => {
                 immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) }; // elemidx
             },
+            .V128_Load => {
+                var memarg = try MemArg.decode(reader, 128);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
             .V128_Const => {
                 immediate = InstructionImmediates{ .ValueVec = try decodeVec(reader) };
             },
@@ -2002,6 +2006,12 @@ const ModuleValidator = struct {
                 try validator.pushType(push_type);
             }
 
+            fn validateLoadOp(validator: *ModuleValidator, module_: *const ModuleDefinition, load_type: ValType) !void {
+                try validator.popType(.I32);
+                try validateMemoryIndex(module_);
+                try validator.pushType(load_type);
+            }
+
             fn validateStoreOp(validator: *ModuleValidator, module_: *const ModuleDefinition, store_type: ValType) !void {
                 try validateMemoryIndex(module_);
                 try validator.popType(store_type);
@@ -2206,24 +2216,16 @@ const ModuleValidator = struct {
                 try self.popType(.I32);
             },
             .I32_Load, .I32_Load8_S, .I32_Load8_U, .I32_Load16_S, .I32_Load16_U => {
-                try self.popType(.I32);
-                try validateMemoryIndex(module);
-                try self.pushType(.I32);
+                try Helpers.validateLoadOp(self, module, .I32);
             },
             .I64_Load, .I64_Load8_S, .I64_Load8_U, .I64_Load16_S, .I64_Load16_U, .I64_Load32_S, .I64_Load32_U => {
-                try self.popType(.I32);
-                try validateMemoryIndex(module);
-                try self.pushType(.I64);
+                try Helpers.validateLoadOp(self, module, .I64);
             },
             .F32_Load => {
-                try self.popType(.I32);
-                try validateMemoryIndex(module);
-                try self.pushType(.F32);
+                try Helpers.validateLoadOp(self, module, .F32);
             },
             .F64_Load => {
-                try self.popType(.I32);
-                try validateMemoryIndex(module);
-                try self.pushType(.F64);
+                try Helpers.validateLoadOp(self, module, .F64);
             },
             .I32_Store, .I32_Store8, .I32_Store16 => {
                 try Helpers.validateStoreOp(self, module, .I32);
@@ -2497,6 +2499,9 @@ const ModuleValidator = struct {
                     }
                 }
                 try self.popType(.I32);
+            },
+            .V128_Load => {
+                try Helpers.validateLoadOp(self, module, .V128);
             },
             .V128_Const => {
                 try self.pushType(.V128);
@@ -2835,6 +2840,7 @@ const InstructionFuncs = struct {
         &op_Table_Grow,
         &op_Table_Size,
         &op_Table_Fill,
+        &op_V128_Load,
         &op_V128_Const,
         &op_V128_Not,
         &op_V128_And,
@@ -2950,12 +2956,13 @@ const InstructionFuncs = struct {
             const memory: *const MemoryInstance = store.getMemory(0);
             const offset: usize = offset_from_memarg + @intCast(usize, offset_from_stack);
 
-            const bit_count = std.meta.bitCount(T);
+            const bit_count = @bitSizeOf(T);
             const read_type = switch (bit_count) {
                 8 => u8,
                 16 => u16,
                 32 => u32,
                 64 => u64,
+                128 => u128,
                 else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
             };
 
@@ -2978,7 +2985,7 @@ const InstructionFuncs = struct {
             const memory: *MemoryInstance = store.getMemory(0);
             const offset: usize = offset_from_memarg + @intCast(u32, offset_from_stack);
 
-            const bit_count = std.meta.bitCount(@TypeOf(value));
+            const bit_count = @bitSizeOf(@TypeOf(value));
             const write_type = switch (bit_count) {
                 8 => u8,
                 16 => u16,
@@ -5187,6 +5194,14 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_V128_Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Const", pc, code, stack);
+        var offset_from_stack: i32 = stack.popI32();
+        var value = try OpHelpers.loadFromMem(v128, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        stack.pushV128(value);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_V128_Const(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_Const", pc, code, stack);
         try stack.checkExhausted(1);
@@ -5205,8 +5220,8 @@ const InstructionFuncs = struct {
 
     fn op_V128_And(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_And", pc, code, stack);
-        var v1 = @bitCast(i8x16, stack.popV128());
         var v2 = @bitCast(i8x16, stack.popV128());
+        var v1 = @bitCast(i8x16, stack.popV128());
         var v = v1 & v2;
         stack.pushV128(@bitCast(v128, v));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -5214,8 +5229,8 @@ const InstructionFuncs = struct {
 
     fn op_V128_AndNot(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_AndNot", pc, code, stack);
-        var v1 = @bitCast(i8x16, stack.popV128());
         var v2 = @bitCast(i8x16, stack.popV128());
+        var v1 = @bitCast(i8x16, stack.popV128());
         var v = v1 & (~v2);
         stack.pushV128(@bitCast(v128, v));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -5232,8 +5247,8 @@ const InstructionFuncs = struct {
 
     fn op_V128_Xor(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_Xor", pc, code, stack);
-        var v1 = @bitCast(i8x16, stack.popV128());
         var v2 = @bitCast(i8x16, stack.popV128());
+        var v1 = @bitCast(i8x16, stack.popV128());
         var v = v1 ^ v2;
         stack.pushV128(@bitCast(v128, v));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });

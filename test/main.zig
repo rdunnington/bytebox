@@ -1032,7 +1032,26 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                                         const actual_typed = @bitCast(VectorType, actual_value);
                                         const expected_typed = @bitCast(VectorType, expected_value_);
 
-                                        const is_equal = std.meta.eql(actual_typed, expected_typed);
+                                        var is_equal = true;
+                                        const child_type = @typeInfo(VectorType).Vector.child;
+                                        switch (child_type) {
+                                            i8, i16, i32, i64 => {
+                                                is_equal = std.meta.eql(actual_typed, expected_typed);
+                                            },
+                                            f32, f64 => {
+                                                const len = @typeInfo(VectorType).Vector.len;
+                                                var vec_i: u32 = 0;
+                                                while (vec_i < len) : (vec_i += 1) {
+                                                    if (std.math.isNan(expected_typed[vec_i])) {
+                                                        is_equal = is_equal and std.math.isNan(actual_typed[vec_i]);
+                                                    } else {
+                                                        is_equal = is_equal and expected_typed[vec_i] == actual_typed[vec_i];
+                                                    }
+                                                }
+                                            },
+                                            else => @compileError("unsupported vector child type"),
+                                        }
+
                                         if (is_equal == false) {
                                             if (!g_verbose_logging) {
                                                 print("assert_return: {s}:{s}({any})\n", .{ module_.filename, command_.action.field, command_.action.args.items });
@@ -1284,7 +1303,7 @@ pub fn main() !void {
         "select",
         // "simd_address",
         // "simd_align",
-        // "simd_bitwise",
+        "simd_bitwise",
         // "simd_bit_shift",
         "simd_boolean",
         "simd_const",

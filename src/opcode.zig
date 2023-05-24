@@ -207,6 +207,7 @@ pub const Opcode = enum(u16) {
     Table_Size,
     Table_Fill,
 
+    V128_Load,
     V128_Const,
     V128_Not,
     V128_And,
@@ -445,6 +446,7 @@ pub const WasmOpcode = enum(u16) {
     Table_Grow = 0xFC0F,
     Table_Size = 0xFC10,
     Table_Fill = 0xFC11,
+    V128_Load = 0xFD00,
     V128_Const = 0xFD0C,
     V128_Not = 0xFD4D,
     V128_And = 0xFD4E,
@@ -741,7 +743,7 @@ const ConversionTables = struct {
     };
 
     const wasmFDOpcodeToOpcodeTable = [_]Opcode{
-        Opcode.Invalid, // 0xFD00
+        Opcode.V128_Load, // 0xFD00
         Opcode.Invalid, // 0xFD01
         Opcode.Invalid, // 0xFD02
         Opcode.Invalid, // 0xFD03
