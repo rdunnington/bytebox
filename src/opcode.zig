@@ -206,9 +206,34 @@ pub const Opcode = enum(u16) {
     Table_Grow,
     Table_Size,
     Table_Fill,
-
     V128_Load,
+    V128_Load8_Splat,
+    V128_Load16_Splat,
+    V128_Load32_Splat,
+    V128_Load64_Splat,
+    I8x16_Splat,
+    I16x8_Splat,
+    I32x4_Splat,
+    I64x2_Splat,
+    F32x4_Splat,
+    F64x2_Splat,
+    I8x16_Extract_Lane_S,
+    I8x16_Extract_Lane_U,
+    I8x16_Replace_Lane,
+    I16x8_Extract_Lane_S,
+    I16x8_Extract_Lane_U,
+    I16x8_Replace_Lane,
+    I32x4_Extract_Lane,
+    I32x4_Replace_Lane,
+    I64x2_Extract_Lane,
+    I64x2_Replace_Lane,
+    F32x4_Extract_Lane,
+    F32x4_Replace_Lane,
+    F64x2_Extract_Lane,
+    F64x2_Replace_Lane,
+    V128_Store,
     V128_Const,
+    V128_Swizzle,
     V128_Not,
     V128_And,
     V128_AndNot,
@@ -218,8 +243,14 @@ pub const Opcode = enum(u16) {
     V128_AnyTrue,
     I8x16_AllTrue,
     I8x16_Bitmask,
+    I8x16_Add,
+    I8x16_Add_Sat_S,
+    I8x16_Add_Sat_U,
     I16x8_AllTrue,
     I16x8_Bitmask,
+    I16x8_Add,
+    I16x8_Add_Sat_S,
+    I16x8_Add_Sat_U,
     I32x4_AllTrue,
     I32x4_Bitmask,
     I64x2_AllTrue,
@@ -447,7 +478,33 @@ pub const WasmOpcode = enum(u16) {
     Table_Size = 0xFC10,
     Table_Fill = 0xFC11,
     V128_Load = 0xFD00,
+    V128_Load8_Splat = 0xFD07,
+    V128_Load16_Splat = 0xFD08,
+    V128_Load32_Splat = 0xFD09,
+    V128_Load64_Splat = 0xFD0A,
+    I8x16_Splat = 0xFD0F,
+    I16x8_Splat = 0xFD10,
+    I32x4_Splat = 0xFD11,
+    I64x2_Splat = 0xFD12,
+    F32x4_Splat = 0xFD13,
+    F64x2_Splat = 0xFD14,
+    I8x16_Extract_Lane_S = 0xFD15,
+    I8x16_Extract_Lane_U = 0xFD16,
+    I8x16_Replace_Lane = 0xFD17,
+    I16x8_Extract_Lane_S = 0xFD18,
+    I16x8_Extract_Lane_U = 0xFD19,
+    I16x8_Replace_Lane = 0xFD1A,
+    I32x4_Extract_Lane = 0xFD1B,
+    I32x4_Replace_Lane = 0xFD1C,
+    I64x2_Extract_Lane = 0xFD1D,
+    I64x2_Replace_Lane = 0xFD1E,
+    F32x4_Extract_Lane = 0xFD1F,
+    F32x4_Replace_Lane = 0xFD20,
+    F64x2_Extract_Lane = 0xFD21,
+    F64x2_Replace_Lane = 0xFD22,
+    V128_Store = 0xFD0B,
     V128_Const = 0xFD0C,
+    V128_Swizzle = 0xFD0E,
     V128_Not = 0xFD4D,
     V128_And = 0xFD4E,
     V128_AndNot = 0xFD4F,
@@ -457,8 +514,14 @@ pub const WasmOpcode = enum(u16) {
     V128_AnyTrue = 0xFD53,
     I8x16_AllTrue = 0xFD63,
     I8x16_Bitmask = 0xFD64,
+    I8x16_Add = 0xFD6E,
+    I8x16_Add_Sat_S = 0xFD6F,
+    I8x16_Add_Sat_U = 0xFD70,
     I16x8_AllTrue = 0xFD83,
     I16x8_Bitmask = 0xFD84,
+    I16x8_Add = 0xFD8E,
+    I16x8_Add_Sat_S = 0xFD8F,
+    I16x8_Add_Sat_U = 0xFD90,
     I32x4_AllTrue = 0xFDA3,
     I32x4_Bitmask = 0xFDA4,
     I64x2_AllTrue = 0xFDC3,
@@ -494,7 +557,7 @@ pub const WasmOpcode = enum(u16) {
             extended |= byte2;
 
             wasm_op = std.meta.intToEnum(WasmOpcode, extended) catch {
-                std.debug.print(">>>> opcode: 0x{X}{X}\n", .{ byte, byte2 });
+                std.debug.print(">>>> opcode: 0x{X}{X:2}\n", .{ byte, byte2 });
                 return error.MalformedIllegalOpcode;
             };
         } else {
@@ -750,34 +813,34 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD04
         Opcode.Invalid, // 0xFD05
         Opcode.Invalid, // 0xFD06
-        Opcode.Invalid, // 0xFD07
-        Opcode.Invalid, // 0xFD08
-        Opcode.Invalid, // 0xFD09
-        Opcode.Invalid, // 0xFD0A
-        Opcode.Invalid, // 0xFD0B
+        Opcode.V128_Load8_Splat, // 0xFD07
+        Opcode.V128_Load16_Splat, // 0xFD08
+        Opcode.V128_Load32_Splat, // 0xFD09
+        Opcode.V128_Load64_Splat, // 0xFD0A
+        Opcode.V128_Store, // 0xFD0B
         Opcode.V128_Const, // 0xFD0C
         Opcode.Invalid, // 0xFD0D
-        Opcode.Invalid, // 0xFD0E
-        Opcode.Invalid, // 0xFD0F
-        Opcode.Invalid, // 0xFD10
-        Opcode.Invalid, // 0xFD11
-        Opcode.Invalid, // 0xFD12
-        Opcode.Invalid, // 0xFD13
-        Opcode.Invalid, // 0xFD14
-        Opcode.Invalid, // 0xFD15
-        Opcode.Invalid, // 0xFD16
-        Opcode.Invalid, // 0xFD17
-        Opcode.Invalid, // 0xFD18
-        Opcode.Invalid, // 0xFD19
-        Opcode.Invalid, // 0xFD1A
-        Opcode.Invalid, // 0xFD1B
-        Opcode.Invalid, // 0xFD1C
-        Opcode.Invalid, // 0xFD1D
-        Opcode.Invalid, // 0xFD1E
-        Opcode.Invalid, // 0xFD1F
-        Opcode.Invalid, // 0xFD20
-        Opcode.Invalid, // 0xFD21
-        Opcode.Invalid, // 0xFD22
+        Opcode.V128_Swizzle, // 0xFD0E
+        Opcode.I8x16_Splat, // 0xFD0F
+        Opcode.I16x8_Splat, // 0xFD10
+        Opcode.I32x4_Splat, // 0xFD11
+        Opcode.I64x2_Splat, // 0xFD12
+        Opcode.F32x4_Splat, // 0xFD13
+        Opcode.F64x2_Splat, // 0xFD14
+        Opcode.I8x16_Extract_Lane_S, // 0xFD15
+        Opcode.I8x16_Extract_Lane_U, // 0xFD16
+        Opcode.I8x16_Replace_Lane, // 0xFD17
+        Opcode.I16x8_Extract_Lane_S, // 0xFD18
+        Opcode.I16x8_Extract_Lane_U, // 0xFD19
+        Opcode.I16x8_Replace_Lane, // 0xFD1A
+        Opcode.I32x4_Extract_Lane, // 0xFD1B
+        Opcode.I32x4_Replace_Lane, // 0xFD1C
+        Opcode.I64x2_Extract_Lane, // 0xFD1D
+        Opcode.I64x2_Replace_Lane, // 0xFD1E
+        Opcode.F32x4_Extract_Lane, // 0xFD1F
+        Opcode.F32x4_Replace_Lane, // 0xFD20
+        Opcode.F64x2_Extract_Lane, // 0xFD21
+        Opcode.F64x2_Replace_Lane, // 0xFD22
         Opcode.Invalid, // 0xFD23
         Opcode.Invalid, // 0xFD24
         Opcode.Invalid, // 0xFD25
@@ -853,9 +916,9 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD6B
         Opcode.Invalid, // 0xFD6C
         Opcode.Invalid, // 0xFD6D
-        Opcode.Invalid, // 0xFD6E
-        Opcode.Invalid, // 0xFD6F
-        Opcode.Invalid, // 0xFD70
+        Opcode.I8x16_Add, // 0xFD6E
+        Opcode.I8x16_Add_Sat_S, // 0xFD6F
+        Opcode.I8x16_Add_Sat_U, // 0xFD70
         Opcode.Invalid, // 0xFD71
         Opcode.Invalid, // 0xFD72
         Opcode.Invalid, // 0xFD73
@@ -885,9 +948,9 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD8B
         Opcode.Invalid, // 0xFD8C
         Opcode.Invalid, // 0xFD8D
-        Opcode.Invalid, // 0xFD8E
-        Opcode.Invalid, // 0xFD8F
-        Opcode.Invalid, // 0xFD90
+        Opcode.I16x8_Add, // 0xFD8E
+        Opcode.I16x8_Add_Sat_S, // 0xFD8F
+        Opcode.I16x8_Add_Sat_U, // 0xFD90
         Opcode.Invalid, // 0xFD91
         Opcode.Invalid, // 0xFD92
         Opcode.Invalid, // 0xFD93
