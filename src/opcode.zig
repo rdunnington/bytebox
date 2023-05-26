@@ -243,20 +243,45 @@ pub const Opcode = enum(u16) {
     V128_AnyTrue,
     I8x16_AllTrue,
     I8x16_Bitmask,
+    I8x16_Shr_S,
+    I8x16_Shr_U,
     I8x16_Add,
     I8x16_Add_Sat_S,
     I8x16_Add_Sat_U,
+    I8x16_Sub,
+    I8x16_Sub_Sat_S,
+    I8x16_Sub_Sat_U,
     I16x8_AllTrue,
     I16x8_Bitmask,
+    I16x8_Shr_S,
+    I16x8_Shr_U,
     I16x8_Add,
     I16x8_Add_Sat_S,
     I16x8_Add_Sat_U,
+    I16x8_Sub,
+    I16x8_Sub_Sat_S,
+    I16x8_Sub_Sat_U,
+    I16x8_Mul,
     I32x4_AllTrue,
     I32x4_Bitmask,
+    I32x4_Shr_S,
+    I32x4_Shr_U,
     I64x2_AllTrue,
     I64x2_Bitmask,
+    I64x4_Shr_S,
+    I64x4_Shr_U,
     I32x4_Add,
+    I32x4_Sub,
+    I32x4_Mul,
     I64x2_Add,
+    I64x2_Sub,
+    I64x2_Mul,
+    F32x4_Add,
+    F32x4_Sub,
+    F32x4_Mul,
+    F64x2_Add,
+    F64x2_Sub,
+    F64x2_Mul,
 
     pub fn beginsBlock(opcode: Opcode) bool {
         return switch (opcode) {
@@ -514,20 +539,45 @@ pub const WasmOpcode = enum(u16) {
     V128_AnyTrue = 0xFD53,
     I8x16_AllTrue = 0xFD63,
     I8x16_Bitmask = 0xFD64,
+    I8x16_Shr_S = 0xFD6C,
+    I8x16_Shr_U = 0xFD6D,
     I8x16_Add = 0xFD6E,
     I8x16_Add_Sat_S = 0xFD6F,
     I8x16_Add_Sat_U = 0xFD70,
+    I8x16_Sub = 0xFD71,
+    I8x16_Sub_Sat_S = 0xFD72,
+    I8x16_Sub_Sat_U = 0xFD73,
     I16x8_AllTrue = 0xFD83,
     I16x8_Bitmask = 0xFD84,
+    I16x8_Shr_S = 0xFD8C,
+    I16x8_Shr_U = 0xFD8D,
     I16x8_Add = 0xFD8E,
     I16x8_Add_Sat_S = 0xFD8F,
     I16x8_Add_Sat_U = 0xFD90,
+    I16x8_Sub = 0xFD91,
+    I16x8_Sub_Sat_S = 0xFD92,
+    I16x8_Sub_Sat_U = 0xFD93,
+    I16x8_Mul = 0xFD95,
     I32x4_AllTrue = 0xFDA3,
     I32x4_Bitmask = 0xFDA4,
+    I32x4_Shr_S = 0xFDAC,
+    I32x4_Shr_U = 0xFDAD,
     I64x2_AllTrue = 0xFDC3,
     I64x2_Bitmask = 0xFDC4,
+    I64x4_Shr_S = 0xFDCC,
+    I64x4_Shr_U = 0xFDCD,
     I32x4_Add = 0xFDAE,
+    I32x4_Sub = 0xFDB1,
+    I32x4_Mul = 0xFDB5,
     I64x2_Add = 0xFDCE,
+    I64x2_Sub = 0xFDD1,
+    I64x2_Mul = 0xFDD5,
+    F32x4_Add = 0xFDE4,
+    F32x4_Sub = 0xFDE5,
+    F32x4_Mul = 0xFDE6,
+    F64x2_Add = 0xFDF0,
+    F64x2_Sub = 0xFDF1,
+    F64x2_Mul = 0xFDF2,
 
     pub fn toOpcode(wasm: WasmOpcode) Opcode {
         const opcode_int = @enumToInt(wasm);
@@ -914,14 +964,14 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD69
         Opcode.Invalid, // 0xFD6A
         Opcode.Invalid, // 0xFD6B
-        Opcode.Invalid, // 0xFD6C
-        Opcode.Invalid, // 0xFD6D
+        Opcode.I8x16_Shr_S, // 0xFD6C
+        Opcode.I8x16_Shr_U, // 0xFD6D
         Opcode.I8x16_Add, // 0xFD6E
         Opcode.I8x16_Add_Sat_S, // 0xFD6F
         Opcode.I8x16_Add_Sat_U, // 0xFD70
-        Opcode.Invalid, // 0xFD71
-        Opcode.Invalid, // 0xFD72
-        Opcode.Invalid, // 0xFD73
+        Opcode.I8x16_Sub, // 0xFD71
+        Opcode.I8x16_Sub_Sat_S, // 0xFD72
+        Opcode.I8x16_Sub_Sat_U, // 0xFD73
         Opcode.Invalid, // 0xFD74
         Opcode.Invalid, // 0xFD75
         Opcode.Invalid, // 0xFD76
@@ -946,16 +996,16 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD89
         Opcode.Invalid, // 0xFD8A
         Opcode.Invalid, // 0xFD8B
-        Opcode.Invalid, // 0xFD8C
-        Opcode.Invalid, // 0xFD8D
+        Opcode.I16x8_Shr_S, // 0xFD8C
+        Opcode.I16x8_Shr_U, // 0xFD8D
         Opcode.I16x8_Add, // 0xFD8E
         Opcode.I16x8_Add_Sat_S, // 0xFD8F
         Opcode.I16x8_Add_Sat_U, // 0xFD90
-        Opcode.Invalid, // 0xFD91
-        Opcode.Invalid, // 0xFD92
-        Opcode.Invalid, // 0xFD93
+        Opcode.I16x8_Sub, // 0xFD91
+        Opcode.I16x8_Sub_Sat_S, // 0xFD92
+        Opcode.I16x8_Sub_Sat_U, // 0xFD93
         Opcode.Invalid, // 0xFD94
-        Opcode.Invalid, // 0xFD95
+        Opcode.I16x8_Mul, // 0xFD95
         Opcode.Invalid, // 0xFD96
         Opcode.Invalid, // 0xFD97
         Opcode.Invalid, // 0xFD98
@@ -978,16 +1028,16 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDA9
         Opcode.Invalid, // 0xFDAA
         Opcode.Invalid, // 0xFDAB
-        Opcode.Invalid, // 0xFDAC
-        Opcode.Invalid, // 0xFDAD
+        Opcode.I32x4_Shr_S, // 0xFDAC
+        Opcode.I32x4_Shr_U, // 0xFDAD
         Opcode.I32x4_Add, // 0xFDAE
         Opcode.Invalid, // 0xFDAF
         Opcode.Invalid, // 0xFDB0
-        Opcode.Invalid, // 0xFDB1
+        Opcode.I32x4_Sub, // 0xFDB1
         Opcode.Invalid, // 0xFDB2
         Opcode.Invalid, // 0xFDB3
         Opcode.Invalid, // 0xFDB4
-        Opcode.Invalid, // 0xFDB5
+        Opcode.I32x4_Mul, // 0xFDB5
         Opcode.Invalid, // 0xFDB6
         Opcode.Invalid, // 0xFDB7
         Opcode.Invalid, // 0xFDB8
@@ -1010,16 +1060,16 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDC9
         Opcode.Invalid, // 0xFDCA
         Opcode.Invalid, // 0xFDCB
-        Opcode.Invalid, // 0xFDCC
-        Opcode.Invalid, // 0xFDCD
+        Opcode.I64x4_Shr_S, // 0xFDCC
+        Opcode.I64x4_Shr_U, // 0xFDCD
         Opcode.I64x2_Add, // 0xFDCE
         Opcode.Invalid, // 0xFDCF
         Opcode.Invalid, // 0xFDD0
-        Opcode.Invalid, // 0xFDD1
+        Opcode.I64x2_Sub, // 0xFDD1
         Opcode.Invalid, // 0xFDD2
         Opcode.Invalid, // 0xFDD3
         Opcode.Invalid, // 0xFDD4
-        Opcode.Invalid, // 0xFDD5
+        Opcode.I64x2_Mul, // 0xFDD5
         Opcode.Invalid, // 0xFDD6
         Opcode.Invalid, // 0xFDD7
         Opcode.Invalid, // 0xFDD8
@@ -1034,9 +1084,9 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDE1
         Opcode.Invalid, // 0xFDE2
         Opcode.Invalid, // 0xFDE3
-        Opcode.Invalid, // 0xFDE4
-        Opcode.Invalid, // 0xFDE5
-        Opcode.Invalid, // 0xFDE6
+        Opcode.F32x4_Add, // 0xFDE4
+        Opcode.F32x4_Sub, // 0xFDE5
+        Opcode.F32x4_Mul, // 0xFDE6
         Opcode.Invalid, // 0xFDE7
         Opcode.Invalid, // 0xFDE8
         Opcode.Invalid, // 0xFDE9
@@ -1046,9 +1096,9 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDED
         Opcode.Invalid, // 0xFDEE
         Opcode.Invalid, // 0xFDEF
-        Opcode.Invalid, // 0xFDF0
-        Opcode.Invalid, // 0xFDF1
-        Opcode.Invalid, // 0xFDF2
+        Opcode.F64x2_Add, // 0xFDF0
+        Opcode.F64x2_Sub, // 0xFDF1
+        Opcode.F64x2_Mul, // 0xFDF2
         Opcode.Invalid, // 0xFDF3
         Opcode.Invalid, // 0xFDF4
         Opcode.Invalid, // 0xFDF5
