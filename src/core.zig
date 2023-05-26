@@ -2654,6 +2654,58 @@ const ModuleValidator = struct {
             .V128_Not => {
                 try Helpers.validateNumericUnaryOp(self, .V128, .V128);
             },
+
+            .I8x16_EQ,
+            .I8x16_NE,
+            .I8x16_LT_S,
+            .I8x16_LT_U,
+            .I8x16_GT_S,
+            .I8x16_GT_U,
+            .I8x16_LE_S,
+            .I8x16_LE_U,
+            .I8x16_GE_S,
+            .I8x16_GE_U,
+            .I16x8_EQ,
+            .I16x8_NE,
+            .I16x8_LT_S,
+            .I16x8_LT_U,
+            .I16x8_GT_S,
+            .I16x8_GT_U,
+            .I16x8_LE_S,
+            .I16x8_LE_U,
+            .I16x8_GE_S,
+            .I16x8_GE_U,
+            .I32x4_EQ,
+            .I32x4_NE,
+            .I32x4_LT_S,
+            .I32x4_LT_U,
+            .I32x4_GT_S,
+            .I32x4_GT_U,
+            .I32x4_LE_S,
+            .I32x4_LE_U,
+            .I32x4_GE_S,
+            .I32x4_GE_U,
+            .F32x4_EQ,
+            .F32x4_NE,
+            .F32x4_LT,
+            .F32x4_GT,
+            .F32x4_LE,
+            .F32x4_GE,
+            .F64x2_EQ,
+            .F64x2_NE,
+            .F64x2_LT,
+            .F64x2_GT,
+            .F64x2_LE,
+            .F64x2_GE,
+            .I64x2_EQ,
+            .I64x2_NE,
+            .I64x2_LT_S,
+            .I64x2_GT_S,
+            .I64x2_LE_S,
+            .I64x2_GE_S,
+            => {
+                try Helpers.validateNumericBinaryOp(self, .V128, .V128);
+            },
             .V128_AnyTrue,
             .I8x16_AllTrue,
             .I8x16_Bitmask,
@@ -3053,6 +3105,48 @@ const InstructionFuncs = struct {
         &op_F32x4_Replace_Lane,
         &op_F64x2_Extract_Lane,
         &op_F64x2_Replace_Lane,
+        &op_I8x16_EQ,
+        &op_I8x16_NE,
+        &op_I8x16_LT_S,
+        &op_I8x16_LT_U,
+        &op_I8x16_GT_S,
+        &op_I8x16_GT_U,
+        &op_I8x16_LE_S,
+        &op_I8x16_LE_U,
+        &op_I8x16_GE_S,
+        &op_I8x16_GE_U,
+        &op_I16x8_EQ,
+        &op_I16x8_NE,
+        &op_I16x8_LT_S,
+        &op_I16x8_LT_U,
+        &op_I16x8_GT_S,
+        &op_I16x8_GT_U,
+        &op_I16x8_LE_S,
+        &op_I16x8_LE_U,
+        &op_I16x8_GE_S,
+        &op_I16x8_GE_U,
+        &op_I32x4_EQ,
+        &op_I32x4_NE,
+        &op_I32x4_LT_S,
+        &op_I32x4_LT_U,
+        &op_I32x4_GT_S,
+        &op_I32x4_GT_U,
+        &op_I32x4_LE_S,
+        &op_I32x4_LE_U,
+        &op_I32x4_GE_S,
+        &op_I32x4_GE_U,
+        &op_F32x4_EQ,
+        &op_F32x4_NE,
+        &op_F32x4_LT,
+        &op_F32x4_GT,
+        &op_F32x4_LE,
+        &op_F32x4_GE,
+        &op_F64x2_EQ,
+        &op_F64x2_NE,
+        &op_F64x2_LT,
+        &op_F64x2_GT,
+        &op_F64x2_LE,
+        &op_F64x2_GE,
         &op_V128_Store,
         &op_V128_Const,
         &op_V128_Swizzle,
@@ -3092,6 +3186,12 @@ const InstructionFuncs = struct {
         &op_I64x2_Add,
         &op_I64x2_Sub,
         &op_I64x2_Mul,
+        &op_I64x2_EQ,
+        &op_I64x2_NE,
+        &op_I64x2_LT_S,
+        &op_I64x2_GT_S,
+        &op_I64x2_LE_S,
+        &op_I64x2_GE_S,
         &op_F32x4_Add,
         &op_F32x4_Sub,
         &op_F32x4_Mul,
@@ -3320,7 +3420,7 @@ const InstructionFuncs = struct {
             };
         }
 
-        const VectorOperation = enum(u8) {
+        const VectorBinaryOp = enum(u8) {
             Add,
             Add_Sat,
             Sub,
@@ -3335,7 +3435,7 @@ const InstructionFuncs = struct {
             Xor,
         };
 
-        fn vectorBinOp(comptime T: type, comptime op: VectorOperation, stack: *Stack) void {
+        fn vectorBinOp(comptime T: type, comptime op: VectorBinaryOp, stack: *Stack) void {
             const v2 = @bitCast(T, stack.popV128());
             const v1 = @bitCast(T, stack.popV128());
             const result = switch (op) {
@@ -3352,6 +3452,33 @@ const InstructionFuncs = struct {
                 .Or => v1 | v2,
                 .Xor => v1 ^ v2,
             };
+            stack.pushV128(@bitCast(v128, result));
+        }
+
+        const VectorBoolOp = enum(u8) {
+            Eq,
+            Ne,
+            Lt,
+            Gt,
+            Le,
+            Ge,
+        };
+
+        fn vectorBoolOp(comptime T: type, comptime op: VectorBoolOp, stack: *Stack) void {
+            const v2 = @bitCast(T, stack.popV128());
+            const v1 = @bitCast(T, stack.popV128());
+            const bools = switch (op) {
+                .Eq => v1 == v2,
+                .Ne => v1 != v2,
+                .Lt => v1 < v2,
+                .Gt => v1 > v2,
+                .Le => v1 <= v2,
+                .Ge => v1 >= v2,
+            };
+            const vec_type_info = @typeInfo(T).Vector;
+            const yes = @splat(vec_type_info.len, @as(vec_type_info.child, 1));
+            const no = @splat(vec_type_info.len, @as(vec_type_info.child, 0));
+            const result = @select(vec_type_info.child, bools, yes, no);
             stack.pushV128(@bitCast(v128, result));
         }
 
@@ -5681,6 +5808,258 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I8x16_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i8x16, .Eq, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i8x16, .Ne, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_LT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i8x16, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_LT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u8x16, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_GT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i8x16, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_GT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u8x16, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_LE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i8x16, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_LE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u8x16, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_GE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i8x16, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_GE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u8x16, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i16x8, .Eq, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i16x8, .Ne, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_LT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i16x8, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_LT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u16x8, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_GT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i16x8, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_GT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u16x8, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_LE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i16x8, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_LE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u16x8, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_GE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i16x8, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_GE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u16x8, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i32x4, .Eq, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i32x4, .Ne, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_LT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i32x4, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_LT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u32x4, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_GT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i32x4, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_GT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u32x4, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_LE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i32x4, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_LE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u32x4, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_GE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(i32x4, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_GE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(u32x4, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f32x4, .Eq, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f32x4, .Ne, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_LT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f32x4, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_GT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f32x4, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_LE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f32x4, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_GE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f32x4, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f64x2, .Eq, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f64x2, .Ne, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_LT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f64x2, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_GT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f64x2, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_LE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f64x2, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_GE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Replace_Lane", pc, code, stack);
+        OpHelpers.vectorBoolOp(f64x2, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_V128_Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_Store", pc, code, stack);
 
@@ -5978,6 +6357,42 @@ const InstructionFuncs = struct {
     fn op_I64x2_Mul(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64x2_Mul", pc, code, stack);
         OpHelpers.vectorBinOp(i64x2, .Mul, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_EQ", pc, code, stack);
+        OpHelpers.vectorBoolOp(i64x2, .Eq, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_NE", pc, code, stack);
+        OpHelpers.vectorBoolOp(i64x2, .Ne, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_LT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_LT_S", pc, code, stack);
+        OpHelpers.vectorBoolOp(i64x2, .Lt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_GT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_GT_S", pc, code, stack);
+        OpHelpers.vectorBoolOp(i64x2, .Gt, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_LE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_LE_S", pc, code, stack);
+        OpHelpers.vectorBoolOp(i64x2, .Le, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_GE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_GE_S", pc, code, stack);
+        OpHelpers.vectorBoolOp(i64x2, .Ge, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
