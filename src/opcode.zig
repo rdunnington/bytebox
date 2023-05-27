@@ -211,6 +211,9 @@ pub const Opcode = enum(u16) {
     V128_Load16_Splat,
     V128_Load32_Splat,
     V128_Load64_Splat,
+    V128_Store,
+    V128_Const,
+    V128_Swizzle,
     I8x16_Splat,
     I16x8_Splat,
     I32x4_Splat,
@@ -273,9 +276,6 @@ pub const Opcode = enum(u16) {
     F64x2_GT,
     F64x2_LE,
     F64x2_GE,
-    V128_Store,
-    V128_Const,
-    V128_Swizzle,
     V128_Not,
     V128_And,
     V128_AndNot,
@@ -283,6 +283,8 @@ pub const Opcode = enum(u16) {
     V128_Xor,
     V128_Bitselect,
     V128_AnyTrue,
+    I8x16_Abs,
+    I8x16_Neg,
     I8x16_AllTrue,
     I8x16_Bitmask,
     I8x16_Shr_S,
@@ -293,6 +295,12 @@ pub const Opcode = enum(u16) {
     I8x16_Sub,
     I8x16_Sub_Sat_S,
     I8x16_Sub_Sat_U,
+    I8x16_Min_S,
+    I8x16_Min_U,
+    I8x16_Max_S,
+    I8x16_Max_U,
+    I16x8_Abs,
+    I16x8_Neg,
     I16x8_AllTrue,
     I16x8_Bitmask,
     I16x8_Shr_S,
@@ -304,17 +312,29 @@ pub const Opcode = enum(u16) {
     I16x8_Sub_Sat_S,
     I16x8_Sub_Sat_U,
     I16x8_Mul,
+    I16x8_Min_S,
+    I16x8_Min_U,
+    I16x8_Max_S,
+    I16x8_Max_U,
+    I32x4_Abs,
+    I32x4_Neg,
     I32x4_AllTrue,
     I32x4_Bitmask,
     I32x4_Shr_S,
     I32x4_Shr_U,
-    I64x2_AllTrue,
-    I64x2_Bitmask,
-    I64x4_Shr_S,
-    I64x4_Shr_U,
     I32x4_Add,
     I32x4_Sub,
     I32x4_Mul,
+    I32x4_Min_S,
+    I32x4_Min_U,
+    I32x4_Max_S,
+    I32x4_Max_U,
+    I64x2_Abs,
+    I64x2_Neg,
+    I64x2_AllTrue,
+    I64x2_Bitmask,
+    I64x2_Shr_S,
+    I64x2_Shr_U,
     I64x2_Add,
     I64x2_Sub,
     I64x2_Mul,
@@ -324,12 +344,25 @@ pub const Opcode = enum(u16) {
     I64x2_GT_S,
     I64x2_LE_S,
     I64x2_GE_S,
+    F32x4_Abs,
+    F32x4_Neg,
     F32x4_Add,
     F32x4_Sub,
     F32x4_Mul,
+    F32x4_Div,
+    F32x4_Min,
+    F32x4_Max,
+    F32x4_PMin,
+    F32x4_PMax,
+    F64x2_Abs,
+    F64x2_Neg,
     F64x2_Add,
     F64x2_Sub,
     F64x2_Mul,
+    F32x4_Trunc_Sat_F32x4_S,
+    F32x4_Trunc_Sat_F32x4_U,
+    F32x4_Convert_I32x4_S,
+    F32x4_Convert_I32x4_U,
 
     pub fn beginsBlock(opcode: Opcode) bool {
         return switch (opcode) {
@@ -627,6 +660,8 @@ pub const WasmOpcode = enum(u16) {
     V128_Xor = 0xFD51,
     V128_Bitselect = 0xFD52,
     V128_AnyTrue = 0xFD53,
+    I8x16_Abs = 0xFD60,
+    I8x16_Neg = 0xFD61,
     I8x16_AllTrue = 0xFD63,
     I8x16_Bitmask = 0xFD64,
     I8x16_Shr_S = 0xFD6C,
@@ -637,6 +672,12 @@ pub const WasmOpcode = enum(u16) {
     I8x16_Sub = 0xFD71,
     I8x16_Sub_Sat_S = 0xFD72,
     I8x16_Sub_Sat_U = 0xFD73,
+    I8x16_Min_S = 0xFD76,
+    I8x16_Min_U = 0xFD77,
+    I8x16_Max_S = 0xFD78,
+    I8x16_Max_U = 0xFD79,
+    I16x8_Abs = 0xFD80,
+    I16x8_Neg = 0xFD81,
     I16x8_AllTrue = 0xFD83,
     I16x8_Bitmask = 0xFD84,
     I16x8_Shr_S = 0xFD8C,
@@ -648,17 +689,29 @@ pub const WasmOpcode = enum(u16) {
     I16x8_Sub_Sat_S = 0xFD92,
     I16x8_Sub_Sat_U = 0xFD93,
     I16x8_Mul = 0xFD95,
+    I16x8_Min_S = 0xFD96,
+    I16x8_Min_U = 0xFD97,
+    I16x8_Max_S = 0xFD98,
+    I16x8_Max_U = 0xFD99,
+    I32x4_Abs = 0xFDA0,
+    I32x4_Neg = 0xFDA1,
     I32x4_AllTrue = 0xFDA3,
     I32x4_Bitmask = 0xFDA4,
     I32x4_Shr_S = 0xFDAC,
     I32x4_Shr_U = 0xFDAD,
-    I64x2_AllTrue = 0xFDC3,
-    I64x2_Bitmask = 0xFDC4,
-    I64x4_Shr_S = 0xFDCC,
-    I64x4_Shr_U = 0xFDCD,
     I32x4_Add = 0xFDAE,
     I32x4_Sub = 0xFDB1,
     I32x4_Mul = 0xFDB5,
+    I32x4_Min_S = 0xFDB6,
+    I32x4_Min_U = 0xFDB7,
+    I32x4_Max_S = 0xFDB8,
+    I32x4_Max_U = 0xFDB9,
+    I64x2_Abs = 0xFDC0,
+    I64x2_Neg = 0xFDC1,
+    I64x2_AllTrue = 0xFDC3,
+    I64x2_Bitmask = 0xFDC4,
+    I64x2_Shr_S = 0xFDCC,
+    I64x2_Shr_U = 0xFDCD,
     I64x2_Add = 0xFDCE,
     I64x2_Sub = 0xFDD1,
     I64x2_Mul = 0xFDD5,
@@ -668,12 +721,25 @@ pub const WasmOpcode = enum(u16) {
     I64x2_GT_S = 0xFDD9,
     I64x2_LE_S = 0xFDDA,
     I64x2_GE_S = 0xFDDB,
+    F32x4_Abs = 0xFDE0,
+    F32x4_Neg = 0xFDE1,
     F32x4_Add = 0xFDE4,
     F32x4_Sub = 0xFDE5,
     F32x4_Mul = 0xFDE6,
+    F32x4_Div = 0xFDE7,
+    F32x4_Min = 0xFDE8,
+    F32x4_Max = 0xFDE9,
+    F32x4_PMin = 0xFDEA,
+    F32x4_PMax = 0xFDEB,
+    F64x2_Abs = 0xFDEC,
+    F64x2_Neg = 0xFDED,
     F64x2_Add = 0xFDF0,
     F64x2_Sub = 0xFDF1,
     F64x2_Mul = 0xFDF2,
+    F32x4_Trunc_Sat_F32x4_S = 0xFDF8,
+    F32x4_Trunc_Sat_F32x4_U = 0xFDF9,
+    F32x4_Convert_I32x4_S = 0xFDFA,
+    F32x4_Convert_I32x4_U = 0xFDFB,
 
     pub fn toOpcode(wasm: WasmOpcode) Opcode {
         const opcode_int = @enumToInt(wasm);
@@ -1048,8 +1114,8 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD5D
         Opcode.Invalid, // 0xFD5E
         Opcode.Invalid, // 0xFD5F
-        Opcode.Invalid, // 0xFD60
-        Opcode.Invalid, // 0xFD61
+        Opcode.I8x16_Abs, // 0xFD60
+        Opcode.I8x16_Neg, // 0xFD61
         Opcode.Invalid, // 0xFD62
         Opcode.I8x16_AllTrue, // 0xFD63
         Opcode.I8x16_Bitmask, // 0xFD64
@@ -1070,18 +1136,18 @@ const ConversionTables = struct {
         Opcode.I8x16_Sub_Sat_U, // 0xFD73
         Opcode.Invalid, // 0xFD74
         Opcode.Invalid, // 0xFD75
-        Opcode.Invalid, // 0xFD76
-        Opcode.Invalid, // 0xFD77
-        Opcode.Invalid, // 0xFD78
-        Opcode.Invalid, // 0xFD79
+        Opcode.I8x16_Min_S, // 0xFD76
+        Opcode.I8x16_Min_U, // 0xFD77
+        Opcode.I8x16_Max_S, // 0xFD78
+        Opcode.I8x16_Max_U, // 0xFD79
         Opcode.Invalid, // 0xFD7A
         Opcode.Invalid, // 0xFD7B
         Opcode.Invalid, // 0xFD7C
         Opcode.Invalid, // 0xFD7D
         Opcode.Invalid, // 0xFD7E
         Opcode.Invalid, // 0xFD7F
-        Opcode.Invalid, // 0xFD80
-        Opcode.Invalid, // 0xFD81
+        Opcode.I16x8_Abs, // 0xFD80
+        Opcode.I16x8_Neg, // 0xFD81
         Opcode.Invalid, // 0xFD82
         Opcode.I16x8_AllTrue, // 0xFD83
         Opcode.I16x8_Bitmask, // 0xFD84
@@ -1102,18 +1168,18 @@ const ConversionTables = struct {
         Opcode.I16x8_Sub_Sat_U, // 0xFD93
         Opcode.Invalid, // 0xFD94
         Opcode.I16x8_Mul, // 0xFD95
-        Opcode.Invalid, // 0xFD96
-        Opcode.Invalid, // 0xFD97
-        Opcode.Invalid, // 0xFD98
-        Opcode.Invalid, // 0xFD99
+        Opcode.I16x8_Min_S, // 0xFD96
+        Opcode.I16x8_Min_U, // 0xFD97
+        Opcode.I16x8_Max_S, // 0xFD98
+        Opcode.I16x8_Max_U, // 0xFD99
         Opcode.Invalid, // 0xFD9A
         Opcode.Invalid, // 0xFD9B
         Opcode.Invalid, // 0xFD9C
         Opcode.Invalid, // 0xFD9D
         Opcode.Invalid, // 0xFD9E
         Opcode.Invalid, // 0xFD9F
-        Opcode.Invalid, // 0xFDA0
-        Opcode.Invalid, // 0xFDA1
+        Opcode.I32x4_Abs, // 0xFDA0
+        Opcode.I32x4_Neg, // 0xFDA1
         Opcode.Invalid, // 0xFDA2
         Opcode.I32x4_AllTrue, // 0xFDA3
         Opcode.I32x4_Bitmask, // 0xFDA4
@@ -1134,18 +1200,18 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDB3
         Opcode.Invalid, // 0xFDB4
         Opcode.I32x4_Mul, // 0xFDB5
-        Opcode.Invalid, // 0xFDB6
-        Opcode.Invalid, // 0xFDB7
-        Opcode.Invalid, // 0xFDB8
-        Opcode.Invalid, // 0xFDB9
+        Opcode.I32x4_Min_S, // 0xFDB6
+        Opcode.I32x4_Min_U, // 0xFDB7
+        Opcode.I32x4_Max_S, // 0xFDB8
+        Opcode.I32x4_Max_U, // 0xFDB9
         Opcode.Invalid, // 0xFDBA
         Opcode.Invalid, // 0xFDBB
         Opcode.Invalid, // 0xFDBC
         Opcode.Invalid, // 0xFDBD
         Opcode.Invalid, // 0xFDBE
         Opcode.Invalid, // 0xFDBF
-        Opcode.Invalid, // 0xFDC0
-        Opcode.Invalid, // 0xFDC1
+        Opcode.I64x2_Abs, // 0xFDC0
+        Opcode.I64x2_Neg, // 0xFDC1
         Opcode.Invalid, // 0xFDC2
         Opcode.I64x2_AllTrue, // 0xFDC3
         Opcode.I64x2_Bitmask, // 0xFDC4
@@ -1156,8 +1222,8 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDC9
         Opcode.Invalid, // 0xFDCA
         Opcode.Invalid, // 0xFDCB
-        Opcode.I64x4_Shr_S, // 0xFDCC
-        Opcode.I64x4_Shr_U, // 0xFDCD
+        Opcode.I64x2_Shr_S, // 0xFDCC
+        Opcode.I64x2_Shr_U, // 0xFDCD
         Opcode.I64x2_Add, // 0xFDCE
         Opcode.Invalid, // 0xFDCF
         Opcode.Invalid, // 0xFDD0
@@ -1176,20 +1242,20 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDDD
         Opcode.Invalid, // 0xFDDE
         Opcode.Invalid, // 0xFDDF
-        Opcode.Invalid, // 0xFDE0
-        Opcode.Invalid, // 0xFDE1
+        Opcode.F32x4_Abs, // 0xFDE0
+        Opcode.F32x4_Neg, // 0xFDE1
         Opcode.Invalid, // 0xFDE2
         Opcode.Invalid, // 0xFDE3
         Opcode.F32x4_Add, // 0xFDE4
         Opcode.F32x4_Sub, // 0xFDE5
         Opcode.F32x4_Mul, // 0xFDE6
-        Opcode.Invalid, // 0xFDE7
-        Opcode.Invalid, // 0xFDE8
-        Opcode.Invalid, // 0xFDE9
-        Opcode.Invalid, // 0xFDEA
-        Opcode.Invalid, // 0xFDEB
-        Opcode.Invalid, // 0xFDEC
-        Opcode.Invalid, // 0xFDED
+        Opcode.F32x4_Div, // 0xFDE7
+        Opcode.F32x4_Min, // 0xFDE8
+        Opcode.F32x4_Max, // 0xFDE9
+        Opcode.F32x4_PMin, // 0xFDEA
+        Opcode.F32x4_PMax, // 0xFDEB
+        Opcode.F64x2_Abs, // 0xFDEC
+        Opcode.F64x2_Neg, // 0xFDED
         Opcode.Invalid, // 0xFDEE
         Opcode.Invalid, // 0xFDEF
         Opcode.F64x2_Add, // 0xFDF0
@@ -1200,10 +1266,10 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFDF5
         Opcode.Invalid, // 0xFDF6
         Opcode.Invalid, // 0xFDF7
-        Opcode.Invalid, // 0xFDF8
-        Opcode.Invalid, // 0xFDF9
-        Opcode.Invalid, // 0xFDFA
-        Opcode.Invalid, // 0xFDFB
+        Opcode.F32x4_Trunc_Sat_F32x4_S, // 0xFDF8
+        Opcode.F32x4_Trunc_Sat_F32x4_U, // 0xFDF9
+        Opcode.F32x4_Convert_I32x4_S, // 0xFDFA
+        Opcode.F32x4_Convert_I32x4_U, // 0xFDFB
         Opcode.Invalid, // 0xFDFC
         Opcode.Invalid, // 0xFDFD
         Opcode.Invalid, // 0xFDFE
