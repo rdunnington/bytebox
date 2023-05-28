@@ -3513,12 +3513,25 @@ const InstructionFuncs = struct {
         };
 
         fn vectorBinOp(comptime T: type, comptime op: VectorBinaryOp, stack: *Stack) void {
+            const child_type = @typeInfo(T).Vector.child;
             const v2 = @bitCast(T, stack.popV128());
             const v1 = @bitCast(T, stack.popV128());
             const result = switch (op) {
-                .Add => v1 + v2,
+                .Add => blk: {
+                    break :blk switch (@typeInfo(child_type)) {
+                        .Int => v1 +% v2,
+                        .Float => v1 + v2,
+                        else => unreachable,
+                    };
+                },
                 .Add_Sat => v1 +| v2,
-                .Sub => v1 - v2,
+                .Sub => blk: {
+                    break :blk switch (@typeInfo(child_type)) {
+                        .Int => v1 -% v2,
+                        .Float => v1 - v2,
+                        else => unreachable,
+                    };
+                },
                 .Sub_Sat => v1 -| v2,
                 .Mul => v1 * v2,
                 .Div => v1 / v2,
@@ -6254,7 +6267,7 @@ const InstructionFuncs = struct {
     fn op_I8x16_Neg(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Neg", pc, code, stack);
         const vec = @bitCast(i8x16, stack.popV128());
-        const negated = -vec;
+        const negated = -%vec;
         stack.pushV128(@bitCast(v128, negated));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -6287,7 +6300,7 @@ const InstructionFuncs = struct {
 
     fn op_I8x16_Add(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Add", pc, code, stack);
-        OpHelpers.vectorBinOp(i8x16, .Add, stack);
+        OpHelpers.vectorBinOp(u8x16, .Add, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6305,7 +6318,7 @@ const InstructionFuncs = struct {
 
     fn op_I8x16_Sub(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Sub", pc, code, stack);
-        OpHelpers.vectorBinOp(i8x16, .Sub, stack);
+        OpHelpers.vectorBinOp(u8x16, .Sub, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
