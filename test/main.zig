@@ -1351,7 +1351,7 @@ pub fn main() !void {
         // "simd_load_extend",
         // "simd_load_splat",
         // "simd_load_zero",
-        // "simd_splat",
+        "simd_splat",
         // "simd_store",
         // "simd_store16_lane",
         // "simd_store32_lane",
