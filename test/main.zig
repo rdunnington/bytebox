@@ -1338,7 +1338,7 @@ pub fn main() !void {
         "simd_i64x2_cmp",
         // "simd_i64x2_extmul_i32x4",
         "simd_i8x16_arith",
-        // "simd_i8x16_arith2",
+        "simd_i8x16_arith2",
         "simd_i8x16_cmp",
         // "simd_i8x16_sat_arith",
         // "simd_int_to_int_extend",

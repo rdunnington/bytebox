@@ -285,6 +285,7 @@ pub const Opcode = enum(u16) {
     V128_AnyTrue,
     I8x16_Abs,
     I8x16_Neg,
+    I8x16_Popcnt,
     I8x16_AllTrue,
     I8x16_Bitmask,
     I8x16_Shr_S,
@@ -299,6 +300,7 @@ pub const Opcode = enum(u16) {
     I8x16_Min_U,
     I8x16_Max_S,
     I8x16_Max_U,
+    I8x16_Avgr_U,
     I16x8_Abs,
     I16x8_Neg,
     I16x8_AllTrue,
@@ -662,6 +664,7 @@ pub const WasmOpcode = enum(u16) {
     V128_AnyTrue = 0xFD53,
     I8x16_Abs = 0xFD60,
     I8x16_Neg = 0xFD61,
+    I8x16_Popcnt = 0xFD62,
     I8x16_AllTrue = 0xFD63,
     I8x16_Bitmask = 0xFD64,
     I8x16_Shr_S = 0xFD6C,
@@ -676,6 +679,7 @@ pub const WasmOpcode = enum(u16) {
     I8x16_Min_U = 0xFD77,
     I8x16_Max_S = 0xFD78,
     I8x16_Max_U = 0xFD79,
+    I8x16_Avgr_U = 0xFD7B,
     I16x8_Abs = 0xFD80,
     I16x8_Neg = 0xFD81,
     I16x8_AllTrue = 0xFD83,
@@ -1116,7 +1120,7 @@ const ConversionTables = struct {
         Opcode.Invalid, // 0xFD5F
         Opcode.I8x16_Abs, // 0xFD60
         Opcode.I8x16_Neg, // 0xFD61
-        Opcode.Invalid, // 0xFD62
+        Opcode.I8x16_Popcnt, // 0xFD62
         Opcode.I8x16_AllTrue, // 0xFD63
         Opcode.I8x16_Bitmask, // 0xFD64
         Opcode.Invalid, // 0xFD65
@@ -1141,7 +1145,7 @@ const ConversionTables = struct {
         Opcode.I8x16_Max_S, // 0xFD78
         Opcode.I8x16_Max_U, // 0xFD79
         Opcode.Invalid, // 0xFD7A
-        Opcode.Invalid, // 0xFD7B
+        Opcode.I8x16_Avgr_U, // 0xFD7B
         Opcode.Invalid, // 0xFD7C
         Opcode.Invalid, // 0xFD7D
         Opcode.Invalid, // 0xFD7E
