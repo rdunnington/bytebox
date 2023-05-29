@@ -2761,6 +2761,7 @@ const ModuleValidator = struct {
             .I16x8_Min_U,
             .I16x8_Max_S,
             .I16x8_Max_U,
+            .I16x8_Avgr_U,
             .I32x4_Add,
             .I32x4_Sub,
             .I32x4_Mul,
@@ -3227,6 +3228,7 @@ const InstructionFuncs = struct {
         &op_I16x8_Min_U,
         &op_I16x8_Max_S,
         &op_I16x8_Max_U,
+        &op_I16x8_Avgr_U,
         &op_I32x4_Abs,
         &op_I32x4_Neg,
         &op_I32x4_AllTrue,
@@ -3537,7 +3539,13 @@ const InstructionFuncs = struct {
                     };
                 },
                 .Sub_Sat => v1 -| v2,
-                .Mul => v1 * v2,
+                .Mul => blk: {
+                    break :blk switch (@typeInfo(child_type)) {
+                        .Int => v1 *% v2,
+                        .Float => v1 * v2,
+                        else => unreachable,
+                    };
+                },
                 .Div => v1 / v2,
                 .Min,
                 .PMin,
@@ -3561,6 +3569,23 @@ const InstructionFuncs = struct {
             }
             const abs: T = arr;
             stack.pushV128(@bitCast(v128, abs));
+        }
+
+        fn vectorAvgrU(comptime T: type, stack: *Stack) void {
+            const type_info = @typeInfo(T).Vector;
+            const child_type = type_info.child;
+            const type_big_width = std.meta.Int(.unsigned, @bitSizeOf(child_type) * 2);
+
+            const v1 = @bitCast(T, stack.popV128());
+            const v2 = @bitCast(T, stack.popV128());
+            var arr: [type_info.len]child_type = undefined;
+            for (arr) |*v, i| {
+                const vv1: type_big_width = v1[i];
+                const vv2: type_big_width = v2[i];
+                v.* = @intCast(child_type, @divTrunc(vv1 + vv2 + 1, 2));
+            }
+            const result: T = arr;
+            stack.pushV128(@bitCast(v128, result));
         }
 
         const VectorBoolOp = enum(u8) {
@@ -6381,16 +6406,7 @@ const InstructionFuncs = struct {
 
     fn op_I8x16_Avgr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Avgr_U", pc, code, stack);
-        const v1 = @bitCast(u8x16, stack.popV128());
-        const v2 = @bitCast(u8x16, stack.popV128());
-        var arr: [16]u8 = undefined;
-        for (arr) |*v, i| {
-            const vv1: u16 = v1[i];
-            const vv2: u16 = v2[i];
-            v.* = @intCast(u8, @divTrunc(vv1 + vv2 + 1, 2));
-        }
-        const result: u8x16 = arr;
-        stack.pushV128(@bitCast(v128, result));
+        OpHelpers.vectorAvgrU(u8x16, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6402,8 +6418,8 @@ const InstructionFuncs = struct {
 
     fn op_I16x8_Neg(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I16x8_Neg", pc, code, stack);
-        const vec = @bitCast(i16x8, stack.popV128());
-        const negated = -vec;
+        const vec = @bitCast(u16x8, stack.popV128());
+        const negated = -%vec;
         stack.pushV128(@bitCast(v128, negated));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -6500,6 +6516,12 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I16x8_Avgr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Avgr_U", pc, code, stack);
+        OpHelpers.vectorAvgrU(u16x8, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I32x4_Abs(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32x4_Abs", pc, code, stack);
         OpHelpers.vectorAbs(i32x4, stack);
@@ -6509,7 +6531,7 @@ const InstructionFuncs = struct {
     fn op_I32x4_Neg(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32x4_Neg", pc, code, stack);
         const vec = @bitCast(i32x4, stack.popV128());
-        const negated = -vec;
+        const negated = -%vec;
         stack.pushV128(@bitCast(v128, negated));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -6549,7 +6571,7 @@ const InstructionFuncs = struct {
     fn op_I64x2_Neg(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64x2_Neg", pc, code, stack);
         const vec = @bitCast(i64x2, stack.popV128());
-        const negated = -vec;
+        const negated = -%vec;
         stack.pushV128(@bitCast(v128, negated));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }

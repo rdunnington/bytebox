@@ -318,6 +318,7 @@ pub const Opcode = enum(u16) {
     I16x8_Min_U,
     I16x8_Max_S,
     I16x8_Max_U,
+    I16x8_Avgr_U,
     I32x4_Abs,
     I32x4_Neg,
     I32x4_AllTrue,
@@ -697,6 +698,7 @@ pub const WasmOpcode = enum(u16) {
     I16x8_Min_U = 0xFD97,
     I16x8_Max_S = 0xFD98,
     I16x8_Max_U = 0xFD99,
+    I16x8_Avgr_U = 0xFD9B,
     I32x4_Abs = 0xFDA0,
     I32x4_Neg = 0xFDA1,
     I32x4_AllTrue = 0xFDA3,
@@ -1177,7 +1179,7 @@ const ConversionTables = struct {
         Opcode.I16x8_Max_S, // 0xFD98
         Opcode.I16x8_Max_U, // 0xFD99
         Opcode.Invalid, // 0xFD9A
-        Opcode.Invalid, // 0xFD9B
+        Opcode.I16x8_Avgr_U, // 0xFD9B
         Opcode.Invalid, // 0xFD9C
         Opcode.Invalid, // 0xFD9D
         Opcode.Invalid, // 0xFD9E
