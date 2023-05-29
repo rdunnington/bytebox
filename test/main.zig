@@ -44,7 +44,7 @@ const Action = struct {
     type: ActionType,
     module: []const u8,
     field: []const u8,
-    args: std.ArrayList(Val),
+    args: std.ArrayList(ValTypedVec),
 };
 
 const BadModuleError = struct {
@@ -65,7 +65,7 @@ const CommandRegister = struct {
 
 const CommandAssertReturn = struct {
     action: Action,
-    expected_returns: ?std.ArrayList(ExpectedVal),
+    expected_returns: ?std.ArrayList(ValTypedVec),
 };
 
 const CommandAssertTrap = struct {
@@ -325,12 +325,21 @@ const V128LaneType = enum(u8) {
     }
 };
 
-const ExpectedVal = struct {
+const ValTypedVec = struct {
     v: Val,
     lane_type: V128LaneType, // only valid when v contains a V128
+
+    fn toValArrayList(typed: []const ValTypedVec, allocator: std.mem.Allocator) !std.ArrayList(Val) {
+        var vals = std.ArrayList(Val).init(allocator);
+        try vals.ensureTotalCapacityPrecise(typed.len);
+        for (typed) |v| {
+            try vals.append(v.v);
+        }
+        return vals;
+    }
 };
 
-fn parseExpectedVal(obj: std.json.ObjectMap) !ExpectedVal {
+fn parseValTypedVec(obj: std.json.ObjectMap) !ValTypedVec {
     var v = try parseVal(obj);
     var lane_type = V128LaneType.I8x16;
     if (std.meta.activeTag(v) == .V128) {
@@ -338,7 +347,7 @@ fn parseExpectedVal(obj: std.json.ObjectMap) !ExpectedVal {
         lane_type = V128LaneType.fromString(json_lane_type.String);
     }
 
-    return ExpectedVal{
+    return ValTypedVec{
         .v = v,
         .lane_type = lane_type,
     };
@@ -442,10 +451,10 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             const json_field = json_action.Object.getPtr("field").?;
 
             const json_args_or_null = json_action.Object.getPtr("args");
-            var args = std.ArrayList(Val).init(_allocator);
+            var args = std.ArrayList(ValTypedVec).init(_allocator);
             if (json_args_or_null) |json_args| {
                 for (json_args.Array.items) |item| {
-                    var val: Val = try parseVal(item.Object);
+                    var val: ValTypedVec = try parseValTypedVec(item.Object);
                     try args.append(val);
                 }
             }
@@ -529,12 +538,12 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
             var action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
-            var expected_returns_or_null: ?std.ArrayList(ExpectedVal) = null;
+            var expected_returns_or_null: ?std.ArrayList(ValTypedVec) = null;
             const json_expected_or_null = json_command.Object.getPtr("expected");
             if (json_expected_or_null) |json_expected| {
-                var expected_returns = std.ArrayList(ExpectedVal).init(allocator);
+                var expected_returns = std.ArrayList(ValTypedVec).init(allocator);
                 for (json_expected.Array.items) |item| {
-                    try expected_returns.append(try parseExpectedVal(item.Object));
+                    try expected_returns.append(try parseValTypedVec(item.Object));
                 }
                 expected_returns_or_null = expected_returns;
             }
@@ -956,6 +965,38 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
         switch (command.*) {
             .AssertReturn => |c| {
+                const PrintTestHelper = struct {
+                    fn logVerbose(filename: []const u8, field: []const u8, values: []ValTypedVec) void {
+                        if (g_verbose_logging) {
+                            log(filename, field, values);
+                        }
+                    }
+
+                    fn log(filename: []const u8, field: []const u8, values: []ValTypedVec) void {
+                        print("assert_return: {s}:{s}(", .{ filename, field });
+                        for (values) |v| {
+                            switch (std.meta.activeTag(v.v)) {
+                                .V128 => {
+                                    printVector(v.lane_type, v.v.V128);
+                                },
+                                else => print("{}", .{v}),
+                            }
+                        }
+                        print(")\n", .{});
+                    }
+
+                    fn printVector(lane_type: V128LaneType, vec: v128) void {
+                        switch (lane_type) {
+                            .I8x16 => print("{}, ", .{@bitCast(i8x16, vec)}),
+                            .I16x8 => print("{}, ", .{@bitCast(i16x8, vec)}),
+                            .I32x4 => print("{}, ", .{@bitCast(i32x4, vec)}),
+                            .I64x2 => print("{}, ", .{@bitCast(i64x2, vec)}),
+                            .F32x4 => print("{}, ", .{@bitCast(f32x4, vec)}),
+                            .F64x2 => print("{}, ", .{@bitCast(f64x2, vec)}),
+                        }
+                    }
+                };
+
                 if (opts.command_filter_or_null) |filter| {
                     if (strcmp("assert_return", filter) == false) {
                         continue;
@@ -976,14 +1017,19 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 try returns_placeholder.resize(num_expected_returns);
                 var returns = returns_placeholder.items;
 
-                logVerbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                PrintTestHelper.logVerbose(module.filename, c.action.field, c.action.args.items);
+                // logVerbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
 
                 var action_succeeded = true;
                 switch (c.action.type) {
                     .Invocation => {
-                        (module.inst.?).invoke(c.action.field, c.action.args.items, returns) catch |e| {
+                        var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
+                        defer vals.deinit();
+
+                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
                             if (!g_verbose_logging) {
-                                print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
+                                // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                             }
                             print("\tInvoke fail with error: {}\n", .{e});
                             action_succeeded = false;
@@ -995,7 +1041,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             returns[0] = value;
                         } else |e| {
                             if (!g_verbose_logging) {
-                                print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
+                                // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                             }
                             print("\tGet fail with error: {}\n", .{e});
                             action_succeeded = false;
@@ -1027,7 +1074,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                                     action_succeeded = false;
                                 }
                             } else {
-                                const V128Helper = struct {
+                                const V128ExpectHelper = struct {
                                     fn expect(comptime VectorType: type, actual_value: v128, expected_value_: v128, return_index: usize, returns_length: usize, module_: *const Module, command_: *const CommandAssertReturn) bool {
                                         const actual_typed = @bitCast(VectorType, actual_value);
                                         const expected_typed = @bitCast(VectorType, expected_value_);
@@ -1065,22 +1112,22 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                                 switch (expected.items[i].lane_type) {
                                     .I8x16 => {
-                                        action_succeeded = V128Helper.expect(i8x16, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i8x16, r.V128, expected_value.V128, i, returns.len, module, &c);
                                     },
                                     .I16x8 => {
-                                        action_succeeded = V128Helper.expect(i16x8, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i16x8, r.V128, expected_value.V128, i, returns.len, module, &c);
                                     },
                                     .I32x4 => {
-                                        action_succeeded = V128Helper.expect(i32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
                                     },
                                     .I64x2 => {
-                                        action_succeeded = V128Helper.expect(i64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
                                     },
                                     .F32x4 => {
-                                        action_succeeded = V128Helper.expect(f32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(f32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
                                     },
                                     .F64x2 => {
-                                        action_succeeded = V128Helper.expect(f64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(f64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
                                     },
                                 }
                             }
@@ -1119,7 +1166,10 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 switch (c.action.type) {
                     .Invocation => {
-                        (module.inst.?).invoke(c.action.field, c.action.args.items, returns) catch |e| {
+                        var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
+                        defer vals.deinit();
+
+                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
                             action_failed = true;
                             caught_error = e;
 
