@@ -3518,8 +3518,17 @@ const InstructionFuncs = struct {
             Xor,
         };
 
+        fn vectorOr(comptime len: usize, v1: @Vector(len, bool), v2: @Vector(len, bool)) @Vector(len, bool) {
+            var arr: [len]bool = undefined;
+            for (arr) |*v, i| {
+                v.* = v1[i] or v2[i];
+            }
+            return arr;
+        }
+
         fn vectorBinOp(comptime T: type, comptime op: VectorBinaryOp, stack: *Stack) void {
-            const child_type = @typeInfo(T).Vector.child;
+            const type_info = @typeInfo(T).Vector;
+            const child_type = type_info.child;
             const v2 = @bitCast(T, stack.popV128());
             const v1 = @bitCast(T, stack.popV128());
             const result = switch (op) {
@@ -3547,10 +3556,34 @@ const InstructionFuncs = struct {
                     };
                 },
                 .Div => v1 / v2,
-                .Min,
-                .PMin,
-                => @min(v1, v2),
-                .Max, .PMax => @max(v1, v2),
+                .Min => blk: {
+                    break :blk switch (@typeInfo(child_type)) {
+                        .Int => @min(v1, v2),
+                        .Float => blk2: {
+                            const is_nan = v1 != v1;
+                            const is_min = v1 < v2;
+                            const pred = vectorOr(type_info.len, is_nan, is_min);
+                            const r = @select(f32, pred, v1, v2);
+                            break :blk2 r;
+                        },
+                        else => unreachable,
+                    };
+                },
+                .PMin => @min(v1, v2),
+                .Max => blk: {
+                    break :blk switch (@typeInfo(child_type)) {
+                        .Int => @min(v1, v2),
+                        .Float => blk2: {
+                            const is_nan = v1 != v1;
+                            const is_min = v1 > v2;
+                            const pred = vectorOr(type_info.len, is_nan, is_min);
+                            const r = @select(f32, pred, v1, v2);
+                            break :blk2 r;
+                        },
+                        else => unreachable,
+                    };
+                },
+                .PMax => @max(v1, v2),
                 .And => v1 & v2,
                 .AndNot => v1 & (~v2),
                 .Or => v1 | v2,
