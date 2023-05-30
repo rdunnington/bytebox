@@ -349,6 +349,7 @@ pub const Opcode = enum(u16) {
     I64x2_GE_S,
     F32x4_Abs,
     F32x4_Neg,
+    F32x4_Sqrt,
     F32x4_Add,
     F32x4_Sub,
     F32x4_Mul,
@@ -729,6 +730,7 @@ pub const WasmOpcode = enum(u16) {
     I64x2_GE_S = 0xFDDB,
     F32x4_Abs = 0xFDE0,
     F32x4_Neg = 0xFDE1,
+    F32x4_Sqrt = 0xFDE3,
     F32x4_Add = 0xFDE4,
     F32x4_Sub = 0xFDE5,
     F32x4_Mul = 0xFDE6,
@@ -1251,7 +1253,7 @@ const ConversionTables = struct {
         Opcode.F32x4_Abs, // 0xFDE0
         Opcode.F32x4_Neg, // 0xFDE1
         Opcode.Invalid, // 0xFDE2
-        Opcode.Invalid, // 0xFDE3
+        Opcode.F32x4_Sqrt, // 0xFDE3
         Opcode.F32x4_Add, // 0xFDE4
         Opcode.F32x4_Sub, // 0xFDE5
         Opcode.F32x4_Mul, // 0xFDE6

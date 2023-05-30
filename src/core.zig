@@ -2663,6 +2663,7 @@ const ModuleValidator = struct {
             .I64x2_Neg,
             .F32x4_Abs,
             .F32x4_Neg,
+            .F32x4_Sqrt,
             .F64x2_Abs,
             .F64x2_Neg,
             .F32x4_Trunc_Sat_F32x4_S,
@@ -3259,6 +3260,7 @@ const InstructionFuncs = struct {
         &op_I64x2_GE_S,
         &op_F32x4_Abs,
         &op_F32x4_Neg,
+        &op_F32x4_Sqrt,
         &op_F32x4_Add,
         &op_F32x4_Sub,
         &op_F32x4_Mul,
@@ -3572,7 +3574,7 @@ const InstructionFuncs = struct {
                 .PMin => @min(v1, v2),
                 .Max => blk: {
                     break :blk switch (@typeInfo(child_type)) {
-                        .Int => @min(v1, v2),
+                        .Int => @max(v1, v2),
                         .Float => blk2: {
                             const is_nan = v1 != v1;
                             const is_min = v1 > v2;
@@ -6744,6 +6746,14 @@ const InstructionFuncs = struct {
         const vec = @bitCast(f32x4, stack.popV128());
         const negated = -vec;
         stack.pushV128(@bitCast(v128, negated));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Sqrt(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Sqrt", pc, code, stack);
+        const vec = @bitCast(f32x4, stack.popV128());
+        const root = @sqrt(vec);
+        stack.pushV128(@bitCast(v128, root));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
