@@ -2784,6 +2784,11 @@ const ModuleValidator = struct {
             .F64x2_Add,
             .F64x2_Sub,
             .F64x2_Mul,
+            .F64x2_Div,
+            .F64x2_Min,
+            .F64x2_Max,
+            .F64x2_PMin,
+            .F64x2_PMax,
             => {
                 try Helpers.validateNumericBinaryOp(self, .V128, .V128);
             },
@@ -3274,6 +3279,11 @@ const InstructionFuncs = struct {
         &op_F64x2_Add,
         &op_F64x2_Sub,
         &op_F64x2_Mul,
+        &op_F64x2_Div,
+        &op_F64x2_Min,
+        &op_F64x2_Max,
+        &op_F64x2_PMin,
+        &op_F64x2_PMax,
         &op_F32x4_Trunc_Sat_F32x4_S,
         &op_F32x4_Trunc_Sat_F32x4_U,
         &op_F32x4_Convert_I32x4_S,
@@ -3565,7 +3575,7 @@ const InstructionFuncs = struct {
                             const is_nan = v1 != v1;
                             const is_min = v1 < v2;
                             const pred = vectorOr(type_info.len, is_nan, is_min);
-                            const r = @select(f32, pred, v1, v2);
+                            const r = @select(child_type, pred, v1, v2);
                             break :blk2 r;
                         },
                         else => unreachable,
@@ -3579,7 +3589,7 @@ const InstructionFuncs = struct {
                             const is_nan = v1 != v1;
                             const is_min = v1 > v2;
                             const pred = vectorOr(type_info.len, is_nan, is_min);
-                            const r = @select(f32, pred, v1, v2);
+                            const r = @select(child_type, pred, v1, v2);
                             break :blk2 r;
                         },
                         else => unreachable,
@@ -6860,6 +6870,36 @@ const InstructionFuncs = struct {
     fn op_F64x2_Mul(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64x2_Mul", pc, code, stack);
         OpHelpers.vectorBinOp(f64x2, .Mul, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Div(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Div", pc, code, stack);
+        OpHelpers.vectorBinOp(f64x2, .Div, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Min(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Min", pc, code, stack);
+        OpHelpers.vectorBinOp(f64x2, .Min, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Max(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Max", pc, code, stack);
+        OpHelpers.vectorBinOp(f64x2, .Max, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_PMin(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_PMin", pc, code, stack);
+        OpHelpers.vectorBinOp(f64x2, .PMin, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_PMax(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_PMax", pc, code, stack);
+        OpHelpers.vectorBinOp(f64x2, .PMax, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 };

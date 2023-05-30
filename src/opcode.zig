@@ -363,6 +363,11 @@ pub const Opcode = enum(u16) {
     F64x2_Add,
     F64x2_Sub,
     F64x2_Mul,
+    F64x2_Div,
+    F64x2_Min,
+    F64x2_Max,
+    F64x2_PMin,
+    F64x2_PMax,
     F32x4_Trunc_Sat_F32x4_S,
     F32x4_Trunc_Sat_F32x4_U,
     F32x4_Convert_I32x4_S,
@@ -744,6 +749,11 @@ pub const WasmOpcode = enum(u16) {
     F64x2_Add = 0xFDF0,
     F64x2_Sub = 0xFDF1,
     F64x2_Mul = 0xFDF2,
+    F64x2_Div = 0xFDF3,
+    F64x2_Min = 0xFDF4,
+    F64x2_Max = 0xFDF5,
+    F64x2_PMin = 0xFDF6,
+    F64x2_PMax = 0xFDF7,
     F32x4_Trunc_Sat_F32x4_S = 0xFDF8,
     F32x4_Trunc_Sat_F32x4_U = 0xFDF9,
     F32x4_Convert_I32x4_S = 0xFDFA,
@@ -1269,11 +1279,11 @@ const ConversionTables = struct {
         Opcode.F64x2_Add, // 0xFDF0
         Opcode.F64x2_Sub, // 0xFDF1
         Opcode.F64x2_Mul, // 0xFDF2
-        Opcode.Invalid, // 0xFDF3
-        Opcode.Invalid, // 0xFDF4
-        Opcode.Invalid, // 0xFDF5
-        Opcode.Invalid, // 0xFDF6
-        Opcode.Invalid, // 0xFDF7
+        Opcode.F64x2_Div, // 0xFDF3
+        Opcode.F64x2_Min, // 0xFDF4
+        Opcode.F64x2_Max, // 0xFDF5
+        Opcode.F64x2_PMin, // 0xFDF6
+        Opcode.F64x2_PMax, // 0xFDF7
         Opcode.F32x4_Trunc_Sat_F32x4_S, // 0xFDF8
         Opcode.F32x4_Trunc_Sat_F32x4_U, // 0xFDF9
         Opcode.F32x4_Convert_I32x4_S, // 0xFDFA

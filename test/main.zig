@@ -1363,7 +1363,7 @@ pub fn main() !void {
         "simd_f32x4_cmp",
         // "simd_f32x4_pmin_pmax",
         // "simd_f32x4_rounding",
-        // "simd_f64x2",
+        "simd_f64x2",
         // "simd_f64x2_arith",
         "simd_f64x2_cmp",
         // "simd_f64x2_pmin_pmax",
