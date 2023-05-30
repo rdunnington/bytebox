@@ -3583,7 +3583,7 @@ const InstructionFuncs = struct {
                         else => unreachable,
                     };
                 },
-                .PMin => @min(v1, v2),
+                .PMin => @select(child_type, (v2 < v1), v2, v1),
                 .Max => blk: {
                     break :blk switch (@typeInfo(child_type)) {
                         .Int => @max(v1, v2),
@@ -3597,7 +3597,7 @@ const InstructionFuncs = struct {
                         else => unreachable,
                     };
                 },
-                .PMax => @max(v1, v2),
+                .PMax => @select(child_type, (v2 > v1), v2, v1),
                 .And => v1 & v2,
                 .AndNot => v1 & (~v2),
                 .Or => v1 | v2,
