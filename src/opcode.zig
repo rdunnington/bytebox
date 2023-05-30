@@ -288,6 +288,10 @@ pub const Opcode = enum(u16) {
     I8x16_Popcnt,
     I8x16_AllTrue,
     I8x16_Bitmask,
+    F32x4_Ceil,
+    F32x4_Floor,
+    F32x4_Trunc,
+    F32x4_Nearest,
     I8x16_Shr_S,
     I8x16_Shr_U,
     I8x16_Add,
@@ -296,10 +300,13 @@ pub const Opcode = enum(u16) {
     I8x16_Sub,
     I8x16_Sub_Sat_S,
     I8x16_Sub_Sat_U,
+    F64x2_Ceil,
+    F64x2_Floor,
     I8x16_Min_S,
     I8x16_Min_U,
     I8x16_Max_S,
     I8x16_Max_U,
+    F64x2_Trunc,
     I8x16_Avgr_U,
     I16x8_Abs,
     I16x8_Neg,
@@ -313,6 +320,7 @@ pub const Opcode = enum(u16) {
     I16x8_Sub,
     I16x8_Sub_Sat_S,
     I16x8_Sub_Sat_U,
+    F64x2_Nearest,
     I16x8_Mul,
     I16x8_Min_S,
     I16x8_Min_U,
@@ -675,6 +683,10 @@ pub const WasmOpcode = enum(u16) {
     I8x16_Popcnt = 0xFD62,
     I8x16_AllTrue = 0xFD63,
     I8x16_Bitmask = 0xFD64,
+    F32x4_Ceil = 0xFD67,
+    F32x4_Floor = 0xFD68,
+    F32x4_Trunc = 0xFD69,
+    F32x4_Nearest = 0xFD6A,
     I8x16_Shr_S = 0xFD6C,
     I8x16_Shr_U = 0xFD6D,
     I8x16_Add = 0xFD6E,
@@ -683,10 +695,13 @@ pub const WasmOpcode = enum(u16) {
     I8x16_Sub = 0xFD71,
     I8x16_Sub_Sat_S = 0xFD72,
     I8x16_Sub_Sat_U = 0xFD73,
+    F64x2_Ceil = 0xFD74,
+    F64x2_Floor = 0xFD75,
     I8x16_Min_S = 0xFD76,
     I8x16_Min_U = 0xFD77,
     I8x16_Max_S = 0xFD78,
     I8x16_Max_U = 0xFD79,
+    F64x2_Trunc = 0xFD7A,
     I8x16_Avgr_U = 0xFD7B,
     I16x8_Abs = 0xFD80,
     I16x8_Neg = 0xFD81,
@@ -700,6 +715,7 @@ pub const WasmOpcode = enum(u16) {
     I16x8_Sub = 0xFD91,
     I16x8_Sub_Sat_S = 0xFD92,
     I16x8_Sub_Sat_U = 0xFD93,
+    F64x2_Nearest = 0xFD94,
     I16x8_Mul = 0xFD95,
     I16x8_Min_S = 0xFD96,
     I16x8_Min_U = 0xFD97,
@@ -1141,10 +1157,10 @@ const ConversionTables = struct {
         Opcode.I8x16_Bitmask, // 0xFD64
         Opcode.Invalid, // 0xFD65
         Opcode.Invalid, // 0xFD66
-        Opcode.Invalid, // 0xFD67
-        Opcode.Invalid, // 0xFD68
-        Opcode.Invalid, // 0xFD69
-        Opcode.Invalid, // 0xFD6A
+        Opcode.F32x4_Ceil, // 0xFD67
+        Opcode.F32x4_Floor, // 0xFD68
+        Opcode.F32x4_Trunc, // 0xFD69
+        Opcode.F32x4_Nearest, // 0xFD6A
         Opcode.Invalid, // 0xFD6B
         Opcode.I8x16_Shr_S, // 0xFD6C
         Opcode.I8x16_Shr_U, // 0xFD6D
@@ -1154,13 +1170,13 @@ const ConversionTables = struct {
         Opcode.I8x16_Sub, // 0xFD71
         Opcode.I8x16_Sub_Sat_S, // 0xFD72
         Opcode.I8x16_Sub_Sat_U, // 0xFD73
-        Opcode.Invalid, // 0xFD74
-        Opcode.Invalid, // 0xFD75
+        Opcode.F64x2_Ceil, // 0xFD74
+        Opcode.F64x2_Floor, // 0xFD75
         Opcode.I8x16_Min_S, // 0xFD76
         Opcode.I8x16_Min_U, // 0xFD77
         Opcode.I8x16_Max_S, // 0xFD78
         Opcode.I8x16_Max_U, // 0xFD79
-        Opcode.Invalid, // 0xFD7A
+        Opcode.F64x2_Trunc, // 0xFD7A
         Opcode.I8x16_Avgr_U, // 0xFD7B
         Opcode.Invalid, // 0xFD7C
         Opcode.Invalid, // 0xFD7D
@@ -1186,7 +1202,7 @@ const ConversionTables = struct {
         Opcode.I16x8_Sub, // 0xFD91
         Opcode.I16x8_Sub_Sat_S, // 0xFD92
         Opcode.I16x8_Sub_Sat_U, // 0xFD93
-        Opcode.Invalid, // 0xFD94
+        Opcode.F64x2_Nearest, // 0xFD94
         Opcode.I16x8_Mul, // 0xFD95
         Opcode.I16x8_Min_S, // 0xFD96
         Opcode.I16x8_Min_U, // 0xFD97

@@ -2655,6 +2655,14 @@ const ModuleValidator = struct {
             .I8x16_Abs,
             .I8x16_Neg,
             .I8x16_Popcnt,
+            .F32x4_Ceil,
+            .F32x4_Floor,
+            .F32x4_Trunc,
+            .F32x4_Nearest,
+            .F64x2_Ceil,
+            .F64x2_Floor,
+            .F64x2_Trunc,
+            .F64x2_Nearest,
             .I16x8_Abs,
             .I16x8_Neg,
             .I32x4_Abs,
@@ -3205,6 +3213,10 @@ const InstructionFuncs = struct {
         &op_I8x16_Popcnt,
         &op_I8x16_AllTrue,
         &op_I8x16_Bitmask,
+        &op_F32x4_Ceil,
+        &op_F32x4_Floor,
+        &op_F32x4_Trunc,
+        &op_F32x4_Nearest,
         &op_I8x16_Shr_S,
         &op_I8x16_Shr_U,
         &op_I8x16_Add,
@@ -3213,10 +3225,13 @@ const InstructionFuncs = struct {
         &op_I8x16_Sub,
         &op_I8x16_Sub_Sat_S,
         &op_I8x16_Sub_Sat_U,
+        &op_F64x2_Ceil,
+        &op_F64x2_Floor,
         &op_I8x16_Min_S,
         &op_I8x16_Min_U,
         &op_I8x16_Max_S,
         &op_I8x16_Max_U,
+        &op_F64x2_Trunc,
         &op_I8x16_Avgr_U,
         &op_I16x8_Abs,
         &op_I16x8_Neg,
@@ -3230,6 +3245,7 @@ const InstructionFuncs = struct {
         &op_I16x8_Sub,
         &op_I16x8_Sub_Sat_S,
         &op_I16x8_Sub_Sat_U,
+        &op_F64x2_Nearest,
         &op_I16x8_Mul,
         &op_I16x8_Min_S,
         &op_I16x8_Min_U,
@@ -3513,6 +3529,36 @@ const InstructionFuncs = struct {
                 .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
                 .continuation = label.continuation + 1, // branching takes care of popping/pushing values so skip the End instruction
             };
+        }
+
+        const VectorUnaryOp = enum(u8) {
+            Ceil,
+            Floor,
+            Trunc,
+            Nearest,
+        };
+
+        fn vectorUnOp(comptime T: type, op: VectorUnaryOp, stack: *Stack) void {
+            const vec = @bitCast(T, stack.popV128());
+            const type_info = @typeInfo(T).Vector;
+            const child_type = type_info.child;
+            const result = switch (op) {
+                .Ceil => @ceil(vec),
+                .Floor => @floor(vec),
+                .Trunc => @trunc(vec),
+                .Nearest => blk: {
+                    const zeroes = @splat(type_info.len, @as(child_type, 0));
+                    const twos = @splat(type_info.len, @as(child_type, 2));
+
+                    const ceil = @ceil(vec);
+                    const floor = @floor(vec);
+                    const is_half = (ceil - vec) == (vec - floor);
+                    const evens = @select(child_type, @mod(ceil, twos) == zeroes, ceil, floor);
+                    const rounded = @round(vec);
+                    break :blk @select(child_type, is_half, evens, rounded);
+                },
+            };
+            stack.pushV128(@bitCast(v128, result));
         }
 
         const VectorBinaryOp = enum(u8) {
@@ -6379,6 +6425,30 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_F32x4_Ceil(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Ceil", pc, code, stack);
+        OpHelpers.vectorUnOp(f32x4, .Ceil, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Floor(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Floor", pc, code, stack);
+        OpHelpers.vectorUnOp(f32x4, .Floor, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Trunc(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Trunc", pc, code, stack);
+        OpHelpers.vectorUnOp(f32x4, .Trunc, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Nearest(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Nearest", pc, code, stack);
+        OpHelpers.vectorUnOp(f32x4, .Nearest, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I8x16_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Shr_S", pc, code, stack);
         OpHelpers.vectorShift(i8x16, stack);
@@ -6427,6 +6497,18 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_F64x2_Ceil(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Ceil", pc, code, stack);
+        OpHelpers.vectorUnOp(f64x2, .Ceil, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Floor(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Floor", pc, code, stack);
+        OpHelpers.vectorUnOp(f64x2, .Floor, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I8x16_Min_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Min_S", pc, code, stack);
         OpHelpers.vectorBinOp(i8x16, .Min, stack);
@@ -6448,6 +6530,12 @@ const InstructionFuncs = struct {
     fn op_I8x16_Max_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Max_U", pc, code, stack);
         OpHelpers.vectorBinOp(u8x16, .Max, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Trunc(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Trunc", pc, code, stack);
+        OpHelpers.vectorUnOp(f64x2, .Trunc, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6530,6 +6618,12 @@ const InstructionFuncs = struct {
     fn op_I16x8_Sub_Sat_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I16x8_Sub_Sat_U", pc, code, stack);
         OpHelpers.vectorBinOp(u16x8, .Sub_Sat, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Nearest(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Nearest", pc, code, stack);
+        OpHelpers.vectorUnOp(f64x2, .Nearest, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
