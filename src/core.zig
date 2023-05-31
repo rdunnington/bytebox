@@ -2652,6 +2652,8 @@ const ModuleValidator = struct {
                 try Helpers.validateNumericBinaryOp(self, .V128, .V128);
             },
             .V128_Not,
+            .F32x4_Demote_F64x2_Zero,
+            .F64x2_Promote_Low_F32x4,
             .I8x16_Abs,
             .I8x16_Neg,
             .I8x16_Popcnt,
@@ -2665,10 +2667,22 @@ const ModuleValidator = struct {
             .F64x2_Nearest,
             .I16x8_Abs,
             .I16x8_Neg,
+            .I16x8_Extend_Low_I8x16_S,
+            .I16x8_Extend_High_I8x16_S,
+            .I16x8_Extend_Low_I8x16_U,
+            .I16x8_Extend_High_I8x16_U,
             .I32x4_Abs,
             .I32x4_Neg,
+            .I32x4_Extend_Low_I16x8_S,
+            .I32x4_Extend_High_I16x8_S,
+            .I32x4_Extend_Low_I16x8_U,
+            .I32x4_Extend_High_I16x8_U,
             .I64x2_Abs,
             .I64x2_Neg,
+            .I64x2_Extend_Low_I32x4_S,
+            .I64x2_Extend_High_I32x4_S,
+            .I64x2_Extend_Low_I32x4_U,
+            .I64x2_Extend_High_I32x4_U,
             .F32x4_Abs,
             .F32x4_Neg,
             .F32x4_Sqrt,
@@ -2679,6 +2693,8 @@ const ModuleValidator = struct {
             .F32x4_Trunc_Sat_F32x4_U,
             .F32x4_Convert_I32x4_S,
             .F32x4_Convert_I32x4_U,
+            .F64x2_Convert_Low_I32x4_S,
+            .F64x2_Convert_Low_I32x4_U,
             => {
                 try Helpers.validateNumericUnaryOp(self, .V128, .V128);
             },
@@ -2749,6 +2765,8 @@ const ModuleValidator = struct {
             .V128_AndNot,
             .V128_Or,
             .V128_Xor,
+            .I8x16_Narrow_16x8_S,
+            .I8x16_Narrow_16x8_U,
             .I8x16_Add,
             .I8x16_Add_Sat_S,
             .I8x16_Add_Sat_U,
@@ -2760,6 +2778,8 @@ const ModuleValidator = struct {
             .I8x16_Max_S,
             .I8x16_Max_U,
             .I8x16_Avgr_U,
+            .I16x8_Narrow_I32x4_S,
+            .I16x8_Narrow_I32x4_U,
             .I16x8_Add,
             .I16x8_Add_Sat_S,
             .I16x8_Add_Sat_U,
@@ -3208,11 +3228,15 @@ const InstructionFuncs = struct {
         &op_V128_Xor,
         &op_V128_Bitselect,
         &op_V128_AnyTrue,
+        &op_F32x4_Demote_F64x2_Zero,
+        &op_F64x2_Promote_Low_F32x4,
         &op_I8x16_Abs,
         &op_I8x16_Neg,
         &op_I8x16_Popcnt,
         &op_I8x16_AllTrue,
         &op_I8x16_Bitmask,
+        &op_I8x16_Narrow_16x8_S,
+        &op_I8x16_Narrow_16x8_U,
         &op_F32x4_Ceil,
         &op_F32x4_Floor,
         &op_F32x4_Trunc,
@@ -3237,6 +3261,12 @@ const InstructionFuncs = struct {
         &op_I16x8_Neg,
         &op_I16x8_AllTrue,
         &op_I16x8_Bitmask,
+        &op_I16x8_Narrow_I32x4_S,
+        &op_I16x8_Narrow_I32x4_U,
+        &op_I16x8_Extend_Low_I8x16_S,
+        &op_I16x8_Extend_High_I8x16_S,
+        &op_I16x8_Extend_Low_I8x16_U,
+        &op_I16x8_Extend_High_I8x16_U,
         &op_I16x8_Shr_S,
         &op_I16x8_Shr_U,
         &op_I16x8_Add,
@@ -3256,6 +3286,10 @@ const InstructionFuncs = struct {
         &op_I32x4_Neg,
         &op_I32x4_AllTrue,
         &op_I32x4_Bitmask,
+        &op_I32x4_Extend_Low_I16x8_S,
+        &op_I32x4_Extend_High_I16x8_S,
+        &op_I32x4_Extend_Low_I16x8_U,
+        &op_I32x4_Extend_High_I16x8_U,
         &op_I32x4_Shr_S,
         &op_I32x4_Shr_U,
         &op_I32x4_Add,
@@ -3269,6 +3303,10 @@ const InstructionFuncs = struct {
         &op_I64x2_Neg,
         &op_I64x2_AllTrue,
         &op_I64x2_Bitmask,
+        &op_I64x2_Extend_Low_I32x4_S,
+        &op_I64x2_Extend_High_I32x4_S,
+        &op_I64x2_Extend_Low_I32x4_U,
+        &op_I64x2_Extend_High_I32x4_U,
         &op_I64x2_Shr_S,
         &op_I64x2_Shr_U,
         &op_I64x2_Add,
@@ -3306,6 +3344,8 @@ const InstructionFuncs = struct {
         &op_F32x4_Trunc_Sat_F32x4_U,
         &op_F32x4_Convert_I32x4_S,
         &op_F32x4_Convert_I32x4_U,
+        &op_F64x2_Convert_Low_I32x4_S,
+        &op_F64x2_Convert_Low_I32x4_U,
     };
 
     fn run(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
@@ -3813,6 +3853,24 @@ const InstructionFuncs = struct {
             var vec = @bitCast(T, stack.popV128());
             vec[lane] = lane_value;
             stack.pushV128(@bitCast(v128, vec));
+        }
+
+        const VectorExtendSide = enum {
+            Low,
+            High,
+        };
+
+        fn vectorExtend(comptime in_type: type, comptime out_type: type, comptime side: VectorExtendSide, stack: *Stack) void {
+            const out_info = @typeInfo(out_type).Vector;
+            const side_offset = if (side == .Low) 0 else out_info.len / 2;
+
+            const vec = @bitCast(in_type, stack.popV128());
+            var arr: [out_info.len]out_info.child = undefined;
+            for (arr) |*v, i| {
+                v.* = vec[i + side_offset];
+            }
+            const extended: out_type = arr;
+            stack.pushV128(@bitCast(v128, extended));
         }
 
         fn vectorConvert(comptime in_type: type, comptime out_type: type, stack: *Stack) void {
@@ -6389,6 +6447,30 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_F32x4_Demote_F64x2_Zero(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Demote_F64x2_Zero", pc, code, stack);
+        const vec = @bitCast(f64x2, stack.popV128());
+        var arr: [4]f32 = undefined;
+        arr[0] = @floatCast(f32, vec[0]);
+        arr[1] = @floatCast(f32, vec[1]);
+        arr[2] = 0.0;
+        arr[3] = 0.0;
+        const demoted: f32x4 = arr;
+        stack.pushV128(@bitCast(v128, demoted));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Promote_Low_F32x4(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Promote_Low_F32x4", pc, code, stack);
+        const vec = @bitCast(f32x4, stack.popV128());
+        var arr: [2]f64 = undefined;
+        arr[0] = vec[0];
+        arr[1] = vec[1];
+        const promoted: f64x2 = arr;
+        stack.pushV128(@bitCast(v128, promoted));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I8x16_Abs(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Abs", pc, code, stack);
         OpHelpers.vectorAbs(i8x16, stack);
@@ -6422,6 +6504,40 @@ const InstructionFuncs = struct {
         debugPreamble("I8x16_Bitmask", pc, code, stack);
         const bitmask: i32 = OpHelpers.vectorBitmask(i8x16, stack.popV128());
         stack.pushI32(bitmask);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn vecTruncate(comptime in_type: type, comptime out_type: type, in: in_type) out_type {
+        const out_info = @typeInfo(out_type).Vector;
+
+        var arr: [out_info.len]out_info.child = undefined;
+        for (arr) |*v, i| {
+            v.* = @truncate(out_info.child, in[i]);
+        }
+        return arr;
+    }
+
+    fn op_I8x16_Narrow_16x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I8x16_Narrow_16x8_S", pc, code, stack);
+        const v2 = @bitCast(i16x8, stack.popV128());
+        const v1 = @bitCast(i16x8, stack.popV128());
+        const v1_narrow: @Vector(8, i8) = vecTruncate(i16x8, @Vector(8, i8), v1);
+        const v2_narrow: @Vector(8, i8) = vecTruncate(i16x8, @Vector(8, i8), v2);
+        const mask = @Vector(16, i32){ 0, 1, 2, 3, 4, 5, 6, 7, -1, -2, -3, -4, -5, -6, -7, -8 };
+        const mix = @shuffle(i8, v1_narrow, v2_narrow, mask);
+        stack.pushV128(@bitCast(v128, mix));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_Narrow_16x8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I8x16_Narrow_16x8_U", pc, code, stack);
+        const v2 = @bitCast(u16x8, stack.popV128());
+        const v1 = @bitCast(u16x8, stack.popV128());
+        const v1_narrow: @Vector(8, u8) = vecTruncate(u16x8, @Vector(8, u8), v1);
+        const v2_narrow: @Vector(8, u8) = vecTruncate(u16x8, @Vector(8, u8), v2);
+        const mask = @Vector(16, i32){ 0, 1, 2, 3, 4, 5, 6, 7, -1, -2, -3, -4, -5, -6, -7, -8 };
+        const mix = @shuffle(u8, v1_narrow, v2_narrow, mask);
+        stack.pushV128(@bitCast(v128, mix));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6573,6 +6689,55 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I16x8_Narrow_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Narrow_I32x4_S", pc, code, stack);
+        const i16x4 = @Vector(4, i16);
+        const v2 = @bitCast(i32x4, stack.popV128());
+        const v1 = @bitCast(i32x4, stack.popV128());
+        const v1_narrow: i16x4 = vecTruncate(i32x4, i16x4, v1);
+        const v2_narrow: i16x4 = vecTruncate(i32x4, i16x4, v2);
+        const mask = @Vector(8, i32){ 0, 1, 2, 3, -1, -2, -3, -4 };
+        const mix = @shuffle(i16, v1_narrow, v2_narrow, mask);
+        stack.pushV128(@bitCast(v128, mix));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Narrow_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Narrow_I32x4_U", pc, code, stack);
+        const u16x4 = @Vector(4, u16);
+        const v2 = @bitCast(u32x4, stack.popV128());
+        const v1 = @bitCast(u32x4, stack.popV128());
+        const v1_narrow: u16x4 = vecTruncate(u32x4, u16x4, v1);
+        const v2_narrow: u16x4 = vecTruncate(u32x4, u16x4, v2);
+        const mask = @Vector(8, i32){ 0, 1, 2, 3, -1, -2, -3, -4 };
+        const mix = @shuffle(u16, v1_narrow, v2_narrow, mask);
+        stack.pushV128(@bitCast(v128, mix));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extend_Low_I8x16_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extend_Low_I8x16_S", pc, code, stack);
+        OpHelpers.vectorExtend(i8x16, i16x8, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extend_High_I8x16_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extend_High_I8x16_S", pc, code, stack);
+        OpHelpers.vectorExtend(i8x16, i16x8, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extend_Low_I8x16_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extend_Low_I8x16_U", pc, code, stack);
+        OpHelpers.vectorExtend(u8x16, i16x8, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+    fn op_I16x8_Extend_High_I8x16_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extend_High_I8x16_U", pc, code, stack);
+        OpHelpers.vectorExtend(u8x16, i16x8, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I16x8_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I16x8_Shr_S", pc, code, stack);
         OpHelpers.vectorShift(i16x8, stack);
@@ -6691,6 +6856,30 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I32x4_Extend_Low_I16x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extend_Low_I16x8_S", pc, code, stack);
+        OpHelpers.vectorExtend(i16x8, i32x4, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extend_High_I16x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extend_High_I16x8_S", pc, code, stack);
+        OpHelpers.vectorExtend(i16x8, i32x4, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extend_Low_I16x8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extend_Low_I16x8_U", pc, code, stack);
+        OpHelpers.vectorExtend(u16x8, i32x4, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extend_High_I16x8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extend_High_I16x8_U", pc, code, stack);
+        OpHelpers.vectorExtend(u16x8, i32x4, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I32x4_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32x4_Shr_S", pc, code, stack);
         OpHelpers.vectorShift(i32x4, stack);
@@ -6728,6 +6917,30 @@ const InstructionFuncs = struct {
         debugPreamble("I64x2_Bitmask", pc, code, stack);
         const bitmask: i32 = OpHelpers.vectorBitmask(i64x2, stack.popV128());
         stack.pushI32(bitmask);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_Extend_Low_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_Extend_Low_I32x4_S", pc, code, stack);
+        OpHelpers.vectorExtend(i32x4, i64x2, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_Extend_High_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_Extend_High_I32x4_S", pc, code, stack);
+        OpHelpers.vectorExtend(i32x4, i64x2, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_Extend_Low_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_Extend_Low_I32x4_U", pc, code, stack);
+        OpHelpers.vectorExtend(u32x4, i64x2, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_Extend_High_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_Extend_High_I32x4_U", pc, code, stack);
+        OpHelpers.vectorExtend(u32x4, i64x2, .High, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6911,30 +7124,6 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
-    fn op_F32x4_Trunc_Sat_F32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("F32x4_Trunc_Sat_F32x4_S", pc, code, stack);
-        OpHelpers.vectorConvert(f32x4, i32x4, stack);
-        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
-    }
-
-    fn op_F32x4_Trunc_Sat_F32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("F32x4_Trunc_Sat_F32x4_U", pc, code, stack);
-        OpHelpers.vectorConvert(f32x4, u32x4, stack);
-        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
-    }
-
-    fn op_F32x4_Convert_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("F32x4_Convert_I32x4_S", pc, code, stack);
-        OpHelpers.vectorConvert(i32x4, f32x4, stack);
-        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
-    }
-
-    fn op_F32x4_Convert_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("F32x4_Convert_I32x4_U", pc, code, stack);
-        OpHelpers.vectorConvert(u32x4, f32x4, stack);
-        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
-    }
-
     fn op_F64x2_Abs(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64x2_Abs", pc, code, stack);
         const vec = @bitCast(f64x2, stack.popV128());
@@ -7004,6 +7193,56 @@ const InstructionFuncs = struct {
     fn op_F64x2_PMax(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("F64x2_PMax", pc, code, stack);
         OpHelpers.vectorBinOp(f64x2, .PMax, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Trunc_Sat_F32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Trunc_Sat_F32x4_S", pc, code, stack);
+        OpHelpers.vectorConvert(f32x4, i32x4, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Trunc_Sat_F32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Trunc_Sat_F32x4_U", pc, code, stack);
+        OpHelpers.vectorConvert(f32x4, u32x4, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Convert_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Convert_I32x4_S", pc, code, stack);
+        OpHelpers.vectorConvert(i32x4, f32x4, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F32x4_Convert_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F32x4_Convert_I32x4_U", pc, code, stack);
+        OpHelpers.vectorConvert(u32x4, f32x4, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Convert_Low_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Convert_Low_I32x4_S", pc, code, stack);
+        // OpHelpers.vectorConvert(i32x4, f64x2, stack);
+        // const vec_in = @bitCast(i32x4, stack.popV128());
+        // var array
+        // const vec_out = @bitCast(i32x4, stack.popV128());
+
+        // const arr: [4]i32 = vec;
+        // const bytes: []const u8 = std.mem.sliceAsBytes(&arr);
+        // const f64_slice: []const f64 = @alignCast(@alignOf(f64), std.mem.bytesAsSlice(f64, bytes));
+        // const arr2: f64x2 = f64_slice[0..2].*;
+
+        stack.pushV128(@splat(4, @as(f32, 0)));
+
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_F64x2_Convert_Low_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("F64x2_Convert_Low_I32x4_U", pc, code, stack);
+        stack.pushV128(@splat(4, @as(f32, 0)));
+
+        // unreachable;
+        // OpHelpers.vectorConvert(u32x4, f64x2, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 };
