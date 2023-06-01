@@ -1391,7 +1391,7 @@ pub fn main() !void {
         "simd_i8x16_arith2",
         "simd_i8x16_cmp",
         "simd_i8x16_sat_arith",
-        // "simd_int_to_int_extend",
+        "simd_int_to_int_extend",
         // "simd_lane",
         // "simd_load",
         // "simd_load16_lane",
