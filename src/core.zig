@@ -2665,6 +2665,10 @@ const ModuleValidator = struct {
             .F64x2_Floor,
             .F64x2_Trunc,
             .F64x2_Nearest,
+            .I16x8_Extadd_Pairwise_I8x16_S,
+            .I16x8_Extadd_Pairwise_I8x16_U,
+            .I32x4_Extadd_Pairwise_I16x8_S,
+            .I32x4_Extadd_Pairwise_I16x8_U,
             .I16x8_Abs,
             .I16x8_Neg,
             .I16x8_Extend_Low_I8x16_S,
@@ -3270,6 +3274,10 @@ const InstructionFuncs = struct {
         &op_I8x16_Max_U,
         &op_F64x2_Trunc,
         &op_I8x16_Avgr_U,
+        &op_I16x8_Extadd_Pairwise_I8x16_S,
+        &op_I16x8_Extadd_Pairwise_I8x16_U,
+        &op_I32x4_Extadd_Pairwise_I16x8_S,
+        &op_I32x4_Extadd_Pairwise_I16x8_U,
         &op_I16x8_Abs,
         &op_I16x8_Neg,
         &op_I16x8_AllTrue,
@@ -3875,6 +3883,20 @@ const InstructionFuncs = struct {
             var vec = @bitCast(T, stack.popV128());
             vec[lane] = lane_value;
             stack.pushV128(@bitCast(v128, vec));
+        }
+
+        fn vectorAddPairwise(comptime in_type: type, comptime out_type: type, stack: *Stack) void {
+            const out_info = @typeInfo(out_type).Vector;
+
+            const vec = @bitCast(in_type, stack.popV128());
+            var arr: [out_info.len]out_info.child = undefined;
+            for (arr) |*v, i| {
+                const v1: out_info.child = vec[i * 2];
+                const v2: out_info.child = vec[(i * 2) + 1];
+                v.* = v1 + v2;
+            }
+            const sum: out_type = arr;
+            stack.pushV128(@bitCast(v128, sum));
         }
 
         const VectorSide = enum {
@@ -6700,6 +6722,30 @@ const InstructionFuncs = struct {
     fn op_I8x16_Avgr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Avgr_U", pc, code, stack);
         OpHelpers.vectorAvgrU(u8x16, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extadd_Pairwise_I8x16_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extadd_Pairwise_I8x16_S", pc, code, stack);
+        OpHelpers.vectorAddPairwise(i8x16, i16x8, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extadd_Pairwise_I8x16_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extadd_Pairwise_I8x16_U", pc, code, stack);
+        OpHelpers.vectorAddPairwise(u8x16, u16x8, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extadd_Pairwise_I16x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extadd_Pairwise_I16x8_S", pc, code, stack);
+        OpHelpers.vectorAddPairwise(i16x8, i32x4, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extadd_Pairwise_I16x8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extadd_Pairwise_I16x8_U", pc, code, stack);
+        OpHelpers.vectorAddPairwise(u16x8, u32x4, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 

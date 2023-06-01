@@ -313,6 +313,10 @@ pub const Opcode = enum(u16) {
     I8x16_Max_U,
     F64x2_Trunc,
     I8x16_Avgr_U,
+    I16x8_Extadd_Pairwise_I8x16_S,
+    I16x8_Extadd_Pairwise_I8x16_U,
+    I32x4_Extadd_Pairwise_I16x8_S,
+    I32x4_Extadd_Pairwise_I16x8_U,
     I16x8_Abs,
     I16x8_Neg,
     I16x8_AllTrue,
@@ -732,6 +736,10 @@ pub const WasmOpcode = enum(u16) {
     I8x16_Max_U = 0xFD79,
     F64x2_Trunc = 0xFD7A,
     I8x16_Avgr_U = 0xFD7B,
+    I16x8_Extadd_Pairwise_I8x16_S = 0xFD7C,
+    I16x8_Extadd_Pairwise_I8x16_U = 0xFD7D,
+    I32x4_Extadd_Pairwise_I16x8_S = 0xFD7E,
+    I32x4_Extadd_Pairwise_I16x8_U = 0xFD7F,
     I16x8_Abs = 0xFD80,
     I16x8_Neg = 0xFD81,
     I16x8_AllTrue = 0xFD83,
@@ -1226,10 +1234,10 @@ const ConversionTables = struct {
         Opcode.I8x16_Max_U, // 0xFD79
         Opcode.F64x2_Trunc, // 0xFD7A
         Opcode.I8x16_Avgr_U, // 0xFD7B
-        Opcode.Invalid, // 0xFD7C
-        Opcode.Invalid, // 0xFD7D
-        Opcode.Invalid, // 0xFD7E
-        Opcode.Invalid, // 0xFD7F
+        Opcode.I16x8_Extadd_Pairwise_I8x16_S, // 0xFD7C
+        Opcode.I16x8_Extadd_Pairwise_I8x16_U, // 0xFD7D
+        Opcode.I32x4_Extadd_Pairwise_I16x8_S, // 0xFD7E
+        Opcode.I32x4_Extadd_Pairwise_I16x8_U, // 0xFD7F
         Opcode.I16x8_Abs, // 0xFD80
         Opcode.I16x8_Neg, // 0xFD81
         Opcode.Invalid, // 0xFD82
