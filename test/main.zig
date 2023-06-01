@@ -1357,7 +1357,7 @@ pub fn main() !void {
         // "simd_bit_shift",
         "simd_boolean",
         "simd_const",
-        // "simd_conversions",
+        "simd_conversions",
         "simd_f32x4",
         "simd_f32x4_arith",
         "simd_f32x4_cmp",

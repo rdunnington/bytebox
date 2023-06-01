@@ -290,8 +290,8 @@ pub const Opcode = enum(u16) {
     I8x16_Popcnt,
     I8x16_AllTrue,
     I8x16_Bitmask,
-    I8x16_Narrow_16x8_S,
-    I8x16_Narrow_16x8_U,
+    I8x16_Narrow_I16x8_S,
+    I8x16_Narrow_I16x8_U,
     F32x4_Ceil,
     F32x4_Floor,
     F32x4_Trunc,
@@ -705,8 +705,8 @@ pub const WasmOpcode = enum(u16) {
     I8x16_Popcnt = 0xFD62,
     I8x16_AllTrue = 0xFD63,
     I8x16_Bitmask = 0xFD64,
-    I8x16_Narrow_16x8_S = 0xFD65,
-    I8x16_Narrow_16x8_U = 0xFD66,
+    II8x16_Narrow_I16x8_S = 0xFD65,
+    II8x16_Narrow_I16x8_U = 0xFD66,
     F32x4_Ceil = 0xFD67,
     F32x4_Floor = 0xFD68,
     F32x4_Trunc = 0xFD69,
@@ -1195,8 +1195,8 @@ const ConversionTables = struct {
         Opcode.I8x16_Popcnt, // 0xFD62
         Opcode.I8x16_AllTrue, // 0xFD63
         Opcode.I8x16_Bitmask, // 0xFD64
-        Opcode.I8x16_Narrow_16x8_S, // 0xFD65
-        Opcode.I8x16_Narrow_16x8_U, // 0xFD66
+        Opcode.I8x16_Narrow_I16x8_S, // 0xFD65
+        Opcode.I8x16_Narrow_I16x8_U, // 0xFD66
         Opcode.F32x4_Ceil, // 0xFD67
         Opcode.F32x4_Floor, // 0xFD68
         Opcode.F32x4_Trunc, // 0xFD69
