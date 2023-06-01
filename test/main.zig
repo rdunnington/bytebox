@@ -1354,7 +1354,7 @@ pub fn main() !void {
         // "simd_address",
         // "simd_align",
         "simd_bitwise",
-        // "simd_bit_shift",
+        "simd_bit_shift",
         "simd_boolean",
         "simd_const",
         "simd_conversions",

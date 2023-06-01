@@ -296,6 +296,7 @@ pub const Opcode = enum(u16) {
     F32x4_Floor,
     F32x4_Trunc,
     F32x4_Nearest,
+    I8x16_Shl,
     I8x16_Shr_S,
     I8x16_Shr_U,
     I8x16_Add,
@@ -322,6 +323,7 @@ pub const Opcode = enum(u16) {
     I16x8_Extend_High_I8x16_S,
     I16x8_Extend_Low_I8x16_U,
     I16x8_Extend_High_I8x16_U,
+    I16x8_Shl,
     I16x8_Shr_S,
     I16x8_Shr_U,
     I16x8_Add,
@@ -345,6 +347,7 @@ pub const Opcode = enum(u16) {
     I32x4_Extend_High_I16x8_S,
     I32x4_Extend_Low_I16x8_U,
     I32x4_Extend_High_I16x8_U,
+    I32x4_Shl,
     I32x4_Shr_S,
     I32x4_Shr_U,
     I32x4_Add,
@@ -362,6 +365,7 @@ pub const Opcode = enum(u16) {
     I64x2_Extend_High_I32x4_S,
     I64x2_Extend_Low_I32x4_U,
     I64x2_Extend_High_I32x4_U,
+    I64x2_Shl,
     I64x2_Shr_S,
     I64x2_Shr_U,
     I64x2_Add,
@@ -711,6 +715,7 @@ pub const WasmOpcode = enum(u16) {
     F32x4_Floor = 0xFD68,
     F32x4_Trunc = 0xFD69,
     F32x4_Nearest = 0xFD6A,
+    I8x16_Shl = 0xFD6B,
     I8x16_Shr_S = 0xFD6C,
     I8x16_Shr_U = 0xFD6D,
     I8x16_Add = 0xFD6E,
@@ -737,6 +742,7 @@ pub const WasmOpcode = enum(u16) {
     I16x8_Extend_High_I8x16_S = 0xFD88,
     I16x8_Extend_Low_I8x16_U = 0xFD89,
     I16x8_Extend_High_I8x16_U = 0xFD8A,
+    I16x8_Shl = 0xFD8B,
     I16x8_Shr_S = 0xFD8C,
     I16x8_Shr_U = 0xFD8D,
     I16x8_Add = 0xFD8E,
@@ -760,6 +766,7 @@ pub const WasmOpcode = enum(u16) {
     I32x4_Extend_High_I16x8_S = 0xFDA8,
     I32x4_Extend_Low_I16x8_U = 0xFDA9,
     I32x4_Extend_High_I16x8_U = 0xFDAA,
+    I32x4_Shl = 0xFDAB,
     I32x4_Shr_S = 0xFDAC,
     I32x4_Shr_U = 0xFDAD,
     I32x4_Add = 0xFDAE,
@@ -777,6 +784,7 @@ pub const WasmOpcode = enum(u16) {
     I64x2_Extend_High_I32x4_S = 0xFDC8,
     I64x2_Extend_Low_I32x4_U = 0xFDC9,
     I64x2_Extend_High_I32x4_U = 0xFDCA,
+    I64x2_Shl = 0xFDCB,
     I64x2_Shr_S = 0xFDCC,
     I64x2_Shr_U = 0xFDCD,
     I64x2_Add = 0xFDCE,
@@ -1201,7 +1209,7 @@ const ConversionTables = struct {
         Opcode.F32x4_Floor, // 0xFD68
         Opcode.F32x4_Trunc, // 0xFD69
         Opcode.F32x4_Nearest, // 0xFD6A
-        Opcode.Invalid, // 0xFD6B
+        Opcode.I8x16_Shl, // 0xFD6B
         Opcode.I8x16_Shr_S, // 0xFD6C
         Opcode.I8x16_Shr_U, // 0xFD6D
         Opcode.I8x16_Add, // 0xFD6E
@@ -1233,7 +1241,7 @@ const ConversionTables = struct {
         Opcode.I16x8_Extend_High_I8x16_S, // 0xFD88
         Opcode.I16x8_Extend_Low_I8x16_U, // 0xFD89
         Opcode.I16x8_Extend_High_I8x16_U, // 0xFD8A
-        Opcode.Invalid, // 0xFD8B
+        Opcode.I16x8_Shl, // 0xFD8B
         Opcode.I16x8_Shr_S, // 0xFD8C
         Opcode.I16x8_Shr_U, // 0xFD8D
         Opcode.I16x8_Add, // 0xFD8E
@@ -1265,7 +1273,7 @@ const ConversionTables = struct {
         Opcode.I32x4_Extend_High_I16x8_S, // 0xFDA8
         Opcode.I32x4_Extend_Low_I16x8_U, // 0xFDA9
         Opcode.I32x4_Extend_High_I16x8_U, // 0xFDAA
-        Opcode.Invalid, // 0xFDAB
+        Opcode.I32x4_Shl, // 0xFDAB
         Opcode.I32x4_Shr_S, // 0xFDAC
         Opcode.I32x4_Shr_U, // 0xFDAD
         Opcode.I32x4_Add, // 0xFDAE
@@ -1297,7 +1305,7 @@ const ConversionTables = struct {
         Opcode.I64x2_Extend_High_I32x4_S, // 0xFDC8
         Opcode.I64x2_Extend_Low_I32x4_U, // 0xFDC9
         Opcode.I64x2_Extend_High_I32x4_U, // 0xFDCA
-        Opcode.Invalid, // 0xFDCB
+        Opcode.I64x2_Shl, // 0xFDCB
         Opcode.I64x2_Shr_S, // 0xFDCC
         Opcode.I64x2_Shr_U, // 0xFDCD
         Opcode.I64x2_Add, // 0xFDCE

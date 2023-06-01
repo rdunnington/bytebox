@@ -2821,7 +2821,19 @@ const ModuleValidator = struct {
             => {
                 try Helpers.validateNumericBinaryOp(self, .V128, .V128);
             },
-            .I8x16_Shr_S, .I8x16_Shr_U, .I16x8_Shr_S, .I16x8_Shr_U, .I32x4_Shr_S, .I32x4_Shr_U, .I64x2_Shr_S, .I64x2_Shr_U => {
+            .I8x16_Shl,
+            .I8x16_Shr_S,
+            .I8x16_Shr_U,
+            .I16x8_Shl,
+            .I16x8_Shr_S,
+            .I16x8_Shr_U,
+            .I32x4_Shl,
+            .I32x4_Shr_S,
+            .I32x4_Shr_U,
+            .I64x2_Shl,
+            .I64x2_Shr_S,
+            .I64x2_Shr_U,
+            => {
                 try self.popType(.I32);
                 try self.popType(.V128);
                 try self.pushType(.V128);
@@ -3241,6 +3253,7 @@ const InstructionFuncs = struct {
         &op_F32x4_Floor,
         &op_F32x4_Trunc,
         &op_F32x4_Nearest,
+        &op_I8x16_Shl,
         &op_I8x16_Shr_S,
         &op_I8x16_Shr_U,
         &op_I8x16_Add,
@@ -3267,6 +3280,7 @@ const InstructionFuncs = struct {
         &op_I16x8_Extend_High_I8x16_S,
         &op_I16x8_Extend_Low_I8x16_U,
         &op_I16x8_Extend_High_I8x16_U,
+        &op_I16x8_Shl,
         &op_I16x8_Shr_S,
         &op_I16x8_Shr_U,
         &op_I16x8_Add,
@@ -3290,6 +3304,7 @@ const InstructionFuncs = struct {
         &op_I32x4_Extend_High_I16x8_S,
         &op_I32x4_Extend_Low_I16x8_U,
         &op_I32x4_Extend_High_I16x8_U,
+        &op_I32x4_Shl,
         &op_I32x4_Shr_S,
         &op_I32x4_Shr_U,
         &op_I32x4_Add,
@@ -3307,6 +3322,7 @@ const InstructionFuncs = struct {
         &op_I64x2_Extend_High_I32x4_S,
         &op_I64x2_Extend_Low_I32x4_U,
         &op_I64x2_Extend_High_I32x4_U,
+        &op_I64x2_Shl,
         &op_I64x2_Shr_S,
         &op_I64x2_Shr_U,
         &op_I64x2_Add,
@@ -3752,11 +3768,17 @@ const InstructionFuncs = struct {
             stack.pushV128(@bitCast(v128, result));
         }
 
-        fn vectorShift(comptime T: type, stack: *Stack) void {
+        const VectorShiftDirection = enum {
+            Left,
+            Right,
+        };
+
+        fn vectorShift(comptime T: type, comptime direction: VectorShiftDirection, stack: *Stack) void {
             const shift_unsafe: i32 = stack.popI32();
             const vec = @bitCast(T, stack.popV128());
             const shift_safe = std.math.mod(i32, shift_unsafe, @bitSizeOf(@typeInfo(T).Vector.child)) catch unreachable;
-            const shifted = std.math.shr(T, vec, shift_safe);
+            const shift_fn = if (direction == .Left) std.math.shl else std.math.shr;
+            const shifted = shift_fn(T, vec, shift_safe);
             stack.pushV128(@bitCast(v128, shifted));
         }
 
@@ -6579,15 +6601,21 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I8x16_Shl(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I8x16_Shl", pc, code, stack);
+        OpHelpers.vectorShift(i8x16, .Left, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I8x16_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Shr_S", pc, code, stack);
-        OpHelpers.vectorShift(i8x16, stack);
+        OpHelpers.vectorShift(i8x16, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I8x16_Shr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I8x16_Shr_U", pc, code, stack);
-        OpHelpers.vectorShift(u8x16, stack);
+        OpHelpers.vectorShift(u8x16, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6738,15 +6766,21 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I16x8_Shl(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Shl", pc, code, stack);
+        OpHelpers.vectorShift(i16x8, .Left, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I16x8_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I16x8_Shr_S", pc, code, stack);
-        OpHelpers.vectorShift(i16x8, stack);
+        OpHelpers.vectorShift(i16x8, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I16x8_Shr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I16x8_Shr_U", pc, code, stack);
-        OpHelpers.vectorShift(u16x8, stack);
+        OpHelpers.vectorShift(u16x8, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6880,15 +6914,21 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I32x4_Shl(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Shl", pc, code, stack);
+        OpHelpers.vectorShift(i32x4, .Left, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I32x4_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32x4_Shr_S", pc, code, stack);
-        OpHelpers.vectorShift(i32x4, stack);
+        OpHelpers.vectorShift(i32x4, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32x4_Shr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32x4_Shr_U", pc, code, stack);
-        OpHelpers.vectorShift(u32x4, stack);
+        OpHelpers.vectorShift(u32x4, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -6944,15 +6984,21 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I64x2_Shl(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_Shl", pc, code, stack);
+        OpHelpers.vectorShift(i64x2, .Left, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I64x2_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64x2_Shr_S", pc, code, stack);
-        OpHelpers.vectorShift(i64x2, stack);
+        OpHelpers.vectorShift(i64x2, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64x2_Shr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64x2_Shr_U", pc, code, stack);
-        OpHelpers.vectorShift(u64x2, stack);
+        OpHelpers.vectorShift(u64x2, .Right, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
