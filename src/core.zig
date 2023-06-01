@@ -2750,6 +2750,10 @@ const ModuleValidator = struct {
             .I64x2_GT_S,
             .I64x2_LE_S,
             .I64x2_GE_S,
+            .I64x2_Extmul_Low_I32x4_S,
+            .I64x2_Extmul_High_I32x4_S,
+            .I64x2_Extmul_Low_I32x4_U,
+            .I64x2_Extmul_High_I32x4_U,
             => {
                 try Helpers.validateNumericBinaryOp(self, .V128, .V128);
             },
@@ -2796,6 +2800,10 @@ const ModuleValidator = struct {
             .I16x8_Max_S,
             .I16x8_Max_U,
             .I16x8_Avgr_U,
+            .I16x8_Extmul_Low_I8x16_S,
+            .I16x8_Extmul_High_I8x16_S,
+            .I16x8_Extmul_Low_I8x16_U,
+            .I16x8_Extmul_High_I8x16_U,
             .I32x4_Add,
             .I32x4_Sub,
             .I32x4_Mul,
@@ -2803,6 +2811,10 @@ const ModuleValidator = struct {
             .I32x4_Min_U,
             .I32x4_Max_S,
             .I32x4_Max_U,
+            .I32x4_Extmul_Low_I16x8_S,
+            .I32x4_Extmul_High_I16x8_S,
+            .I32x4_Extmul_Low_I16x8_U,
+            .I32x4_Extmul_High_I16x8_U,
             .I64x2_Add,
             .I64x2_Sub,
             .I64x2_Mul,
@@ -3304,6 +3316,10 @@ const InstructionFuncs = struct {
         &op_I16x8_Max_S,
         &op_I16x8_Max_U,
         &op_I16x8_Avgr_U,
+        &op_I16x8_Extmul_Low_I8x16_S,
+        &op_I16x8_Extmul_High_I8x16_S,
+        &op_I16x8_Extmul_Low_I8x16_U,
+        &op_I16x8_Extmul_High_I8x16_U,
         &op_I32x4_Abs,
         &op_I32x4_Neg,
         &op_I32x4_AllTrue,
@@ -3322,6 +3338,10 @@ const InstructionFuncs = struct {
         &op_I32x4_Min_U,
         &op_I32x4_Max_S,
         &op_I32x4_Max_U,
+        &op_I32x4_Extmul_Low_I16x8_S,
+        &op_I32x4_Extmul_High_I16x8_S,
+        &op_I32x4_Extmul_Low_I16x8_U,
+        &op_I32x4_Extmul_High_I16x8_U,
         &op_I64x2_Abs,
         &op_I64x2_Neg,
         &op_I64x2_AllTrue,
@@ -3342,6 +3362,10 @@ const InstructionFuncs = struct {
         &op_I64x2_GT_S,
         &op_I64x2_LE_S,
         &op_I64x2_GE_S,
+        &op_I64x2_Extmul_Low_I32x4_S,
+        &op_I64x2_Extmul_High_I32x4_S,
+        &op_I64x2_Extmul_Low_I32x4_U,
+        &op_I64x2_Extmul_High_I32x4_U,
         &op_F32x4_Abs,
         &op_F32x4_Neg,
         &op_F32x4_Sqrt,
@@ -3885,6 +3909,11 @@ const InstructionFuncs = struct {
             stack.pushV128(@bitCast(v128, vec));
         }
 
+        const VectorSide = enum {
+            Low,
+            High,
+        };
+
         fn vectorAddPairwise(comptime in_type: type, comptime out_type: type, stack: *Stack) void {
             const out_info = @typeInfo(out_type).Vector;
 
@@ -3899,10 +3928,22 @@ const InstructionFuncs = struct {
             stack.pushV128(@bitCast(v128, sum));
         }
 
-        const VectorSide = enum {
-            Low,
-            High,
-        };
+        fn vectorMulPairwise(comptime in_type: type, comptime out_type: type, side: OpHelpers.VectorSide, stack: *Stack) void {
+            const info_out = @typeInfo(out_type).Vector;
+
+            const vec2 = @bitCast(in_type, stack.popV128());
+            const vec1 = @bitCast(in_type, stack.popV128());
+
+            var arr: [info_out.len]info_out.child = undefined;
+            for (arr) |*v, i| {
+                const index = if (side == .Low) i else i + info_out.len;
+                const v1: info_out.child = vec1[index];
+                const v2: info_out.child = vec2[index];
+                v.* = v1 * v2;
+            }
+            const product = arr;
+            stack.pushV128(@bitCast(v128, product));
+        }
 
         fn vectorExtend(comptime in_type: type, comptime out_type: type, comptime side: VectorSide, stack: *Stack) void {
             const in_info = @typeInfo(in_type).Vector;
@@ -6908,6 +6949,30 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I16x8_Extmul_Low_I8x16_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extmul_Low_I8x16_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(i8x16, i16x8, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extmul_High_I8x16_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extmul_High_I8x16_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(i8x16, i16x8, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extmul_Low_I8x16_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extmul_Low_I8x16_U", pc, code, stack);
+        OpHelpers.vectorMulPairwise(u8x16, u16x8, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Extmul_High_I8x16_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Extmul_High_I8x16_U", pc, code, stack);
+        OpHelpers.vectorMulPairwise(u8x16, u16x8, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I32x4_Abs(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32x4_Abs", pc, code, stack);
         OpHelpers.vectorAbs(i32x4, stack);
@@ -7090,6 +7155,30 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
+    fn op_I32x4_Extmul_Low_I16x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extmul_Low_I16x8_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(i16x8, i32x4, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extmul_High_I16x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extmul_High_I16x8_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(i16x8, i32x4, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extmul_Low_I16x8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extmul_Low_I16x8_U", pc, code, stack);
+        OpHelpers.vectorMulPairwise(u16x8, u32x4, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Extmul_High_I16x8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Extmul_High_I16x8_U", pc, code, stack);
+        OpHelpers.vectorMulPairwise(u16x8, u32x4, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
     fn op_I64x2_Add(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64x2_Add", pc, code, stack);
         OpHelpers.vectorBinOp(i64x2, .Add, stack);
@@ -7141,6 +7230,27 @@ const InstructionFuncs = struct {
     fn op_I64x2_GE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I64x2_GE_S", pc, code, stack);
         OpHelpers.vectorBoolOp(i64x2, .Ge, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I64x2_Extmul_Low_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_GE_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(i32x4, i64x2, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+    fn op_I64x2_Extmul_High_I32x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_GE_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(i32x4, i64x2, .High, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+    fn op_I64x2_Extmul_Low_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_GE_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(u32x4, u64x2, .Low, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+    fn op_I64x2_Extmul_High_I32x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I64x2_GE_S", pc, code, stack);
+        OpHelpers.vectorMulPairwise(u32x4, u64x2, .High, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 

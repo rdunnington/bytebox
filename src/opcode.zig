@@ -343,6 +343,10 @@ pub const Opcode = enum(u16) {
     I16x8_Max_S,
     I16x8_Max_U,
     I16x8_Avgr_U,
+    I16x8_Extmul_Low_I8x16_S,
+    I16x8_Extmul_High_I8x16_S,
+    I16x8_Extmul_Low_I8x16_U,
+    I16x8_Extmul_High_I8x16_U,
     I32x4_Abs,
     I32x4_Neg,
     I32x4_AllTrue,
@@ -361,6 +365,10 @@ pub const Opcode = enum(u16) {
     I32x4_Min_U,
     I32x4_Max_S,
     I32x4_Max_U,
+    I32x4_Extmul_Low_I16x8_S,
+    I32x4_Extmul_High_I16x8_S,
+    I32x4_Extmul_Low_I16x8_U,
+    I32x4_Extmul_High_I16x8_U,
     I64x2_Abs,
     I64x2_Neg,
     I64x2_AllTrue,
@@ -381,6 +389,10 @@ pub const Opcode = enum(u16) {
     I64x2_GT_S,
     I64x2_LE_S,
     I64x2_GE_S,
+    I64x2_Extmul_Low_I32x4_S,
+    I64x2_Extmul_High_I32x4_S,
+    I64x2_Extmul_Low_I32x4_U,
+    I64x2_Extmul_High_I32x4_U,
     F32x4_Abs,
     F32x4_Neg,
     F32x4_Sqrt,
@@ -766,6 +778,10 @@ pub const WasmOpcode = enum(u16) {
     I16x8_Max_S = 0xFD98,
     I16x8_Max_U = 0xFD99,
     I16x8_Avgr_U = 0xFD9B,
+    I16x8_Extmul_Low_I8x16_S = 0xFD9C,
+    I16x8_Extmul_High_I8x16_S = 0xFD9D,
+    I16x8_Extmul_Low_I8x16_U = 0xFD9E,
+    I16x8_Extmul_High_I8x16_U = 0xFD9F,
     I32x4_Abs = 0xFDA0,
     I32x4_Neg = 0xFDA1,
     I32x4_AllTrue = 0xFDA3,
@@ -784,6 +800,10 @@ pub const WasmOpcode = enum(u16) {
     I32x4_Min_U = 0xFDB7,
     I32x4_Max_S = 0xFDB8,
     I32x4_Max_U = 0xFDB9,
+    I32x4_Extmul_Low_I16x8_S = 0xFDBC,
+    I32x4_Extmul_High_I16x8_S = 0xFDBD,
+    I32x4_Extmul_Low_I16x8_U = 0xFDBE,
+    I32x4_Extmul_High_I16x8_U = 0xFDBF,
     I64x2_Abs = 0xFDC0,
     I64x2_Neg = 0xFDC1,
     I64x2_AllTrue = 0xFDC3,
@@ -804,6 +824,10 @@ pub const WasmOpcode = enum(u16) {
     I64x2_GT_S = 0xFDD9,
     I64x2_LE_S = 0xFDDA,
     I64x2_GE_S = 0xFDDB,
+    I64x2_Extmul_Low_I32x4_S = 0xFDDC,
+    I64x2_Extmul_High_I32x4_S = 0xFDDD,
+    I64x2_Extmul_Low_I32x4_U = 0xFDDE,
+    I64x2_Extmul_High_I32x4_U = 0xFDDF,
     F32x4_Abs = 0xFDE0,
     F32x4_Neg = 0xFDE1,
     F32x4_Sqrt = 0xFDE3,
@@ -1266,10 +1290,10 @@ const ConversionTables = struct {
         Opcode.I16x8_Max_U, // 0xFD99
         Opcode.Invalid, // 0xFD9A
         Opcode.I16x8_Avgr_U, // 0xFD9B
-        Opcode.Invalid, // 0xFD9C
-        Opcode.Invalid, // 0xFD9D
-        Opcode.Invalid, // 0xFD9E
-        Opcode.Invalid, // 0xFD9F
+        Opcode.I16x8_Extmul_Low_I8x16_S, // 0xFD9C
+        Opcode.I16x8_Extmul_High_I8x16_S, // 0xFD9D
+        Opcode.I16x8_Extmul_Low_I8x16_U, // 0xFD9E
+        Opcode.I16x8_Extmul_High_I8x16_U, // 0xFD9F
         Opcode.I32x4_Abs, // 0xFDA0
         Opcode.I32x4_Neg, // 0xFDA1
         Opcode.Invalid, // 0xFDA2
@@ -1298,10 +1322,10 @@ const ConversionTables = struct {
         Opcode.I32x4_Max_U, // 0xFDB9
         Opcode.Invalid, // 0xFDBA
         Opcode.Invalid, // 0xFDBB
-        Opcode.Invalid, // 0xFDBC
-        Opcode.Invalid, // 0xFDBD
-        Opcode.Invalid, // 0xFDBE
-        Opcode.Invalid, // 0xFDBF
+        Opcode.I32x4_Extmul_Low_I16x8_S, // 0xFDBC
+        Opcode.I32x4_Extmul_High_I16x8_S, // 0xFDBD
+        Opcode.I32x4_Extmul_Low_I16x8_U, // 0xFDBE
+        Opcode.I32x4_Extmul_High_I16x8_U, // 0xFDBF
         Opcode.I64x2_Abs, // 0xFDC0
         Opcode.I64x2_Neg, // 0xFDC1
         Opcode.Invalid, // 0xFDC2
@@ -1330,10 +1354,10 @@ const ConversionTables = struct {
         Opcode.I64x2_GT_S, // 0xFDD9
         Opcode.I64x2_LE_S, // 0xFDDA
         Opcode.I64x2_GE_S, // 0xFDDB
-        Opcode.Invalid, // 0xFDDC
-        Opcode.Invalid, // 0xFDDD
-        Opcode.Invalid, // 0xFDDE
-        Opcode.Invalid, // 0xFDDF
+        Opcode.I64x2_Extmul_Low_I32x4_S, // 0xFDDC
+        Opcode.I64x2_Extmul_High_I32x4_S, // 0xFDDD
+        Opcode.I64x2_Extmul_Low_I32x4_U, // 0xFDDE
+        Opcode.I64x2_Extmul_High_I32x4_U, // 0xFDDF
         Opcode.F32x4_Abs, // 0xFDE0
         Opcode.F32x4_Neg, // 0xFDE1
         Opcode.Invalid, // 0xFDE2
