@@ -2812,6 +2812,7 @@ const ModuleValidator = struct {
             .I32x4_Min_U,
             .I32x4_Max_S,
             .I32x4_Max_U,
+            .I32x4_Dot_I16x8_S,
             .I32x4_Extmul_Low_I16x8_S,
             .I32x4_Extmul_High_I16x8_S,
             .I32x4_Extmul_Low_I16x8_U,
@@ -3340,6 +3341,7 @@ const InstructionFuncs = struct {
         &op_I32x4_Min_U,
         &op_I32x4_Max_S,
         &op_I32x4_Max_U,
+        &op_I32x4_Dot_I16x8_S,
         &op_I32x4_Extmul_Low_I16x8_S,
         &op_I32x4_Extmul_High_I16x8_S,
         &op_I32x4_Extmul_Low_I16x8_U,
@@ -7173,6 +7175,23 @@ const InstructionFuncs = struct {
     fn op_I32x4_Max_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("I32x4_Max_U", pc, code, stack);
         OpHelpers.vectorBinOp(u32x4, .Max, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I32x4_Dot_I16x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I32x4_Dot_I16x8_S", pc, code, stack);
+        const i32x8 = @Vector(8, i32);
+        const v1: i32x8 = @bitCast(i16x8, stack.popV128());
+        const v2: i32x8 = @bitCast(i16x8, stack.popV128());
+        const product = v1 * v2;
+        var arr: [4]i32 = undefined;
+        for (arr) |*v, i| {
+            const p1: i32 = product[i * 2];
+            const p2: i32 = product[(i * 2) + 1];
+            v.* = p1 +% p2;
+        }
+        const dot: i32x4 = arr;
+        stack.pushV128(@bitCast(v128, dot));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 

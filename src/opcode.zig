@@ -366,6 +366,7 @@ pub const Opcode = enum(u16) {
     I32x4_Min_U,
     I32x4_Max_S,
     I32x4_Max_U,
+    I32x4_Dot_I16x8_S,
     I32x4_Extmul_Low_I16x8_S,
     I32x4_Extmul_High_I16x8_S,
     I32x4_Extmul_Low_I16x8_U,
@@ -802,6 +803,7 @@ pub const WasmOpcode = enum(u16) {
     I32x4_Min_U = 0xFDB7,
     I32x4_Max_S = 0xFDB8,
     I32x4_Max_U = 0xFDB9,
+    I32x4_Dot_I16x8_S = 0xFDBA,
     I32x4_Extmul_Low_I16x8_S = 0xFDBC,
     I32x4_Extmul_High_I16x8_S = 0xFDBD,
     I32x4_Extmul_Low_I16x8_U = 0xFDBE,
@@ -1322,7 +1324,7 @@ const ConversionTables = struct {
         Opcode.I32x4_Min_U, // 0xFDB7
         Opcode.I32x4_Max_S, // 0xFDB8
         Opcode.I32x4_Max_U, // 0xFDB9
-        Opcode.Invalid, // 0xFDBA
+        Opcode.I32x4_Dot_I16x8_S, // 0xFDBA
         Opcode.Invalid, // 0xFDBB
         Opcode.I32x4_Extmul_Low_I16x8_S, // 0xFDBC
         Opcode.I32x4_Extmul_High_I16x8_S, // 0xFDBD

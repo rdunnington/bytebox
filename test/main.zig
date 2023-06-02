@@ -1378,7 +1378,7 @@ pub fn main() !void {
         "simd_i32x4_arith",
         "simd_i32x4_arith2",
         "simd_i32x4_cmp",
-        // "simd_i32x4_dot_i16x8",
+        "simd_i32x4_dot_i16x8",
         "simd_i32x4_extadd_pairwise_i16x8",
         "simd_i32x4_extmul_i16x8",
         // "simd_i32x4_trunc_sat_f32x4",
