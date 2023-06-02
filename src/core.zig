@@ -2800,6 +2800,7 @@ const ModuleValidator = struct {
             .I16x8_Max_S,
             .I16x8_Max_U,
             .I16x8_Avgr_U,
+            .I16x8_Q15mulr_Sat_S,
             .I16x8_Extmul_Low_I8x16_S,
             .I16x8_Extmul_High_I8x16_S,
             .I16x8_Extmul_Low_I8x16_U,
@@ -3292,6 +3293,7 @@ const InstructionFuncs = struct {
         &op_I32x4_Extadd_Pairwise_I16x8_U,
         &op_I16x8_Abs,
         &op_I16x8_Neg,
+        &op_I16x8_Q15mulr_Sat_S,
         &op_I16x8_AllTrue,
         &op_I16x8_Bitmask,
         &op_I16x8_Narrow_I32x4_S,
@@ -6801,6 +6803,25 @@ const InstructionFuncs = struct {
         const vec = @bitCast(u16x8, stack.popV128());
         const negated = -%vec;
         stack.pushV128(@bitCast(v128, negated));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I16x8_Q15mulr_Sat_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I16x8_Q15mulr_Sat_S", pc, code, stack);
+        const v2 = @bitCast(i16x8, stack.popV128());
+        const v1 = @bitCast(i16x8, stack.popV128());
+        const power: i32 = comptime std.math.powi(i32, 2, 14) catch unreachable;
+
+        var arr: [8]i16 = undefined;
+        for (arr) |*v, i| {
+            const product = @as(i32, v1[i]) * @as(i32, v2[i]) + power;
+            const shifted = product >> 15;
+            const saturated = std.math.clamp(shifted, std.math.minInt(i16), std.math.maxInt(i16));
+            v.* = @intCast(i16, saturated);
+        }
+
+        const result: i16x8 = arr;
+        stack.pushV128(@bitCast(v128, result));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 

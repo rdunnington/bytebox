@@ -319,6 +319,7 @@ pub const Opcode = enum(u16) {
     I32x4_Extadd_Pairwise_I16x8_U,
     I16x8_Abs,
     I16x8_Neg,
+    I16x8_Q15mulr_Sat_S,
     I16x8_AllTrue,
     I16x8_Bitmask,
     I16x8_Narrow_I32x4_S,
@@ -754,6 +755,7 @@ pub const WasmOpcode = enum(u16) {
     I32x4_Extadd_Pairwise_I16x8_U = 0xFD7F,
     I16x8_Abs = 0xFD80,
     I16x8_Neg = 0xFD81,
+    I16x8_Q15mulr_Sat_S = 0xFD82,
     I16x8_AllTrue = 0xFD83,
     I16x8_Bitmask = 0xFD84,
     I16x8_Narrow_I32x4_S = 0xFD85,
@@ -1264,7 +1266,7 @@ const ConversionTables = struct {
         Opcode.I32x4_Extadd_Pairwise_I16x8_U, // 0xFD7F
         Opcode.I16x8_Abs, // 0xFD80
         Opcode.I16x8_Neg, // 0xFD81
-        Opcode.Invalid, // 0xFD82
+        Opcode.I16x8_Q15mulr_Sat_S, // 0xFD82
         Opcode.I16x8_AllTrue, // 0xFD83
         Opcode.I16x8_Bitmask, // 0xFD84
         Opcode.I16x8_Narrow_I32x4_S, // 0xFD85
