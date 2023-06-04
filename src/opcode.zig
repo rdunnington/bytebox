@@ -421,6 +421,9 @@ pub const Opcode = enum(u16) {
     F32x4_Trunc_Sat_F32x4_U,
     F32x4_Convert_I32x4_S,
     F32x4_Convert_I32x4_U,
+    I32x4_Trunc_Sat_F64x2_S_Zero,
+    I32x4_Trunc_Sat_F64x2_U_Zero,
+
     F64x2_Convert_Low_I32x4_S,
     F64x2_Convert_Low_I32x4_U,
 
@@ -858,6 +861,8 @@ pub const WasmOpcode = enum(u16) {
     F32x4_Trunc_Sat_F32x4_U = 0xFDF9,
     F32x4_Convert_I32x4_S = 0xFDFA,
     F32x4_Convert_I32x4_U = 0xFDFB,
+    I32x4_Trunc_Sat_F64x2_S_Zero = 0xFDFC,
+    I32x4_Trunc_Sat_F64x2_U_Zero = 0xFDFD,
     F64x2_Convert_Low_I32x4_S = 0xFDFE,
     F64x2_Convert_Low_I32x4_U = 0xFDFF,
 
@@ -1390,8 +1395,8 @@ const ConversionTables = struct {
         Opcode.F32x4_Trunc_Sat_F32x4_U, // 0xFDF9
         Opcode.F32x4_Convert_I32x4_S, // 0xFDFA
         Opcode.F32x4_Convert_I32x4_U, // 0xFDFB
-        Opcode.Invalid, // 0xFDFC
-        Opcode.Invalid, // 0xFDFD
+        Opcode.I32x4_Trunc_Sat_F64x2_S_Zero, // 0xFDFC
+        Opcode.I32x4_Trunc_Sat_F64x2_U_Zero, // 0xFDFD
         Opcode.F64x2_Convert_Low_I32x4_S, // 0xFDFE
         Opcode.F64x2_Convert_Low_I32x4_U, // 0xFDFF
     };
