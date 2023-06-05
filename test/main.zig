@@ -413,6 +413,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.ValidationError.ValidationDuplicateExportName => strcmp(err_string, "duplicate export name"),
         bytebox.ValidationError.ValidationFuncRefUndeclared => strcmp(err_string, "undeclared function reference"),
         bytebox.ValidationError.ValidationIfElseMismatch => strcmp(err_string, "END opcode expected"),
+        bytebox.ValidationError.ValidationInvalidLaneIndex => strcmp(err_string, "invalid lane index"),
 
         bytebox.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         bytebox.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
@@ -1392,7 +1393,7 @@ pub fn main() !void {
         "simd_i8x16_cmp",
         "simd_i8x16_sat_arith",
         "simd_int_to_int_extend",
-        // "simd_lane",
+        "simd_lane",
         // "simd_load",
         // "simd_load16_lane",
         // "simd_load32_lane",

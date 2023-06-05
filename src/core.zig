@@ -1336,6 +1336,7 @@ const InstructionImmediatesTypes = enum(u8) {
     CallIndirect,
     TablePair,
     If,
+    VecShuffle16,
 };
 
 const InstructionImmediates = union(InstructionImmediatesTypes) {
@@ -1353,6 +1354,7 @@ const InstructionImmediates = union(InstructionImmediatesTypes) {
     CallIndirect: CallIndirectImmediates,
     TablePair: TablePairImmediates,
     If: IfImmediates,
+    VecShuffle16: [16]u8,
 };
 
 const Instruction = struct {
@@ -1646,7 +1648,6 @@ const Instruction = struct {
                 }
 
                 immediate = InstructionImmediates{ .ValType = valtype };
-                // immediate = @enumToInt(valtype);
             },
             .Ref_Func => {
                 immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) }; // funcidx
@@ -1693,7 +1694,7 @@ const Instruction = struct {
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I8x16_Extract_Lane_S, .I8x16_Extract_Lane_U, .I8x16_Replace_Lane, .I16x8_Extract_Lane_S, .I16x8_Extract_Lane_U, .I16x8_Replace_Lane, .I32x4_Extract_Lane, .I32x4_Replace_Lane, .I64x2_Extract_Lane, .I64x2_Replace_Lane, .F32x4_Extract_Lane, .F32x4_Replace_Lane, .F64x2_Extract_Lane, .F64x2_Replace_Lane => {
-                immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u8, reader) }; // laneidx
+                immediate = InstructionImmediates{ .Index = try reader.readByte() }; // laneidx
             },
             .V128_Store => {
                 var memarg = try MemArg.decode(reader, 128);
@@ -1701,6 +1702,14 @@ const Instruction = struct {
             },
             .V128_Const => {
                 immediate = InstructionImmediates{ .ValueVec = try decodeVec(reader) };
+            },
+            .I8x16_Shuffle => {
+                var lane_indices: [16]u8 = undefined;
+                for (lane_indices) |*v| {
+                    const laneidx: u8 = try reader.readByte();
+                    v.* = laneidx;
+                }
+                immediate = InstructionImmediates{ .VecShuffle16 = lane_indices };
             },
             else => {},
         }
@@ -2648,7 +2657,15 @@ const ModuleValidator = struct {
             .V128_Const => {
                 try self.pushType(.V128);
             },
-            .V128_Swizzle => {
+            .I8x16_Shuffle => {
+                for (instruction.immediate.VecShuffle16) |v| {
+                    if (v >= 32) {
+                        return ValidationError.ValidationInvalidLaneIndex;
+                    }
+                }
+                try Helpers.validateNumericBinaryOp(self, .V128, .V128);
+            },
+            .I8x16_Swizzle => {
                 try Helpers.validateNumericBinaryOp(self, .V128, .V128);
             },
             .V128_Not,
@@ -3190,7 +3207,8 @@ const InstructionFuncs = struct {
         &op_V128_Load64_Splat,
         &op_V128_Store,
         &op_V128_Const,
-        &op_V128_Swizzle,
+        &op_I8x16_Shuffle,
+        &op_I8x16_Swizzle,
         &op_I8x16_Splat,
         &op_I16x8_Splat,
         &op_I32x4_Splat,
@@ -6535,15 +6553,40 @@ const InstructionFuncs = struct {
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
-    fn op_V128_Swizzle(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("V128_Swizzle", pc, code, stack);
-        const indices: [16]i8 = @bitCast(i8x16, stack.popV128());
-        var vec: [16]i8 = @bitCast(i8x16, stack.popV128());
-        for (vec) |*v, i| {
-            const value = if (indices[i] >= 0 and indices[i] < vec.len) vec[@intCast(usize, indices[i])] else @as(i8, 0);
-            v.* = value;
+    fn op_I8x16_Shuffle(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I8x16_Shuffle", pc, code, stack);
+        const v2 = @bitCast(i8x16, stack.popV128());
+        const v1 = @bitCast(i8x16, stack.popV128());
+        const indices: u8x16 = code[pc].immediate.VecShuffle16;
+
+        var concat: [32]i8 = undefined;
+        for (concat[0..16]) |_, i| {
+            concat[i] = v1[i];
+            concat[i + 16] = v2[i];
         }
-        const swizzled: i8x16 = vec;
+        const concat_v: @Vector(32, i8) = concat;
+
+        var arr: [16]i8 = undefined;
+        for (arr) |*v, i| {
+            const laneidx = indices[i];
+            v.* = concat_v[laneidx];
+        }
+        const shuffled: i8x16 = arr;
+
+        stack.pushV128(@bitCast(v128, shuffled));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_I8x16_Swizzle(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("I8x16_Swizzle", pc, code, stack);
+        const indices: i8x16 = @bitCast(i8x16, stack.popV128());
+        var vec: i8x16 = @bitCast(i8x16, stack.popV128());
+        var swizzled: i8x16 = undefined;
+        var i: usize = 0;
+        while (i < 16) : (i += 1) {
+            const value = if (indices[i] >= 0 and indices[i] < 16) vec[@intCast(usize, indices[i])] else @as(i8, 0);
+            swizzled[i] = value;
+        }
         stack.pushV128(@bitCast(v128, swizzled));
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }

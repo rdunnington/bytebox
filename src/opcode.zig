@@ -213,7 +213,8 @@ pub const Opcode = enum(u16) {
     V128_Load64_Splat,
     V128_Store,
     V128_Const,
-    V128_Swizzle,
+    I8x16_Shuffle,
+    I8x16_Swizzle,
     I8x16_Splat,
     I16x8_Splat,
     I32x4_Splat,
@@ -653,7 +654,8 @@ pub const WasmOpcode = enum(u16) {
     V128_Load64_Splat = 0xFD0A,
     V128_Store = 0xFD0B,
     V128_Const = 0xFD0C,
-    V128_Swizzle = 0xFD0E,
+    I8x16_Shuffle = 0xFD0D,
+    I8x16_Swizzle = 0xFD0E,
     I8x16_Splat = 0xFD0F,
     I16x8_Splat = 0xFD10,
     I32x4_Splat = 0xFD11,
@@ -1156,8 +1158,8 @@ const ConversionTables = struct {
         Opcode.V128_Load64_Splat, // 0xFD0A
         Opcode.V128_Store, // 0xFD0B
         Opcode.V128_Const, // 0xFD0C
-        Opcode.Invalid, // 0xFD0D
-        Opcode.V128_Swizzle, // 0xFD0E
+        Opcode.I8x16_Shuffle, // 0xFD0D
+        Opcode.I8x16_Swizzle, // 0xFD0E
         Opcode.I8x16_Splat, // 0xFD0F
         Opcode.I16x8_Splat, // 0xFD10
         Opcode.I32x4_Splat, // 0xFD11
