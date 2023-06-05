@@ -1352,7 +1352,7 @@ pub fn main() !void {
         "ref_null",
         "return",
         "select",
-        // "simd_address",
+        "simd_address",
         // "simd_align",
         "simd_bitwise",
         "simd_bit_shift",
