@@ -284,6 +284,10 @@ pub const Opcode = enum(u16) {
     V128_Xor,
     V128_Bitselect,
     V128_AnyTrue,
+    V128_Load8_Lane,
+    V128_Load16_Lane,
+    V128_Load32_Lane,
+    V128_Load64_Lane,
     F32x4_Demote_F64x2_Zero,
     F64x2_Promote_Low_F32x4,
     I8x16_Abs,
@@ -725,6 +729,10 @@ pub const WasmOpcode = enum(u16) {
     V128_Xor = 0xFD51,
     V128_Bitselect = 0xFD52,
     V128_AnyTrue = 0xFD53,
+    V128_Load8_Lane = 0xFD54,
+    V128_Load16_Lane = 0xFD55,
+    V128_Load32_Lane = 0xFD56,
+    V128_Load64_Lane = 0xFD57,
     F32x4_Demote_F64x2_Zero = 0xFD5E,
     F64x2_Promote_Low_F32x4 = 0xFD5F,
     I8x16_Abs = 0xFD60,
@@ -1229,10 +1237,10 @@ const ConversionTables = struct {
         Opcode.V128_Xor, // 0xFD51
         Opcode.V128_Bitselect, // 0xFD52
         Opcode.V128_AnyTrue, // 0xFD53
-        Opcode.Invalid, // 0xFD54
-        Opcode.Invalid, // 0xFD55
-        Opcode.Invalid, // 0xFD56
-        Opcode.Invalid, // 0xFD57
+        Opcode.V128_Load8_Lane, // 0xFD54
+        Opcode.V128_Load16_Lane, // 0xFD55
+        Opcode.V128_Load32_Lane, // 0xFD56
+        Opcode.V128_Load64_Lane, // 0xFD57
         Opcode.Invalid, // 0xFD58
         Opcode.Invalid, // 0xFD59
         Opcode.Invalid, // 0xFD5A

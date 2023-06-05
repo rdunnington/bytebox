@@ -1293,6 +1293,11 @@ const MemArg = struct {
     }
 };
 
+const MemoryOffsetAndLaneImmediates = struct {
+    offset: u32,
+    laneidx: u8,
+};
+
 const CallIndirectImmediates = struct {
     type_index: u32,
     table_index: u32,
@@ -1332,6 +1337,7 @@ const InstructionImmediatesTypes = enum(u8) {
     Index,
     LabelId,
     MemoryOffset,
+    MemoryOffsetAndLane,
     Block,
     CallIndirect,
     TablePair,
@@ -1350,6 +1356,7 @@ const InstructionImmediates = union(InstructionImmediatesTypes) {
     Index: u32,
     LabelId: u32,
     MemoryOffset: u32,
+    MemoryOffsetAndLane: MemoryOffsetAndLaneImmediates,
     Block: BlockImmediates,
     CallIndirect: CallIndirectImmediates,
     TablePair: TablePairImmediates,
@@ -1711,6 +1718,34 @@ const Instruction = struct {
                 }
                 immediate = InstructionImmediates{ .VecShuffle16 = lane_indices };
             },
+            .V128_Load8_Lane => {
+                const memarg = try MemArg.decode(reader, 8);
+                immediate = InstructionImmediates{ .MemoryOffsetAndLane = MemoryOffsetAndLaneImmediates{
+                    .offset = memarg.offset,
+                    .laneidx = try reader.readByte(),
+                } };
+            },
+            .V128_Load16_Lane => {
+                const memarg = try MemArg.decode(reader, 16);
+                immediate = InstructionImmediates{ .MemoryOffsetAndLane = MemoryOffsetAndLaneImmediates{
+                    .offset = memarg.offset,
+                    .laneidx = try reader.readByte(),
+                } };
+            },
+            .V128_Load32_Lane => {
+                const memarg = try MemArg.decode(reader, 32);
+                immediate = InstructionImmediates{ .MemoryOffsetAndLane = MemoryOffsetAndLaneImmediates{
+                    .offset = memarg.offset,
+                    .laneidx = try reader.readByte(),
+                } };
+            },
+            .V128_Load64_Lane => {
+                const memarg = try MemArg.decode(reader, 64);
+                immediate = InstructionImmediates{ .MemoryOffsetAndLane = MemoryOffsetAndLaneImmediates{
+                    .offset = memarg.offset,
+                    .laneidx = try reader.readByte(),
+                } };
+            },
             else => {},
         }
 
@@ -2051,6 +2086,17 @@ const ModuleValidator = struct {
                 try validateMemoryIndex(module_);
                 try validator.popType(store_type);
                 try validator.popType(.I32);
+            }
+
+            fn validateLoadLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
+                const vec_type_info = @typeInfo(T).Vector;
+                if (vec_type_info.len <= instruction_.immediate.MemoryOffsetAndLane.laneidx) {
+                    return error.ValidationInvalidLaneIndex;
+                }
+                try validator.popType(.V128);
+                try validator.popType(.I32);
+                try validateMemoryIndex(module_);
+                try validator.pushType(.V128);
             }
 
             fn validateVecExtractLane(comptime T: type, validator: *ModuleValidator, instruction_: Instruction) !void {
@@ -2788,6 +2834,18 @@ const ModuleValidator = struct {
             => {
                 try Helpers.validateNumericUnaryOp(self, .V128, .I32);
             },
+            .V128_Load8_Lane => {
+                try Helpers.validateLoadLaneOp(self, module, instruction, i8x16);
+            },
+            .V128_Load16_Lane => {
+                try Helpers.validateLoadLaneOp(self, module, instruction, i16x8);
+            },
+            .V128_Load32_Lane => {
+                try Helpers.validateLoadLaneOp(self, module, instruction, i32x4);
+            },
+            .V128_Load64_Lane => {
+                try Helpers.validateLoadLaneOp(self, module, instruction, i64x2);
+            },
             .V128_And,
             .V128_AndNot,
             .V128_Or,
@@ -3278,6 +3336,10 @@ const InstructionFuncs = struct {
         &op_V128_Xor,
         &op_V128_Bitselect,
         &op_V128_AnyTrue,
+        &op_V128_Load8_Lane,
+        &op_V128_Load16_Lane,
+        &op_V128_Load32_Lane,
+        &op_V128_Load64_Lane,
         &op_F32x4_Demote_F64x2_Zero,
         &op_F64x2_Promote_Low_F32x4,
         &op_I8x16_Abs,
@@ -3905,6 +3967,17 @@ const InstructionFuncs = struct {
                 const bitmask = @bitCast(i32, reduction);
                 return bitmask;
             }
+        }
+
+        fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
+            const vec_type_info = @typeInfo(T).Vector;
+
+            var vec = @bitCast(T, stack.popV128());
+            const immediate = instruction.immediate.MemoryOffsetAndLane;
+            const offset_from_stack: i32 = stack.popI32();
+            const scalar = try loadFromMem(vec_type_info.child, &stack.topFrame().module_instance.store, immediate.offset, offset_from_stack);
+            vec[immediate.laneidx] = scalar;
+            stack.pushV128(@bitCast(v128, vec));
         }
 
         fn vectorExtractLane(comptime T: type, lane: u32, stack: *Stack) void {
@@ -6639,6 +6712,30 @@ const InstructionFuncs = struct {
         const v = @bitCast(u128, stack.popV128());
         const boolean: i32 = if (v != 0) 1 else 0;
         stack.pushI32(boolean);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load8_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load8_Lane", pc, code, stack);
+        try OpHelpers.vectorLoadLane(u8x16, code[pc], stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load16_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load16_Lane", pc, code, stack);
+        try OpHelpers.vectorLoadLane(u16x8, code[pc], stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load32_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load32_Lane", pc, code, stack);
+        try OpHelpers.vectorLoadLane(u32x4, code[pc], stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load64_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load64_Lane", pc, code, stack);
+        try OpHelpers.vectorLoadLane(u64x2, code[pc], stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
