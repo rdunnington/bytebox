@@ -207,6 +207,12 @@ pub const Opcode = enum(u16) {
     Table_Size,
     Table_Fill,
     V128_Load,
+    V128_Load8x8_S,
+    V128_Load8x8_U,
+    V128_Load16x4_S,
+    V128_Load16x4_U,
+    V128_Load32x2_S,
+    V128_Load32x2_U,
     V128_Load8_Splat,
     V128_Load16_Splat,
     V128_Load32_Splat,
@@ -658,6 +664,12 @@ pub const WasmOpcode = enum(u16) {
     Table_Size = 0xFC10,
     Table_Fill = 0xFC11,
     V128_Load = 0xFD00,
+    V128_Load8x8_S = 0xFD01,
+    V128_Load8x8_U = 0xFD02,
+    V128_Load16x4_S = 0xFD03,
+    V128_Load16x4_U = 0xFD04,
+    V128_Load32x2_S = 0xFD05,
+    V128_Load32x2_U = 0xFD06,
     V128_Load8_Splat = 0xFD07,
     V128_Load16_Splat = 0xFD08,
     V128_Load32_Splat = 0xFD09,
@@ -1166,12 +1178,12 @@ const ConversionTables = struct {
 
     const wasmFDOpcodeToOpcodeTable = [_]Opcode{
         Opcode.V128_Load, // 0xFD00
-        Opcode.Invalid, // 0xFD01
-        Opcode.Invalid, // 0xFD02
-        Opcode.Invalid, // 0xFD03
-        Opcode.Invalid, // 0xFD04
-        Opcode.Invalid, // 0xFD05
-        Opcode.Invalid, // 0xFD06
+        Opcode.V128_Load8x8_S, // 0xFD01
+        Opcode.V128_Load8x8_U, // 0xFD02
+        Opcode.V128_Load16x4_S, // 0xFD03
+        Opcode.V128_Load16x4_U, // 0xFD04
+        Opcode.V128_Load32x2_S, // 0xFD05
+        Opcode.V128_Load32x2_U, // 0xFD06
         Opcode.V128_Load8_Splat, // 0xFD07
         Opcode.V128_Load16_Splat, // 0xFD08
         Opcode.V128_Load32_Splat, // 0xFD09

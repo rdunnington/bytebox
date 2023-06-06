@@ -1709,6 +1709,18 @@ const Instruction = struct {
                 var memarg = try MemArg.decode(reader, 128);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
+            .V128_Load8x8_S, .V128_Load8x8_U => {
+                var memarg = try MemArg.decode(reader, 8);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
+            .V128_Load16x4_S, .V128_Load16x4_U => {
+                var memarg = try MemArg.decode(reader, 16);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
+            .V128_Load32x2_S, .V128_Load32x2_U => {
+                var memarg = try MemArg.decode(reader, 32);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
             .V128_Load8_Splat => {
                 var memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
@@ -2676,7 +2688,18 @@ const ModuleValidator = struct {
                 }
                 try self.popType(.I32);
             },
-            .V128_Load, .V128_Load8_Splat, .V128_Load16_Splat, .V128_Load32_Splat, .V128_Load64_Splat => {
+            .V128_Load,
+            .V128_Load8x8_S,
+            .V128_Load8x8_U,
+            .V128_Load16x4_S,
+            .V128_Load16x4_U,
+            .V128_Load32x2_S,
+            .V128_Load32x2_U,
+            .V128_Load8_Splat,
+            .V128_Load16_Splat,
+            .V128_Load32_Splat,
+            .V128_Load64_Splat,
+            => {
                 try Helpers.validateLoadOp(self, module, .V128);
             },
             .I8x16_Splat, .I16x8_Splat, .I32x4_Splat => {
@@ -3307,6 +3330,12 @@ const InstructionFuncs = struct {
         &op_Table_Size,
         &op_Table_Fill,
         &op_V128_Load,
+        &op_V128_Load8x8_S,
+        &op_V128_Load8x8_U,
+        &op_V128_Load16x4_S,
+        &op_V128_Load16x4_U,
+        &op_V128_Load32x2_S,
+        &op_V128_Load32x2_U,
         &op_V128_Load8_Splat,
         &op_V128_Load16_Splat,
         &op_V128_Load32_Splat,
@@ -3655,6 +3684,32 @@ const InstructionFuncs = struct {
             const mem = memory.mem.items[offset..end];
             const value = std.mem.readIntSliceLittle(read_type, mem);
             return @bitCast(T, value);
+        }
+
+        fn loadArrayFromMem(comptime read_type: type, comptime out_type: type, comptime array_len: usize, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) ![array_len]out_type {
+            if (offset_from_stack < 0) {
+                return error.TrapOutOfBoundsMemoryAccess;
+            }
+
+            const memory: *const MemoryInstance = store.getMemory(0);
+            const offset: usize = offset_from_memarg + @intCast(usize, offset_from_stack);
+
+            const byte_count = @sizeOf(read_type);
+            const end = offset + (byte_count * array_len);
+
+            if (memory.mem.items.len < end) {
+                return error.TrapOutOfBoundsMemoryAccess;
+            }
+
+            var ret: [array_len]out_type = undefined;
+            const mem = memory.mem.items[offset..end];
+            var i: usize = 0;
+            while (i < mem.len) : (i += 1) {
+                const value_start = i * byte_count;
+                const value_end = value_start + byte_count;
+                ret[i] = std.mem.readIntSliceLittle(read_type, mem[value_start..value_end]);
+            }
+            return ret;
         }
 
         fn storeInMem(value: anytype, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) !void {
@@ -6261,6 +6316,21 @@ const InstructionFuncs = struct {
         stack.pushV128(value);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
+
+    fn op_V128_Load8x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load8x8_S", pc, code, stack);
+        const offset_from_stack: i32 = stack.popI32();
+        const array: [8]i16 = try OpHelpers.loadArrayFromMem(i8, i16, 8, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        const vec: i16x8 = array;
+        stack.pushV128(@bitCast(v128, vec));
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load8x8_U(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
+    fn op_V128_Load16x4_S(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
+    fn op_V128_Load16x4_U(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
+    fn op_V128_Load32x2_S(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
+    fn op_V128_Load32x2_U(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
 
     fn op_V128_Load8_Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_Load8_Splat", pc, code, stack);
