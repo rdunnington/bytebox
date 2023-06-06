@@ -1751,6 +1751,14 @@ const Instruction = struct {
             .V128_Store64_Lane => {
                 immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 64);
             },
+            .V128_Load32_Zero => {
+                var memarg = try MemArg.decode(reader, 128);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
+            .V128_Load64_Zero => {
+                var memarg = try MemArg.decode(reader, 128);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
             else => {},
         }
 
@@ -2093,11 +2101,15 @@ const ModuleValidator = struct {
                 try validator.popType(.I32);
             }
 
-            fn validateLoadLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
+            fn validateVectorLane(comptime T: type, laneidx: u32) !void {
                 const vec_type_info = @typeInfo(T).Vector;
-                if (vec_type_info.len <= instruction_.immediate.MemoryOffsetAndLane.laneidx) {
+                if (vec_type_info.len <= laneidx) {
                     return error.ValidationInvalidLaneIndex;
                 }
+            }
+
+            fn validateLoadLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
+                try validateVectorLane(T, instruction_.immediate.MemoryOffsetAndLane.laneidx);
                 try validator.popType(.V128);
                 try validator.popType(.I32);
                 try validateMemoryIndex(module_);
@@ -2105,35 +2117,22 @@ const ModuleValidator = struct {
             }
 
             fn validateStoreLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
-                const vec_type_info = @typeInfo(T).Vector;
-                if (vec_type_info.len <= instruction_.immediate.MemoryOffsetAndLane.laneidx) {
-                    return error.ValidationInvalidLaneIndex;
-                }
+                try validateVectorLane(T, instruction_.immediate.MemoryOffsetAndLane.laneidx);
                 try validator.popType(.V128);
                 try validator.popType(.I32);
                 try validateMemoryIndex(module_);
             }
 
             fn validateVecExtractLane(comptime T: type, validator: *ModuleValidator, instruction_: Instruction) !void {
-                const vec_type_info = @typeInfo(T).Vector;
-                if (vec_type_info.len <= instruction_.immediate.Index) {
-                    return error.ValidationInvalidLaneIndex;
-                }
-
-                const lane_valtype = vecLaneTypeToValtype(vec_type_info.child);
-
+                try validateVectorLane(T, instruction_.immediate.Index);
+                const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).Vector.child);
                 try validator.popType(.V128);
                 try validator.pushType(lane_valtype);
             }
 
             fn validateVecReplaceLane(comptime T: type, validator: *ModuleValidator, instruction_: Instruction) !void {
-                const vec_type_info = @typeInfo(T).Vector;
-                if (vec_type_info.len <= instruction_.immediate.Index) {
-                    return error.ValidationInvalidLaneIndex;
-                }
-
-                const lane_valtype = vecLaneTypeToValtype(vec_type_info.child);
-
+                try validateVectorLane(T, instruction_.immediate.Index);
+                const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).Vector.child);
                 try validator.popType(lane_valtype);
                 try validator.popType(.V128);
                 try validator.pushType(.V128);
@@ -2873,6 +2872,12 @@ const ModuleValidator = struct {
             .V128_Store64_Lane => {
                 try Helpers.validateStoreLaneOp(self, module, instruction, i64x2);
             },
+            .V128_Load32_Zero => {
+                try Helpers.validateLoadOp(self, module, .V128);
+            },
+            .V128_Load64_Zero => {
+                try Helpers.validateLoadOp(self, module, .V128);
+            },
             .V128_And,
             .V128_AndNot,
             .V128_Or,
@@ -3371,6 +3376,8 @@ const InstructionFuncs = struct {
         &op_V128_Store16_Lane,
         &op_V128_Store32_Lane,
         &op_V128_Store64_Lane,
+        &op_V128_Load32_Zero,
+        &op_V128_Load64_Zero,
         &op_F32x4_Demote_F64x2_Zero,
         &op_F64x2_Promote_Low_F32x4,
         &op_I8x16_Abs,
@@ -4008,6 +4015,17 @@ const InstructionFuncs = struct {
             const offset_from_stack: i32 = stack.popI32();
             const scalar = try loadFromMem(vec_type_info.child, &stack.topFrame().module_instance.store, immediate.offset, offset_from_stack);
             vec[immediate.laneidx] = scalar;
+            stack.pushV128(@bitCast(v128, vec));
+        }
+
+        fn vectorLoadLaneZero(comptime T: type, instruction: Instruction, stack: *Stack) !void {
+            const vec_type_info = @typeInfo(T).Vector;
+
+            const mem_offset = instruction.immediate.MemoryOffset;
+            const offset_from_stack: i32 = stack.popI32();
+            const scalar = try loadFromMem(vec_type_info.child, &stack.topFrame().module_instance.store, mem_offset, offset_from_stack);
+            var vec = @splat(vec_type_info.len, @as(vec_type_info.child, 0));
+            vec[0] = scalar;
             stack.pushV128(@bitCast(v128, vec));
         }
 
@@ -6780,26 +6798,38 @@ const InstructionFuncs = struct {
     }
 
     fn op_V128_Store8_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("V128_Load64_Lane", pc, code, stack);
+        debugPreamble("V128_Store8_Lane", pc, code, stack);
         try OpHelpers.vectorStoreLane(u8x16, code[pc], stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_V128_Store16_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("V128_Load64_Lane", pc, code, stack);
+        debugPreamble("V128_Store16_Lane", pc, code, stack);
         try OpHelpers.vectorStoreLane(u16x8, code[pc], stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_V128_Store32_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("V128_Load64_Lane", pc, code, stack);
+        debugPreamble("V128_Store32_Lane", pc, code, stack);
         try OpHelpers.vectorStoreLane(u32x4, code[pc], stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_V128_Store64_Lane(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        debugPreamble("V128_Load64_Lane", pc, code, stack);
+        debugPreamble("V128_Store64_Lane", pc, code, stack);
         try OpHelpers.vectorStoreLane(u64x2, code[pc], stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load32_Zero(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load32_Zero", pc, code, stack);
+        try OpHelpers.vectorLoadLaneZero(u32x4, code[pc], stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load64_Zero(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load64_Zero", pc, code, stack);
+        try OpHelpers.vectorLoadLaneZero(u64x2, code[pc], stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
