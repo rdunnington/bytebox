@@ -1709,6 +1709,22 @@ const Instruction = struct {
                 var memarg = try MemArg.decode(reader, 128);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
+            .V128_Load8_Splat => {
+                var memarg = try MemArg.decode(reader, 8);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
+            .V128_Load16_Splat => {
+                var memarg = try MemArg.decode(reader, 16);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
+            .V128_Load32_Splat => {
+                var memarg = try MemArg.decode(reader, 64);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
+            .V128_Load64_Splat => {
+                var memarg = try MemArg.decode(reader, 64);
+                immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
+            },
             .I8x16_Extract_Lane_S, .I8x16_Extract_Lane_U, .I8x16_Replace_Lane, .I16x8_Extract_Lane_S, .I16x8_Extract_Lane_U, .I16x8_Replace_Lane, .I32x4_Extract_Lane, .I32x4_Replace_Lane, .I64x2_Extract_Lane, .I64x2_Replace_Lane, .F32x4_Extract_Lane, .F32x4_Replace_Lane, .F64x2_Extract_Lane, .F64x2_Replace_Lane => {
                 immediate = InstructionImmediates{ .Index = try reader.readByte() }; // laneidx
             },

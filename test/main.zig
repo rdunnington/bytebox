@@ -1400,7 +1400,7 @@ pub fn main() !void {
         "simd_load64_lane",
         "simd_load8_lane",
         // "simd_load_extend",
-        // "simd_load_splat",
+        "simd_load_splat",
         "simd_load_zero",
         "simd_splat",
         "simd_store",
