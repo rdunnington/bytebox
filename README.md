@@ -91,7 +91,7 @@ This project is still in the alpha stage.
 |✅|Table instructions|
 |✅|Multiple tables|
 |✅|Bulk memory and table instructions|
-|❌|Vector instructions|
+|✅|Vector instructions|
 
 ### [WASI Preview 1](https://github.com/WebAssembly/WASI/tree/main) support:
 
@@ -147,7 +147,6 @@ This project is still in the alpha stage.
 ### Roadmap
 These tasks must be completed to enter alpha:
 * WASI support on all platforms
-* Vector instructions
 * API ergonomics pass
 * Documentation
 * General TODO/code cleanup
