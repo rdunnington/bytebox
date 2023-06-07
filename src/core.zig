@@ -1730,7 +1730,7 @@ const Instruction = struct {
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load32_Splat => {
-                var memarg = try MemArg.decode(reader, 64);
+                var memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load64_Splat => {

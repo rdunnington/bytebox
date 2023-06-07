@@ -1353,7 +1353,7 @@ pub fn main() !void {
         "return",
         "select",
         "simd_address",
-        // "simd_align",
+        "simd_align",
         "simd_bitwise",
         "simd_bit_shift",
         "simd_boolean",
