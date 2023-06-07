@@ -1,4 +1,5 @@
 const std = @import("std");
+const common = @import("common.zig");
 
 // A compressed version of the wasm opcodes for better table-oriented lookup (no holes). See WasmOpcode for the actual wasm representation.
 pub const Opcode = enum(u16) {
@@ -205,6 +206,243 @@ pub const Opcode = enum(u16) {
     Table_Grow,
     Table_Size,
     Table_Fill,
+    V128_Load,
+    V128_Load8x8_S,
+    V128_Load8x8_U,
+    V128_Load16x4_S,
+    V128_Load16x4_U,
+    V128_Load32x2_S,
+    V128_Load32x2_U,
+    V128_Load8_Splat,
+    V128_Load16_Splat,
+    V128_Load32_Splat,
+    V128_Load64_Splat,
+    V128_Store,
+    V128_Const,
+    I8x16_Shuffle,
+    I8x16_Swizzle,
+    I8x16_Splat,
+    I16x8_Splat,
+    I32x4_Splat,
+    I64x2_Splat,
+    F32x4_Splat,
+    F64x2_Splat,
+    I8x16_Extract_Lane_S,
+    I8x16_Extract_Lane_U,
+    I8x16_Replace_Lane,
+    I16x8_Extract_Lane_S,
+    I16x8_Extract_Lane_U,
+    I16x8_Replace_Lane,
+    I32x4_Extract_Lane,
+    I32x4_Replace_Lane,
+    I64x2_Extract_Lane,
+    I64x2_Replace_Lane,
+    F32x4_Extract_Lane,
+    F32x4_Replace_Lane,
+    F64x2_Extract_Lane,
+    F64x2_Replace_Lane,
+    I8x16_EQ,
+    I8x16_NE,
+    I8x16_LT_S,
+    I8x16_LT_U,
+    I8x16_GT_S,
+    I8x16_GT_U,
+    I8x16_LE_S,
+    I8x16_LE_U,
+    I8x16_GE_S,
+    I8x16_GE_U,
+    I16x8_EQ,
+    I16x8_NE,
+    I16x8_LT_S,
+    I16x8_LT_U,
+    I16x8_GT_S,
+    I16x8_GT_U,
+    I16x8_LE_S,
+    I16x8_LE_U,
+    I16x8_GE_S,
+    I16x8_GE_U,
+    I32x4_EQ,
+    I32x4_NE,
+    I32x4_LT_S,
+    I32x4_LT_U,
+    I32x4_GT_S,
+    I32x4_GT_U,
+    I32x4_LE_S,
+    I32x4_LE_U,
+    I32x4_GE_S,
+    I32x4_GE_U,
+    F32x4_EQ,
+    F32x4_NE,
+    F32x4_LT,
+    F32x4_GT,
+    F32x4_LE,
+    F32x4_GE,
+    F64x2_EQ,
+    F64x2_NE,
+    F64x2_LT,
+    F64x2_GT,
+    F64x2_LE,
+    F64x2_GE,
+    V128_Not,
+    V128_And,
+    V128_AndNot,
+    V128_Or,
+    V128_Xor,
+    V128_Bitselect,
+    V128_AnyTrue,
+    V128_Load8_Lane,
+    V128_Load16_Lane,
+    V128_Load32_Lane,
+    V128_Load64_Lane,
+    V128_Store8_Lane,
+    V128_Store16_Lane,
+    V128_Store32_Lane,
+    V128_Store64_Lane,
+    V128_Load32_Zero,
+    V128_Load64_Zero,
+    F32x4_Demote_F64x2_Zero,
+    F64x2_Promote_Low_F32x4,
+    I8x16_Abs,
+    I8x16_Neg,
+    I8x16_Popcnt,
+    I8x16_AllTrue,
+    I8x16_Bitmask,
+    I8x16_Narrow_I16x8_S,
+    I8x16_Narrow_I16x8_U,
+    F32x4_Ceil,
+    F32x4_Floor,
+    F32x4_Trunc,
+    F32x4_Nearest,
+    I8x16_Shl,
+    I8x16_Shr_S,
+    I8x16_Shr_U,
+    I8x16_Add,
+    I8x16_Add_Sat_S,
+    I8x16_Add_Sat_U,
+    I8x16_Sub,
+    I8x16_Sub_Sat_S,
+    I8x16_Sub_Sat_U,
+    F64x2_Ceil,
+    F64x2_Floor,
+    I8x16_Min_S,
+    I8x16_Min_U,
+    I8x16_Max_S,
+    I8x16_Max_U,
+    F64x2_Trunc,
+    I8x16_Avgr_U,
+    I16x8_Extadd_Pairwise_I8x16_S,
+    I16x8_Extadd_Pairwise_I8x16_U,
+    I32x4_Extadd_Pairwise_I16x8_S,
+    I32x4_Extadd_Pairwise_I16x8_U,
+    I16x8_Abs,
+    I16x8_Neg,
+    I16x8_Q15mulr_Sat_S,
+    I16x8_AllTrue,
+    I16x8_Bitmask,
+    I16x8_Narrow_I32x4_S,
+    I16x8_Narrow_I32x4_U,
+    I16x8_Extend_Low_I8x16_S,
+    I16x8_Extend_High_I8x16_S,
+    I16x8_Extend_Low_I8x16_U,
+    I16x8_Extend_High_I8x16_U,
+    I16x8_Shl,
+    I16x8_Shr_S,
+    I16x8_Shr_U,
+    I16x8_Add,
+    I16x8_Add_Sat_S,
+    I16x8_Add_Sat_U,
+    I16x8_Sub,
+    I16x8_Sub_Sat_S,
+    I16x8_Sub_Sat_U,
+    F64x2_Nearest,
+    I16x8_Mul,
+    I16x8_Min_S,
+    I16x8_Min_U,
+    I16x8_Max_S,
+    I16x8_Max_U,
+    I16x8_Avgr_U,
+    I16x8_Extmul_Low_I8x16_S,
+    I16x8_Extmul_High_I8x16_S,
+    I16x8_Extmul_Low_I8x16_U,
+    I16x8_Extmul_High_I8x16_U,
+    I32x4_Abs,
+    I32x4_Neg,
+    I32x4_AllTrue,
+    I32x4_Bitmask,
+    I32x4_Extend_Low_I16x8_S,
+    I32x4_Extend_High_I16x8_S,
+    I32x4_Extend_Low_I16x8_U,
+    I32x4_Extend_High_I16x8_U,
+    I32x4_Shl,
+    I32x4_Shr_S,
+    I32x4_Shr_U,
+    I32x4_Add,
+    I32x4_Sub,
+    I32x4_Mul,
+    I32x4_Min_S,
+    I32x4_Min_U,
+    I32x4_Max_S,
+    I32x4_Max_U,
+    I32x4_Dot_I16x8_S,
+    I32x4_Extmul_Low_I16x8_S,
+    I32x4_Extmul_High_I16x8_S,
+    I32x4_Extmul_Low_I16x8_U,
+    I32x4_Extmul_High_I16x8_U,
+    I64x2_Abs,
+    I64x2_Neg,
+    I64x2_AllTrue,
+    I64x2_Bitmask,
+    I64x2_Extend_Low_I32x4_S,
+    I64x2_Extend_High_I32x4_S,
+    I64x2_Extend_Low_I32x4_U,
+    I64x2_Extend_High_I32x4_U,
+    I64x2_Shl,
+    I64x2_Shr_S,
+    I64x2_Shr_U,
+    I64x2_Add,
+    I64x2_Sub,
+    I64x2_Mul,
+    I64x2_EQ,
+    I64x2_NE,
+    I64x2_LT_S,
+    I64x2_GT_S,
+    I64x2_LE_S,
+    I64x2_GE_S,
+    I64x2_Extmul_Low_I32x4_S,
+    I64x2_Extmul_High_I32x4_S,
+    I64x2_Extmul_Low_I32x4_U,
+    I64x2_Extmul_High_I32x4_U,
+    F32x4_Abs,
+    F32x4_Neg,
+    F32x4_Sqrt,
+    F32x4_Add,
+    F32x4_Sub,
+    F32x4_Mul,
+    F32x4_Div,
+    F32x4_Min,
+    F32x4_Max,
+    F32x4_PMin,
+    F32x4_PMax,
+    F64x2_Abs,
+    F64x2_Neg,
+    F64x2_Sqrt,
+    F64x2_Add,
+    F64x2_Sub,
+    F64x2_Mul,
+    F64x2_Div,
+    F64x2_Min,
+    F64x2_Max,
+    F64x2_PMin,
+    F64x2_PMax,
+    F32x4_Trunc_Sat_F32x4_S,
+    F32x4_Trunc_Sat_F32x4_U,
+    F32x4_Convert_I32x4_S,
+    F32x4_Convert_I32x4_U,
+    I32x4_Trunc_Sat_F64x2_S_Zero,
+    I32x4_Trunc_Sat_F64x2_U_Zero,
+
+    F64x2_Convert_Low_I32x4_S,
+    F64x2_Convert_Low_I32x4_U,
 
     pub fn beginsBlock(opcode: Opcode) bool {
         return switch (opcode) {
@@ -425,12 +663,279 @@ pub const WasmOpcode = enum(u16) {
     Table_Grow = 0xFC0F,
     Table_Size = 0xFC10,
     Table_Fill = 0xFC11,
+    V128_Load = 0xFD00,
+    V128_Load8x8_S = 0xFD01,
+    V128_Load8x8_U = 0xFD02,
+    V128_Load16x4_S = 0xFD03,
+    V128_Load16x4_U = 0xFD04,
+    V128_Load32x2_S = 0xFD05,
+    V128_Load32x2_U = 0xFD06,
+    V128_Load8_Splat = 0xFD07,
+    V128_Load16_Splat = 0xFD08,
+    V128_Load32_Splat = 0xFD09,
+    V128_Load64_Splat = 0xFD0A,
+    V128_Store = 0xFD0B,
+    V128_Const = 0xFD0C,
+    I8x16_Shuffle = 0xFD0D,
+    I8x16_Swizzle = 0xFD0E,
+    I8x16_Splat = 0xFD0F,
+    I16x8_Splat = 0xFD10,
+    I32x4_Splat = 0xFD11,
+    I64x2_Splat = 0xFD12,
+    F32x4_Splat = 0xFD13,
+    F64x2_Splat = 0xFD14,
+    I8x16_Extract_Lane_S = 0xFD15,
+    I8x16_Extract_Lane_U = 0xFD16,
+    I8x16_Replace_Lane = 0xFD17,
+    I16x8_Extract_Lane_S = 0xFD18,
+    I16x8_Extract_Lane_U = 0xFD19,
+    I16x8_Replace_Lane = 0xFD1A,
+    I32x4_Extract_Lane = 0xFD1B,
+    I32x4_Replace_Lane = 0xFD1C,
+    I64x2_Extract_Lane = 0xFD1D,
+    I64x2_Replace_Lane = 0xFD1E,
+    F32x4_Extract_Lane = 0xFD1F,
+    F32x4_Replace_Lane = 0xFD20,
+    F64x2_Extract_Lane = 0xFD21,
+    F64x2_Replace_Lane = 0xFD22,
+    I8x16_EQ = 0xFD23,
+    I8x16_NE = 0xFD24,
+    I8x16_LT_S = 0xFD25,
+    I8x16_LT_U = 0xFD26,
+    I8x16_GT_S = 0xFD27,
+    I8x16_GT_U = 0xFD28,
+    I8x16_LE_S = 0xFD29,
+    I8x16_LE_U = 0xFD2A,
+    I8x16_GE_S = 0xFD2B,
+    I8x16_GE_U = 0xFD2C,
+    I16x8_EQ = 0xFD2D,
+    I16x8_NE = 0xFD2E,
+    I16x8_LT_S = 0xFD2F,
+    I16x8_LT_U = 0xFD30,
+    I16x8_GT_S = 0xFD31,
+    I16x8_GT_U = 0xFD32,
+    I16x8_LE_S = 0xFD33,
+    I16x8_LE_U = 0xFD34,
+    I16x8_GE_S = 0xFD35,
+    I16x8_GE_U = 0xFD36,
+    I32x4_EQ = 0xFD37,
+    I32x4_NE = 0xFD38,
+    I32x4_LT_S = 0xFD39,
+    I32x4_LT_U = 0xFD3A,
+    I32x4_GT_S = 0xFD3B,
+    I32x4_GT_U = 0xFD3C,
+    I32x4_LE_S = 0xFD3D,
+    I32x4_LE_U = 0xFD3E,
+    I32x4_GE_S = 0xFD3F,
+    I32x4_GE_U = 0xFD40,
+    F32x4_EQ = 0xFD41,
+    F32x4_NE = 0xFD42,
+    F32x4_LT = 0xFD43,
+    F32x4_GT = 0xFD44,
+    F32x4_LE = 0xFD45,
+    F32x4_GE = 0xFD46,
+    F64x2_EQ = 0xFD47,
+    F64x2_NE = 0xFD48,
+    F64x2_LT = 0xFD49,
+    F64x2_GT = 0xFD4A,
+    F64x2_LE = 0xFD4B,
+    F64x2_GE = 0xFD4C,
+    V128_Not = 0xFD4D,
+    V128_And = 0xFD4E,
+    V128_AndNot = 0xFD4F,
+    V128_Or = 0xFD50,
+    V128_Xor = 0xFD51,
+    V128_Bitselect = 0xFD52,
+    V128_AnyTrue = 0xFD53,
+    V128_Load8_Lane = 0xFD54,
+    V128_Load16_Lane = 0xFD55,
+    V128_Load32_Lane = 0xFD56,
+    V128_Load64_Lane = 0xFD57,
+    V128_Store8_Lane = 0xFD58,
+    V128_Store16_Lane = 0xFD59,
+    V128_Store32_Lane = 0xFD5A,
+    V128_Store64_Lane = 0xFD5B,
+    V128_Load32_Zero = 0xFD5C,
+    V128_Load64_Zero = 0xFD5D,
+    F32x4_Demote_F64x2_Zero = 0xFD5E,
+    F64x2_Promote_Low_F32x4 = 0xFD5F,
+    I8x16_Abs = 0xFD60,
+    I8x16_Neg = 0xFD61,
+    I8x16_Popcnt = 0xFD62,
+    I8x16_AllTrue = 0xFD63,
+    I8x16_Bitmask = 0xFD64,
+    II8x16_Narrow_I16x8_S = 0xFD65,
+    II8x16_Narrow_I16x8_U = 0xFD66,
+    F32x4_Ceil = 0xFD67,
+    F32x4_Floor = 0xFD68,
+    F32x4_Trunc = 0xFD69,
+    F32x4_Nearest = 0xFD6A,
+    I8x16_Shl = 0xFD6B,
+    I8x16_Shr_S = 0xFD6C,
+    I8x16_Shr_U = 0xFD6D,
+    I8x16_Add = 0xFD6E,
+    I8x16_Add_Sat_S = 0xFD6F,
+    I8x16_Add_Sat_U = 0xFD70,
+    I8x16_Sub = 0xFD71,
+    I8x16_Sub_Sat_S = 0xFD72,
+    I8x16_Sub_Sat_U = 0xFD73,
+    F64x2_Ceil = 0xFD74,
+    F64x2_Floor = 0xFD75,
+    I8x16_Min_S = 0xFD76,
+    I8x16_Min_U = 0xFD77,
+    I8x16_Max_S = 0xFD78,
+    I8x16_Max_U = 0xFD79,
+    F64x2_Trunc = 0xFD7A,
+    I8x16_Avgr_U = 0xFD7B,
+    I16x8_Extadd_Pairwise_I8x16_S = 0xFD7C,
+    I16x8_Extadd_Pairwise_I8x16_U = 0xFD7D,
+    I32x4_Extadd_Pairwise_I16x8_S = 0xFD7E,
+    I32x4_Extadd_Pairwise_I16x8_U = 0xFD7F,
+    I16x8_Abs = 0xFD80,
+    I16x8_Neg = 0xFD81,
+    I16x8_Q15mulr_Sat_S = 0xFD82,
+    I16x8_AllTrue = 0xFD83,
+    I16x8_Bitmask = 0xFD84,
+    I16x8_Narrow_I32x4_S = 0xFD85,
+    I16x8_Narrow_I32x4_U = 0xFD86,
+    I16x8_Extend_Low_I8x16_S = 0xFD87,
+    I16x8_Extend_High_I8x16_S = 0xFD88,
+    I16x8_Extend_Low_I8x16_U = 0xFD89,
+    I16x8_Extend_High_I8x16_U = 0xFD8A,
+    I16x8_Shl = 0xFD8B,
+    I16x8_Shr_S = 0xFD8C,
+    I16x8_Shr_U = 0xFD8D,
+    I16x8_Add = 0xFD8E,
+    I16x8_Add_Sat_S = 0xFD8F,
+    I16x8_Add_Sat_U = 0xFD90,
+    I16x8_Sub = 0xFD91,
+    I16x8_Sub_Sat_S = 0xFD92,
+    I16x8_Sub_Sat_U = 0xFD93,
+    F64x2_Nearest = 0xFD94,
+    I16x8_Mul = 0xFD95,
+    I16x8_Min_S = 0xFD96,
+    I16x8_Min_U = 0xFD97,
+    I16x8_Max_S = 0xFD98,
+    I16x8_Max_U = 0xFD99,
+    I16x8_Avgr_U = 0xFD9B,
+    I16x8_Extmul_Low_I8x16_S = 0xFD9C,
+    I16x8_Extmul_High_I8x16_S = 0xFD9D,
+    I16x8_Extmul_Low_I8x16_U = 0xFD9E,
+    I16x8_Extmul_High_I8x16_U = 0xFD9F,
+    I32x4_Abs = 0xFDA0,
+    I32x4_Neg = 0xFDA1,
+    I32x4_AllTrue = 0xFDA3,
+    I32x4_Bitmask = 0xFDA4,
+    I32x4_Extend_Low_I16x8_S = 0xFDA7,
+    I32x4_Extend_High_I16x8_S = 0xFDA8,
+    I32x4_Extend_Low_I16x8_U = 0xFDA9,
+    I32x4_Extend_High_I16x8_U = 0xFDAA,
+    I32x4_Shl = 0xFDAB,
+    I32x4_Shr_S = 0xFDAC,
+    I32x4_Shr_U = 0xFDAD,
+    I32x4_Add = 0xFDAE,
+    I32x4_Sub = 0xFDB1,
+    I32x4_Mul = 0xFDB5,
+    I32x4_Min_S = 0xFDB6,
+    I32x4_Min_U = 0xFDB7,
+    I32x4_Max_S = 0xFDB8,
+    I32x4_Max_U = 0xFDB9,
+    I32x4_Dot_I16x8_S = 0xFDBA,
+    I32x4_Extmul_Low_I16x8_S = 0xFDBC,
+    I32x4_Extmul_High_I16x8_S = 0xFDBD,
+    I32x4_Extmul_Low_I16x8_U = 0xFDBE,
+    I32x4_Extmul_High_I16x8_U = 0xFDBF,
+    I64x2_Abs = 0xFDC0,
+    I64x2_Neg = 0xFDC1,
+    I64x2_AllTrue = 0xFDC3,
+    I64x2_Bitmask = 0xFDC4,
+    I64x2_Extend_Low_I32x4_S = 0xFDC7,
+    I64x2_Extend_High_I32x4_S = 0xFDC8,
+    I64x2_Extend_Low_I32x4_U = 0xFDC9,
+    I64x2_Extend_High_I32x4_U = 0xFDCA,
+    I64x2_Shl = 0xFDCB,
+    I64x2_Shr_S = 0xFDCC,
+    I64x2_Shr_U = 0xFDCD,
+    I64x2_Add = 0xFDCE,
+    I64x2_Sub = 0xFDD1,
+    I64x2_Mul = 0xFDD5,
+    I64x2_EQ = 0xFDD6,
+    I64x2_NE = 0xFDD7,
+    I64x2_LT_S = 0xFDD8,
+    I64x2_GT_S = 0xFDD9,
+    I64x2_LE_S = 0xFDDA,
+    I64x2_GE_S = 0xFDDB,
+    I64x2_Extmul_Low_I32x4_S = 0xFDDC,
+    I64x2_Extmul_High_I32x4_S = 0xFDDD,
+    I64x2_Extmul_Low_I32x4_U = 0xFDDE,
+    I64x2_Extmul_High_I32x4_U = 0xFDDF,
+    F32x4_Abs = 0xFDE0,
+    F32x4_Neg = 0xFDE1,
+    F32x4_Sqrt = 0xFDE3,
+    F32x4_Add = 0xFDE4,
+    F32x4_Sub = 0xFDE5,
+    F32x4_Mul = 0xFDE6,
+    F32x4_Div = 0xFDE7,
+    F32x4_Min = 0xFDE8,
+    F32x4_Max = 0xFDE9,
+    F32x4_PMin = 0xFDEA,
+    F32x4_PMax = 0xFDEB,
+    F64x2_Abs = 0xFDEC,
+    F64x2_Neg = 0xFDED,
+    F64x2_Sqrt = 0xFDEF,
+    F64x2_Add = 0xFDF0,
+    F64x2_Sub = 0xFDF1,
+    F64x2_Mul = 0xFDF2,
+    F64x2_Div = 0xFDF3,
+    F64x2_Min = 0xFDF4,
+    F64x2_Max = 0xFDF5,
+    F64x2_PMin = 0xFDF6,
+    F64x2_PMax = 0xFDF7,
+    F32x4_Trunc_Sat_F32x4_S = 0xFDF8,
+    F32x4_Trunc_Sat_F32x4_U = 0xFDF9,
+    F32x4_Convert_I32x4_S = 0xFDFA,
+    F32x4_Convert_I32x4_U = 0xFDFB,
+    I32x4_Trunc_Sat_F64x2_S_Zero = 0xFDFC,
+    I32x4_Trunc_Sat_F64x2_U_Zero = 0xFDFD,
+    F64x2_Convert_Low_I32x4_S = 0xFDFE,
+    F64x2_Convert_Low_I32x4_U = 0xFDFF,
 
     pub fn toOpcode(wasm: WasmOpcode) Opcode {
         const opcode_int = @enumToInt(wasm);
-        const opcode: Opcode = if (opcode_int < ConversionTables.wasmOpcodeToOpcodeTable.len) ConversionTables.wasmOpcodeToOpcodeTable[opcode_int] else ConversionTables.wasmFCOpcodeToOpcodeTable[opcode_int - 0xFC00];
+        var opcode: Opcode = undefined;
+        if (opcode_int < ConversionTables.wasmOpcodeToOpcodeTable.len) {
+            opcode = ConversionTables.wasmOpcodeToOpcodeTable[opcode_int];
+        } else if (opcode_int >= 0xFC00 and opcode_int < 0xFCD0) {
+            opcode = ConversionTables.wasmFCOpcodeToOpcodeTable[opcode_int - 0xFC00];
+        } else {
+            opcode = ConversionTables.wasmFDOpcodeToOpcodeTable[opcode_int - 0xFD00];
+        }
         std.debug.assert(opcode != .Invalid);
         return opcode;
+    }
+
+    pub fn decode(reader: anytype) !WasmOpcode {
+        var byte = try reader.readByte();
+        var wasm_op: WasmOpcode = undefined;
+        if (byte == 0xFC or byte == 0xFD) {
+            var type_opcode = try common.decodeLEB128(u32, reader);
+            if (type_opcode > std.math.maxInt(u8)) {
+                return error.MalformedIllegalOpcode;
+            }
+            var byte2 = @intCast(u8, type_opcode);
+            var extended: u16 = byte;
+            extended = extended << 8;
+            extended |= byte2;
+
+            wasm_op = std.meta.intToEnum(WasmOpcode, extended) catch {
+                return error.MalformedIllegalOpcode;
+            };
+        } else {
+            wasm_op = std.meta.intToEnum(WasmOpcode, byte) catch {
+                return error.MalformedIllegalOpcode;
+            };
+        }
+        return wasm_op;
     }
 };
 
@@ -668,5 +1173,264 @@ const ConversionTables = struct {
         Opcode.Table_Grow, // 0xFC0F
         Opcode.Table_Size, // 0xFC10
         Opcode.Table_Fill, // 0xFC11
+    };
+
+    const wasmFDOpcodeToOpcodeTable = [_]Opcode{
+        Opcode.V128_Load, // 0xFD00
+        Opcode.V128_Load8x8_S, // 0xFD01
+        Opcode.V128_Load8x8_U, // 0xFD02
+        Opcode.V128_Load16x4_S, // 0xFD03
+        Opcode.V128_Load16x4_U, // 0xFD04
+        Opcode.V128_Load32x2_S, // 0xFD05
+        Opcode.V128_Load32x2_U, // 0xFD06
+        Opcode.V128_Load8_Splat, // 0xFD07
+        Opcode.V128_Load16_Splat, // 0xFD08
+        Opcode.V128_Load32_Splat, // 0xFD09
+        Opcode.V128_Load64_Splat, // 0xFD0A
+        Opcode.V128_Store, // 0xFD0B
+        Opcode.V128_Const, // 0xFD0C
+        Opcode.I8x16_Shuffle, // 0xFD0D
+        Opcode.I8x16_Swizzle, // 0xFD0E
+        Opcode.I8x16_Splat, // 0xFD0F
+        Opcode.I16x8_Splat, // 0xFD10
+        Opcode.I32x4_Splat, // 0xFD11
+        Opcode.I64x2_Splat, // 0xFD12
+        Opcode.F32x4_Splat, // 0xFD13
+        Opcode.F64x2_Splat, // 0xFD14
+        Opcode.I8x16_Extract_Lane_S, // 0xFD15
+        Opcode.I8x16_Extract_Lane_U, // 0xFD16
+        Opcode.I8x16_Replace_Lane, // 0xFD17
+        Opcode.I16x8_Extract_Lane_S, // 0xFD18
+        Opcode.I16x8_Extract_Lane_U, // 0xFD19
+        Opcode.I16x8_Replace_Lane, // 0xFD1A
+        Opcode.I32x4_Extract_Lane, // 0xFD1B
+        Opcode.I32x4_Replace_Lane, // 0xFD1C
+        Opcode.I64x2_Extract_Lane, // 0xFD1D
+        Opcode.I64x2_Replace_Lane, // 0xFD1E
+        Opcode.F32x4_Extract_Lane, // 0xFD1F
+        Opcode.F32x4_Replace_Lane, // 0xFD20
+        Opcode.F64x2_Extract_Lane, // 0xFD21
+        Opcode.F64x2_Replace_Lane, // 0xFD22
+        Opcode.I8x16_EQ, // 0xFD23
+        Opcode.I8x16_NE, // 0xFD24
+        Opcode.I8x16_LT_S, // 0xFD25
+        Opcode.I8x16_LT_U, // 0xFD26
+        Opcode.I8x16_GT_S, // 0xFD27
+        Opcode.I8x16_GT_U, // 0xFD28
+        Opcode.I8x16_LE_S, // 0xFD29
+        Opcode.I8x16_LE_U, // 0xFD2A
+        Opcode.I8x16_GE_S, // 0xFD2B
+        Opcode.I8x16_GE_U, // 0xFD2C
+        Opcode.I16x8_EQ, // 0xFD2D
+        Opcode.I16x8_NE, // 0xFD2E
+        Opcode.I16x8_LT_S, // 0xFD2F
+        Opcode.I16x8_LT_U, // 0xFD30
+        Opcode.I16x8_GT_S, // 0xFD31
+        Opcode.I16x8_GT_U, // 0xFD32
+        Opcode.I16x8_LE_S, // 0xFD33
+        Opcode.I16x8_LE_U, // 0xFD34
+        Opcode.I16x8_GE_S, // 0xFD35
+        Opcode.I16x8_GE_U, // 0xFD36
+        Opcode.I32x4_EQ, // 0xFD37
+        Opcode.I32x4_NE, // 0xFD38
+        Opcode.I32x4_LT_S, // 0xFD39
+        Opcode.I32x4_LT_U, // 0xFD3A
+        Opcode.I32x4_GT_S, // 0xFD3B
+        Opcode.I32x4_GT_U, // 0xFD3C
+        Opcode.I32x4_LE_S, // 0xFD3D
+        Opcode.I32x4_LE_U, // 0xFD3E
+        Opcode.I32x4_GE_S, // 0xFD3F
+        Opcode.I32x4_GE_U, // 0xFD40
+        Opcode.F32x4_EQ, // 0xFD41
+        Opcode.F32x4_NE, // 0xFD42
+        Opcode.F32x4_LT, // 0xFD43
+        Opcode.F32x4_GT, // 0xFD44
+        Opcode.F32x4_LE, // 0xFD45
+        Opcode.F32x4_GE, // 0xFD46
+        Opcode.F64x2_EQ, // 0xFD47
+        Opcode.F64x2_NE, // 0xFD48
+        Opcode.F64x2_LT, // 0xFD49
+        Opcode.F64x2_GT, // 0xFD4A
+        Opcode.F64x2_LE, // 0xFD4B
+        Opcode.F64x2_GE, // 0xFD4C
+        Opcode.V128_Not, // 0xFD4D
+        Opcode.V128_And, // 0xFD4E
+        Opcode.V128_AndNot, // 0xFD4F
+        Opcode.V128_Or, // 0xFD50
+        Opcode.V128_Xor, // 0xFD51
+        Opcode.V128_Bitselect, // 0xFD52
+        Opcode.V128_AnyTrue, // 0xFD53
+        Opcode.V128_Load8_Lane, // 0xFD54
+        Opcode.V128_Load16_Lane, // 0xFD55
+        Opcode.V128_Load32_Lane, // 0xFD56
+        Opcode.V128_Load64_Lane, // 0xFD57
+        Opcode.V128_Store8_Lane, // 0xFD58
+        Opcode.V128_Store16_Lane, // 0xFD59
+        Opcode.V128_Store32_Lane, // 0xFD5A
+        Opcode.V128_Store64_Lane, // 0xFD5B
+        Opcode.V128_Load32_Zero, // 0xFD5C
+        Opcode.V128_Load64_Zero, // 0xFD5D
+        Opcode.F32x4_Demote_F64x2_Zero, // 0xFD5E
+        Opcode.F64x2_Promote_Low_F32x4, // 0xFD5F
+        Opcode.I8x16_Abs, // 0xFD60
+        Opcode.I8x16_Neg, // 0xFD61
+        Opcode.I8x16_Popcnt, // 0xFD62
+        Opcode.I8x16_AllTrue, // 0xFD63
+        Opcode.I8x16_Bitmask, // 0xFD64
+        Opcode.I8x16_Narrow_I16x8_S, // 0xFD65
+        Opcode.I8x16_Narrow_I16x8_U, // 0xFD66
+        Opcode.F32x4_Ceil, // 0xFD67
+        Opcode.F32x4_Floor, // 0xFD68
+        Opcode.F32x4_Trunc, // 0xFD69
+        Opcode.F32x4_Nearest, // 0xFD6A
+        Opcode.I8x16_Shl, // 0xFD6B
+        Opcode.I8x16_Shr_S, // 0xFD6C
+        Opcode.I8x16_Shr_U, // 0xFD6D
+        Opcode.I8x16_Add, // 0xFD6E
+        Opcode.I8x16_Add_Sat_S, // 0xFD6F
+        Opcode.I8x16_Add_Sat_U, // 0xFD70
+        Opcode.I8x16_Sub, // 0xFD71
+        Opcode.I8x16_Sub_Sat_S, // 0xFD72
+        Opcode.I8x16_Sub_Sat_U, // 0xFD73
+        Opcode.F64x2_Ceil, // 0xFD74
+        Opcode.F64x2_Floor, // 0xFD75
+        Opcode.I8x16_Min_S, // 0xFD76
+        Opcode.I8x16_Min_U, // 0xFD77
+        Opcode.I8x16_Max_S, // 0xFD78
+        Opcode.I8x16_Max_U, // 0xFD79
+        Opcode.F64x2_Trunc, // 0xFD7A
+        Opcode.I8x16_Avgr_U, // 0xFD7B
+        Opcode.I16x8_Extadd_Pairwise_I8x16_S, // 0xFD7C
+        Opcode.I16x8_Extadd_Pairwise_I8x16_U, // 0xFD7D
+        Opcode.I32x4_Extadd_Pairwise_I16x8_S, // 0xFD7E
+        Opcode.I32x4_Extadd_Pairwise_I16x8_U, // 0xFD7F
+        Opcode.I16x8_Abs, // 0xFD80
+        Opcode.I16x8_Neg, // 0xFD81
+        Opcode.I16x8_Q15mulr_Sat_S, // 0xFD82
+        Opcode.I16x8_AllTrue, // 0xFD83
+        Opcode.I16x8_Bitmask, // 0xFD84
+        Opcode.I16x8_Narrow_I32x4_S, // 0xFD85
+        Opcode.I16x8_Narrow_I32x4_U, // 0xFD86
+        Opcode.I16x8_Extend_Low_I8x16_S, // 0xFD87
+        Opcode.I16x8_Extend_High_I8x16_S, // 0xFD88
+        Opcode.I16x8_Extend_Low_I8x16_U, // 0xFD89
+        Opcode.I16x8_Extend_High_I8x16_U, // 0xFD8A
+        Opcode.I16x8_Shl, // 0xFD8B
+        Opcode.I16x8_Shr_S, // 0xFD8C
+        Opcode.I16x8_Shr_U, // 0xFD8D
+        Opcode.I16x8_Add, // 0xFD8E
+        Opcode.I16x8_Add_Sat_S, // 0xFD8F
+        Opcode.I16x8_Add_Sat_U, // 0xFD90
+        Opcode.I16x8_Sub, // 0xFD91
+        Opcode.I16x8_Sub_Sat_S, // 0xFD92
+        Opcode.I16x8_Sub_Sat_U, // 0xFD93
+        Opcode.F64x2_Nearest, // 0xFD94
+        Opcode.I16x8_Mul, // 0xFD95
+        Opcode.I16x8_Min_S, // 0xFD96
+        Opcode.I16x8_Min_U, // 0xFD97
+        Opcode.I16x8_Max_S, // 0xFD98
+        Opcode.I16x8_Max_U, // 0xFD99
+        Opcode.Invalid, // 0xFD9A
+        Opcode.I16x8_Avgr_U, // 0xFD9B
+        Opcode.I16x8_Extmul_Low_I8x16_S, // 0xFD9C
+        Opcode.I16x8_Extmul_High_I8x16_S, // 0xFD9D
+        Opcode.I16x8_Extmul_Low_I8x16_U, // 0xFD9E
+        Opcode.I16x8_Extmul_High_I8x16_U, // 0xFD9F
+        Opcode.I32x4_Abs, // 0xFDA0
+        Opcode.I32x4_Neg, // 0xFDA1
+        Opcode.Invalid, // 0xFDA2
+        Opcode.I32x4_AllTrue, // 0xFDA3
+        Opcode.I32x4_Bitmask, // 0xFDA4
+        Opcode.Invalid, // 0xFDA5
+        Opcode.Invalid, // 0xFDA6
+        Opcode.I32x4_Extend_Low_I16x8_S, // 0xFDA7
+        Opcode.I32x4_Extend_High_I16x8_S, // 0xFDA8
+        Opcode.I32x4_Extend_Low_I16x8_U, // 0xFDA9
+        Opcode.I32x4_Extend_High_I16x8_U, // 0xFDAA
+        Opcode.I32x4_Shl, // 0xFDAB
+        Opcode.I32x4_Shr_S, // 0xFDAC
+        Opcode.I32x4_Shr_U, // 0xFDAD
+        Opcode.I32x4_Add, // 0xFDAE
+        Opcode.Invalid, // 0xFDAF
+        Opcode.Invalid, // 0xFDB0
+        Opcode.I32x4_Sub, // 0xFDB1
+        Opcode.Invalid, // 0xFDB2
+        Opcode.Invalid, // 0xFDB3
+        Opcode.Invalid, // 0xFDB4
+        Opcode.I32x4_Mul, // 0xFDB5
+        Opcode.I32x4_Min_S, // 0xFDB6
+        Opcode.I32x4_Min_U, // 0xFDB7
+        Opcode.I32x4_Max_S, // 0xFDB8
+        Opcode.I32x4_Max_U, // 0xFDB9
+        Opcode.I32x4_Dot_I16x8_S, // 0xFDBA
+        Opcode.Invalid, // 0xFDBB
+        Opcode.I32x4_Extmul_Low_I16x8_S, // 0xFDBC
+        Opcode.I32x4_Extmul_High_I16x8_S, // 0xFDBD
+        Opcode.I32x4_Extmul_Low_I16x8_U, // 0xFDBE
+        Opcode.I32x4_Extmul_High_I16x8_U, // 0xFDBF
+        Opcode.I64x2_Abs, // 0xFDC0
+        Opcode.I64x2_Neg, // 0xFDC1
+        Opcode.Invalid, // 0xFDC2
+        Opcode.I64x2_AllTrue, // 0xFDC3
+        Opcode.I64x2_Bitmask, // 0xFDC4
+        Opcode.Invalid, // 0xFDC5
+        Opcode.Invalid, // 0xFDC6
+        Opcode.I64x2_Extend_Low_I32x4_S, // 0xFDC7
+        Opcode.I64x2_Extend_High_I32x4_S, // 0xFDC8
+        Opcode.I64x2_Extend_Low_I32x4_U, // 0xFDC9
+        Opcode.I64x2_Extend_High_I32x4_U, // 0xFDCA
+        Opcode.I64x2_Shl, // 0xFDCB
+        Opcode.I64x2_Shr_S, // 0xFDCC
+        Opcode.I64x2_Shr_U, // 0xFDCD
+        Opcode.I64x2_Add, // 0xFDCE
+        Opcode.Invalid, // 0xFDCF
+        Opcode.Invalid, // 0xFDD0
+        Opcode.I64x2_Sub, // 0xFDD1
+        Opcode.Invalid, // 0xFDD2
+        Opcode.Invalid, // 0xFDD3
+        Opcode.Invalid, // 0xFDD4
+        Opcode.I64x2_Mul, // 0xFDD5
+        Opcode.I64x2_EQ, // 0xFDD6
+        Opcode.I64x2_NE, // 0xFDD7
+        Opcode.I64x2_LT_S, // 0xFDD8
+        Opcode.I64x2_GT_S, // 0xFDD9
+        Opcode.I64x2_LE_S, // 0xFDDA
+        Opcode.I64x2_GE_S, // 0xFDDB
+        Opcode.I64x2_Extmul_Low_I32x4_S, // 0xFDDC
+        Opcode.I64x2_Extmul_High_I32x4_S, // 0xFDDD
+        Opcode.I64x2_Extmul_Low_I32x4_U, // 0xFDDE
+        Opcode.I64x2_Extmul_High_I32x4_U, // 0xFDDF
+        Opcode.F32x4_Abs, // 0xFDE0
+        Opcode.F32x4_Neg, // 0xFDE1
+        Opcode.Invalid, // 0xFDE2
+        Opcode.F32x4_Sqrt, // 0xFDE3
+        Opcode.F32x4_Add, // 0xFDE4
+        Opcode.F32x4_Sub, // 0xFDE5
+        Opcode.F32x4_Mul, // 0xFDE6
+        Opcode.F32x4_Div, // 0xFDE7
+        Opcode.F32x4_Min, // 0xFDE8
+        Opcode.F32x4_Max, // 0xFDE9
+        Opcode.F32x4_PMin, // 0xFDEA
+        Opcode.F32x4_PMax, // 0xFDEB
+        Opcode.F64x2_Abs, // 0xFDEC
+        Opcode.F64x2_Neg, // 0xFDED
+        Opcode.Invalid, // 0xFDEE
+        Opcode.F64x2_Sqrt, // 0xFDEF
+        Opcode.F64x2_Add, // 0xFDF0
+        Opcode.F64x2_Sub, // 0xFDF1
+        Opcode.F64x2_Mul, // 0xFDF2
+        Opcode.F64x2_Div, // 0xFDF3
+        Opcode.F64x2_Min, // 0xFDF4
+        Opcode.F64x2_Max, // 0xFDF5
+        Opcode.F64x2_PMin, // 0xFDF6
+        Opcode.F64x2_PMax, // 0xFDF7
+        Opcode.F32x4_Trunc_Sat_F32x4_S, // 0xFDF8
+        Opcode.F32x4_Trunc_Sat_F32x4_U, // 0xFDF9
+        Opcode.F32x4_Convert_I32x4_S, // 0xFDFA
+        Opcode.F32x4_Convert_I32x4_U, // 0xFDFB
+        Opcode.I32x4_Trunc_Sat_F64x2_S_Zero, // 0xFDFC
+        Opcode.I32x4_Trunc_Sat_F64x2_U_Zero, // 0xFDFD
+        Opcode.F64x2_Convert_Low_I32x4_S, // 0xFDFE
+        Opcode.F64x2_Convert_Low_I32x4_U, // 0xFDFF
     };
 };

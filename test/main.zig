@@ -2,6 +2,14 @@ const std = @import("std");
 const bytebox = @import("bytebox");
 const ValType = bytebox.ValType;
 const Val = bytebox.Val;
+const v128 = bytebox.v128;
+const i8x16 = bytebox.i8x16;
+const i16x8 = bytebox.i16x8;
+const i32x4 = bytebox.i32x4;
+const i64x2 = bytebox.i64x2;
+const f32x4 = bytebox.f32x4;
+const f64x2 = bytebox.f64x2;
+
 const print = std.debug.print;
 
 var g_verbose_logging = false;
@@ -36,7 +44,7 @@ const Action = struct {
     type: ActionType,
     module: []const u8,
     field: []const u8,
-    args: std.ArrayList(Val),
+    args: std.ArrayList(ValTypedVec),
 };
 
 const BadModuleError = struct {
@@ -57,7 +65,7 @@ const CommandRegister = struct {
 
 const CommandAssertReturn = struct {
     action: Action,
-    expected_returns: ?std.ArrayList(Val),
+    expected_returns: ?std.ArrayList(ValTypedVec),
 };
 
 const CommandAssertTrap = struct {
@@ -178,33 +186,102 @@ fn strcmp(a: []const u8, b: []const u8) bool {
 }
 
 fn parseVal(obj: std.json.ObjectMap) !Val {
+    const Helpers = struct {
+        fn parseI8(str: []const u8) !i8 {
+            return std.fmt.parseInt(i8, str, 10) catch @bitCast(i8, try std.fmt.parseInt(u8, str, 10));
+        }
+
+        fn parseI16(str: []const u8) !i16 {
+            return std.fmt.parseInt(i16, str, 10) catch @bitCast(i16, try std.fmt.parseInt(u16, str, 10));
+        }
+
+        fn parseI32(str: []const u8) !i32 {
+            return std.fmt.parseInt(i32, str, 10) catch @bitCast(i32, try std.fmt.parseInt(u32, str, 10));
+        }
+
+        fn parseI64(str: []const u8) !i64 {
+            return std.fmt.parseInt(i64, str, 10) catch @bitCast(i64, try std.fmt.parseInt(u64, str, 10));
+        }
+
+        fn parseF32(str: []const u8) !f32 {
+            if (std.mem.startsWith(u8, str, "nan:")) {
+                return std.math.nan_f32; // don't differentiate between arithmetic/canonical nan
+            } else {
+                const int = try std.fmt.parseInt(u32, str, 10);
+                return @bitCast(f32, int);
+            }
+        }
+
+        fn parseF64(str: []const u8) !f64 {
+            if (std.mem.startsWith(u8, str, "nan:")) {
+                return std.math.nan_f64; // don't differentiate between arithmetic/canonical nan
+            } else {
+                const int = try std.fmt.parseInt(u64, str, 10);
+                return @bitCast(f64, int);
+            }
+        }
+
+        fn parseValuesIntoVec(comptime T: type, json_strings: []std.json.Value) !v128 {
+            std.debug.assert(json_strings.len * @sizeOf(T) == @sizeOf(v128));
+            const num_items = @sizeOf(v128) / @sizeOf(T);
+            var parsed_values: [num_items]T = undefined;
+
+            const parse_func = switch (T) {
+                i8 => parseI8,
+                i16 => parseI16,
+                i32 => parseI32,
+                i64 => parseI64,
+                f32 => parseF32,
+                f64 => parseF64,
+                else => unreachable,
+            };
+
+            for (parsed_values) |*v, i| {
+                v.* = try parse_func(json_strings[i].String);
+            }
+
+            var parsed_bytes = std.mem.sliceAsBytes(&parsed_values);
+            var bytes: [16]u8 = undefined;
+            std.mem.copy(u8, &bytes, parsed_bytes);
+            return std.mem.bytesToValue(v128, &bytes);
+        }
+    };
+
     const json_type = obj.get("type").?;
     const json_value = obj.get("value").?;
 
     if (strcmp("i32", json_type.String)) {
-        const int = std.fmt.parseInt(i32, json_value.String, 10) catch @bitCast(i32, try std.fmt.parseInt(u32, json_value.String, 10));
+        const int = try Helpers.parseI32(json_value.String);
         return Val{ .I32 = int };
     } else if (strcmp("i64", json_type.String)) {
-        const int = std.fmt.parseInt(i64, json_value.String, 10) catch @bitCast(i64, try std.fmt.parseInt(u64, json_value.String, 10));
+        const int = try Helpers.parseI64(json_value.String);
         return Val{ .I64 = int };
     } else if (strcmp("f32", json_type.String)) {
-        var float: f32 = undefined;
-        if (std.mem.startsWith(u8, json_value.String, "nan:")) {
-            float = std.math.nan_f32; // don't differentiate between arithmetic/canonical nan
-        } else {
-            const int = try std.fmt.parseInt(u32, json_value.String, 10);
-            float = @bitCast(f32, int);
-        }
+        var float: f32 = try Helpers.parseF32(json_value.String);
         return Val{ .F32 = float };
     } else if (strcmp("f64", json_type.String)) {
-        var float: f64 = undefined;
-        if (std.mem.startsWith(u8, json_value.String, "nan:")) {
-            float = std.math.nan_f64; // don't differentiate between arithmetic/canonical nan
-        } else {
-            const int = try std.fmt.parseInt(u64, json_value.String, 10);
-            float = @bitCast(f64, int);
-        }
+        var float: f64 = try Helpers.parseF64(json_value.String);
         return Val{ .F64 = float };
+    } else if (strcmp("v128", json_type.String)) {
+        const json_lane_type = obj.get("lane_type").?;
+        var vec: v128 = undefined;
+        if (strcmp("i8", json_lane_type.String)) {
+            vec = try Helpers.parseValuesIntoVec(i8, json_value.Array.items);
+        } else if (strcmp("i16", json_lane_type.String)) {
+            vec = try Helpers.parseValuesIntoVec(i16, json_value.Array.items);
+        } else if (strcmp("i32", json_lane_type.String)) {
+            vec = try Helpers.parseValuesIntoVec(i32, json_value.Array.items);
+        } else if (strcmp("i64", json_lane_type.String)) {
+            vec = try Helpers.parseValuesIntoVec(i64, json_value.Array.items);
+        } else if (strcmp("f32", json_lane_type.String)) {
+            vec = try Helpers.parseValuesIntoVec(f32, json_value.Array.items);
+        } else if (strcmp("f64", json_lane_type.String)) {
+            vec = try Helpers.parseValuesIntoVec(f64, json_value.Array.items);
+        } else {
+            unreachable;
+        }
+
+        return Val{ .V128 = vec };
     } else if (strcmp("externref", json_type.String)) {
         if (strcmp("null", json_value.String)) {
             return Val.nullRef(ValType.ExternRef);
@@ -219,6 +296,61 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
     }
 
     unreachable;
+}
+
+const V128LaneType = enum(u8) {
+    I8x16,
+    I16x8,
+    I32x4,
+    I64x2,
+    F32x4,
+    F64x2,
+
+    fn fromString(str: []const u8) V128LaneType {
+        if (strcmp("i8", str)) {
+            return .I8x16;
+        } else if (strcmp("i16", str)) {
+            return .I16x8;
+        } else if (strcmp("i32", str)) {
+            return .I32x4;
+        } else if (strcmp("i64", str)) {
+            return .I64x2;
+        } else if (strcmp("f32", str)) {
+            return .F32x4;
+        } else if (strcmp("f64", str)) {
+            return .F64x2;
+        }
+
+        unreachable;
+    }
+};
+
+const ValTypedVec = struct {
+    v: Val,
+    lane_type: V128LaneType, // only valid when v contains a V128
+
+    fn toValArrayList(typed: []const ValTypedVec, allocator: std.mem.Allocator) !std.ArrayList(Val) {
+        var vals = std.ArrayList(Val).init(allocator);
+        try vals.ensureTotalCapacityPrecise(typed.len);
+        for (typed) |v| {
+            try vals.append(v.v);
+        }
+        return vals;
+    }
+};
+
+fn parseValTypedVec(obj: std.json.ObjectMap) !ValTypedVec {
+    var v = try parseVal(obj);
+    var lane_type = V128LaneType.I8x16;
+    if (std.meta.activeTag(v) == .V128) {
+        const json_lane_type = obj.get("lane_type").?;
+        lane_type = V128LaneType.fromString(json_lane_type.String);
+    }
+
+    return ValTypedVec{
+        .v = v,
+        .lane_type = lane_type,
+    };
 }
 
 fn isSameError(err: anyerror, err_string: []const u8) bool {
@@ -256,7 +388,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.ValidationError.ValidationUnknownType => strcmp(err_string, "unknown type"),
         bytebox.ValidationError.ValidationUnknownFunction => std.mem.startsWith(u8, err_string, "unknown function"),
         bytebox.ValidationError.ValidationUnknownGlobal => std.mem.startsWith(u8, err_string, "unknown global"),
-        bytebox.ValidationError.ValidationUnknownLocal => strcmp(err_string, "unknown local"),
+        bytebox.ValidationError.ValidationUnknownLocal => std.mem.startsWith(u8, err_string, "unknown local"),
         bytebox.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table"),
         bytebox.ValidationError.ValidationUnknownMemory => std.mem.startsWith(u8, err_string, "unknown memory"),
         bytebox.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element") or std.mem.startsWith(u8, err_string, "unknown elem segment"),
@@ -281,6 +413,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.ValidationError.ValidationDuplicateExportName => strcmp(err_string, "duplicate export name"),
         bytebox.ValidationError.ValidationFuncRefUndeclared => strcmp(err_string, "undeclared function reference"),
         bytebox.ValidationError.ValidationIfElseMismatch => strcmp(err_string, "END opcode expected"),
+        bytebox.ValidationError.ValidationInvalidLaneIndex => strcmp(err_string, "invalid lane index"),
 
         bytebox.UnlinkableError.UnlinkableUnknownImport => strcmp(err_string, "unknown import"),
         bytebox.UnlinkableError.UnlinkableIncompatibleImportType => strcmp(err_string, "incompatible import type"),
@@ -319,10 +452,10 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             const json_field = json_action.Object.getPtr("field").?;
 
             const json_args_or_null = json_action.Object.getPtr("args");
-            var args = std.ArrayList(Val).init(_allocator);
+            var args = std.ArrayList(ValTypedVec).init(_allocator);
             if (json_args_or_null) |json_args| {
                 for (json_args.Array.items) |item| {
-                    var val: Val = try parseVal(item.Object);
+                    var val: ValTypedVec = try parseValTypedVec(item.Object);
                     try args.append(val);
                 }
             }
@@ -406,12 +539,12 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
             var action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
-            var expected_returns_or_null: ?std.ArrayList(Val) = null;
+            var expected_returns_or_null: ?std.ArrayList(ValTypedVec) = null;
             const json_expected_or_null = json_command.Object.getPtr("expected");
             if (json_expected_or_null) |json_expected| {
-                var expected_returns = std.ArrayList(Val).init(allocator);
+                var expected_returns = std.ArrayList(ValTypedVec).init(allocator);
                 for (json_expected.Array.items) |item| {
-                    try expected_returns.append(try parseVal(item.Object));
+                    try expected_returns.append(try parseValTypedVec(item.Object));
                 }
                 expected_returns_or_null = expected_returns;
             }
@@ -765,6 +898,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                     }
                     print("\tDecode failed with error: {}\n", .{e});
                     did_fail_any_test = true;
+                    return e;
                 }
                 continue;
             };
@@ -832,6 +966,38 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
         switch (command.*) {
             .AssertReturn => |c| {
+                const PrintTestHelper = struct {
+                    fn logVerbose(filename: []const u8, field: []const u8, values: []ValTypedVec) void {
+                        if (g_verbose_logging) {
+                            log(filename, field, values);
+                        }
+                    }
+
+                    fn log(filename: []const u8, field: []const u8, values: []ValTypedVec) void {
+                        print("assert_return: {s}:{s}(", .{ filename, field });
+                        for (values) |v| {
+                            switch (std.meta.activeTag(v.v)) {
+                                .V128 => {
+                                    printVector(v.lane_type, v.v.V128);
+                                },
+                                else => print("{}", .{v}),
+                            }
+                        }
+                        print(")\n", .{});
+                    }
+
+                    fn printVector(lane_type: V128LaneType, vec: v128) void {
+                        switch (lane_type) {
+                            .I8x16 => print("{}, ", .{@bitCast(i8x16, vec)}),
+                            .I16x8 => print("{}, ", .{@bitCast(i16x8, vec)}),
+                            .I32x4 => print("{}, ", .{@bitCast(i32x4, vec)}),
+                            .I64x2 => print("{}, ", .{@bitCast(i64x2, vec)}),
+                            .F32x4 => print("{}, ", .{@bitCast(f32x4, vec)}),
+                            .F64x2 => print("{}, ", .{@bitCast(f64x2, vec)}),
+                        }
+                    }
+                };
+
                 if (opts.command_filter_or_null) |filter| {
                     if (strcmp("assert_return", filter) == false) {
                         continue;
@@ -852,14 +1018,19 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 try returns_placeholder.resize(num_expected_returns);
                 var returns = returns_placeholder.items;
 
-                logVerbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                PrintTestHelper.logVerbose(module.filename, c.action.field, c.action.args.items);
+                // logVerbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
 
                 var action_succeeded = true;
                 switch (c.action.type) {
                     .Invocation => {
-                        (module.inst.?).invoke(c.action.field, c.action.args.items, returns) catch |e| {
+                        var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
+                        defer vals.deinit();
+
+                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
                             if (!g_verbose_logging) {
-                                print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
+                                // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                             }
                             print("\tInvoke fail with error: {}\n", .{e});
                             action_succeeded = false;
@@ -871,7 +1042,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             returns[0] = value;
                         } else |e| {
                             if (!g_verbose_logging) {
-                                print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
+                                // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                             }
                             print("\tGet fail with error: {}\n", .{e});
                             action_succeeded = false;
@@ -884,20 +1056,81 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         for (returns) |r, i| {
                             var pass = false;
 
-                            if (std.meta.activeTag(expected.items[i]) == .F32 and std.math.isNan(expected.items[i].F32)) {
-                                pass = std.meta.activeTag(r) == .F32 and std.math.isNan(r.F32);
-                            } else if (std.meta.activeTag(expected.items[i]) == .F64 and std.math.isNan(expected.items[i].F64)) {
-                                pass = std.meta.activeTag(r) == .F64 and std.math.isNan(r.F64);
-                            } else {
-                                pass = std.meta.eql(r, expected.items[i]);
-                            }
-
-                            if (pass == false) {
-                                if (!g_verbose_logging) {
-                                    print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                            const expected_value: Val = expected.items[i].v;
+                            if (std.meta.activeTag(expected_value) != .V128) {
+                                if (std.meta.activeTag(expected_value) == .F32 and std.math.isNan(expected_value.F32)) {
+                                    pass = std.meta.activeTag(r) == .F32 and std.math.isNan(r.F32);
+                                } else if (std.meta.activeTag(expected_value) == .F64 and std.math.isNan(expected_value.F64)) {
+                                    pass = std.meta.activeTag(r) == .F64 and std.math.isNan(r.F64);
+                                } else {
+                                    pass = std.meta.eql(r, expected_value);
                                 }
-                                print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected.items[i], r });
-                                action_succeeded = false;
+
+                                if (pass == false) {
+                                    if (!g_verbose_logging) {
+                                        print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
+                                    }
+
+                                    print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected_value, r });
+                                    action_succeeded = false;
+                                }
+                            } else {
+                                const V128ExpectHelper = struct {
+                                    fn expect(comptime VectorType: type, actual_value: v128, expected_value_: v128, return_index: usize, returns_length: usize, module_: *const Module, command_: *const CommandAssertReturn) bool {
+                                        const actual_typed = @bitCast(VectorType, actual_value);
+                                        const expected_typed = @bitCast(VectorType, expected_value_);
+
+                                        var is_equal = true;
+                                        const child_type = @typeInfo(VectorType).Vector.child;
+                                        switch (child_type) {
+                                            i8, i16, i32, i64 => {
+                                                is_equal = std.meta.eql(actual_typed, expected_typed);
+                                            },
+                                            f32, f64 => {
+                                                const len = @typeInfo(VectorType).Vector.len;
+                                                var vec_i: u32 = 0;
+                                                while (vec_i < len) : (vec_i += 1) {
+                                                    if (std.math.isNan(expected_typed[vec_i])) {
+                                                        is_equal = is_equal and std.math.isNan(actual_typed[vec_i]);
+                                                    } else {
+                                                        is_equal = is_equal and expected_typed[vec_i] == actual_typed[vec_i];
+                                                    }
+                                                }
+                                            },
+                                            else => @compileError("unsupported vector child type"),
+                                        }
+
+                                        if (is_equal == false) {
+                                            if (!g_verbose_logging) {
+                                                print("assert_return: {s}:{s}({any})\n", .{ module_.filename, command_.action.field, command_.action.args.items });
+                                            }
+
+                                            print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ return_index + 1, returns_length, expected_typed, actual_typed });
+                                        }
+                                        return is_equal;
+                                    }
+                                };
+
+                                switch (expected.items[i].lane_type) {
+                                    .I8x16 => {
+                                        action_succeeded = V128ExpectHelper.expect(i8x16, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                    },
+                                    .I16x8 => {
+                                        action_succeeded = V128ExpectHelper.expect(i16x8, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                    },
+                                    .I32x4 => {
+                                        action_succeeded = V128ExpectHelper.expect(i32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                    },
+                                    .I64x2 => {
+                                        action_succeeded = V128ExpectHelper.expect(i64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                    },
+                                    .F32x4 => {
+                                        action_succeeded = V128ExpectHelper.expect(f32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                    },
+                                    .F64x2 => {
+                                        action_succeeded = V128ExpectHelper.expect(f64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                    },
+                                }
                             }
                         }
                     }
@@ -934,7 +1167,10 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 switch (c.action.type) {
                     .Invocation => {
-                        (module.inst.?).invoke(c.action.field, c.action.args.items, returns) catch |e| {
+                        var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
+                        defer vals.deinit();
+
+                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
                             action_failed = true;
                             caught_error = e;
 
@@ -1116,6 +1352,62 @@ pub fn main() !void {
         "ref_null",
         "return",
         "select",
+        "simd_address",
+        "simd_align",
+        "simd_bitwise",
+        "simd_bit_shift",
+        "simd_boolean",
+        "simd_const",
+        "simd_conversions",
+        "simd_f32x4",
+        "simd_f32x4_arith",
+        "simd_f32x4_cmp",
+        "simd_f32x4_pmin_pmax",
+        "simd_f32x4_rounding",
+        "simd_f64x2",
+        "simd_f64x2_arith",
+        "simd_f64x2_cmp",
+        "simd_f64x2_pmin_pmax",
+        "simd_f64x2_rounding",
+        "simd_i16x8_arith",
+        "simd_i16x8_arith2",
+        "simd_i16x8_cmp",
+        "simd_i16x8_extadd_pairwise_i8x16",
+        "simd_i16x8_extmul_i8x16",
+        "simd_i16x8_q15mulr_sat_s",
+        "simd_i16x8_sat_arith",
+        "simd_i32x4_arith",
+        "simd_i32x4_arith2",
+        "simd_i32x4_cmp",
+        "simd_i32x4_dot_i16x8",
+        "simd_i32x4_extadd_pairwise_i16x8",
+        "simd_i32x4_extmul_i16x8",
+        "simd_i32x4_trunc_sat_f32x4",
+        "simd_i32x4_trunc_sat_f64x2",
+        "simd_i64x2_arith",
+        "simd_i64x2_arith2",
+        "simd_i64x2_cmp",
+        "simd_i64x2_extmul_i32x4",
+        "simd_i8x16_arith",
+        "simd_i8x16_arith2",
+        "simd_i8x16_cmp",
+        "simd_i8x16_sat_arith",
+        "simd_int_to_int_extend",
+        "simd_lane",
+        "simd_load",
+        "simd_load16_lane",
+        "simd_load32_lane",
+        "simd_load64_lane",
+        "simd_load8_lane",
+        "simd_load_extend",
+        "simd_load_splat",
+        "simd_load_zero",
+        "simd_splat",
+        "simd_store",
+        "simd_store16_lane",
+        "simd_store32_lane",
+        "simd_store64_lane",
+        "simd_store8_lane",
         "skip-stack-guard-page",
         "stack",
         "start",
