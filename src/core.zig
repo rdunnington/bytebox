@@ -3572,9 +3572,6 @@ const InstructionFuncs = struct {
     }
 
     fn lookup(opcode: Opcode) InstructionFunc {
-        if (@enumToInt(opcode) >= opcodeToFuncTable.len) {
-            std.debug.print(">>>> unregistered opcode: {}\n", .{opcode});
-        }
         return opcodeToFuncTable[@enumToInt(opcode)];
     }
 

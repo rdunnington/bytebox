@@ -928,7 +928,6 @@ pub const WasmOpcode = enum(u16) {
             extended |= byte2;
 
             wasm_op = std.meta.intToEnum(WasmOpcode, extended) catch {
-                std.debug.print(">>>> opcode: 0x{X}{X:2}\n", .{ byte, byte2 });
                 return error.MalformedIllegalOpcode;
             };
         } else {
