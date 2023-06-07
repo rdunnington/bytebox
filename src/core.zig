@@ -1710,15 +1710,15 @@ const Instruction = struct {
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load8x8_S, .V128_Load8x8_U => {
-                var memarg = try MemArg.decode(reader, 8);
+                var memarg = try MemArg.decode(reader, 8 * 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load16x4_S, .V128_Load16x4_U => {
-                var memarg = try MemArg.decode(reader, 16);
+                var memarg = try MemArg.decode(reader, 16 * 4);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load32x2_S, .V128_Load32x2_U => {
-                var memarg = try MemArg.decode(reader, 32);
+                var memarg = try MemArg.decode(reader, 32 * 2);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load8_Splat => {
@@ -3704,7 +3704,7 @@ const InstructionFuncs = struct {
             var ret: [array_len]out_type = undefined;
             const mem = memory.mem.items[offset..end];
             var i: usize = 0;
-            while (i < mem.len) : (i += 1) {
+            while (i < array_len) : (i += 1) {
                 const value_start = i * byte_count;
                 const value_end = value_start + byte_count;
                 ret[i] = std.mem.readIntSliceLittle(read_type, mem[value_start..value_end]);
@@ -4086,6 +4086,13 @@ const InstructionFuncs = struct {
             const offset_from_stack: i32 = stack.popI32();
             const scalar = try loadFromMem(vec_type_info.child, &stack.topFrame().module_instance.store, immediate.offset, offset_from_stack);
             vec[immediate.laneidx] = scalar;
+            stack.pushV128(@bitCast(v128, vec));
+        }
+
+        fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptime len: usize, mem_offset: usize, stack: *Stack) !void {
+            const offset_from_stack: i32 = stack.popI32();
+            const array: [len]extend_type = try OpHelpers.loadArrayFromMem(mem_type, extend_type, len, &stack.topFrame().module_instance.store, mem_offset, offset_from_stack);
+            const vec: @Vector(len, extend_type) = array;
             stack.pushV128(@bitCast(v128, vec));
         }
 
@@ -6319,18 +6326,39 @@ const InstructionFuncs = struct {
 
     fn op_V128_Load8x8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_Load8x8_S", pc, code, stack);
-        const offset_from_stack: i32 = stack.popI32();
-        const array: [8]i16 = try OpHelpers.loadArrayFromMem(i8, i16, 8, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
-        const vec: i16x8 = array;
-        stack.pushV128(@bitCast(v128, vec));
+        try OpHelpers.vectorLoadExtend(i8, i16, 8, code[pc].immediate.MemoryOffset, stack);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
-    fn op_V128_Load8x8_U(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
-    fn op_V128_Load16x4_S(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
-    fn op_V128_Load16x4_U(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
-    fn op_V128_Load32x2_S(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
-    fn op_V128_Load32x2_U(_: u32, _: [*]const Instruction, _: *Stack) anyerror!void {}
+    fn op_V128_Load8x8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load8x8_S", pc, code, stack);
+        try OpHelpers.vectorLoadExtend(u8, i16, 8, code[pc].immediate.MemoryOffset, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load16x4_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load16x4_S", pc, code, stack);
+        try OpHelpers.vectorLoadExtend(i16, i32, 4, code[pc].immediate.MemoryOffset, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load16x4_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load16x4_U", pc, code, stack);
+        try OpHelpers.vectorLoadExtend(u16, i32, 4, code[pc].immediate.MemoryOffset, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load32x2_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load32x2_S", pc, code, stack);
+        try OpHelpers.vectorLoadExtend(i32, i64, 2, code[pc].immediate.MemoryOffset, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_V128_Load32x2_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        debugPreamble("V128_Load32x2_U", pc, code, stack);
+        try OpHelpers.vectorLoadExtend(u32, i64, 2, code[pc].immediate.MemoryOffset, stack);
+        try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
 
     fn op_V128_Load8_Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         debugPreamble("V128_Load8_Splat", pc, code, stack);
