@@ -77,7 +77,7 @@ This project is still in the alpha stage.
 | --- | --- |
 |✅|Implemented|
 |❌|TODO|
-|💀|Removed from spec|
+|💀|Not planned/Removed from spec|
 
 ### [WebAssembly](https://webassembly.github.io/spec/core/index.html) support:
 
@@ -106,7 +106,7 @@ This project is still in the alpha stage.
 |✅|fd_advise|
 |✅|fd_allocate|
 |✅|fd_close|
-|❌|fd_datasync|
+|✅|fd_datasync|
 |✅|fd_fdstat_get|
 |✅|fd_fdstat_set_flags|
 |💀|fd_fdstat_set_rights|
@@ -146,7 +146,6 @@ This project is still in the alpha stage.
 
 ### Roadmap
 These tasks must be completed to enter alpha:
-* WASI support on all platforms
 * API ergonomics pass
 * Documentation
 * General TODO/code cleanup
