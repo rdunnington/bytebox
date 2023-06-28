@@ -31,7 +31,7 @@ fn run(allocator: std.mem.Allocator, benchmark: Benchmark) !void {
 
     var input = [1]Val{.{ .I32 = benchmark.param }};
     var output = [1]Val{.{ .I32 = 0 }};
-    try module_instance.invoke("run", &input, &output);
+    try module_instance.invoke("run", &input, &output, .{});
 
     const ms_elapsed: f64 = elapsedMilliseconds(&timer);
     std.log.info("{s} decode+instantiate+run took {d}ms\n", .{ benchmark.name, ms_elapsed });

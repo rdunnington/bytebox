@@ -1027,7 +1027,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
                         defer vals.deinit();
 
-                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
+                        (module.inst.?).invoke(c.action.field, vals.items, returns, .{}) catch |e| {
                             if (!g_verbose_logging) {
                                 PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
                                 // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
@@ -1170,7 +1170,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
                         defer vals.deinit();
 
-                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
+                        (module.inst.?).invoke(c.action.field, vals.items, returns, .{}) catch |e| {
                             action_failed = true;
                             caught_error = e;
 
