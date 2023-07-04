@@ -623,7 +623,7 @@ const TestOpts = struct {
     force_wasm_regen_only: bool = false,
 };
 
-fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
+fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackage {
     const Functions = struct {
         fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
             std.debug.assert(params.len == 1);
@@ -677,7 +677,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
     };
 
     const Helpers = struct {
-        fn addGlobal(imports: *bytebox.ModuleImports, _allocator: std.mem.Allocator, mut: bytebox.GlobalMut, comptime T: type, value: T, name: []const u8) !void {
+        fn addGlobal(imports: *bytebox.ModuleImportPackage, _allocator: std.mem.Allocator, mut: bytebox.GlobalMut, comptime T: type, value: T, name: []const u8) !void {
             const val: Val = switch (T) {
                 i32 => Val{ .I32 = value },
                 i64 => Val{ .I64 = value },
@@ -696,7 +696,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
             });
         }
     };
-    var imports: bytebox.ModuleImports = try bytebox.ModuleImports.init("spectest", null, null, allocator);
+    var imports: bytebox.ModuleImportPackage = try bytebox.ModuleImportPackage.init("spectest", null, null, allocator);
 
     const no_returns = &[0]ValType{};
 
@@ -778,7 +778,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     name_to_module.ensureTotalCapacity(256) catch unreachable;
 
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
-    var imports = std.ArrayList(bytebox.ModuleImports).init(allocator);
+    var imports = std.ArrayList(bytebox.ModuleImportPackage).init(allocator);
     defer {
         var spectest_imports = imports.items[0];
         for (spectest_imports.tables.items) |*item| {
@@ -839,7 +839,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 logVerbose("\tSetting export module name to {s}\n", .{c.import_name});
 
-                var module_imports: bytebox.ModuleImports = try (module.inst.?).exports(c.import_name);
+                var module_imports: bytebox.ModuleImportPackage = try (module.inst.?).exports(c.import_name);
                 try imports.append(module_imports);
                 continue;
             },

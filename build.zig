@@ -46,6 +46,29 @@ pub fn build(b: *Builder) void {
             &bench_mandelbrot_step.step,
         },
     });
+
+    const lib_bytebox = b.addStaticLibrary("bytebox", "src/cffi.zig");
+    lib_bytebox.setTarget(target);
+    lib_bytebox.setBuildMode(b.standardReleaseOptions());
+    lib_bytebox.emit_asm = if (should_emit_asm) .emit else .default;
+    //     .name = "bytebox",
+    //     .root_source_file = .{ .path = "src/cffi.zig" },
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // const lib_bytebox = b.addStaticLibrary(.{
+    //     .name = "bytebox",
+    //     .root_source_file = .{ .path = "src/cffi.zig" },
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // lib_bytebox.installHeader("src/bytebox.h", "bytebox.h");
+
+    var c_header = b.addInstallFileWithDir(std.build.FileSource{ .path = "src/bytebox.h" }, .header, "bytebox.h");
+    c_header.step.dependOn(&lib_bytebox.step);
+
+    lib_bytebox.install();
+    // c_header_step.install();
 }
 
 fn buildExeWithStep(b: *Builder, target: CrossTarget, opts: ExeOpts) void {

@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("common.zig");
 pub const wasi = @import("wasi.zig");
+pub const dwarf = @import("dwarf.zig");
+
 const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
 
 const opcodes = @import("opcode.zig");
@@ -182,78 +184,6 @@ pub const DebugTrace = struct {
     }
 
     var mode: Mode = .None;
-};
-
-pub const ScratchAllocator = struct {
-    buffer: StableArray(u8),
-
-    const InitOpts = struct {
-        max_size: usize,
-    };
-
-    fn init(opts: InitOpts) ScratchAllocator {
-        return ScratchAllocator{
-            .buffer = StableArray(u8).init(opts.max_size),
-        };
-    }
-
-    pub fn allocator(self: *ScratchAllocator) std.mem.Allocator {
-        return std.mem.Allocator.init(self, alloc, resize, free);
-    }
-
-    pub fn reset(self: *ScratchAllocator) void {
-        self.buffer.resize(0) catch unreachable;
-    }
-
-    fn alloc(
-        self: *ScratchAllocator,
-        len: usize,
-        ptr_align: u29,
-        len_align: u29,
-        ret_addr: usize,
-    ) std.mem.Allocator.Error![]u8 {
-        _ = ret_addr;
-        _ = len_align;
-
-        const alloc_size = len;
-        const offset_begin = std.mem.alignForward(self.buffer.items.len, ptr_align);
-        const offset_end = offset_begin + alloc_size;
-        self.buffer.resize(offset_end) catch {
-            return std.mem.Allocator.Error.OutOfMemory;
-        };
-        return self.buffer.items[offset_begin..offset_end];
-    }
-
-    fn resize(
-        self: *ScratchAllocator,
-        old_mem: []u8,
-        old_align: u29,
-        new_size: usize,
-        len_align: u29,
-        ret_addr: usize,
-    ) ?usize {
-        _ = self;
-        _ = old_align;
-        _ = ret_addr;
-
-        if (new_size > old_mem.len) {
-            return null;
-        }
-        const aligned_size: usize = if (len_align == 0) new_size else std.mem.alignForward(new_size, len_align);
-        return aligned_size;
-    }
-
-    fn free(
-        self: *ScratchAllocator,
-        old_mem: []u8,
-        old_align: u29,
-        ret_addr: usize,
-    ) void {
-        _ = self;
-        _ = old_mem;
-        _ = old_align;
-        _ = ret_addr;
-    }
 };
 
 pub const i8x16 = @Vector(16, i8);
@@ -865,6 +795,10 @@ const ConstantExpression = union(ConstantExpressionType) {
         }
     }
 };
+
+// so what we need to do is expose Val and ValType directly to C to avoid a translation layer. need to eval all places
+// doing activeTag() and make them not do that. maybe side by side type and value storage.
+// big problem is v128. not sure about that one yet...
 
 pub const Limits = struct {
     min: u32,
@@ -8703,7 +8637,7 @@ pub const ModuleDefinition = struct {
 
     pub fn getCustomSection(self: *const ModuleDefinition, name: []const u8) ?[]u8 {
         for (self.custom_sections.items) |section| {
-            if (std.mem.eql(section.name, name)) {
+            if (std.mem.eql(u8, section.name, name)) {
                 return section.data.items;
             }
         }
@@ -8990,7 +8924,7 @@ pub const GlobalImport = struct {
     }
 };
 
-pub const ModuleImports = struct {
+pub const ModuleImportPackage = struct {
     name: []const u8,
     instance: ?*ModuleInstance,
     userdata: ?*anyopaque,
@@ -9000,8 +8934,8 @@ pub const ModuleImports = struct {
     globals: std.ArrayList(GlobalImport),
     allocator: std.mem.Allocator,
 
-    pub fn init(name: []const u8, instance: ?*ModuleInstance, userdata: ?*anyopaque, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImports {
-        return ModuleImports{
+    pub fn init(name: []const u8, instance: ?*ModuleInstance, userdata: ?*anyopaque, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImportPackage {
+        return ModuleImportPackage{
             .name = try allocator.dupe(u8, name),
             .instance = instance,
             .userdata = userdata,
@@ -9013,7 +8947,7 @@ pub const ModuleImports = struct {
         };
     }
 
-    pub fn addHostFunction(self: *ModuleImports, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
+    pub fn addHostFunction(self: *ModuleImportPackage, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
         var type_list = std.ArrayList(ValType).init(self.allocator);
@@ -9035,7 +8969,7 @@ pub const ModuleImports = struct {
         });
     }
 
-    pub fn deinit(self: *ModuleImports) void {
+    pub fn deinit(self: *ModuleImportPackage) void {
         self.allocator.free(self.name);
 
         for (self.functions.items) |*item| {
@@ -9154,7 +9088,7 @@ pub const Store = struct {
 
 pub const ModuleInstantiateOpts = struct {
     /// imports is not owned by ModuleInstance - caller must ensure its memory outlives ModuleInstance
-    imports: ?[]const ModuleImports = null,
+    imports: ?[]const ModuleImportPackage = null,
     enable_debug: bool = false,
 };
 
@@ -9215,10 +9149,11 @@ pub const ModuleInstance = struct {
             }
 
             // TODO probably should change the imports search to a hashed lookup of module_name+item_name -> array of items to make this faster
-            fn findImportInMultiple(comptime T: type, names: *const ImportNames, imports_or_null: ?[]const ModuleImports) UnlinkableError!*const T {
+            fn findImportInMultiple(comptime T: type, names: *const ImportNames, imports_or_null: ?[]const ModuleImportPackage) UnlinkableError!*const T {
                 if (imports_or_null) |_imports| {
                     for (_imports) |*module_imports| {
-                        if (std.mem.eql(u8, names.module_name, module_imports.name)) {
+                        const wildcard_name = std.mem.eql(u8, module_imports.name, "*");
+                        if (wildcard_name or std.mem.eql(u8, names.module_name, module_imports.name)) {
                             switch (T) {
                                 FunctionImport => {
                                     if (findImportInSingle(FunctionImport, names, module_imports)) |import| {
@@ -9286,7 +9221,7 @@ pub const ModuleInstance = struct {
                 return error.UnlinkableUnknownImport;
             }
 
-            fn findImportInSingle(comptime T: type, names: *const ImportNames, module_imports: *const ModuleImports) ?*const T {
+            fn findImportInSingle(comptime T: type, names: *const ImportNames, module_imports: *const ModuleImportPackage) ?*const T {
                 var items: []const T = switch (T) {
                     FunctionImport => module_imports.functions.items,
                     TableImport => module_imports.tables.items,
@@ -9549,8 +9484,8 @@ pub const ModuleInstance = struct {
         }
     }
 
-    pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImports {
-        var imports = try ModuleImports.init(name, self, null, self.allocator);
+    pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImportPackage {
+        var imports = try ModuleImportPackage.init(name, self, null, self.allocator);
 
         for (self.module_def.exports.functions.items) |*item| {
             try imports.functions.append(FunctionImport{
@@ -9820,19 +9755,6 @@ pub const ModuleInstance = struct {
         const func_import: *const FunctionImport = &self.store.imports.functions.items[import_index];
         switch (func_import.data) {
             .Host => |data| {
-                const param_types = data.func_def.getParams();
-                const return_types = data.func_def.getReturns();
-
-                for (params) |v, i| {
-                    if (std.meta.activeTag(v) != param_types[i]) {
-                        return error.ValidationTypeMismatch;
-                    }
-                }
-
-                if (returns.len != return_types.len) {
-                    return error.ValidationTypeMismatch;
-                }
-
                 DebugTrace.traceHostFunction(self, 1, func_import.name);
 
                 data.callback(data.userdata, self, params, returns);

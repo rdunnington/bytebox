@@ -7,7 +7,7 @@ const StringPool = @import("stringpool.zig");
 const Val = core.Val;
 const ValType = core.ValType;
 const ModuleInstance = core.ModuleInstance;
-const ModuleImports = core.ModuleImports;
+const ModuleImportPackage = core.ModuleImportPackage;
 
 const WasiContext = struct {
     const FdInfo = struct {
@@ -2486,13 +2486,13 @@ pub const WasiOpts = struct {
     dirs: ?[][]const u8 = null,
 };
 
-pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) !ModuleImports {
+pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) !ModuleImportPackage {
     var context: *WasiContext = try allocator.create(WasiContext);
     errdefer allocator.destroy(context);
     context.* = try WasiContext.init(&opts, allocator);
     errdefer context.deinit();
 
-    var imports: ModuleImports = try ModuleImports.init("wasi_snapshot_preview1", null, context, allocator);
+    var imports: ModuleImportPackage = try ModuleImportPackage.init("wasi_snapshot_preview1", null, context, allocator);
 
     const void_returns = &[0]ValType{};
 
@@ -2533,7 +2533,7 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) !ModuleImports 
     return imports;
 }
 
-pub fn deinitImports(imports: *ModuleImports) void {
+pub fn deinitImports(imports: *ModuleImportPackage) void {
     var context = WasiContext.fromUserdata(imports.userdata);
     context.deinit();
     imports.allocator.destroy(context);

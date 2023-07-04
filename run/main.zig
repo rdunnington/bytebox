@@ -256,7 +256,7 @@ pub fn main() !void {
     var module_instance = bytebox.ModuleInstance.init(&module_def, allocator);
     defer module_instance.deinit();
 
-    var imports_wasi: bytebox.ModuleImports = try wasi.initImports(.{
+    var imports_wasi: bytebox.ModuleImportPackage = try wasi.initImports(.{
         .argv = opts.wasm_argv,
         .env = opts.wasm_env,
         .dirs = opts.wasm_dirs,
@@ -264,7 +264,7 @@ pub fn main() !void {
     defer wasi.deinitImports(&imports_wasi);
 
     var instantiate_opts = bytebox.ModuleInstantiateOpts{
-        .imports = &[_]bytebox.ModuleImports{imports_wasi},
+        .imports = &[_]bytebox.ModuleImportPackage{imports_wasi},
     };
 
     module_instance.instantiate(instantiate_opts) catch |e| {
