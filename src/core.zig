@@ -51,20 +51,11 @@ pub const UninstantiableError = error{
 pub const AssertError = error{
     AssertInvalidValType,
     AssertInvalidBytecode,
-    AssertInvalidExport,
-    AssertInvalidLabel,
-    AssertInvalidElement,
-    AssertTableMaxExceeded,
-    AssertUnknownTable,
-    AssertUnknownType,
-    AssertIncompleteInstruction,
-    AssertUnknownInstruction,
-    AssertUnknownExport,
-    AssertMissingCallFrame,
-    AssertInvalidFunction,
+};
 
-    ModuleAlreadyDecoded,
-    ModuleAlreadyInstantiated,
+pub const ExportError = error{
+    ExportUnknownFunction,
+    ExportUnknownGlobal,
 };
 
 pub const ValidationError = error{
@@ -198,7 +189,7 @@ pub const f32x4 = @Vector(4, f32);
 pub const f64x2 = @Vector(2, f64);
 pub const v128 = f32x4;
 
-pub const ValType = enum(u8) {
+pub const ValType = enum(c_int) {
     I32,
     I64,
     F32,
@@ -253,15 +244,19 @@ var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 var empty_module_definition = ModuleDefinition.init(gpa.allocator(), .{});
 var empty_module_instance = ModuleInstance.init(&empty_module_definition, gpa.allocator());
 
-pub const Val = union(ValType) {
+pub const Val = extern union {
     I32: i32,
     I64: i64,
     F32: f32,
     F64: f64,
     V128: v128,
-    FuncRef: struct {
-        module_instance: *ModuleInstance,
+    FuncRef: extern struct {
         index: u32, // index into functions
+        module_instance: *anyopaque align(@alignOf(ModuleInstance)),
+
+        fn getModule(self: @This()) *ModuleInstance {
+            return @ptrCast(*ModuleInstance, @alignCast(@alignOf(ModuleInstance), self.module_instance));
+        }
     },
     ExternRef: u32, // TODO figure out what this indexes
 
@@ -291,47 +286,53 @@ pub const Val = union(ValType) {
         return Val{ .FuncRef = .{ .index = index, .module_instance = &empty_module_instance } };
     }
 
-    fn get(val: Val, comptime T: type) !T {
-        switch (T) {
-            i32 => if (std.meta.activeTag(val) == .I32) {
-                return val.I32;
-            },
-            u32 => if (std.meta.activeTag(val) == .I32) {
-                return @bitCast(u32, val.I32);
-            },
-            i64 => if (std.meta.activeTag(val) == .I64) {
-                return val.I64;
-            },
-            u64 => if (std.meta.activeTag(val) == .I64) {
-                return @bitCast(u64, val.I64);
-            },
-            f32 => if (std.meta.activeTag(val) == .F32) {
-                return val.F64;
-            },
-            f64 => if (std.meta.activeTag(val) == .F64) {
-                return val.F64;
-            },
-            else => unreachable,
-        }
-
-        return error.ValidationTypeMismatch;
+    fn isNull(v: Val) bool {
+        // Because FuncRef.index is located at the same memory location as ExternRef, this passes for both types
+        return v.FuncRef.index == k_null_funcref;
     }
 
-    fn isRefType(v: Val) bool {
-        return switch (v) {
-            .FuncRef => true,
-            .ExternRef => true,
-            else => false,
+    pub fn eql(valtype: ValType, v1: Val, v2: Val) bool {
+        return switch (valtype) {
+            .I32 => v1.I32 == v2.I32,
+            .I64 => v1.I64 == v2.I64,
+            .F32 => v1.F32 == v2.F32,
+            .F64 => v1.F64 == v2.F64,
+            .V128 => @reduce(.And, v1.V128 == v2.V128),
+            .FuncRef => std.meta.eql(v1.FuncRef, v2.FuncRef),
+            .ExternRef => v1.ExternRef == v2.ExternRef,
+        };
+    }
+};
+
+test "Val.isNull" {
+    const v1 = Val.nullRef(.FuncRef);
+    const v2 = Val.nullRef(.ExternRef);
+
+    std.testing.expect(v1.isNull() == true);
+    std.testing.expect(v2.isNull() == true);
+
+    const v3 = Val.funcrefFromIndex(12);
+    const v4 = Val{ .ExternRef = 234 };
+
+    std.testing.expect(v3.isNull() == false);
+    std.testing.expect(v4.isNull() == false);
+}
+
+pub const TaggedVal = struct {
+    val: Val,
+    type: ValType,
+
+    pub fn nullRef(valtype: ValType) !TaggedVal {
+        return TaggedVal{
+            .val = try Val.nullRef(valtype),
+            .type = valtype,
         };
     }
 
-    fn isNull(v: Val) bool {
-        return switch (v) {
-            .FuncRef => |s| s.index == k_null_funcref,
-            .ExternRef => |index| index == k_null_funcref,
-            else => {
-                unreachable;
-            },
+    pub fn funcrefFromIndex(index: u32) TaggedVal {
+        return TaggedVal{
+            .val = Val.funcrefFromIndex(index),
+            .type = .FuncRef,
         };
     }
 };
@@ -692,7 +693,7 @@ const ConstantExpressionType = enum {
 };
 
 const ConstantExpression = union(ConstantExpressionType) {
-    Value: Val,
+    Value: TaggedVal,
     Global: u32, // global index
 
     const ExpectedGlobalMut = enum {
@@ -704,13 +705,13 @@ const ConstantExpression = union(ConstantExpressionType) {
         const opcode = try WasmOpcode.decode(reader);
 
         const expr = switch (opcode) {
-            .I32_Const => ConstantExpression{ .Value = Val{ .I32 = try common.decodeLEB128(i32, reader) } },
-            .I64_Const => ConstantExpression{ .Value = Val{ .I64 = try common.decodeLEB128(i64, reader) } },
-            .F32_Const => ConstantExpression{ .Value = Val{ .F32 = try decodeFloat(f32, reader) } },
-            .F64_Const => ConstantExpression{ .Value = Val{ .F64 = try decodeFloat(f64, reader) } },
-            .V128_Const => ConstantExpression{ .Value = Val{ .V128 = try decodeVec(reader) } },
-            .Ref_Null => ConstantExpression{ .Value = try Val.nullRef(try ValType.decode(reader)) },
-            .Ref_Func => ConstantExpression{ .Value = Val.funcrefFromIndex(try common.decodeLEB128(u32, reader)) },
+            .I32_Const => ConstantExpression{ .Value = TaggedVal{ .type = .I32, .val = .{ .I32 = try common.decodeLEB128(i32, reader) } } },
+            .I64_Const => ConstantExpression{ .Value = TaggedVal{ .type = .I64, .val = .{ .I64 = try common.decodeLEB128(i64, reader) } } },
+            .F32_Const => ConstantExpression{ .Value = TaggedVal{ .type = .F32, .val = .{ .F32 = try decodeFloat(f32, reader) } } },
+            .F64_Const => ConstantExpression{ .Value = TaggedVal{ .type = .F64, .val = .{ .F64 = try decodeFloat(f64, reader) } } },
+            .V128_Const => ConstantExpression{ .Value = TaggedVal{ .type = .V128, .val = .{ .V128 = try decodeVec(reader) } } },
+            .Ref_Null => ConstantExpression{ .Value = try TaggedVal.nullRef(try ValType.decode(reader)) },
+            .Ref_Func => ConstantExpression{ .Value = TaggedVal.funcrefFromIndex(try common.decodeLEB128(u32, reader)) },
             .Global_Get => ConstantExpression{ .Global = try common.decodeLEB128(u32, reader) },
             else => return error.ValidationBadConstantExpression,
         };
@@ -749,7 +750,7 @@ const ConstantExpression = union(ConstantExpressionType) {
                 return error.ValidationConstantExpressionTypeMismatch;
             }
         } else {
-            if (std.meta.activeTag(expr.Value) != expected_valtype) {
+            if (expr.Value.type != expected_valtype) {
                 return error.ValidationConstantExpressionTypeMismatch;
             }
         }
@@ -762,9 +763,11 @@ const ConstantExpression = union(ConstantExpressionType) {
         return expr;
     }
 
-    fn resolve(self: *const ConstantExpression, store: *Store) !Val {
+    fn resolve(self: *const ConstantExpression, store: *Store) Val {
         switch (self.*) {
-            .Value => |val| return val,
+            .Value => |val| {
+                return val.val;
+            },
             .Global => |global_index| {
                 std.debug.assert(global_index < store.imports.globals.items.len + store.globals.items.len);
                 const global: *GlobalInstance = store.getGlobal(global_index);
@@ -773,14 +776,22 @@ const ConstantExpression = union(ConstantExpressionType) {
         }
     }
 
-    fn resolveTo(self: *const ConstantExpression, store: *Store, comptime T: type) !T {
-        const val: Val = try self.resolve(store);
-        return val.get(T);
+    fn resolveTo(self: *const ConstantExpression, store: *Store, comptime T: type) T {
+        const val: Val = self.resolve(store);
+        switch (T) {
+            i32 => return val.I32,
+            u32 => return @bitCast(u32, val.I32),
+            i64 => return val.I64,
+            u64 => return @bitCast(u64, val.I64),
+            f32 => return val.F64,
+            f64 => return val.F64,
+            else => unreachable,
+        }
     }
 
     fn resolveType(self: *const ConstantExpression, module_def: *const ModuleDefinition) ValType {
         switch (self.*) {
-            .Value => |val| return std.meta.activeTag(val),
+            .Value => |val| return val.type,
             .Global => |index| {
                 if (index < module_def.imports.globals.items.len) {
                     const global_import_def: *const GlobalImportDefinition = &module_def.imports.globals.items[index];
@@ -795,10 +806,6 @@ const ConstantExpression = union(ConstantExpressionType) {
         }
     }
 };
-
-// so what we need to do is expose Val and ValType directly to C to avoid a translation layer. need to eval all places
-// doing activeTag() and make them not do that. maybe side by side type and value storage.
-// big problem is v128. not sure about that one yet...
 
 pub const Limits = struct {
     min: u32,
@@ -918,7 +925,7 @@ const ExportDefinition = struct {
     index: u32,
 };
 
-pub const FunctionExportInfo = struct {
+pub const FunctionExport = struct {
     name: []const u8,
     params: []const ValType,
     returns: []const ValType,
@@ -937,15 +944,21 @@ pub const GlobalMut = enum(u8) {
     }
 };
 
-const GlobalDefinition = struct {
+pub const GlobalDefinition = struct {
     valtype: ValType,
     mut: GlobalMut,
     expr: ConstantExpression,
 };
 
 pub const GlobalInstance = struct {
-    mut: GlobalMut,
+    def: *GlobalDefinition,
     value: Val,
+};
+
+pub const GlobalExport = struct {
+    val: *Val,
+    valtype: ValType,
+    mut: GlobalMut,
 };
 
 const TableDefinition = struct {
@@ -1007,7 +1020,6 @@ pub const TableInstance = struct {
         var index: u32 = 0;
         while (index < elem_range.len) : (index += 1) {
             var val: Val = elem_range[index];
-            std.debug.assert(std.meta.activeTag(val) == table.reftype);
 
             if (table.reftype == .FuncRef) {
                 val.FuncRef.module_instance = module;
@@ -1031,8 +1043,7 @@ pub const TableInstance = struct {
 
         var index: u32 = 0;
         while (index < elem_range.len) : (index += 1) {
-            var val: Val = try elem_range[index].resolve(store);
-            std.debug.assert(std.meta.activeTag(val) == table.reftype);
+            var val: Val = elem_range[index].resolve(store);
 
             if (table.reftype == .FuncRef) {
                 val.FuncRef.module_instance = module;
@@ -2507,7 +2518,7 @@ const ModuleValidator = struct {
                             } else {
                                 for (elem_def.elems_expr.items) |expr| {
                                     if (std.meta.activeTag(expr) == .Value) {
-                                        if (expr.Value.FuncRef.index == func_index) {
+                                        if (expr.Value.val.FuncRef.index == func_index) {
                                             needs_declaration = false;
                                             break :skip_outer;
                                         }
@@ -4406,7 +4417,7 @@ const InstructionFuncs = struct {
 
         const func_index = ref.FuncRef.index;
 
-        var call_module: *ModuleInstance = ref.FuncRef.module_instance;
+        var call_module: *ModuleInstance = ref.FuncRef.getModule();
         var call_store = &call_module.store;
 
         std.debug.assert(call_module != &empty_module_instance); // Should have been set in module instantiation
@@ -4541,9 +4552,6 @@ const InstructionFuncs = struct {
         const index: i32 = stack.popI32();
         if (table.refs.items.len <= index or index < 0) {
             return error.TrapOutOfBoundsTableAccess;
-        }
-        if (ref.isRefType() == false) {
-            return error.TrapTableSetTypeMismatch;
         }
         table.refs.items[@intCast(usize, index)] = ref;
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -7901,11 +7909,7 @@ pub const ModuleDefinition = struct {
     }
 
     pub fn decode(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
-        if (self.is_decoded == false) {
-            self.is_decoded = true;
-        } else {
-            return AssertError.ModuleAlreadyDecoded;
-        }
+        std.debug.assert(self.is_decoded == false);
 
         self.decode_internal(wasm) catch |e| {
             var wrapped_error: anyerror = switch (e) {
@@ -8187,9 +8191,9 @@ pub const ModuleDefinition = struct {
                         const expr = try ConstantExpression.decode(reader, self, .Immutable, valtype);
 
                         if (std.meta.activeTag(expr) == .Value) {
-                            if (std.meta.activeTag(expr.Value) == .FuncRef) {
-                                if (expr.Value.isNull() == false) {
-                                    const index: u32 = expr.Value.FuncRef.index;
+                            if (expr.Value.type == .FuncRef) {
+                                if (expr.Value.val.isNull() == false) {
+                                    const index: u32 = expr.Value.val.FuncRef.index;
                                     try ModuleValidator.validateFunctionIndex(index, self);
                                 }
                             }
@@ -8645,7 +8649,7 @@ pub const ModuleDefinition = struct {
         return null;
     }
 
-    pub fn getFuncExportInfo(self: *const ModuleDefinition, funcname: []const u8) ?FunctionExportInfo {
+    pub fn getFunctionExport(self: *const ModuleDefinition, funcname: []const u8) ?FunctionExport {
         for (self.exports.functions.items) |*func_export| {
             if (std.mem.eql(u8, func_export.name, funcname)) {
                 var type_index: u32 = undefined;
@@ -8661,7 +8665,7 @@ pub const ModuleDefinition = struct {
                 var params: []const ValType = self.types.items[type_index].getParams();
                 var returns: []const ValType = self.types.items[type_index].getReturns();
 
-                return FunctionExportInfo{
+                return FunctionExport{
                     .name = func_export.name,
                     .params = params,
                     .returns = returns,
@@ -9240,11 +9244,7 @@ pub const ModuleInstance = struct {
             }
         };
 
-        if (self.is_instantiated == false) {
-            self.is_instantiated = true;
-        } else {
-            return AssertError.ModuleAlreadyInstantiated;
-        }
+        std.debug.assert(self.is_instantiated == false);
 
         if (opts.enable_debug) {
             self.debug_state = DebugState{
@@ -9327,13 +9327,13 @@ pub const ModuleInstance = struct {
             var is_eql: bool = undefined;
             switch (import_global.data) {
                 .Host => |global_instance| {
-                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value) and
-                        global_import_def.mut == global_instance.mut;
+                    is_eql = global_import_def.valtype == global_instance.def.valtype and
+                        global_import_def.mut == global_instance.def.mut;
                 },
                 .Wasm => |data| {
                     const global_instance: *const GlobalInstance = data.module_instance.store.getGlobal(data.index);
-                    is_eql = global_import_def.valtype == std.meta.activeTag(global_instance.value) and
-                        global_import_def.mut == global_instance.mut;
+                    is_eql = global_import_def.valtype == global_instance.def.valtype and
+                        global_import_def.mut == global_instance.def.mut;
                 },
             }
 
@@ -9387,10 +9387,10 @@ pub const ModuleInstance = struct {
 
         for (module_def.globals.items) |*def_global| {
             var global = GlobalInstance{
-                .mut = def_global.mut,
-                .value = try def_global.expr.resolve(store),
+                .def = def_global,
+                .value = def_global.expr.resolve(store),
             };
-            if (std.meta.activeTag(global.value) == .FuncRef) {
+            if (def_global.valtype == .FuncRef) {
                 global.value.FuncRef.module_instance = self;
             }
             try store.globals.append(global);
@@ -9406,13 +9406,11 @@ pub const ModuleInstance = struct {
 
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_elem.mode == .Active) {
-                if (store.imports.tables.items.len + store.tables.items.len <= def_elem.table_index) {
-                    return error.AssertUnknownTable;
-                }
+                std.debug.assert(def_elem.table_index < store.imports.tables.items.len + store.tables.items.len);
 
                 var table: *TableInstance = store.getTable(def_elem.table_index);
 
-                var start_table_index_i32: i32 = if (def_elem.offset) |offset| (try offset.resolveTo(store, i32)) else 0;
+                var start_table_index_i32: i32 = if (def_elem.offset) |offset| offset.resolveTo(store, i32) else 0;
                 if (start_table_index_i32 < 0) {
                     return error.UninstantiableOutOfBoundsTableAccess;
                 }
@@ -9440,7 +9438,7 @@ pub const ModuleInstance = struct {
                     try elem.refs.resize(def_elem.elems_expr.items.len);
                     var index: usize = 0;
                     while (index < elem.refs.items.len) : (index += 1) {
-                        elem.refs.items[index] = try def_elem.elems_expr.items[index].resolve(store);
+                        elem.refs.items[index] = def_elem.elems_expr.items[index].resolve(store);
                         if (elem.reftype == .FuncRef) {
                             elem.refs.items[index].FuncRef.module_instance = self;
                         }
@@ -9458,7 +9456,7 @@ pub const ModuleInstance = struct {
                 var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
-                const offset_begin: usize = try (def_data.offset.?).resolveTo(store, u32);
+                const offset_begin: usize = (def_data.offset.?).resolveTo(store, u32);
                 const offset_end: usize = offset_begin + num_bytes;
 
                 if (memory.mem.items.len < offset_end) {
@@ -9538,14 +9536,19 @@ pub const ModuleInstance = struct {
         return imports;
     }
 
-    pub fn getGlobal(self: *ModuleInstance, global_name: []const u8) anyerror!Val {
+    pub fn getGlobalExport(self: *ModuleInstance, global_name: []const u8) ExportError!GlobalExport {
         for (self.module_def.exports.globals.items) |*global_export| {
             if (std.mem.eql(u8, global_name, global_export.name)) {
-                return self.getGlobalWithIndex(global_export.index);
+                var global: *GlobalInstance = self.getGlobalWithIndex(global_export.index);
+                return GlobalExport{
+                    .val = &global.value,
+                    .valtype = global.def.valtype,
+                    .mut = global.def.mut,
+                };
             }
         }
 
-        return error.AssertUnknownExport;
+        return error.ExportUnknownGlobal;
     }
 
     pub const InvokeOpts = struct {
@@ -9581,7 +9584,7 @@ pub const ModuleInstance = struct {
             }
         }
 
-        return error.AssertUnknownExport;
+        return error.ExportUnknownFunction;
     }
 
     /// Use to resume an invoked function after it returned error.DebugTrap
@@ -9783,19 +9786,17 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn getGlobalWithIndex(self: *ModuleInstance, index: usize) Val {
+    fn getGlobalWithIndex(self: *ModuleInstance, index: usize) *GlobalInstance {
         const num_imports: usize = self.module_def.imports.globals.items.len;
         if (index >= num_imports) {
             var local_global_index: usize = index - self.module_def.imports.globals.items.len;
-            var value: Val = self.store.globals.items[local_global_index].value;
-            return value;
+            return &self.store.globals.items[local_global_index];
         } else {
             var import: *const GlobalImport = &self.store.imports.globals.items[index];
-            var value: Val = switch (import.data) {
-                .Host => |data| data.value,
+            return switch (import.data) {
+                .Host => |data| data,
                 .Wasm => |data| data.module_instance.getGlobalWithIndex(data.index),
             };
-            return value;
         }
     }
 };

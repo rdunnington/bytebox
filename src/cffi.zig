@@ -296,8 +296,8 @@ export fn bb_module_instance_invoke(instance: *CModuleInstance, func_name: ?[*:0
         // var params_slice: []CVal = if (params == null) &[_]CVal{} else params.?[0..num_params];
         // var returns_slice: []CVal = if (returns == null) &[_]CVal{} else returns.?[0..num_returns];
 
-        if (module.module_def.getFuncExportInfo(func_name_slice)) |func_info| {
-            _ = func_info;
+        if (module.module_def.getFunctionExport(func_name_slice)) |func_export| {
+            _ = func_export;
             const total_vals = num_params + num_returns;
             var vals = allocator.alloc(core.Val, total_vals) catch |err| return translateError(err);
             defer allocator.free(vals);
@@ -305,7 +305,7 @@ export fn bb_module_instance_invoke(instance: *CModuleInstance, func_name: ?[*:0
             var returns_temp = vals[num_params..];
 
             // TODO
-            // if (translateCValToVal(func_info.params, params_slice, params_temp) == false) {
+            // if (translateCValToVal(func_export.params, params_slice, params_temp) == false) {
             //     return CError.InvalidParameter;
             // }
 
@@ -315,7 +315,7 @@ export fn bb_module_instance_invoke(instance: *CModuleInstance, func_name: ?[*:0
 
             if (module.invoke(func_name_slice, params_temp, returns_temp, invoke_opts)) {
                 // TODO
-                // if (translateValToCVal(func_info.returns, returns_temp, returns_slice)) {
+                // if (translateValToCVal(func_export.returns, returns_temp, returns_slice)) {
                 //     return CError.Ok;
                 // } else {
                 //     unreachable;
