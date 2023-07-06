@@ -1,6 +1,9 @@
 const std = @import("std");
 const core = @import("core.zig");
 
+// C interface
+const ValType = core.ValType;
+const Val = core.Val;
 const c_char = u8;
 
 const CSlice = extern struct {
@@ -23,15 +26,16 @@ const CModuleDefinition = extern struct {
     module: ?*anyopaque,
 };
 
-const CHostFunction = *const fn (userdata: ?*anyopaque, module: *CModuleInstance, params: [*]CVal, returns: [*]CVal) void;
+const CHostFunction = *const fn (userdata: ?*anyopaque, module: *CModuleInstance, params: [*]const Val, returns: [*]Val) void;
 
 const CImportFunction = extern struct {
     name: ?[*:0]c_char,
     func: ?CHostFunction,
-    params: ?[*]CValType,
+    params: ?[*]ValType,
     num_params: usize,
-    returns: ?[*]CValType,
+    returns: ?[*]ValType,
     num_returns: usize,
+    userdata: ?*anyopaque,
 };
 
 const CImportPackage = extern struct {
@@ -59,18 +63,30 @@ const CDebugTrapMode = enum(c_int) {
     Enabled,
 };
 
-const CValType = enum(c_int) {
-    I32,
-    I64,
-    F32,
-    F64,
+// Local data
+const FFIBinding = struct {
+    host: CHostFunction,
+    userdata: ?*anyopaque,
 };
 
-const CVal = extern union {
-    i32_val: i32,
-    i64_val: i64,
-    f32_val: f32,
-    f64_val: f64,
+const FFIData = struct {
+    function_bindings: std.ArrayList(FFIBinding),
+
+    fn alloc(allocator: std.mem.Allocator) !*FFIData {
+        var data: *FFIData = try allocator.create(FFIData);
+        data.function_bindings = std.ArrayList(FFIBinding).init(allocator);
+        return data;
+    }
+
+    fn free(allocator: std.mem.Allocator, userdata: ?*anyopaque) void {
+        var data: *FFIData = fromUserdata(userdata);
+        data.function_bindings.deinit();
+        allocator.destroy(data);
+    }
+
+    fn fromUserdata(userdata: ?*anyopaque) *FFIData {
+        return @ptrCast(*FFIData, @alignCast(@alignOf(FFIData), userdata.?));
+    }
 };
 
 // TODO logging callback as well?
@@ -196,15 +212,18 @@ export fn bb_module_definition_get_custom_section(definition: *const CModuleDefi
 }
 
 export fn bb_module_instance_init(definition: *CModuleDefinition) CModuleInstance {
-    var module: ?*core.ModuleInstance = null;
-    if (definition.module != null) {
-        var module_definition = @ptrCast(*core.ModuleDefinition, @alignCast(@alignOf(core.ModuleDefinition), definition.module.?));
+    var allocator = cffi_gpa.allocator();
 
-        var allocator = cffi_gpa.allocator();
+    var module: ?*core.ModuleInstance = null;
+    var ffi_data: ?*FFIData = FFIData.alloc(allocator) catch null;
+
+    if (definition.module != null and ffi_data != null) {
+        var module_definition = @ptrCast(*core.ModuleDefinition, @alignCast(@alignOf(core.ModuleDefinition), definition.module.?));
         module = allocator.create(core.ModuleInstance) catch null;
 
         if (module) |m| {
             m.* = core.ModuleInstance.init(module_definition, allocator);
+            m.userdata = ffi_data;
         }
     }
 
@@ -218,61 +237,83 @@ export fn bb_module_instance_deinit(instance: *CModuleInstance) void {
         return;
     }
 
+    var allocator = cffi_gpa.allocator();
+
     var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), instance.module.?));
+    FFIData.free(allocator, module.userdata);
+
     module.deinit();
 
-    var allocator = cffi_gpa.allocator();
     allocator.destroy(module);
 }
 
 export fn bb_module_instance_instantiate(instance: *CModuleInstance, opts: CModuleInstanceInstantiateOpts) CError {
-    if (instance.module != null) {
+    if (instance.module != null and opts.packages != null) {
         var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), instance.module.?));
 
-        // var allocator = cffi_gpa.allocator();
+        var allocator = cffi_gpa.allocator();
 
-        // var packages = std.ArrayList(core.ModuleImportPackage).init(allocator);
-        // defer {
-        //     for (packages.items) |package| {
-        //         package.deinit();
-        //     }
-        //     packages.deinit();
-        // }
+        var packages = std.ArrayList(core.ModuleImportPackage).init(allocator);
+        defer {
+            for (packages.items) |*package| {
+                package.deinit();
+            }
+            packages.deinit();
+        }
 
-        // const c_packages: []const CImportPackage = std.mem.sliceTo(opts.packages, 0);
+        const c_packages: []const CImportPackage = opts.packages.?[0..opts.num_packages];
 
-        // packages.ensureTotalCapacityPrecise(c_packages.len) catch |err| return translateError(err);
-        // for (c_packages) |c_package| {
-        //     const package_name: []const u8 = if (c_package.name != null) std.mem.sliceTo(c_package.name.?, 0) else "";
+        var ffi_data = FFIData.fromUserdata(module.userdata);
 
-        //     var package = core.ModuleImportPackage.init(package_name, null, c_package.userdata, allocator) catch |err| return translateError(err);
+        // preallocate binding data to ensure memory doesn't move so we can pass out pointers into it
+        {
+            var num_function_bindings: usize = 0;
+            for (c_packages) |c_package| {
+                num_function_bindings += c_package.num_functions;
+            }
+            ffi_data.function_bindings.ensureTotalCapacity(num_function_bindings) catch |err| return translateError(err);
+        }
 
-        //     const c_functions = std.mem.sliceTo(c_package.functions, 0);
-        //     for (c_functions) |c_function| {
-        //         const function_name: []const u8 = if (c_function.name != null) std.mem.sliceTo(c_function.name.?, 0) else return CError.InvalidParameter;
+        packages.ensureTotalCapacityPrecise(c_packages.len) catch |err| return translateError(err);
+        for (c_packages) |c_package| {
+            if (c_package.functions) |c_functions| {
+                const package_name: []const u8 = if (c_package.name != null) std.mem.sliceTo(c_package.name.?, 0) else "";
 
-        //         const c_param_types: CValType = std.mem.sliceTo(c_function.params, 0);
-        //         const c_return_types: CValType = std.mem.sliceTo(c_function.returns, 0);
+                var package = core.ModuleImportPackage.init(package_name, null, null, allocator) catch |err| return translateError(err);
 
-        //         const total_vals = c_param_types.len + c_return_types.len;
-        //         var valtypes = allocator.alloc(core.ValType, total_vals) catch |err| return translateError(err);
-        //         defer allocator.free(valtypes);
-        //         var params_types_temp = valtypes[0..c_param_types.len];
-        //         var returns_types_temp = valtypes[c_param_types.len..];
+                const c_functions_slice = c_functions[0..c_package.num_functions];
+                for (c_functions_slice) |c_function| {
+                    if (c_function.func != null) {
+                        const ffi_binding = FFIBinding{
+                            .host = c_function.func.?,
+                            .userdata = c_function.userdata,
+                        };
+                        ffi_data.function_bindings.appendAssumeCapacity(ffi_binding);
 
-        //         // TODO
-        //         // translateCValTypeToValType(c_param_types, params_types_temp);
-        //         // translateCValTypeToValType(c_return_types, returns_types_temp);
+                        const function_name: []const u8 = if (c_function.name != null) std.mem.sliceTo(c_function.name.?, 0) else return CError.InvalidParameter;
 
-        //         package.addHostFunction(function_name, params_types_temp, returns_types_temp, callback) catch |err| return translateError(err);
-        //     }
+                        if (c_function.params == null and c_function.num_params > 0) return CError.InvalidParameter;
+                        if (c_function.returns == null and c_function.num_returns > 0) return CError.InvalidParameter;
 
-        //     packages.append(package) catch |err| return translateError(err);
-        // }
+                        const param_types: []ValType = if (c_function.params) |params| params[0..c_function.num_params] else &[_]ValType{};
+                        const return_types: []ValType = if (c_function.returns) |returns| returns[0..c_function.num_returns] else &[_]ValType{};
+
+                        package.addHostFunction(
+                            function_name,
+                            param_types,
+                            return_types,
+                            hostFunctionShim,
+                            &ffi_data.function_bindings.items[ffi_data.function_bindings.items.len - 1],
+                        ) catch |err| return translateError(err);
+                    }
+                }
+
+                packages.append(package) catch |err| return translateError(err);
+            }
+        }
 
         const opts_translated = core.ModuleInstantiateOpts{
-            .imports = undefined, // TODO
-            // .imports = imports.items,
+            .imports = packages.items,
             .enable_debug = opts.enable_debug,
         };
 
@@ -283,43 +324,32 @@ export fn bb_module_instance_instantiate(instance: *CModuleInstance, opts: CModu
         }
     }
 
-    return CError.Failed;
+    return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_invoke(instance: *CModuleInstance, func_name: ?[*:0]const c_char, params: ?[*]CVal, num_params: usize, returns: ?[*]CVal, num_returns: usize, opts: CModuleInstanceInvokeOpts) CError {
-    if (instance.module != null and func_name != null and (num_params == 0 or params != null) and (num_returns == 0 or returns != null)) {
+export fn bb_module_instance_invoke(instance: *CModuleInstance, func_name: ?[*:0]const c_char, params: ?[*]const Val, num_params: usize, returns: ?[*]Val, num_returns: usize, opts: CModuleInstanceInvokeOpts) CError {
+    if (instance.module != null and func_name != null) {
         var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), instance.module.?));
 
-        var allocator = cffi_gpa.allocator();
         const func_name_slice = std.mem.sliceTo(func_name.?, 0);
 
-        // var params_slice: []CVal = if (params == null) &[_]CVal{} else params.?[0..num_params];
-        // var returns_slice: []CVal = if (returns == null) &[_]CVal{} else returns.?[0..num_returns];
-
         if (module.module_def.getFunctionExport(func_name_slice)) |func_export| {
-            _ = func_export;
-            const total_vals = num_params + num_returns;
-            var vals = allocator.alloc(core.Val, total_vals) catch |err| return translateError(err);
-            defer allocator.free(vals);
-            var params_temp = vals[0..num_params];
-            var returns_temp = vals[num_params..];
-
-            // TODO
-            // if (translateCValToVal(func_export.params, params_slice, params_temp) == false) {
-            //     return CError.InvalidParameter;
-            // }
+            if (func_export.params.len != num_params or func_export.params.len > 0 and params == null) {
+                return CError.InvalidParameter;
+            }
+            if (func_export.returns.len != num_returns or func_export.returns.len > 0 and returns == null) {
+                return CError.InvalidParameter;
+            }
 
             const invoke_opts = core.ModuleInstance.InvokeOpts{
                 .trap_on_start = opts.trap_on_start,
             };
 
-            if (module.invoke(func_name_slice, params_temp, returns_temp, invoke_opts)) {
-                // TODO
-                // if (translateValToCVal(func_export.returns, returns_temp, returns_slice)) {
-                //     return CError.Ok;
-                // } else {
-                //     unreachable;
-                // }
+            var params_slice: []const Val = if (params != null) params.?[0..num_params] else &[_]Val{};
+            var returns_slice: []Val = if (returns != null) returns.?[0..num_returns] else &[_]Val{};
+
+            if (module.invoke(func_name_slice, params_slice, returns_slice, invoke_opts)) {
+                return CError.Ok;
             } else |err| {
                 return translateError(err);
             }
@@ -329,14 +359,14 @@ export fn bb_module_instance_invoke(instance: *CModuleInstance, func_name: ?[*:0
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_resume(instance: *CModuleInstance, returns: ?[*]CVal, num_returns: usize) CError {
+export fn bb_module_instance_resume(instance: *CModuleInstance, returns: ?[*]Val, num_returns: usize) CError {
     _ = instance;
     _ = returns;
     _ = num_returns;
     return CError.Failed;
 }
 
-export fn bb_module_instance_step(instance: *CModuleInstance, returns: ?[*]CVal, num_returns: usize) CError {
+export fn bb_module_instance_step(instance: *CModuleInstance, returns: ?[*]Val, num_returns: usize) CError {
     _ = instance;
     _ = returns;
     _ = num_returns;
@@ -360,138 +390,11 @@ fn translateError(err: anyerror) CError {
     }
 }
 
-// fn translateCValTypeToValType(c_valtypes: []const CValType, valtypes: []core.ValType) bool {
-//     std.debug.assert(c_valtypes.len == valtypes.len);
-//     for (c_valtypes) |valtype, i| {
-//         switch (valtype) {
-//             .I32 => valtypes[i] = .I32,
-//             .I64 => valtypes[i] = .I64,
-//             .F32 => valtypes[i] = .F32,
-//             .F64 => valtypes[i] = .F64,
-//             else => return false, // TODO log unsupported type
-//         }
-//     }
+fn hostFunctionShim(userdata: ?*anyopaque, module: *core.ModuleInstance, params: []const Val, returns: []Val) void {
+    const binding = @ptrCast(*FFIBinding, @alignCast(@alignOf(FFIBinding), userdata.?));
+    var c_module = CModuleInstance{
+        .module = module,
+    };
 
-//     return true;
-// }
-
-// fn translateCValToVal(valtypes: []const core.ValType, c_vals: []const CVal, vals: []core.Val) bool {
-//     std.debug.assert(valtypes.len == vals.len);
-//     std.debug.assert(valtypes.len == c_vals.len);
-//     for (valtypes) |valtype, i| {
-//         switch (valtype) {
-//             .I32 => vals[i].I32 = c_vals[i].i32_val,
-//             .I64 => vals[i].I64 = c_vals[i].i64_val,
-//             .F32 => vals[i].F32 = c_vals[i].f32_val,
-//             .F64 => vals[i].F64 = c_vals[i].f64_val,
-//             else => return false, // TODO log unsupported type
-//         }
-//     }
-
-//     return true;
-// }
-
-// fn translateValToCVal(valtypes: []const core.ValType, vals: []const core.Val, c_vals: []CVal) bool {
-//     std.debug.assert(valtypes.len == vals.len);
-//     std.debug.assert(valtypes.len == c_vals.len);
-//     for (valtypes) |valtype, i| {
-//         switch (valtype) {
-//             .I32 => c_vals[i].i32_val = vals[i].I32,
-//             .I64 => c_vals[i].i64_val = vals[i].I64,
-//             .F32 => c_vals[i].f32_val = vals[i].F32,
-//             .F64 => c_vals[i].f64_val = vals[i].F64,
-//             else => return false, // TODO log unsupported type
-//         }
-//     }
-
-//     return true;
-// }
-
-// fn cvaltypeToValtype(c_valtype: CValType) !core.ValType {
-//     switch (c_valtype) {
-//         .I32 => return .I32,
-//         .I64 => return .I64,
-//         .F32 => return .F32,
-//         .F64 => return .F64,
-//         else => return error.Unsupported, // TODO log unsupported type
-//     }
-// }
-
-// fn translateCValToVal(c_val: CVal, valtype: core.ValType) !core.Val {
-//     switch (valtype) {
-//         .I32 => return c_val[i].i32_val,
-//         .I64 => return c_val[i].i64_val,
-//         .F32 => return c_val[i].f32_val,
-//         .F64 => return c_val[i].f64_val,
-//         else => return error.Unsupported, // TODO log unsupported type
-//     }
-// }
-
-// fn translateValToCVal(val: core.Val, valtype: core.ValType) !CVal {
-//     switch (valtype) {
-//         .I32 => return val.I32,
-//         .I64 => return val.I64,
-//         .F32 => return val.F32,
-//         .F64 => return val.F64,
-//         else => return error.Unsupported, // TODO log unsupported type
-//     }
-// }
-
-// const CHostFunctionContext = struct {
-//     package_context: *CHostPackageContext,
-//     func_def: *const FunctionTypeDefinition,
-//     callback: CHostFunction,
-// };
-
-// const CHostPackageContext = struct {
-//     functions: std.ArrayList(CHostFunctionContext),
-//     userdata: ?*anyopaque,
-// };
-
-// fn cStackTranslateHelper(comptime in_type: type, out_type: type, _translate_func: *const fn (in_type) out_type) type {
-//     return struct {
-//         const Self = @This();
-//         const translate_func = _translate_func;
-
-//         out: [16]out_type = undefined,
-
-//         fn translateTypes(self: *Self, in: []const in_type) ![]const out_type {
-//             if (in.len > self.out.len) {
-//                 return error.Unsupported;
-//             }
-//             for (in) |v, i| {
-//                 self.out[i] = try translate_func(v);
-//             }
-//             return self.out[0..in.len];
-//         }
-
-//         fn translateVals(self: *Self, in: []const in_type, in_type: []const ValType) ![]const out_type {
-//             if (in.len > self.out.len) {
-//                 return error.Unsupported;
-//             }
-//             for (in) |v, i| {
-//                 self.out[i] = try translate_func(v, in_type[i]);
-//             }
-//             return self.out[0..in.len];
-//         }
-//     };
-// }
-
-// const CValToValHelper = cStackTranslateHelper(CVal, Val, cvalToVal);
-// const ValToCValHelper = cStackTranslateHelper(Val, CVal, cvalToVal);
-
-// fn hostFunctionShim(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
-//     const context = @ptrCast(*const CHostFunctionContext, @alignCast(@alignOf(CHostFunctionContext), userdata));
-//     var c_module = CModuleInstance{
-//         .module = module,
-//     };
-
-//     const param_types = c_context.
-
-//     var c_params_translate = ValToCValHelper{};
-//     var c_returns_translate = CValToValHelper{};
-
-//     var c_params = c_params_translate.translateVals(, param_types);
-//     var c_returns = ;
-//     context.callback(context.package_context.userdata, c_module, c_params, c_returns);
-// }
+    binding.host(binding.userdata, &c_module, params.ptr, returns.ptr);
+}

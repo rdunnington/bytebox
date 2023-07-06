@@ -8951,7 +8951,7 @@ pub const ModuleImportPackage = struct {
         };
     }
 
-    pub fn addHostFunction(self: *ModuleImportPackage, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback) !void {
+    pub fn addHostFunction(self: *ModuleImportPackage, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback, userdata: ?*anyopaque) !void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
         var type_list = std.ArrayList(ValType).init(self.allocator);
@@ -8962,7 +8962,7 @@ pub const ModuleImportPackage = struct {
             .name = try self.allocator.dupe(u8, name),
             .data = .{
                 .Host = HostFunction{
-                    .userdata = self.userdata,
+                    .userdata = userdata,
                     .func_def = FunctionTypeDefinition{
                         .types = type_list,
                         .num_params = @intCast(u32, param_types.len),
@@ -9120,6 +9120,7 @@ pub const ModuleInstance = struct {
     store: Store,
     module_def: *const ModuleDefinition,
     debug_state: ?DebugState = null,
+    userdata: ?*anyopaque = null, // any host data associated with this module
     is_instantiated: bool = false,
 
     pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {

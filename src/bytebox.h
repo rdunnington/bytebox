@@ -28,12 +28,15 @@ enum bb_valtype
 };
 typedef enum bb_valtype bb_valtype;
 
+typedef float[4] bb_v128;
 union bb_val
 {
 	int32_t i32_val;
 	int64_t i64_val;
-	float	f32_val;
-	double	f64_val;
+	float f32_val;
+	double f64_val;
+	bb_v128 v128_val;
+	uint32 externref_val;
 };
 typedef union bb_val bb_val;
 
@@ -59,6 +62,7 @@ struct bb_import_function
 	size_t num_params;
 	bb_valtype* returns;
 	size_t num_returns;
+	void* userdata;
 };
 typedef struct bb_import_function bb_import_function;
 
@@ -67,7 +71,6 @@ struct bb_import_package
 	const char* name; // must be valid. Use "*" to try to match any module imports
 	bb_import_function* functions;
 	size_t num_functions;
-	void* userdata; // passed into bb_host_function
 
 	// TODO globals, tables, memories
 };
@@ -75,7 +78,7 @@ typedef struct bb_import_package bb_import_package;
 
 struct bb_module_instance_instantiate_opts
 {
-	bb_import_package* imports;
+	bb_import_package* packages;
 	size_t num_packages;
 	bool enable_debug;
 };
@@ -121,7 +124,7 @@ bb_slice bb_module_definition_get_custom_section(const bb_module_definition* def
 bb_module_instance bb_module_instance_init(bb_module_definition* definition);
 void bb_module_instance_deinit(bb_module_instance* instance);
 bb_error bb_module_instance_instantiate(bb_module_instance* instance, bb_module_instance_instantiate_opts opts);
-bb_error bb_module_instance_invoke(bb_module_instance* instance, const char* func_name, bb_val* params, size_t num_params, bb_val* returns, size_t num_returns, bb_module_instance_invoke_opts opts);
+bb_error bb_module_instance_invoke(bb_module_instance* instance, const char* func_name, const bb_val* params, size_t num_params, bb_val* returns, size_t num_returns, bb_module_instance_invoke_opts opts);
 bb_error bb_module_instance_resume(bb_module_instance* instance, bb_val* returns, size_t num_returns);
 bb_error bb_module_instance_step(bb_module_instance* instance, bb_val* returns, size_t num_returns);
 bb_error bb_module_instance_debug_set_trap(bb_module_instance* instance, uint32_t address, bb_debug_trap_mode trap_mode);
