@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("common.zig");
 pub const wasi = @import("wasi.zig");
-pub const dwarf = @import("dwarf.zig");
 
 const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
 
