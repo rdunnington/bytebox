@@ -103,18 +103,13 @@ enum bb_debug_trap_mode
 };
 typedef enum bb_debug_trap_mode bb_debug_trap_mode;
 
-// struct bb_val_tagged
-// {
-// 	bb_valtype type;
-// 	bb_val val;
-// };
-// typedef struct bb_val_tagged bb_val_tagged;
-
 // typedef void* bb_malloc_func(size_t size, void* userdata);
 // typedef void* bb_realloc_func(void* mem, size_t size, void* userdata);
 // typedef void bb_free_func(void* mem, void* userdata);
 
 // void bb_set_memory_hooks(bb_alloc_func* alloc_func, bb_realloc_func* realloc_func, bb_free_func);
+
+const char* bb_error_str(bb_error err);
 
 bb_module_definition bb_module_definition_init(bb_module_definition_init_opts opts);
 void bb_module_definition_deinit(bb_module_definition* definition);
@@ -128,3 +123,4 @@ bb_error bb_module_instance_invoke(bb_module_instance* instance, const char* fun
 bb_error bb_module_instance_resume(bb_module_instance* instance, bb_val* returns, size_t num_returns);
 bb_error bb_module_instance_step(bb_module_instance* instance, bb_val* returns, size_t num_returns);
 bb_error bb_module_instance_debug_set_trap(bb_module_instance* instance, uint32_t address, bb_debug_trap_mode trap_mode);
+bb_slice bb_module_instance_mem(bb_module_instance* instance, size_t offset, size_t length);

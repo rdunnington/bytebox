@@ -151,6 +151,15 @@ var cffi_gpa = std.heap.GeneralPurposeAllocator(.{}){};
 //     cffi_allocator.userdata = userdata;
 // }
 
+export fn bb_error_str(c_error: CError) [*]const c_char {
+    return switch (c_error) {
+        .Ok => "BB_ERROR_OK",
+        .Failed => "BB_ERROR_FAILED",
+        .OutOfMemory => "BB_ERROR_OUTOFMEMORY",
+        .InvalidParameter => "BB_ERROR_INVALIDPARAMETER",
+    };
+}
+
 export fn bb_module_definition_init(opts: CModuleDefinitionInitOpts) CModuleDefinition {
     var allocator = cffi_gpa.allocator();
     var module: ?*core.ModuleDefinition = allocator.create(core.ModuleDefinition) catch null;
@@ -378,6 +387,24 @@ export fn bb_module_instance_debug_set_trap(instance: *CModuleInstance, address:
     _ = address;
     _ = trap_mode;
     return CError.Failed;
+}
+
+export fn bb_module_instance_mem(instance: *CModuleInstance, offset: usize, length: usize) CSlice {
+    if (instance.module != null and length > 0) {
+        var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), instance.module.?));
+
+        var mem = module.memorySlice(offset, length);
+        var ptr: ?[*]c_char = if (mem.len > 0) @ptrCast([*]c_char, mem.ptr) else null;
+        return CSlice{
+            .data = ptr,
+            .length = mem.len,
+        };
+    }
+
+    return CSlice{
+        .data = null,
+        .length = 0,
+    };
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
