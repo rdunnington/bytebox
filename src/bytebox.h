@@ -54,25 +54,21 @@ typedef struct bb_module_definition bb_module_definition;
 
 typedef void bb_host_function(void* userdata, bb_module_instance* module, const bb_val* params, bb_val* returns);
 
-struct bb_import_function
-{
-	const char* name;
-	bb_host_function* func;
-	bb_valtype* params;
-	size_t num_params;
-	bb_valtype* returns;
-	size_t num_returns;
-	void* userdata;
-};
-typedef struct bb_import_function bb_import_function;
+// struct bb_import_function
+// {
+// 	const char* name;
+// 	bb_host_function* func;
+// 	bb_valtype* params;
+// 	size_t num_params;
+// 	bb_valtype* returns;
+// 	size_t num_returns;
+// 	void* userdata;
+// };
+// typedef struct bb_import_function bb_import_function;
 
 struct bb_import_package
 {
-	const char* name; // must be valid. Use "*" to try to match any module imports
-	bb_import_function* functions;
-	size_t num_functions;
-
-	// TODO globals, tables, memories
+	void* package;
 };
 typedef struct bb_import_package bb_import_package;
 
@@ -116,6 +112,11 @@ void bb_module_definition_deinit(bb_module_definition* definition);
 bb_error bb_module_definition_decode(bb_module_definition* definition, const char* data, size_t length);
 bb_slice bb_module_definition_get_custom_section(const bb_module_definition* definition, const char* name);
 
+bb_import_package bb_import_package_init(const char* name);
+void bb_import_package_deinit(bb_import_package* package); // only deinit when all module_instances using the package have been deinited
+void* bb_import_package_userdata(const bb_import_package* package);
+CError bb_import_package_add_function(bb_import_package* package, bb_host_function* func, const char* export_name, bb_valtype* params, size_t num_params, bb_valtype* returns, size_t num_returns, void* userdata);
+
 bb_module_instance bb_module_instance_init(bb_module_definition* definition);
 void bb_module_instance_deinit(bb_module_instance* instance);
 bb_error bb_module_instance_instantiate(bb_module_instance* instance, bb_module_instance_instantiate_opts opts);
@@ -123,4 +124,4 @@ bb_error bb_module_instance_invoke(bb_module_instance* instance, const char* fun
 bb_error bb_module_instance_resume(bb_module_instance* instance, bb_val* returns, size_t num_returns);
 bb_error bb_module_instance_step(bb_module_instance* instance, bb_val* returns, size_t num_returns);
 bb_error bb_module_instance_debug_set_trap(bb_module_instance* instance, uint32_t address, bb_debug_trap_mode trap_mode);
-bb_slice bb_module_instance_mem(bb_module_instance* instance, size_t offset, size_t length);
+void* bb_module_instance_mem(bb_module_instance* instance, size_t offset, size_t length);

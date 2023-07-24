@@ -611,7 +611,7 @@ const Helpers = struct {
         return fd_wasi < 3; // std handles are 0, 1, 2 (stdin, stdout, stderr)
     }
 
-    fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
+    fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: [*]const Val, returns: [*]Val) void {
         const strings_count: u32 = @intCast(u32, strings.len);
         var strings_length: u32 = 0;
         for (strings) |string| {
@@ -631,7 +631,7 @@ const Helpers = struct {
         returns[0] = Val{ .I32 = @enumToInt(errno) };
     }
 
-    fn stringsGet(module: *ModuleInstance, strings: [][]const u8, params: []const Val, returns: []Val) void {
+    fn stringsGet(module: *ModuleInstance, strings: [][]const u8, params: [*]const Val, returns: [*]Val) void {
         var errno = Errno.SUCCESS;
 
         const dest_string_ptrs_begin = Helpers.signedCast(u32, params[0].I32, &errno);
@@ -1582,7 +1582,7 @@ const Helpers = struct {
     }
 };
 
-fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, _: []Val) void {
+fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, _: [*]Val) void {
     const raw_exit_code = params[0].I32;
 
     if (raw_exit_code >= 0 and raw_exit_code < std.math.maxInt(u8)) {
@@ -1593,27 +1593,27 @@ fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: []const Val, _: []
     }
 }
 
-fn wasi_args_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_args_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var context = WasiContext.fromUserdata(userdata);
     Helpers.stringsSizesGet(module, context.argv, params, returns);
 }
 
-fn wasi_args_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_args_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var context = WasiContext.fromUserdata(userdata);
     Helpers.stringsGet(module, context.argv, params, returns);
 }
 
-fn wasi_environ_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_environ_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var context = WasiContext.fromUserdata(userdata);
     Helpers.stringsSizesGet(module, context.env, params, returns);
 }
 
-fn wasi_environ_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_environ_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var context = WasiContext.fromUserdata(userdata);
     Helpers.stringsGet(module, context.env, params, returns);
 }
 
-fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const system_clockid: i32 = Helpers.convertClockId(params[0].I32, &errno);
@@ -1655,7 +1655,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: []const V
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const system_clockid: i32 = Helpers.convertClockId(params[0].I32, &errno);
@@ -1725,7 +1725,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     const context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @bitCast(u32, params[0].I32);
 
@@ -1740,7 +1740,7 @@ fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: []const V
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1764,7 +1764,7 @@ fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1781,7 +1781,7 @@ fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: [
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1800,7 +1800,7 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1828,7 +1828,7 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1857,7 +1857,7 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1879,7 +1879,7 @@ fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: []con
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1891,7 +1891,7 @@ fn wasi_fd_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: []const V
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1921,7 +1921,7 @@ fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1968,7 +1968,7 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2032,7 +2032,7 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: []const V
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2046,7 +2046,7 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val,
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2070,7 +2070,7 @@ fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2090,7 +2090,7 @@ fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2121,7 +2121,7 @@ fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params:
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2173,7 +2173,7 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2194,7 +2194,7 @@ fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: []const 
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2219,7 +2219,7 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: []const
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2245,7 +2245,7 @@ fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2270,7 +2270,7 @@ fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2309,7 +2309,7 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2347,7 +2347,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: []cons
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2378,7 +2378,7 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2432,7 +2432,7 @@ fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: []c
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2463,7 +2463,7 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
     returns[0] = Val{ .I32 = @enumToInt(errno) };
 }
 
-fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void {
+fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const array_begin_offset: u32 = Helpers.signedCast(u32, params[0].I32, &errno);

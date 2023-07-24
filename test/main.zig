@@ -629,45 +629,31 @@ const TestOpts = struct {
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackage {
     const Functions = struct {
-        fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
+        fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].I32});
         }
 
-        fn printI64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
+        fn printI64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].I64});
         }
 
-        fn printF32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
+        fn printF32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].F32});
         }
 
-        fn printF64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
+        fn printF64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].F64});
         }
 
-        fn printI32F32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 2);
-            std.debug.assert(returns.len == 0);
+        fn printI32F32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
         }
 
-        fn printF64F64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 2);
-            std.debug.assert(returns.len == 0);
+        fn printF64F64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
         }
 
-        fn print(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 0);
-            std.debug.assert(returns.len == 0);
+        fn print(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("\n", .{});
         }
     };

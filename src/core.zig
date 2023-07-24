@@ -3714,7 +3714,7 @@ const InstructionFuncs = struct {
 
                         DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
 
-                        data.callback(data.userdata, module, params, returns_temp);
+                        data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
 
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         var returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
@@ -8833,7 +8833,7 @@ const ImportType = enum(u8) {
     Wasm,
 };
 
-const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: []const Val, returns: []Val) void;
+const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void;
 
 const HostFunction = struct {
     userdata: ?*anyopaque,
@@ -8950,7 +8950,7 @@ pub const ModuleImportPackage = struct {
         };
     }
 
-    pub fn addHostFunction(self: *ModuleImportPackage, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback, userdata: ?*anyopaque) !void {
+    pub fn addHostFunction(self: *ModuleImportPackage, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback, userdata: ?*anyopaque) std.mem.Allocator.Error!void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
         var type_list = std.ArrayList(ValType).init(self.allocator);
@@ -9760,7 +9760,7 @@ pub const ModuleInstance = struct {
             .Host => |data| {
                 DebugTrace.traceHostFunction(self, 1, func_import.name);
 
-                data.callback(data.userdata, self, params, returns);
+                data.callback(data.userdata, self, params.ptr, returns.ptr);
             },
             .Wasm => |data| {
                 var instance: *ModuleInstance = data.module_instance;
