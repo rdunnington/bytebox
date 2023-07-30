@@ -924,8 +924,17 @@ const ExportDefinition = struct {
     index: u32,
 };
 
+pub const FunctionHandleType = enum(u8) {
+    Export,
+    Import,
+};
+
+pub const FunctionHandle = struct {
+    index: u32,
+    type: FunctionHandleType,
+};
+
 pub const FunctionExport = struct {
-    name: []const u8,
     params: []const ValType,
     returns: []const ValType,
 };
@@ -8648,31 +8657,20 @@ pub const ModuleDefinition = struct {
         return null;
     }
 
-    pub fn getFunctionExport(self: *const ModuleDefinition, funcname: []const u8) ?FunctionExport {
-        for (self.exports.functions.items) |*func_export| {
-            if (std.mem.eql(u8, func_export.name, funcname)) {
-                var type_index: u32 = undefined;
+    pub fn getFunctionExport(self: *const ModuleDefinition, func_handle: FunctionHandle) FunctionExport {
+        const type_index = switch (func_handle.type) {
+            .Export => self.functions.items[func_handle.index].type_index,
+            .Import => self.imports.functions.items[func_handle.index].type_index,
+        };
 
-                const num_imports = self.imports.functions.items.len;
-                if (func_export.index >= num_imports) {
-                    const instance_index = func_export.index - num_imports;
-                    type_index = self.functions.items[instance_index].type_index;
-                } else {
-                    type_index = self.imports.functions.items[func_export.index].type_index;
-                }
+        const type_def: *const FunctionTypeDefinition = &self.types.items[type_index];
+        var params: []const ValType = type_def.getParams();
+        var returns: []const ValType = type_def.getReturns();
 
-                var params: []const ValType = self.types.items[type_index].getParams();
-                var returns: []const ValType = self.types.items[type_index].getReturns();
-
-                return FunctionExport{
-                    .name = func_export.name,
-                    .params = params,
-                    .returns = returns,
-                };
-            }
-        }
-
-        return null;
+        return FunctionExport{
+            .params = params,
+            .returns = returns,
+        };
     }
 
     pub fn dump(self: *const ModuleDefinition, writer: anytype) !void {
@@ -9536,6 +9534,40 @@ pub const ModuleInstance = struct {
         return imports;
     }
 
+    pub fn getFunctionHandle(self: *const ModuleInstance, func_name: []const u8) ExportError!FunctionHandle {
+        for (self.module_def.exports.functions.items) |func_export| {
+            if (std.mem.eql(u8, func_name, func_export.name)) {
+                if (func_export.index >= self.module_def.imports.functions.items.len) {
+                    var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
+                    return FunctionHandle{
+                        .index = @intCast(u32, func_index),
+                        .type = .Export,
+                    };
+                } else {
+                    return FunctionHandle{
+                        .index = @intCast(u32, func_export.index),
+                        .type = .Import,
+                    };
+                }
+            }
+        }
+
+        for (self.store.imports.functions.items) |*func_import, i| {
+            if (std.mem.eql(u8, func_name, func_import.name)) {
+                return FunctionHandle{
+                    .index = @intCast(u32, i),
+                    .type = .Import,
+                };
+            }
+        }
+
+        return error.ExportUnknownFunction;
+    }
+
+    pub fn getFunctionInfo(self: *const ModuleInstance, handle: FunctionHandle) FunctionExport {
+        return self.module_def.getFunctionExport(handle);
+    }
+
     pub fn getGlobalExport(self: *ModuleInstance, global_name: []const u8) ExportError!GlobalExport {
         for (self.module_def.exports.globals.items) |*global_export| {
             if (std.mem.eql(u8, global_name, global_export.name)) {
@@ -9555,7 +9587,7 @@ pub const ModuleInstance = struct {
         trap_on_start: bool = false,
     };
 
-    pub fn invoke(self: *ModuleInstance, func_name: []const u8, params: []const Val, returns: []Val, opts: InvokeOpts) anyerror!void {
+    pub fn invoke(self: *ModuleInstance, handle: FunctionHandle, params: []const Val, returns: []Val, opts: InvokeOpts) anyerror!void {
         if (self.debug_state) |*debug_state| {
             debug_state.pc = 0;
             debug_state.is_invoking = true;
@@ -9565,26 +9597,10 @@ pub const ModuleInstance = struct {
             }
         }
 
-        for (self.module_def.exports.functions.items) |func_export| {
-            if (std.mem.eql(u8, func_name, func_export.name)) {
-                if (func_export.index >= self.module_def.imports.functions.items.len) {
-                    var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
-                    try self.invokeInternal(func_index, params, returns);
-                    return;
-                } else {
-                    try self.invokeImportInternal(func_export.index, params, returns, opts);
-                    return;
-                }
-            }
+        switch (handle.type) {
+            .Export => try self.invokeInternal(handle.index, params, returns),
+            .Import => try self.invokeImportInternal(handle.index, params, returns, opts),
         }
-
-        for (self.store.imports.functions.items) |*func_import, i| {
-            if (std.mem.eql(u8, func_name, func_import.name)) {
-                try self.invokeImportInternal(i, params, returns, opts);
-            }
-        }
-
-        return error.ExportUnknownFunction;
     }
 
     /// Use to resume an invoked function after it returned error.DebugTrap
@@ -9678,6 +9694,11 @@ pub const ModuleInstance = struct {
         return "";
     }
 
+    pub fn memoryAll(self: *ModuleInstance) []u8 {
+        const memory: *MemoryInstance = self.store.getMemory(0);
+        return memory.mem.items;
+    }
+
     pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
         var bytes: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
         std.mem.writeIntLittle(T, &bytes, value);
@@ -9764,7 +9785,8 @@ pub const ModuleInstance = struct {
             },
             .Wasm => |data| {
                 var instance: *ModuleInstance = data.module_instance;
-                try instance.invoke(func_import.name, params, returns, opts);
+                const handle: FunctionHandle = try instance.getFunctionHandle(func_import.name); // TODO could cache this in the func_import
+                try instance.invoke(handle, params, returns, opts);
             },
         }
     }

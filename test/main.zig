@@ -1025,7 +1025,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         var vals = try LaneTypedVal.toValArrayList(c.action.args.items, allocator);
                         defer vals.deinit();
 
-                        (module.inst.?).invoke(c.action.field, vals.items, returns, .{}) catch |e| {
+                        const func_handle: bytebox.FunctionHandle = try (module.inst.?).getFunctionHandle(c.action.field);
+                        (module.inst.?).invoke(func_handle, vals.items, returns, .{}) catch |e| {
                             if (!g_verbose_logging) {
                                 PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
                                 // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
@@ -1034,9 +1035,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             action_succeeded = false;
                         };
 
-                        if (module.inst.?.module_def.getFunctionExport(c.action.field)) |func_export| {
-                            return_types = try allocator.dupe(ValType, func_export.returns);
-                        }
+                        const func_export = module.inst.?.module_def.getFunctionExport(func_handle);
+                        return_types = try allocator.dupe(ValType, func_export.returns);
                     },
                     .Get => {
                         if ((module.inst.?).getGlobalExport(c.action.field)) |global_export| {
@@ -1174,7 +1174,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         var vals = try LaneTypedVal.toValArrayList(c.action.args.items, allocator);
                         defer vals.deinit();
 
-                        (module.inst.?).invoke(c.action.field, vals.items, returns, .{}) catch |e| {
+                        const func_handle: bytebox.FunctionHandle = try (module.inst.?).getFunctionHandle(c.action.field);
+                        (module.inst.?).invoke(func_handle, vals.items, returns, .{}) catch |e| {
                             action_failed = true;
                             caught_error = e;
 
