@@ -47,43 +47,17 @@ struct bb_module_definition_init_opts
 };
 typedef struct bb_module_definition_init_opts bb_module_definition_init_opts;
 
-struct bb_module_definition
-{
-	void* module;
-};
 typedef struct bb_module_definition bb_module_definition;
-
-// struct bb_import_function
-// {
-// 	const char* name;
-// 	bb_host_function* func;
-// 	bb_valtype* params;
-// 	size_t num_params;
-// 	bb_valtype* returns;
-// 	size_t num_returns;
-// 	void* userdata;
-// };
-// typedef struct bb_import_function bb_import_function;
-
-struct bb_import_package
-{
-	void* package;
-};
+typedef struct bb_module_instance bb_module_instance;
 typedef struct bb_import_package bb_import_package;
 
 struct bb_module_instance_instantiate_opts
 {
-	bb_import_package* packages;
+	bb_import_package** packages;
 	size_t num_packages;
 	bool enable_debug;
 };
 typedef struct bb_module_instance_instantiate_opts bb_module_instance_instantiate_opts;
-
-struct bb_module_instance
-{
-	void* module;
-};
-typedef struct bb_module_instance bb_module_instance;
 
 struct bb_module_instance_invoke_opts
 {
@@ -124,20 +98,19 @@ typedef void bb_host_function(void* userdata, bb_module_instance* module, const 
 
 const char* bb_error_str(bb_error err);
 
-bb_module_definition bb_module_definition_init(bb_module_definition_init_opts opts);
+bb_module_definition* bb_module_definition_init(bb_module_definition_init_opts opts);
 void bb_module_definition_deinit(bb_module_definition* definition);
 bb_error bb_module_definition_decode(bb_module_definition* definition, const char* data, size_t length);
 bb_slice bb_module_definition_get_custom_section(const bb_module_definition* definition, const char* name);
 
-bb_import_package bb_import_package_init(const char* name);
+bb_import_package* bb_import_package_init(const char* name);
 void bb_import_package_deinit(bb_import_package* package); // only deinit when all module_instances using the package have been deinited
-void* bb_import_package_userdata(const bb_import_package* package);
 bb_error bb_import_package_add_function(bb_import_package* package, bb_host_function* func, const char* export_name, bb_valtype* params, size_t num_params, bb_valtype* returns, size_t num_returns, void* userdata);
 
-bb_module_instance bb_module_instance_init(bb_module_definition* definition);
+bb_module_instance* bb_module_instance_init(bb_module_definition* definition);
 void bb_module_instance_deinit(bb_module_instance* instance);
 bb_error bb_module_instance_instantiate(bb_module_instance* instance, bb_module_instance_instantiate_opts opts);
-bb_func_handle bb_module_instance_find_func(bb_module_instance* instance, const char* func_name);
+bb_error bb_module_instance_find_func(bb_module_instance* instance, const char* func_name, bb_func_handle* out_handle);
 bb_func_info bb_module_instance_func_info(bb_module_instance* instance, bb_func_handle handle);
 bb_error bb_module_instance_invoke(bb_module_instance* instance, bb_func_handle, const bb_val* params, size_t num_params, bb_val* returns, size_t num_returns, bb_module_instance_invoke_opts opts);
 bb_error bb_module_instance_resume(bb_module_instance* instance, bb_val* returns, size_t num_returns);
@@ -145,3 +118,5 @@ bb_error bb_module_instance_step(bb_module_instance* instance, bb_val* returns, 
 bb_error bb_module_instance_debug_set_trap(bb_module_instance* instance, uint32_t address, bb_debug_trap_mode trap_mode);
 void* bb_module_instance_mem(bb_module_instance* instance, size_t offset, size_t length);
 bb_slice bb_module_instance_mem_all(bb_module_instance* instance);
+
+bool bb_func_handle_isvalid(bb_func_handle handle);

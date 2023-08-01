@@ -2,12 +2,14 @@ const std = @import("std");
 const core = @import("core.zig");
 const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
 
-// C interface
 const ValType = core.ValType;
 const Val = core.Val;
+const ModuleDefinition = core.ModuleDefinition;
+const ModuleInstance = core.ModuleInstance;
 const ModuleImportPackage = core.ModuleImportPackage;
 const c_char = u8;
 
+// C interface
 const CSlice = extern struct {
     data: ?[*]c_char,
     length: usize,
@@ -25,11 +27,6 @@ const CModuleDefinitionInitOpts = extern struct {
     debug_name: ?[*:0]c_char,
 };
 
-const CModuleDefinition = extern struct {
-    module: ?*anyopaque,
-};
-
-// TODO verify that although the C header defines module as CModuleInstance, it should just be the same as a raw pointer since it's a thin wrapper around a pointer
 const CHostFunction = *const fn (userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) void;
 
 const CImportFunction = extern struct {
@@ -42,18 +39,10 @@ const CImportFunction = extern struct {
     userdata: ?*anyopaque,
 };
 
-const CImportPackage = extern struct {
-    package: ?*anyopaque,
-};
-
 const CModuleInstanceInstantiateOpts = extern struct {
-    packages: ?[*]CImportPackage,
+    packages: ?[*]?*const ModuleImportPackage,
     num_packages: usize,
     enable_debug: bool,
-};
-
-const CModuleInstance = extern struct {
-    module: ?*anyopaque,
 };
 
 const CModuleInstanceInvokeOpts = extern struct {
@@ -77,40 +66,13 @@ const CDebugTrapMode = enum(c_int) {
     Enabled,
 };
 
-// Local data
-// const FFIBinding = struct {
-//     host: CHostFunction,
-//     userdata: ?*anyopaque,
-// };
-
-// const FFIData = struct {
-//     function_bindings: StableArray(FFIBinding),
-
-//     fn alloc(allocator: std.mem.Allocator) !*FFIData {
-//         var data: *FFIData = try allocator.create(FFIData);
-//         const max_function_count = 1024 * 512;
-//         data.function_bindings = StableArray(FFIBinding).init(max_function_count * @sizeOf(FFIBinding));
-//         return data;
-//     }
-
-//     fn free(userdata: ?*anyopaque, allocator: std.mem.Allocator) void {
-//         var data: *FFIData = fromUserdata(userdata);
-//         data.function_bindings.deinit();
-//         allocator.destroy(data);
-//     }
-
-//     fn fromUserdata(userdata: ?*anyopaque) *FFIData {
-//         return @ptrCast(*FFIData, @alignCast(@alignOf(FFIData), userdata.?));
-//     }
-// };
-
 // TODO logging callback as well?
 // TODO allocator hooks
 // const CAllocFunc = *const fn (size: usize, userdata: ?*anyopaque) ?*anyopaque;
 // const CReallocFunc = *const fn (mem: ?*anyopaque, size: usize, userdata: ?*anyopaque) ?*anyopaque;
 // const CFreeFunc = *const fn (mem: ?*anyopaque, userdata: ?*anyopaque) void;
 
-const INVALID_FUNC_HANDLE = std.math.maxInt(u32);
+const INVALID_FUNC_INDEX = std.math.maxInt(u32);
 
 var cffi_gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -178,7 +140,7 @@ export fn bb_error_str(c_error: CError) [*]const c_char {
     };
 }
 
-export fn bb_module_definition_init(c_opts: CModuleDefinitionInitOpts) CModuleDefinition {
+export fn bb_module_definition_init(c_opts: CModuleDefinitionInitOpts) ?*core.ModuleDefinition {
     var allocator = cffi_gpa.allocator();
     var module: ?*core.ModuleDefinition = allocator.create(core.ModuleDefinition) catch null;
 
@@ -190,27 +152,22 @@ export fn bb_module_definition_init(c_opts: CModuleDefinitionInitOpts) CModuleDe
         m.* = core.ModuleDefinition.init(allocator, opts_translated);
     }
 
-    return CModuleDefinition{
-        .module = module,
-    };
+    return module;
 }
 
-export fn bb_module_definition_deinit(c_definition: *CModuleDefinition) void {
-    if (c_definition.module == null) {
-        return;
+export fn bb_module_definition_deinit(module: ?*core.ModuleDefinition) void {
+    if (module) |m| {
+        m.deinit();
+
+        var allocator = cffi_gpa.allocator();
+        allocator.destroy(m);
     }
-    var module = @ptrCast(*core.ModuleDefinition, @alignCast(@alignOf(core.ModuleDefinition), c_definition.module.?));
-    module.deinit();
-
-    var allocator = cffi_gpa.allocator();
-    allocator.destroy(module);
 }
 
-export fn bb_module_definition_decode(c_definition: *CModuleDefinition, data: ?[*]c_char, length: usize) CError {
-    if (c_definition.module != null and data != null) {
-        var module = @ptrCast(*core.ModuleDefinition, @alignCast(@alignOf(core.ModuleDefinition), c_definition.module.?));
+export fn bb_module_definition_decode(module: ?*core.ModuleDefinition, data: ?[*]c_char, length: usize) CError {
+    if (module != null and data != null) {
         const data_slice = data.?[0..length];
-        if (module.decode(data_slice)) {
+        if (module.?.decode(data_slice)) {
             return .Ok;
         } else |_| {
             return CError.Failed;
@@ -220,11 +177,10 @@ export fn bb_module_definition_decode(c_definition: *CModuleDefinition, data: ?[
     return CError.InvalidParameter;
 }
 
-export fn bb_module_definition_get_custom_section(c_definition: *const CModuleDefinition, name: ?[*:0]const c_char) CSlice {
-    if (c_definition.module != null and name != null) {
-        var module = @ptrCast(*core.ModuleDefinition, @alignCast(@alignOf(core.ModuleDefinition), c_definition.module.?));
+export fn bb_module_definition_get_custom_section(module: ?*core.ModuleDefinition, name: ?[*:0]const c_char) CSlice {
+    if (module != null and name != null) {
         const name_slice: []const u8 = std.mem.sliceTo(name.?, 0);
-        if (module.getCustomSection(name_slice)) |section_data| {
+        if (module.?.getCustomSection(name_slice)) |section_data| {
             return CSlice{
                 .data = section_data.ptr,
                 .length = section_data.len,
@@ -238,7 +194,7 @@ export fn bb_module_definition_get_custom_section(c_definition: *const CModuleDe
     };
 }
 
-export fn bb_import_package_init(c_name: ?[*:0]const c_char) CImportPackage {
+export fn bb_import_package_init(c_name: ?[*:0]const c_char) ?*ModuleImportPackage {
     var package: ?*ModuleImportPackage = null;
     var allocator = cffi_gpa.allocator();
 
@@ -249,34 +205,22 @@ export fn bb_import_package_init(c_name: ?[*:0]const c_char) CImportPackage {
             const name: []const u8 = std.mem.sliceTo(c_name.?, 0);
             p.* = ModuleImportPackage.init(name, null, null, allocator) catch {
                 allocator.destroy(p);
-                return CImportPackage{ .package = null };
+                return null;
             };
         }
     }
 
-    return CImportPackage{
-        .package = package,
-    };
+    return package;
 }
 
-export fn bb_import_package_deinit(c_package: ?*CImportPackage) void {
-    if (c_package != null and c_package.?.package != null) {
-        var package = @ptrCast(*ModuleImportPackage, @alignCast(@alignOf(ModuleImportPackage), c_package.?.package.?));
-        package.deinit();
+export fn bb_import_package_deinit(package: ?*ModuleImportPackage) void {
+    if (package) |p| {
+        p.deinit();
     }
 }
 
-export fn bb_import_package_userdata(c_package: ?*CImportPackage) ?*anyopaque {
-    if (c_package != null and c_package.?.package != null) {
-        var package = @ptrCast(*ModuleImportPackage, @alignCast(@alignOf(ModuleImportPackage), c_package.?.package.?));
-        return package.userdata;
-    }
-
-    return null;
-}
-
-export fn bb_import_package_add_function(c_package: ?*CImportPackage, func: ?CHostFunction, c_name: ?[*:0]const c_char, c_params: ?[*]ValType, num_params: usize, c_returns: ?[*]ValType, num_returns: usize, userdata: ?*anyopaque) CError {
-    if (c_package != null and c_package.?.package != null and c_name != null and func != null) {
+export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?CHostFunction, c_name: ?[*:0]const c_char, c_params: ?[*]ValType, num_params: usize, c_returns: ?[*]ValType, num_returns: usize, userdata: ?*anyopaque) CError {
+    if (package != null and c_name != null and func != null) {
         if (num_params > 0 and c_params == null) {
             return CError.InvalidParameter;
         }
@@ -288,9 +232,7 @@ export fn bb_import_package_add_function(c_package: ?*CImportPackage, func: ?CHo
         const param_types: []ValType = if (c_params) |params| params[0..num_params] else &[_]ValType{};
         const return_types: []ValType = if (c_returns) |returns| returns[0..num_returns] else &[_]ValType{};
 
-        var package = @ptrCast(*ModuleImportPackage, @alignCast(@alignOf(ModuleImportPackage), c_package.?.package.?));
-
-        package.addHostFunction(name, param_types, return_types, func.?, userdata) catch {
+        package.?.addHostFunction(name, param_types, return_types, func.?, userdata) catch {
             return CError.OutOfMemory;
         };
     }
@@ -298,67 +240,52 @@ export fn bb_import_package_add_function(c_package: ?*CImportPackage, func: ?CHo
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_init(c_definition: *CModuleDefinition) CModuleInstance {
+export fn bb_module_instance_init(module_definition: ?*ModuleDefinition) ?*ModuleInstance {
     var allocator = cffi_gpa.allocator();
 
     var module: ?*core.ModuleInstance = null;
 
-    if (c_definition.module != null) {
-        var module_definition = @ptrCast(*core.ModuleDefinition, @alignCast(@alignOf(core.ModuleDefinition), c_definition.module.?));
+    if (module_definition != null) {
         module = allocator.create(core.ModuleInstance) catch null;
 
         if (module) |m| {
-            m.* = core.ModuleInstance.init(module_definition, allocator);
+            m.* = core.ModuleInstance.init(module_definition.?, allocator);
         }
     }
 
-    return CModuleInstance{
-        .module = module,
-    };
+    return module;
 }
 
-export fn bb_module_instance_deinit(c_instance: *CModuleInstance) void {
-    if (c_instance.module == null) {
-        return;
-    }
-
+export fn bb_module_instance_deinit(module: ?*ModuleInstance) void {
     var allocator = cffi_gpa.allocator();
 
-    var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), c_instance.module.?));
-    module.deinit();
-
-    allocator.destroy(module);
+    if (module) |m| {
+        m.deinit();
+        allocator.destroy(m);
+    }
 }
 
-export fn bb_module_instance_instantiate(c_instance: *CModuleInstance, c_opts: CModuleInstanceInstantiateOpts) CError {
-    if (c_instance.module != null and c_opts.packages != null) {
-        var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), c_instance.module.?));
+export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModuleInstanceInstantiateOpts) CError {
+    if (module != null and c_opts.packages != null) {
+        const packages: []?*const ModuleImportPackage = c_opts.packages.?[0..c_opts.num_packages];
 
         var allocator = cffi_gpa.allocator();
+        var flat_packages = std.ArrayList(ModuleImportPackage).init(allocator);
+        defer flat_packages.deinit();
 
-        var packages = std.ArrayList(ModuleImportPackage).init(allocator);
-        packages.ensureTotalCapacityPrecise(c_opts.num_packages) catch return CError.OutOfMemory;
-        defer {
-            for (packages.items) |*package| {
-                package.deinit();
-            }
-            packages.deinit();
-        }
-
-        if (c_opts.packages != null) {
-            const c_packages: []const CImportPackage = c_opts.packages.?[0..c_opts.num_packages];
-            for (c_packages) |c_package| {
-                var package = @ptrCast(*ModuleImportPackage, @alignCast(@alignOf(ModuleImportPackage), c_package.package.?));
-                packages.appendAssumeCapacity(package.*);
+        flat_packages.ensureTotalCapacityPrecise(packages.len) catch return CError.OutOfMemory;
+        for (packages) |p| {
+            if (p != null) {
+                flat_packages.appendAssumeCapacity(p.?.*);
             }
         }
 
         const opts = core.ModuleInstantiateOpts{
-            .imports = packages.items,
+            .imports = flat_packages.items,
             .enable_debug = c_opts.enable_debug,
         };
 
-        if (module.instantiate(opts)) {
+        if (module.?.instantiate(opts)) {
             return CError.Ok;
         } else |err| {
             return translateError(err);
@@ -368,15 +295,13 @@ export fn bb_module_instance_instantiate(c_instance: *CModuleInstance, c_opts: C
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_find_func(c_instance: CModuleInstance, c_func_name: ?[*:0]const c_char, out_handle: ?*CFuncHandle) CError {
-    if (c_instance.module != null and c_func_name != null and out_handle != null) {
-        var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), c_instance.module.?));
-
+export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[*:0]const c_char, out_handle: ?*CFuncHandle) CError {
+    if (module != null and c_func_name != null and out_handle != null) {
         const func_name = std.mem.sliceTo(c_func_name.?, 0);
 
-        out_handle.?.index = INVALID_FUNC_HANDLE;
+        out_handle.?.index = INVALID_FUNC_INDEX;
 
-        if (module.getFunctionHandle(func_name)) |handle| {
+        if (module.?.getFunctionHandle(func_name)) |handle| {
             out_handle.?.index = handle.index;
             out_handle.?.type = @enumToInt(handle.type);
             return CError.Ok;
@@ -389,16 +314,15 @@ export fn bb_module_instance_find_func(c_instance: CModuleInstance, c_func_name:
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_func_info(c_instance: CModuleInstance, c_func_handle: CFuncHandle) CFuncInfo {
-    if (c_instance.module != null and c_func_handle.index != INVALID_FUNC_HANDLE) {
+export fn bb_module_instance_func_info(module: ?*ModuleInstance, c_func_handle: CFuncHandle) CFuncInfo {
+    if (module != null and c_func_handle.index != INVALID_FUNC_INDEX) {
         if (std.meta.intToEnum(core.FunctionHandleType, c_func_handle.type)) |handle_type| {
-            var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), c_instance.module.?));
             const func_handle = core.FunctionHandle{
                 .index = c_func_handle.index,
                 .type = handle_type,
             };
 
-            const maybe_info: ?core.FunctionExport = module.getFunctionInfo(func_handle);
+            const maybe_info: ?core.FunctionExport = module.?.getFunctionInfo(func_handle);
             if (maybe_info) |info| {
                 return CFuncInfo{
                     .params = if (info.params.len > 0) info.params.ptr else null,
@@ -418,10 +342,8 @@ export fn bb_module_instance_func_info(c_instance: CModuleInstance, c_func_handl
     };
 }
 
-export fn bb_module_instance_invoke(c_instance: *CModuleInstance, c_handle: CFuncHandle, params: ?[*]const Val, num_params: usize, returns: ?[*]Val, num_returns: usize, opts: CModuleInstanceInvokeOpts) CError {
-    if (c_instance.module != null and c_handle.index != INVALID_FUNC_HANDLE) {
-        var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), c_instance.module.?));
-
+export fn bb_module_instance_invoke(module: ?*ModuleInstance, c_handle: CFuncHandle, params: ?[*]const Val, num_params: usize, returns: ?[*]Val, num_returns: usize, opts: CModuleInstanceInvokeOpts) CError {
+    if (module != null and c_handle.index != INVALID_FUNC_INDEX) {
         const handle = core.FunctionHandle{
             .index = c_handle.index,
             .type = @intToEnum(core.FunctionHandleType, c_handle.type),
@@ -434,7 +356,7 @@ export fn bb_module_instance_invoke(c_instance: *CModuleInstance, c_handle: CFun
         var params_slice: []const Val = if (params != null) params.?[0..num_params] else &[_]Val{};
         var returns_slice: []Val = if (returns != null) returns.?[0..num_returns] else &[_]Val{};
 
-        if (module.invoke(handle, params_slice, returns_slice, invoke_opts)) {
+        if (module.?.invoke(handle, params_slice, returns_slice, invoke_opts)) {
             return CError.Ok;
         } else |err| {
             return translateError(err);
@@ -444,42 +366,39 @@ export fn bb_module_instance_invoke(c_instance: *CModuleInstance, c_handle: CFun
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_resume(c_instance: *CModuleInstance, returns: ?[*]Val, num_returns: usize) CError {
-    _ = c_instance;
+export fn bb_module_instance_resume(module: ?*ModuleInstance, returns: ?[*]Val, num_returns: usize) CError {
+    _ = module;
     _ = returns;
     _ = num_returns;
     return CError.Failed;
 }
 
-export fn bb_module_instance_step(c_instance: *CModuleInstance, returns: ?[*]Val, num_returns: usize) CError {
-    _ = c_instance;
+export fn bb_module_instance_step(module: ?*ModuleInstance, returns: ?[*]Val, num_returns: usize) CError {
+    _ = module;
     _ = returns;
     _ = num_returns;
     return CError.Failed;
 }
 
-export fn bb_module_instance_debug_set_trap(c_instance: *CModuleInstance, address: u32, trap_mode: CDebugTrapMode) CError {
-    _ = c_instance;
+export fn bb_module_instance_debug_set_trap(module: ?*ModuleInstance, address: u32, trap_mode: CDebugTrapMode) CError {
+    _ = module;
     _ = address;
     _ = trap_mode;
     return CError.Failed;
 }
 
-export fn bb_module_instance_mem(c_instance: *CModuleInstance, offset: usize, length: usize) ?*anyopaque {
-    if (c_instance.module != null and length > 0) {
-        var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), c_instance.module.?));
-
-        var mem = module.memorySlice(offset, length);
+export fn bb_module_instance_mem(module: ?*ModuleInstance, offset: usize, length: usize) ?*anyopaque {
+    if (module != null and length > 0) {
+        var mem = module.?.memorySlice(offset, length);
         return if (mem.len > 0) mem.ptr else null;
     }
 
     return null;
 }
 
-export fn bb_module_instance_mem_all(c_instance: *CModuleInstance) CSlice {
-    if (c_instance.module != null) {
-        var module = @ptrCast(*core.ModuleInstance, @alignCast(@alignOf(core.ModuleInstance), c_instance.module.?));
-        var mem = module.memoryAll();
+export fn bb_module_instance_mem_all(module: ?*ModuleInstance) CSlice {
+    if (module != null) {
+        var mem = module.?.memoryAll();
         return CSlice{
             .data = mem.ptr,
             .length = mem.len,
@@ -490,6 +409,10 @@ export fn bb_module_instance_mem_all(c_instance: *CModuleInstance) CSlice {
         .data = null,
         .length = 0,
     };
+}
+
+export fn bb_func_handle_isvalid(c_handle: CFuncHandle) bool {
+    return c_handle.index != INVALID_FUNC_INDEX;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
