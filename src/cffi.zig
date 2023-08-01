@@ -21,6 +21,8 @@ const CError = enum(c_int) {
     OutOfMemory,
     InvalidParameter,
     UnknownExport,
+    UnknownImport,
+    IncompatibleImport,
 };
 
 const CModuleDefinitionInitOpts = extern struct {
@@ -130,13 +132,15 @@ var cffi_gpa = std.heap.GeneralPurposeAllocator(.{}){};
 //     cffi_allocator.userdata = userdata;
 // }
 
-export fn bb_error_str(c_error: CError) [*]const c_char {
+export fn bb_error_str(c_error: CError) [*:0]const c_char {
     return switch (c_error) {
         .Ok => "BB_ERROR_OK",
         .Failed => "BB_ERROR_FAILED",
         .OutOfMemory => "BB_ERROR_OUTOFMEMORY",
         .InvalidParameter => "BB_ERROR_INVALIDPARAMETER",
         .UnknownExport => "BB_ERROR_UNKNOWNEXPORT",
+        .UnknownImport => "BB_ERROR_UNKNOWNIMPORT",
+        .IncompatibleImport => "BB_ERROR_INCOMPATIBLEIMPORT",
     };
 }
 
@@ -411,8 +415,52 @@ export fn bb_module_instance_mem_all(module: ?*ModuleInstance) CSlice {
     };
 }
 
+const CGlobalMut = enum(c_int) {
+    Immutable = 0,
+    Mutable = 1,
+};
+
+const CGlobalExport = extern struct {
+    value: ?*Val,
+    type: ValType,
+    mut: CGlobalMut,
+};
+
+export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name: ?[*:0]const c_char) CGlobalExport {
+    comptime {
+        std.debug.assert(@enumToInt(CGlobalMut.Immutable) == @enumToInt(core.GlobalMut.Immutable));
+        std.debug.assert(@enumToInt(CGlobalMut.Mutable) == @enumToInt(core.GlobalMut.Mutable));
+    }
+
+    if (module != null and c_global_name != null) {
+        const global_name = std.mem.sliceTo(c_global_name.?, 0);
+        if (module.?.getGlobalExport(global_name)) |global| {
+            return CGlobalExport{
+                .value = global.val,
+                .type = global.valtype,
+                .mut = @intToEnum(CGlobalMut, @enumToInt(global.mut)),
+            };
+        } else |_| {}
+    }
+
+    return CGlobalExport{
+        .value = null,
+        .type = .I32,
+        .mut = .Immutable,
+    };
+}
+
 export fn bb_func_handle_isvalid(c_handle: CFuncHandle) bool {
     return c_handle.index != INVALID_FUNC_INDEX;
+}
+
+// NOTE: Zig expects this function to be present during linking, which would be fine if zig linked
+// this code, but when linking with the MSVC compiler, the compiler runtime doesn't provide this
+// function. Manually defining it here ensures the linker error gets resolved.
+fn ___chkstk_ms() callconv(.Naked) void {}
+
+comptime {
+    @export(___chkstk_ms, .{ .name = "___chkstk_ms", .linkage = .Weak });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -421,6 +469,8 @@ export fn bb_func_handle_isvalid(c_handle: CFuncHandle) bool {
 fn translateError(err: anyerror) CError {
     switch (err) {
         error.OutOfMemory => return CError.OutOfMemory,
+        error.UnlinkableUnknownImport => return CError.UnknownImport,
+        error.UnlinkableIncompatibleImportType => return CError.IncompatibleImport,
         else => return CError.Failed,
     }
 }

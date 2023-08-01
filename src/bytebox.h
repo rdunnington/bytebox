@@ -17,6 +17,8 @@ enum bb_error
 	BB_ERROR_OUTOFMEMORY,
 	BB_ERROR_INVALIDPARAM,
 	BB_ERROR_UNKNOWNEXPORT,
+    BB_ERROR_UNKNOWNIMPORT,
+    BB_ERROR_INCOMPATIBLEIMPORT,
 };
 typedef enum bb_error bb_error;
 
@@ -90,6 +92,21 @@ typedef enum bb_debug_trap_mode bb_debug_trap_mode;
 
 typedef void bb_host_function(void* userdata, bb_module_instance* module, const bb_val* params, bb_val* returns);
 
+enum bb_global_mut
+{
+	BB_GLOBAL_MUT_IMMUTABLE,
+	BB_GLOBAL_MUT_MUTABLE,
+};
+typedef enum bb_global_mut bb_global_mut;
+
+struct bb_global
+{
+	bb_val* value;
+	bb_valtype type;
+	bb_global_mut mut;
+};
+typedef struct bb_global bb_global;
+
 // typedef void* bb_malloc_func(size_t size, void* userdata);
 // typedef void* bb_realloc_func(void* mem, size_t size, void* userdata);
 // typedef void bb_free_func(void* mem, void* userdata);
@@ -118,5 +135,6 @@ bb_error bb_module_instance_step(bb_module_instance* instance, bb_val* returns, 
 bb_error bb_module_instance_debug_set_trap(bb_module_instance* instance, uint32_t address, bb_debug_trap_mode trap_mode);
 void* bb_module_instance_mem(bb_module_instance* instance, size_t offset, size_t length);
 bb_slice bb_module_instance_mem_all(bb_module_instance* instance);
+bb_global bb_module_instance_find_global(bb_module_instance* instance, const char* global_name);
 
 bool bb_func_handle_isvalid(bb_func_handle handle);

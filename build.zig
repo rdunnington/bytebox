@@ -3,6 +3,7 @@ const std = @import("std");
 const CrossTarget = std.zig.CrossTarget;
 const Builder = std.build.Builder;
 const LibExeObjStep = std.build.LibExeObjStep;
+const InstallFileStep = std.build.InstallFileStep;
 
 const ExeOpts = struct {
     exe_name: []const u8,
@@ -47,9 +48,9 @@ pub fn build(b: *Builder) void {
         },
     });
 
-    var c_header = b.addInstallFileWithDir(std.build.FileSource{ .path = "src/bytebox.h" }, .header, "bytebox.h");
+    var c_header: *InstallFileStep = b.addInstallFileWithDir(std.build.FileSource{ .path = "src/bytebox.h" }, .header, "bytebox.h");
 
-    const lib_bytebox = b.addStaticLibrary("bytebox", "src/cffi.zig");
+    const lib_bytebox: *LibExeObjStep = b.addStaticLibrary("bytebox", "src/cffi.zig");
     lib_bytebox.setTarget(target);
     lib_bytebox.setBuildMode(b.standardReleaseOptions());
     lib_bytebox.step.dependOn(&c_header.step);
