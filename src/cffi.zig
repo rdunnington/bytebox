@@ -68,6 +68,17 @@ const CDebugTrapMode = enum(c_int) {
     Enabled,
 };
 
+const CGlobalMut = enum(c_int) {
+    Immutable = 0,
+    Mutable = 1,
+};
+
+const CGlobalExport = extern struct {
+    value: ?*Val,
+    type: ValType,
+    mut: CGlobalMut,
+};
+
 // TODO logging callback as well?
 // TODO allocator hooks
 // const CAllocFunc = *const fn (size: usize, userdata: ?*anyopaque) ?*anyopaque;
@@ -239,6 +250,8 @@ export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?
         package.?.addHostFunction(name, param_types, return_types, func.?, userdata) catch {
             return CError.OutOfMemory;
         };
+
+        return CError.Ok;
     }
 
     return CError.InvalidParameter;
@@ -414,17 +427,6 @@ export fn bb_module_instance_mem_all(module: ?*ModuleInstance) CSlice {
         .length = 0,
     };
 }
-
-const CGlobalMut = enum(c_int) {
-    Immutable = 0,
-    Mutable = 1,
-};
-
-const CGlobalExport = extern struct {
-    value: ?*Val,
-    type: ValType,
-    mut: CGlobalMut,
-};
 
 export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name: ?[*:0]const c_char) CGlobalExport {
     comptime {
