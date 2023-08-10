@@ -719,7 +719,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
     memory.* = MemoryInstance.init(bytebox.Limits{
         .min = 1,
         .max = 2,
-    });
+    }, null);
     _ = memory.grow(1);
     try imports.memories.append(bytebox.MemoryImport{
         .name = try allocator.dupe(u8, "memory"),

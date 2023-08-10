@@ -19,6 +19,17 @@ enum bb_error
 	BB_ERROR_UNKNOWNEXPORT,
     BB_ERROR_UNKNOWNIMPORT,
     BB_ERROR_INCOMPATIBLEIMPORT,
+    BB_ERROR_TRAP_DEBUG,
+    BB_ERROR_TRAP_UNREACHABLE,
+    BB_ERROR_TRAP_INTEGERDIVISIONBYZERO,
+    BB_ERROR_TRAP_INTEGEROVERFLOW,
+    BB_ERROR_TRAP_INDIRECTCALLTYPEMISMATCH,
+    BB_ERROR_TRAP_INVALIDINTEGERCONVERSION,
+    BB_ERROR_TRAP_OUTOFBOUNDSMEMORYACCESS,
+    BB_ERROR_TRAP_UNDEFINEDELEMENT,
+    BB_ERROR_TRAP_UNINITIALIZEDELEMENT,
+    BB_ERROR_TRAP_OUTOFBOUNDSTABLEACCESS,
+    BB_ERROR_TRAP_STACKEXHAUSTED,
 };
 typedef enum bb_error bb_error;
 
@@ -53,10 +64,20 @@ typedef struct bb_module_definition bb_module_definition;
 typedef struct bb_module_instance bb_module_instance;
 typedef struct bb_import_package bb_import_package;
 
+typedef void bb_host_function(void* userdata, bb_module_instance* module, const bb_val* params, bb_val* returns);
+typedef void* bb_wasm_memory_resize(void* mem, size_t new_size_bytes, size_t old_size_bytes, void* userdata);
+typedef void bb_wasm_memory_free(void* mem, size_t size_bytes, void* userdata);
+
 struct bb_module_instance_instantiate_opts
 {
 	bb_import_package** packages;
 	size_t num_packages;
+	struct {
+		bb_wasm_memory_resize* resize_callback;
+		bb_wasm_memory_free* free_callback;
+		void* userdata;
+	} wasm_memory_config;
+	size_t stack_size;
 	bool enable_debug;
 };
 typedef struct bb_module_instance_instantiate_opts bb_module_instance_instantiate_opts;
@@ -83,15 +104,6 @@ struct bb_func_info
 };
 typedef struct bb_func_info bb_func_info;
 
-enum bb_debug_trap_mode
-{
-	BB_DEBUG_TRAP_MODE_DISABLED,
-	BB_DEBUG_TRAP_MODE_ENABLED,
-};
-typedef enum bb_debug_trap_mode bb_debug_trap_mode;
-
-typedef void bb_host_function(void* userdata, bb_module_instance* module, const bb_val* params, bb_val* returns);
-
 enum bb_global_mut
 {
 	BB_GLOBAL_MUT_IMMUTABLE,
@@ -106,6 +118,21 @@ struct bb_global
 	bb_global_mut mut;
 };
 typedef struct bb_global bb_global;
+
+enum bb_debug_trace_mode
+{
+	BB_DEBUG_TRACE_NONE,
+	BB_DEBUG_TRACE_FUNCTION,
+	BB_DEBUG_TRACE_INSTRUCTION,
+};
+typedef enum bb_debug_trace_mode bb_debug_trace_mode;
+
+enum bb_debug_trap_mode
+{
+	BB_DEBUG_TRAP_MODE_DISABLED,
+	BB_DEBUG_TRAP_MODE_ENABLED,
+};
+typedef enum bb_debug_trap_mode bb_debug_trap_mode;
 
 // typedef void* bb_malloc_func(size_t size, void* userdata);
 // typedef void* bb_realloc_func(void* mem, size_t size, void* userdata);
@@ -124,6 +151,8 @@ bb_import_package* bb_import_package_init(const char* name);
 void bb_import_package_deinit(bb_import_package* package); // only deinit when all module_instances using the package have been deinited
 bb_error bb_import_package_add_function(bb_import_package* package, bb_host_function* func, const char* export_name, bb_valtype* params, size_t num_params, bb_valtype* returns, size_t num_returns, void* userdata);
 
+void bb_set_debug_trace_mode(bb_debug_trace_mode mode);
+
 bb_module_instance* bb_module_instance_init(bb_module_definition* definition);
 void bb_module_instance_deinit(bb_module_instance* instance);
 bb_error bb_module_instance_instantiate(bb_module_instance* instance, bb_module_instance_instantiate_opts opts);
@@ -135,6 +164,7 @@ bb_error bb_module_instance_step(bb_module_instance* instance, bb_val* returns, 
 bb_error bb_module_instance_debug_set_trap(bb_module_instance* instance, uint32_t address, bb_debug_trap_mode trap_mode);
 void* bb_module_instance_mem(bb_module_instance* instance, size_t offset, size_t length);
 bb_slice bb_module_instance_mem_all(bb_module_instance* instance);
+bb_error bb_module_instance_mem_grow(bb_module_instance* instance, size_t num_pages);
 bb_global bb_module_instance_find_global(bb_module_instance* instance, const char* global_name);
 
 bool bb_func_handle_isvalid(bb_func_handle handle);

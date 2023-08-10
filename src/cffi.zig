@@ -23,6 +23,17 @@ const CError = enum(c_int) {
     UnknownExport,
     UnknownImport,
     IncompatibleImport,
+    TrapDebug,
+    TrapUnreachable,
+    TrapIntegerDivisionByZero,
+    TrapIntegerOverflow,
+    TrapIndirectCallTypeMismatch,
+    TrapInvalidIntegerConversion,
+    TrapOutOfBoundsMemoryAccess,
+    TrapUndefinedElement,
+    TrapUninitializedElement,
+    TrapOutOfBoundsTableAccess,
+    TrapStackExhausted,
 };
 
 const CModuleDefinitionInitOpts = extern struct {
@@ -44,6 +55,12 @@ const CImportFunction = extern struct {
 const CModuleInstanceInstantiateOpts = extern struct {
     packages: ?[*]?*const ModuleImportPackage,
     num_packages: usize,
+    wasm_memory_config: extern struct {
+        resize: ?core.WasmMemoryResizeFunction,
+        free: ?core.WasmMemoryFreeFunction,
+        userdata: ?*anyopaque,
+    },
+    stack_size: usize,
     enable_debug: bool,
 };
 
@@ -61,6 +78,12 @@ const CFuncInfo = extern struct {
     num_params: usize,
     returns: ?[*]const ValType,
     num_returns: usize,
+};
+
+const CDebugTraceMode = enum(c_int) {
+    None,
+    Function,
+    Instruction,
 };
 
 const CDebugTrapMode = enum(c_int) {
@@ -152,6 +175,17 @@ export fn bb_error_str(c_error: CError) [*:0]const c_char {
         .UnknownExport => "BB_ERROR_UNKNOWNEXPORT",
         .UnknownImport => "BB_ERROR_UNKNOWNIMPORT",
         .IncompatibleImport => "BB_ERROR_INCOMPATIBLEIMPORT",
+        .TrapDebug => "BB_ERROR_TRAP_DEBUG",
+        .TrapUnreachable => "BB_ERROR_TRAP_UNREACHABLE",
+        .TrapIntegerDivisionByZero => "BB_ERROR_TRAP_INTEGERDIVISIONBYZERO",
+        .TrapIntegerOverflow => "BB_ERROR_TRAP_INTEGEROVERFLOW",
+        .TrapIndirectCallTypeMismatch => "BB_ERROR_TRAP_INDIRECTCALLTYPEMISMATCH",
+        .TrapInvalidIntegerConversion => "BB_ERROR_TRAP_INVALIDINTEGERCONVERSION",
+        .TrapOutOfBoundsMemoryAccess => "BB_ERROR_TRAP_OUTOFBOUNDSMEMORYACCESS",
+        .TrapUndefinedElement => "BB_ERROR_TRAP_UNDEFINEDELEMENT",
+        .TrapUninitializedElement => "BB_ERROR_TRAP_UNINITIALIZEDELEMENT",
+        .TrapOutOfBoundsTableAccess => "BB_ERROR_TRAP_OUTOFBOUNDSTABLEACCESS",
+        .TrapStackExhausted => "BB_ERROR_TRAP_STACKEXHAUSTED",
     };
 }
 
@@ -257,6 +291,15 @@ export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?
     return CError.InvalidParameter;
 }
 
+export fn bb_set_debug_trace_mode(c_mode: CDebugTraceMode) void {
+    const mode = switch (c_mode) {
+        .None => core.DebugTrace.Mode.None,
+        .Function => core.DebugTrace.Mode.Function,
+        .Instruction => core.DebugTrace.Mode.Instruction,
+    };
+    _ = core.DebugTrace.setMode(mode);
+}
+
 export fn bb_module_instance_init(module_definition: ?*ModuleDefinition) ?*ModuleInstance {
     var allocator = cffi_gpa.allocator();
 
@@ -283,7 +326,12 @@ export fn bb_module_instance_deinit(module: ?*ModuleInstance) void {
 }
 
 export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModuleInstanceInstantiateOpts) CError {
-    if (module != null and c_opts.packages != null) {
+    // Both wasm memory config callbacks must be set or null - partially overriding the behavior isn't valid
+    var num_wasm_memory_callbacks: u32 = 0;
+    num_wasm_memory_callbacks += if (c_opts.wasm_memory_config.resize != null) 1 else 0;
+    num_wasm_memory_callbacks += if (c_opts.wasm_memory_config.free != null) 1 else 0;
+
+    if (module != null and c_opts.packages != null and num_wasm_memory_callbacks != 1) {
         const packages: []?*const ModuleImportPackage = c_opts.packages.?[0..c_opts.num_packages];
 
         var allocator = cffi_gpa.allocator();
@@ -297,10 +345,19 @@ export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModu
             }
         }
 
-        const opts = core.ModuleInstantiateOpts{
+        var opts = core.ModuleInstantiateOpts{
             .imports = flat_packages.items,
+            .stack_size = c_opts.stack_size,
             .enable_debug = c_opts.enable_debug,
         };
+
+        if (num_wasm_memory_callbacks > 0) {
+            opts.wasm_memory_external = core.WasmMemoryExternal{
+                .resize_callback = c_opts.wasm_memory_config.resize.?,
+                .free_callback = c_opts.wasm_memory_config.free.?,
+                .userdata = c_opts.wasm_memory_config.userdata,
+            };
+        }
 
         if (module.?.instantiate(opts)) {
             return CError.Ok;
@@ -428,6 +485,17 @@ export fn bb_module_instance_mem_all(module: ?*ModuleInstance) CSlice {
     };
 }
 
+export fn bb_module_instance_mem_grow(module: ?*ModuleInstance, num_pages: usize) CError {
+    if (module != null) {
+        if (module.?.memoryGrow(num_pages)) {
+            return CError.Ok;
+        } else {
+            return CError.Failed;
+        }
+    }
+    return CError.InvalidParameter;
+}
+
 export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name: ?[*:0]const c_char) CGlobalExport {
     comptime {
         std.debug.assert(@enumToInt(CGlobalMut.Immutable) == @enumToInt(core.GlobalMut.Immutable));
@@ -473,6 +541,17 @@ fn translateError(err: anyerror) CError {
         error.OutOfMemory => return CError.OutOfMemory,
         error.UnlinkableUnknownImport => return CError.UnknownImport,
         error.UnlinkableIncompatibleImportType => return CError.IncompatibleImport,
+        error.TrapDebug => return CError.TrapDebug,
+        error.TrapUnreachable => return CError.TrapUnreachable,
+        error.TrapIntegerDivisionByZero => return CError.TrapIntegerDivisionByZero,
+        error.TrapIntegerOverflow => return CError.TrapIntegerOverflow,
+        error.TrapIndirectCallTypeMismatch => return CError.TrapIndirectCallTypeMismatch,
+        error.TrapInvalidIntegerConversion => return CError.TrapInvalidIntegerConversion,
+        error.TrapOutOfBoundsMemoryAccess => return CError.TrapOutOfBoundsMemoryAccess,
+        error.TrapUndefinedElement => return CError.TrapUndefinedElement,
+        error.TrapUninitializedElement => return CError.TrapUninitializedElement,
+        error.TrapOutOfBoundsTableAccess => return CError.TrapOutOfBoundsTableAccess,
+        error.TrapStackExhausted => return CError.TrapStackExhausted,
         else => return CError.Failed,
     }
 }

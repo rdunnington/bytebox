@@ -1066,30 +1066,65 @@ const MemoryDefinition = struct {
     limits: Limits,
 };
 
+pub const WasmMemoryResizeFunction = *const fn (mem: ?[*]u8, new_size_bytes: usize, old_size_bytes: usize, userdata: ?*anyopaque) ?[*]u8;
+pub const WasmMemoryFreeFunction = *const fn (mem: ?[*]u8, size_bytes: usize, userdata: ?*anyopaque) void;
+
+pub const WasmMemoryExternal = struct {
+    resize_callback: WasmMemoryResizeFunction,
+    free_callback: WasmMemoryFreeFunction,
+    userdata: ?*anyopaque,
+};
+
 pub const MemoryInstance = struct {
+    const BackingMemoryType = enum(u8) {
+        Internal,
+        External,
+    };
+
+    const BackingMemory = union(BackingMemoryType) {
+        Internal: StableArray(u8),
+        External: struct {
+            buffer: []u8,
+            params: WasmMemoryExternal,
+        },
+    };
+
     const k_page_size: usize = 64 * 1024;
     const k_max_pages: usize = std.math.powi(usize, 2, 16) catch unreachable;
 
     limits: Limits,
-    mem: StableArray(u8),
+    mem: BackingMemory,
 
-    pub fn init(limits: Limits) MemoryInstance {
+    pub fn init(limits: Limits, params: ?WasmMemoryExternal) MemoryInstance {
         const max_pages = if (limits.max) |max| std.math.max(1, max) else k_max_pages;
+
+        var mem = if (params == null) BackingMemory{
+            .Internal = StableArray(u8).init(max_pages * k_page_size),
+        } else BackingMemory{ .External = .{
+            .buffer = &[0]u8{},
+            .params = params.?,
+        } };
 
         var instance = MemoryInstance{
             .limits = Limits{ .min = 0, .max = @intCast(u32, max_pages) },
-            .mem = StableArray(u8).init(max_pages * k_page_size),
+            .mem = mem,
         };
 
         return instance;
     }
 
     pub fn deinit(self: *MemoryInstance) void {
-        self.mem.deinit();
+        switch (self.mem) {
+            .Internal => |*m| m.deinit(),
+            .External => |*m| m.params.free_callback(m.buffer.ptr, m.buffer.len, m.params.userdata),
+        }
     }
 
     pub fn size(self: *const MemoryInstance) usize {
-        return self.mem.items.len / k_page_size;
+        return switch (self.mem) {
+            .Internal => |m| m.items.len / k_page_size,
+            .External => |m| m.buffer.len / k_page_size,
+        };
     }
 
     pub fn grow(self: *MemoryInstance, num_pages: usize) bool {
@@ -1106,11 +1141,27 @@ pub const MemoryInstance = struct {
 
         const commit_size: usize = (self.limits.min + num_pages) * k_page_size;
 
-        self.mem.resize(commit_size) catch return false;
+        switch (self.mem) {
+            .Internal => |*m| m.resize(commit_size) catch return false,
+            .External => |*m| {
+                var new_mem: ?[*]u8 = m.params.resize_callback(m.buffer.ptr, commit_size, m.buffer.len, m.params.userdata);
+                if (new_mem == null) {
+                    return false;
+                }
+                m.buffer = new_mem.?[0..commit_size];
+            },
+        }
 
         self.limits.min = @intCast(u32, total_pages);
 
         return true;
+    }
+
+    pub fn buffer(self: *const MemoryInstance) []u8 {
+        return switch (self.mem) {
+            .Internal => |m| m.items,
+            .External => |m| m.buffer,
+        };
     }
 
     fn ensureMinSize(self: *MemoryInstance, size_bytes: usize) !void {
@@ -1121,7 +1172,7 @@ pub const MemoryInstance = struct {
             }
 
             var needed_pages = num_min_pages - self.limits.min;
-            if (self.grow(needed_pages) == false) {
+            if (self.resize(needed_pages) == false) {
                 unreachable;
             }
         }
@@ -3629,11 +3680,12 @@ const InstructionFuncs = struct {
 
             const end = offset + (bit_count / 8);
 
-            if (memory.mem.items.len < end) {
+            const buffer = memory.buffer();
+            if (buffer.len < end) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
-            const mem = memory.mem.items[offset..end];
+            const mem = buffer[offset..end];
             const value = std.mem.readIntSliceLittle(read_type, mem);
             return @bitCast(T, value);
         }
@@ -3649,12 +3701,13 @@ const InstructionFuncs = struct {
             const byte_count = @sizeOf(read_type);
             const end = offset + (byte_count * array_len);
 
-            if (memory.mem.items.len < end) {
+            const buffer = memory.buffer();
+            if (buffer.len < end) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
             var ret: [array_len]out_type = undefined;
-            const mem = memory.mem.items[offset..end];
+            const mem = buffer[offset..end];
             var i: usize = 0;
             while (i < array_len) : (i += 1) {
                 const value_start = i * byte_count;
@@ -3683,13 +3736,15 @@ const InstructionFuncs = struct {
             };
 
             const end = offset + (bit_count / 8);
-            if (memory.mem.items.len < end) {
+            const buffer = memory.buffer();
+
+            if (buffer.len < end) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
             const write_value = @bitCast(write_type, value);
 
-            const mem = memory.mem.items[offset..end];
+            const mem = buffer[offset..end];
             std.mem.writeIntSliceLittle(write_type, mem, write_value);
         }
 
@@ -6086,7 +6141,9 @@ const InstructionFuncs = struct {
         if (data.bytes.items.len < data_offset + length or data_offset < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
-        if (memory.mem.items.len < memory_offset + length or memory_offset < 0) {
+
+        const buffer = memory.buffer();
+        if (buffer.len < memory_offset + length or memory_offset < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
@@ -6095,7 +6152,7 @@ const InstructionFuncs = struct {
         const length_u32 = @intCast(u32, length);
 
         var source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
-        var destination = memory.mem.items[memory_offset_u32 .. memory_offset_u32 + length_u32];
+        var destination = buffer[memory_offset_u32 .. memory_offset_u32 + length_u32];
         std.mem.copy(u8, destination, source);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -6119,10 +6176,12 @@ const InstructionFuncs = struct {
         if (length < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
-        if (memory.mem.items.len < source_offset + length or source_offset < 0) {
+
+        const buffer = memory.buffer();
+        if (buffer.len < source_offset + length or source_offset < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
-        if (memory.mem.items.len < dest_offset + length or dest_offset < 0) {
+        if (buffer.len < dest_offset + length or dest_offset < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
@@ -6130,8 +6189,8 @@ const InstructionFuncs = struct {
         const dest_offset_u32 = @intCast(u32, dest_offset);
         const length_u32 = @intCast(u32, length);
 
-        var source = memory.mem.items[source_offset_u32 .. source_offset_u32 + length_u32];
-        var destination = memory.mem.items[dest_offset_u32 .. dest_offset_u32 + length_u32];
+        var source = buffer[source_offset_u32 .. source_offset_u32 + length_u32];
+        var destination = buffer[dest_offset_u32 .. dest_offset_u32 + length_u32];
 
         if (@ptrToInt(destination.ptr) < @ptrToInt(source.ptr)) {
             std.mem.copy(u8, destination, source);
@@ -6152,14 +6211,16 @@ const InstructionFuncs = struct {
         if (length < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
-        if (memory.mem.items.len < offset + length or offset < 0) {
+
+        const buffer = memory.buffer();
+        if (buffer.len < offset + length or offset < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
         const offset_u32 = @intCast(u32, offset);
         const length_u32 = @intCast(u32, length);
 
-        var destination = memory.mem.items[offset_u32 .. offset_u32 + length_u32];
+        var destination = buffer[offset_u32 .. offset_u32 + length_u32];
 
         std.mem.set(u8, destination, value);
         try @call(.{ .modifier = .always_tail }, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -9090,6 +9151,8 @@ pub const Store = struct {
 pub const ModuleInstantiateOpts = struct {
     /// imports is not owned by ModuleInstance - caller must ensure its memory outlives ModuleInstance
     imports: ?[]const ModuleImportPackage = null,
+    wasm_memory_external: ?WasmMemoryExternal = null,
+    stack_size: usize = 0,
     enable_debug: bool = false,
 };
 
@@ -9251,11 +9314,13 @@ pub const ModuleInstance = struct {
             };
         }
 
-        // TODO expose these options to the user
+        const stack_size = if (opts.stack_size > 0) opts.stack_size else 1024 * 128;
+        const stack_size_f = @intToFloat(f64, stack_size);
+
         try self.stack.allocMemory(.{
-            .max_values = 1024 * 64,
-            .max_labels = 1024 * 8,
-            .max_frames = 256,
+            .max_values = @floatToInt(u32, stack_size_f * 0.75),
+            .max_labels = @floatToInt(u16, stack_size_f * 0.24),
+            .max_frames = @floatToInt(u16, stack_size_f * 0.01),
         });
 
         var store: *Store = &self.store;
@@ -9374,7 +9439,7 @@ pub const ModuleInstance = struct {
         try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
 
         for (module_def.memories.items) |*def_memory| {
-            var memory = MemoryInstance.init(def_memory.limits);
+            var memory = MemoryInstance.init(def_memory.limits, opts.wasm_memory_external);
             if (memory.grow(def_memory.limits.min) == false) {
                 unreachable;
             }
@@ -9457,11 +9522,13 @@ pub const ModuleInstance = struct {
                 const offset_begin: usize = (def_data.offset.?).resolveTo(store, u32);
                 const offset_end: usize = offset_begin + num_bytes;
 
-                if (memory.mem.items.len < offset_end) {
+                const mem_buffer: []u8 = memory.buffer();
+
+                if (mem_buffer.len < offset_end) {
                     return error.UninstantiableOutOfBoundsMemoryAccess;
                 }
 
-                var destination = memory.mem.items[offset_begin..offset_end];
+                var destination = mem_buffer[offset_begin..offset_end];
                 std.mem.copy(u8, destination, def_data.bytes.items);
             }
         }
@@ -9686,8 +9753,9 @@ pub const ModuleInstance = struct {
     pub fn memorySlice(self: *ModuleInstance, offset: usize, length: usize) []u8 {
         const memory: *MemoryInstance = self.store.getMemory(0);
 
-        if (offset + length < memory.mem.items.len) {
-            var data: []u8 = memory.mem.items[offset .. offset + length];
+        const buffer = memory.buffer();
+        if (offset + length < buffer.len) {
+            var data: []u8 = buffer[offset .. offset + length];
             return data;
         }
 
@@ -9696,7 +9764,13 @@ pub const ModuleInstance = struct {
 
     pub fn memoryAll(self: *ModuleInstance) []u8 {
         const memory: *MemoryInstance = self.store.getMemory(0);
-        return memory.mem.items;
+        const buffer = memory.buffer();
+        return buffer;
+    }
+
+    pub fn memoryGrow(self: *ModuleInstance, num_pages: usize) bool {
+        const memory: *MemoryInstance = self.store.getMemory(0);
+        return memory.grow(num_pages);
     }
 
     pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
