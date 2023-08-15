@@ -3,6 +3,7 @@ const std = @import("std");
 const CrossTarget = std.zig.CrossTarget;
 const Builder = std.build.Builder;
 const LibExeObjStep = std.build.LibExeObjStep;
+const InstallFileStep = std.build.InstallFileStep;
 
 const ExeOpts = struct {
     exe_name: []const u8,
@@ -14,7 +15,7 @@ const ExeOpts = struct {
 };
 
 pub fn build(b: *Builder) void {
-    const should_emit_asm = b.option(bool, "asm", "Emit asm for the bytebox .exe") orelse false;
+    const should_emit_asm = b.option(bool, "asm", "Emit asm for the bytebox binaries") orelse false;
 
     const target = b.standardTargetOptions(.{});
 
@@ -46,6 +47,23 @@ pub fn build(b: *Builder) void {
             &bench_mandelbrot_step.step,
         },
     });
+
+    var c_header: *InstallFileStep = b.addInstallFileWithDir(std.build.FileSource{ .path = "src/bytebox.h" }, .header, "bytebox.h");
+
+    const lib_bytebox: *LibExeObjStep = b.addStaticLibrary("bytebox", "src/cffi.zig");
+    lib_bytebox.setTarget(target);
+    lib_bytebox.setBuildMode(b.standardReleaseOptions());
+    lib_bytebox.step.dependOn(&c_header.step);
+    lib_bytebox.emit_asm = if (should_emit_asm) .emit else .default;
+    // const lib_bytebox = b.addStaticLibrary(.{
+    //     .name = "bytebox",
+    //     .root_source_file = .{ .path = "src/cffi.zig" },
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // lib_bytebox.installHeader("src/bytebox.h", "bytebox.h");
+
+    lib_bytebox.install();
 }
 
 fn buildExeWithStep(b: *Builder, target: CrossTarget, opts: ExeOpts) void {

@@ -5,6 +5,7 @@ const common = @import("common.zig");
 pub const Opcode = enum(u16) {
     Invalid, // Has no corresponding mapping in WasmOpcode.
     Unreachable,
+    DebugTrap, // Has no corresponding mapping in WasmOpcode, intended for use in returning control flow to invoker
     Noop,
     Block,
     Loop,

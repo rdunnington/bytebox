@@ -251,7 +251,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                     if (builtin.os.tag == .windows) {
                         const w = os.windows;
                         const addr: w.PVOID = try w.VirtualAlloc(null, self.max_virtual_alloc_bytes, w.MEM_RESERVE, w.PAGE_READWRITE);
-                        self.items.ptr = @alignCast(alignment, @ptrCast([*]T, addr));
+                        self.items.ptr = @ptrCast([*]T, @alignCast(alignment, addr));
                         self.items.len = 0;
                     } else {
                         const prot: u32 = std.c.PROT.READ | std.c.PROT.WRITE;
@@ -259,7 +259,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                         const fd: os.fd_t = -1;
                         const offset: usize = 0;
                         var slice = try os.mmap(null, self.max_virtual_alloc_bytes, prot, map, fd, offset);
-                        self.items.ptr = @alignCast(alignment, @ptrCast([*]T, slice.ptr));
+                        self.items.ptr = @ptrCast([*]T, @alignCast(alignment, slice.ptr));
                         self.items.len = 0;
                     }
                 } else if (current_capacity_bytes == self.max_virtual_alloc_bytes) {

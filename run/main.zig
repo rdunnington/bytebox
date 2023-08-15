@@ -256,7 +256,7 @@ pub fn main() !void {
     var module_instance = bytebox.ModuleInstance.init(&module_def, allocator);
     defer module_instance.deinit();
 
-    var imports_wasi: bytebox.ModuleImports = try wasi.initImports(.{
+    var imports_wasi: bytebox.ModuleImportPackage = try wasi.initImports(.{
         .argv = opts.wasm_argv,
         .env = opts.wasm_env,
         .dirs = opts.wasm_dirs,
@@ -264,7 +264,7 @@ pub fn main() !void {
     defer wasi.deinitImports(&imports_wasi);
 
     var instantiate_opts = bytebox.ModuleInstantiateOpts{
-        .imports = &[_]bytebox.ModuleImports{imports_wasi},
+        .imports = &[_]bytebox.ModuleImportPackage{imports_wasi},
     };
 
     module_instance.instantiate(instantiate_opts) catch |e| {
@@ -275,23 +275,24 @@ pub fn main() !void {
     const invoke_funcname: []const u8 = if (opts.invoke) |invoke| invoke.funcname else "_start";
     const invoke_args: [][]const u8 = if (opts.invoke) |invoke| invoke.args else &[_][]u8{};
 
-    const func_info: ?bytebox.FunctionExportInfo = module_def.getFuncExportInfo(invoke_funcname);
-    if (func_info == null) {
+    const func_handle: bytebox.FunctionHandle = module_instance.getFunctionHandle(invoke_funcname) catch {
         // don't log an error if the user didn't explicitly try to invoke a function
         if (opts.invoke != null) {
             std.log.err("Failed to find function '{s}' - either it doesn't exist or is not a public export.", .{invoke_funcname});
         }
         return RunErrors.MissingFunction;
-    }
+    };
+
+    const func_export: bytebox.FunctionExport = module_def.getFunctionExport(func_handle);
 
     const num_params: usize = invoke_args.len;
-    if (func_info.?.params.len != num_params) {
+    if (func_export.params.len != num_params) {
         var strbuf = std.ArrayList(u8).init(allocator);
         defer strbuf.deinit();
-        try writeSignature(&strbuf, &func_info.?);
+        try writeSignature(&strbuf, &func_export);
         std.log.err("Specified {} params but expected {}. The signature of '{s}' is:\n{s}", .{
             num_params,
-            func_info.?.params.len,
+            func_export.params.len,
             invoke_funcname,
             strbuf.items,
         });
@@ -303,7 +304,7 @@ pub fn main() !void {
     var params = std.ArrayList(bytebox.Val).init(allocator);
     defer params.deinit();
     try params.resize(invoke_args.len);
-    for (func_info.?.params) |valtype, i| {
+    for (func_export.params) |valtype, i| {
         const arg: []const u8 = invoke_args[i];
         switch (valtype) {
             .I32 => {
@@ -350,9 +351,9 @@ pub fn main() !void {
     }
 
     var returns = std.ArrayList(bytebox.Val).init(allocator);
-    try returns.resize(func_info.?.returns.len);
+    try returns.resize(func_export.returns.len);
 
-    module_instance.invoke(invoke_funcname, params.items, returns.items) catch |e| {
+    module_instance.invoke(func_handle, params.items, returns.items, .{}) catch |e| {
         var backtrace = module_instance.formatBacktrace(1, allocator) catch unreachable;
         std.log.err("Caught {} during function invoke. Backtrace:\n{s}\n", .{ e, backtrace.items });
         backtrace.deinit();
@@ -365,13 +366,14 @@ pub fn main() !void {
         var writer = strbuf.writer();
 
         if (returns.items.len > 0) {
+            const return_types = func_export.returns;
             try std.fmt.format(writer, ":\n", .{});
-            for (returns.items) |val| {
-                switch (val) {
-                    .I32 => |v| try std.fmt.format(writer, "  {} (i32)\n", .{v}),
-                    .I64 => |v| try std.fmt.format(writer, "  {} (i64)\n", .{v}),
-                    .F32 => |v| try std.fmt.format(writer, "  {} (f32)\n", .{v}),
-                    .F64 => |v| try std.fmt.format(writer, "  {} (f64)\n", .{v}),
+            for (returns.items) |_, i| {
+                switch (return_types[i]) {
+                    .I32 => try std.fmt.format(writer, "  {} (i32)\n", .{returns.items[i]}),
+                    .I64 => try std.fmt.format(writer, "  {} (i64)\n", .{returns.items[i]}),
+                    .F32 => try std.fmt.format(writer, "  {} (f32)\n", .{returns.items[i]}),
+                    .F64 => try std.fmt.format(writer, "  {} (f64)\n", .{returns.items[i]}),
                     .V128 => unreachable, // TODO support
                     .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
                     .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
@@ -385,7 +387,7 @@ pub fn main() !void {
     }
 }
 
-fn writeSignature(strbuf: *std.ArrayList(u8), info: *const bytebox.FunctionExportInfo) !void {
+fn writeSignature(strbuf: *std.ArrayList(u8), info: *const bytebox.FunctionExport) !void {
     var writer = strbuf.writer();
     if (info.params.len == 0) {
         try std.fmt.format(writer, "  params: none\n", .{});

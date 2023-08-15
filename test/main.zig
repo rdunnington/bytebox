@@ -2,6 +2,7 @@ const std = @import("std");
 const bytebox = @import("bytebox");
 const ValType = bytebox.ValType;
 const Val = bytebox.Val;
+const TaggedVal = bytebox.TaggedVal;
 const v128 = bytebox.v128;
 const i8x16 = bytebox.i8x16;
 const i16x8 = bytebox.i16x8;
@@ -44,7 +45,7 @@ const Action = struct {
     type: ActionType,
     module: []const u8,
     field: []const u8,
-    args: std.ArrayList(ValTypedVec),
+    args: std.ArrayList(LaneTypedVal),
 };
 
 const BadModuleError = struct {
@@ -65,7 +66,7 @@ const CommandRegister = struct {
 
 const CommandAssertReturn = struct {
     action: Action,
-    expected_returns: ?std.ArrayList(ValTypedVec),
+    expected_returns: ?std.ArrayList(LaneTypedVal),
 };
 
 const CommandAssertTrap = struct {
@@ -185,7 +186,7 @@ fn strcmp(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
-fn parseVal(obj: std.json.ObjectMap) !Val {
+fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
     const Helpers = struct {
         fn parseI8(str: []const u8) !i8 {
             return std.fmt.parseInt(i8, str, 10) catch @bitCast(i8, try std.fmt.parseInt(u8, str, 10));
@@ -252,16 +253,16 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
 
     if (strcmp("i32", json_type.String)) {
         const int = try Helpers.parseI32(json_value.String);
-        return Val{ .I32 = int };
+        return TaggedVal{ .type = .I32, .val = Val{ .I32 = int } };
     } else if (strcmp("i64", json_type.String)) {
         const int = try Helpers.parseI64(json_value.String);
-        return Val{ .I64 = int };
+        return TaggedVal{ .type = .I64, .val = Val{ .I64 = int } };
     } else if (strcmp("f32", json_type.String)) {
         var float: f32 = try Helpers.parseF32(json_value.String);
-        return Val{ .F32 = float };
+        return TaggedVal{ .type = .F32, .val = Val{ .F32 = float } };
     } else if (strcmp("f64", json_type.String)) {
         var float: f64 = try Helpers.parseF64(json_value.String);
-        return Val{ .F64 = float };
+        return TaggedVal{ .type = .F64, .val = Val{ .F64 = float } };
     } else if (strcmp("v128", json_type.String)) {
         const json_lane_type = obj.get("lane_type").?;
         var vec: v128 = undefined;
@@ -281,16 +282,19 @@ fn parseVal(obj: std.json.ObjectMap) !Val {
             unreachable;
         }
 
-        return Val{ .V128 = vec };
+        return TaggedVal{ .type = .V128, .val = Val{ .V128 = vec } };
     } else if (strcmp("externref", json_type.String)) {
-        if (strcmp("null", json_value.String)) {
-            return Val.nullRef(ValType.ExternRef);
-        } else {
-            const int = try std.fmt.parseInt(u32, json_value.String, 10);
-            return Val{ .ExternRef = int };
-        }
+        const val: Val = blk: {
+            if (strcmp("null", json_value.String)) {
+                break :blk Val.nullRef(ValType.ExternRef) catch unreachable;
+            } else {
+                const int = try std.fmt.parseInt(u32, json_value.String, 10);
+                break :blk Val{ .ExternRef = int };
+            }
+        };
+        return TaggedVal{ .type = .ExternRef, .val = val };
     } else if (strcmp("funcref", json_type.String) and strcmp("null", json_value.String)) {
-        return Val.nullRef(ValType.FuncRef);
+        return TaggedVal{ .type = .FuncRef, .val = Val.nullRef(ValType.FuncRef) catch unreachable };
     } else {
         print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
     }
@@ -325,29 +329,29 @@ const V128LaneType = enum(u8) {
     }
 };
 
-const ValTypedVec = struct {
-    v: Val,
+const LaneTypedVal = struct {
+    v: TaggedVal,
     lane_type: V128LaneType, // only valid when v contains a V128
 
-    fn toValArrayList(typed: []const ValTypedVec, allocator: std.mem.Allocator) !std.ArrayList(Val) {
+    fn toValArrayList(typed: []const LaneTypedVal, allocator: std.mem.Allocator) !std.ArrayList(Val) {
         var vals = std.ArrayList(Val).init(allocator);
         try vals.ensureTotalCapacityPrecise(typed.len);
         for (typed) |v| {
-            try vals.append(v.v);
+            try vals.append(v.v.val);
         }
         return vals;
     }
 };
 
-fn parseValTypedVec(obj: std.json.ObjectMap) !ValTypedVec {
-    var v = try parseVal(obj);
+fn parseLaneTypedVal(obj: std.json.ObjectMap) !LaneTypedVal {
+    var v: TaggedVal = try parseVal(obj);
     var lane_type = V128LaneType.I8x16;
-    if (std.meta.activeTag(v) == .V128) {
+    if (v.type == .V128) {
         const json_lane_type = obj.get("lane_type").?;
         lane_type = V128LaneType.fromString(json_lane_type.String);
     }
 
-    return ValTypedVec{
+    return LaneTypedVal{
         .v = v,
         .lane_type = lane_type,
     };
@@ -452,10 +456,10 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             const json_field = json_action.Object.getPtr("field").?;
 
             const json_args_or_null = json_action.Object.getPtr("args");
-            var args = std.ArrayList(ValTypedVec).init(_allocator);
+            var args = std.ArrayList(LaneTypedVal).init(_allocator);
             if (json_args_or_null) |json_args| {
                 for (json_args.Array.items) |item| {
-                    var val: ValTypedVec = try parseValTypedVec(item.Object);
+                    var val: LaneTypedVal = try parseLaneTypedVal(item.Object);
                     try args.append(val);
                 }
             }
@@ -539,12 +543,12 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
             var action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
-            var expected_returns_or_null: ?std.ArrayList(ValTypedVec) = null;
+            var expected_returns_or_null: ?std.ArrayList(LaneTypedVal) = null;
             const json_expected_or_null = json_command.Object.getPtr("expected");
             if (json_expected_or_null) |json_expected| {
-                var expected_returns = std.ArrayList(ValTypedVec).init(allocator);
+                var expected_returns = std.ArrayList(LaneTypedVal).init(allocator);
                 for (json_expected.Array.items) |item| {
-                    try expected_returns.append(try parseValTypedVec(item.Object));
+                    try expected_returns.append(try parseLaneTypedVal(item.Object));
                 }
                 expected_returns_or_null = expected_returns;
             }
@@ -623,61 +627,46 @@ const TestOpts = struct {
     force_wasm_regen_only: bool = false,
 };
 
-fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
+fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackage {
     const Functions = struct {
-        fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
-            std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
+        fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].I32});
         }
 
-        fn printI64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
-            std.debug.assert(std.meta.activeTag(params[0]) == ValType.I64);
+        fn printI64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].I64});
         }
 
-        fn printF32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
-            std.debug.assert(std.meta.activeTag(params[0]) == ValType.F32);
+        fn printF32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].F32});
         }
 
-        fn printF64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 1);
-            std.debug.assert(returns.len == 0);
-            std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
+        fn printF64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{}", .{params[0].F64});
         }
 
-        fn printI32F32(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 2);
-            std.debug.assert(returns.len == 0);
-            std.debug.assert(std.meta.activeTag(params[0]) == ValType.I32);
-            std.debug.assert(std.meta.activeTag(params[1]) == ValType.F32);
+        fn printI32F32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
         }
 
-        fn printF64F64(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 2);
-            std.debug.assert(returns.len == 0);
-            std.debug.assert(std.meta.activeTag(params[0]) == ValType.F64);
-            std.debug.assert(std.meta.activeTag(params[1]) == ValType.F64);
+        fn printF64F64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
         }
 
-        fn print(_: ?*anyopaque, _: *bytebox.ModuleInstance, params: []const Val, returns: []Val) void {
-            std.debug.assert(params.len == 0);
-            std.debug.assert(returns.len == 0);
+        fn print(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
             // std.debug.print("\n", .{});
         }
     };
 
     const Helpers = struct {
-        fn addGlobal(imports: *bytebox.ModuleImports, _allocator: std.mem.Allocator, mut: bytebox.GlobalMut, comptime T: type, value: T, name: []const u8) !void {
+        fn addGlobal(imports: *bytebox.ModuleImportPackage, _allocator: std.mem.Allocator, mut: bytebox.GlobalMut, comptime T: type, value: T, name: []const u8) !void {
+            const valtype = switch (T) {
+                i32 => ValType.I32,
+                i64 => ValType.I64,
+                f32 => ValType.F32,
+                f64 => ValType.F64,
+                else => unreachable,
+            };
             const val: Val = switch (T) {
                 i32 => Val{ .I32 = value },
                 i64 => Val{ .I64 = value },
@@ -685,29 +674,35 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
                 f64 => Val{ .F64 = value },
                 else => unreachable,
             };
-            var global = try _allocator.create(bytebox.GlobalInstance);
-            global.* = bytebox.GlobalInstance{
+            var global_definition = try _allocator.create(bytebox.GlobalDefinition);
+            global_definition.* = bytebox.GlobalDefinition{
+                .valtype = valtype,
                 .mut = mut,
+                .expr = undefined, // unused
+            };
+            var global_instance = try _allocator.create(bytebox.GlobalInstance);
+            global_instance.* = bytebox.GlobalInstance{
+                .def = global_definition,
                 .value = val,
             };
             try imports.globals.append(bytebox.GlobalImport{
                 .name = try _allocator.dupe(u8, name),
-                .data = .{ .Host = global },
+                .data = .{ .Host = global_instance },
             });
         }
     };
-    var imports: bytebox.ModuleImports = try bytebox.ModuleImports.init("spectest", null, null, allocator);
+    var imports: bytebox.ModuleImportPackage = try bytebox.ModuleImportPackage.init("spectest", null, null, allocator);
 
     const no_returns = &[0]ValType{};
 
-    try imports.addHostFunction("print_i32", &[_]ValType{.I32}, no_returns, Functions.printI32);
-    try imports.addHostFunction("print_i64", &[_]ValType{.I64}, no_returns, Functions.printI64);
-    try imports.addHostFunction("print_f32", &[_]ValType{.F32}, no_returns, Functions.printF32);
-    try imports.addHostFunction("print_f64", &[_]ValType{.F64}, no_returns, Functions.printF64);
-    try imports.addHostFunction("print_i32_f32", &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32);
-    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
-    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64);
-    try imports.addHostFunction("print", &[_]ValType{}, no_returns, Functions.print);
+    try imports.addHostFunction("print_i32", &[_]ValType{.I32}, no_returns, Functions.printI32, null);
+    try imports.addHostFunction("print_i64", &[_]ValType{.I64}, no_returns, Functions.printI64, null);
+    try imports.addHostFunction("print_f32", &[_]ValType{.F32}, no_returns, Functions.printF32, null);
+    try imports.addHostFunction("print_f64", &[_]ValType{.F64}, no_returns, Functions.printF64, null);
+    try imports.addHostFunction("print_i32_f32", &[_]ValType{ .I32, .F32 }, no_returns, Functions.printI32F32, null);
+    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64, null);
+    try imports.addHostFunction("print_f64_f64", &[_]ValType{ .F64, .F64 }, no_returns, Functions.printF64F64, null);
+    try imports.addHostFunction("print", &[_]ValType{}, no_returns, Functions.print, null);
 
     const TableInstance = bytebox.TableInstance;
 
@@ -724,7 +719,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImports {
     memory.* = MemoryInstance.init(bytebox.Limits{
         .min = 1,
         .max = 2,
-    });
+    }, null);
     _ = memory.grow(1);
     try imports.memories.append(bytebox.MemoryImport{
         .name = try allocator.dupe(u8, "memory"),
@@ -778,7 +773,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     name_to_module.ensureTotalCapacity(256) catch unreachable;
 
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
-    var imports = std.ArrayList(bytebox.ModuleImports).init(allocator);
+    var imports = std.ArrayList(bytebox.ModuleImportPackage).init(allocator);
     defer {
         var spectest_imports = imports.items[0];
         for (spectest_imports.tables.items) |*item| {
@@ -793,6 +788,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         }
         for (spectest_imports.globals.items) |*item| {
             allocator.free(item.name);
+            allocator.destroy(item.data.Host.def);
             allocator.destroy(item.data.Host);
         }
 
@@ -839,7 +835,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 logVerbose("\tSetting export module name to {s}\n", .{c.import_name});
 
-                var module_imports: bytebox.ModuleImports = try (module.inst.?).exports(c.import_name);
+                var module_imports: bytebox.ModuleImportPackage = try (module.inst.?).exports(c.import_name);
                 try imports.append(module_imports);
                 continue;
             },
@@ -967,18 +963,18 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         switch (command.*) {
             .AssertReturn => |c| {
                 const PrintTestHelper = struct {
-                    fn logVerbose(filename: []const u8, field: []const u8, values: []ValTypedVec) void {
+                    fn logVerbose(filename: []const u8, field: []const u8, values: []LaneTypedVal) void {
                         if (g_verbose_logging) {
                             log(filename, field, values);
                         }
                     }
 
-                    fn log(filename: []const u8, field: []const u8, values: []ValTypedVec) void {
+                    fn log(filename: []const u8, field: []const u8, values: []LaneTypedVal) void {
                         print("assert_return: {s}:{s}(", .{ filename, field });
                         for (values) |v| {
-                            switch (std.meta.activeTag(v.v)) {
+                            switch (v.v.type) {
                                 .V128 => {
-                                    printVector(v.lane_type, v.v.V128);
+                                    printVector(v.lane_type, v.v.val.V128);
                                 },
                                 else => print("{}", .{v}),
                             }
@@ -1017,6 +1013,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 try returns_placeholder.resize(num_expected_returns);
                 var returns = returns_placeholder.items;
+                var return_types: ?[]ValType = null;
+                defer if (return_types) |types| allocator.free(types);
 
                 PrintTestHelper.logVerbose(module.filename, c.action.field, c.action.args.items);
                 // logVerbose("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
@@ -1024,10 +1022,11 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 var action_succeeded = true;
                 switch (c.action.type) {
                     .Invocation => {
-                        var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
+                        var vals = try LaneTypedVal.toValArrayList(c.action.args.items, allocator);
                         defer vals.deinit();
 
-                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
+                        const func_handle: bytebox.FunctionHandle = try (module.inst.?).getFunctionHandle(c.action.field);
+                        (module.inst.?).invoke(func_handle, vals.items, returns, .{}) catch |e| {
                             if (!g_verbose_logging) {
                                 PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
                                 // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
@@ -1035,11 +1034,14 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             print("\tInvoke fail with error: {}\n", .{e});
                             action_succeeded = false;
                         };
+
+                        const func_export = module.inst.?.module_def.getFunctionExport(func_handle);
+                        return_types = try allocator.dupe(ValType, func_export.returns);
                     },
                     .Get => {
-                        var val_or_error: anyerror!bytebox.Val = (module.inst.?).getGlobal(c.action.field);
-                        if (val_or_error) |value| {
-                            returns[0] = value;
+                        if ((module.inst.?).getGlobalExport(c.action.field)) |global_export| {
+                            returns[0] = global_export.val.*;
+                            return_types = try allocator.dupe(ValType, &[_]ValType{global_export.valtype});
                         } else |e| {
                             if (!g_verbose_logging) {
                                 PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
@@ -1056,14 +1058,16 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         for (returns) |r, i| {
                             var pass = false;
 
-                            const expected_value: Val = expected.items[i].v;
-                            if (std.meta.activeTag(expected_value) != .V128) {
-                                if (std.meta.activeTag(expected_value) == .F32 and std.math.isNan(expected_value.F32)) {
-                                    pass = std.meta.activeTag(r) == .F32 and std.math.isNan(r.F32);
-                                } else if (std.meta.activeTag(expected_value) == .F64 and std.math.isNan(expected_value.F64)) {
-                                    pass = std.meta.activeTag(r) == .F64 and std.math.isNan(r.F64);
+                            const return_type: ValType = return_types.?[i];
+
+                            const expected_value: TaggedVal = expected.items[i].v;
+                            if (expected_value.type != .V128) {
+                                if (expected_value.type == .F32 and std.math.isNan(expected_value.val.F32)) {
+                                    pass = return_type == .F32 and std.math.isNan(r.F32);
+                                } else if (expected_value.type == .F64 and std.math.isNan(expected_value.val.F64)) {
+                                    pass = return_type == .F64 and std.math.isNan(r.F64);
                                 } else {
-                                    pass = std.meta.eql(r, expected_value);
+                                    pass = Val.eql(expected_value.type, r, expected_value.val);
                                 }
 
                                 if (pass == false) {
@@ -1113,22 +1117,22 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                                 switch (expected.items[i].lane_type) {
                                     .I8x16 => {
-                                        action_succeeded = V128ExpectHelper.expect(i8x16, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i8x16, r.V128, expected_value.val.V128, i, returns.len, module, &c);
                                     },
                                     .I16x8 => {
-                                        action_succeeded = V128ExpectHelper.expect(i16x8, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i16x8, r.V128, expected_value.val.V128, i, returns.len, module, &c);
                                     },
                                     .I32x4 => {
-                                        action_succeeded = V128ExpectHelper.expect(i32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i32x4, r.V128, expected_value.val.V128, i, returns.len, module, &c);
                                     },
                                     .I64x2 => {
-                                        action_succeeded = V128ExpectHelper.expect(i64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(i64x2, r.V128, expected_value.val.V128, i, returns.len, module, &c);
                                     },
                                     .F32x4 => {
-                                        action_succeeded = V128ExpectHelper.expect(f32x4, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(f32x4, r.V128, expected_value.val.V128, i, returns.len, module, &c);
                                     },
                                     .F64x2 => {
-                                        action_succeeded = V128ExpectHelper.expect(f64x2, r.V128, expected_value.V128, i, returns.len, module, &c);
+                                        action_succeeded = V128ExpectHelper.expect(f64x2, r.V128, expected_value.val.V128, i, returns.len, module, &c);
                                     },
                                 }
                             }
@@ -1167,10 +1171,11 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 switch (c.action.type) {
                     .Invocation => {
-                        var vals = try ValTypedVec.toValArrayList(c.action.args.items, allocator);
+                        var vals = try LaneTypedVal.toValArrayList(c.action.args.items, allocator);
                         defer vals.deinit();
 
-                        (module.inst.?).invoke(c.action.field, vals.items, returns) catch |e| {
+                        const func_handle: bytebox.FunctionHandle = try (module.inst.?).getFunctionHandle(c.action.field);
+                        (module.inst.?).invoke(func_handle, vals.items, returns, .{}) catch |e| {
                             action_failed = true;
                             caught_error = e;
 
@@ -1180,9 +1185,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         };
                     },
                     .Get => {
-                        var val_or_error: anyerror!bytebox.Val = (module.inst.?).getGlobal(c.action.field);
-                        if (val_or_error) |value| {
-                            returns[0] = value;
+                        if ((module.inst.?).getGlobalExport(c.action.field)) |global_export| {
+                            returns[0] = global_export.val.*;
                         } else |e| {
                             action_failed = true;
                             caught_error = e;
