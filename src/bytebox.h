@@ -68,15 +68,19 @@ typedef void bb_host_function(void* userdata, bb_module_instance* module, const 
 typedef void* bb_wasm_memory_resize(void* mem, size_t new_size_bytes, size_t old_size_bytes, void* userdata);
 typedef void bb_wasm_memory_free(void* mem, size_t size_bytes, void* userdata);
 
+struct bb_wasm_memory_config
+{
+	bb_wasm_memory_resize* resize_callback;
+	bb_wasm_memory_free* free_callback;
+	void* userdata;
+};
+typedef struct bb_wasm_memory_config bb_wasm_memory_config;
+
 struct bb_module_instance_instantiate_opts
 {
 	bb_import_package** packages;
 	size_t num_packages;
-	struct {
-		bb_wasm_memory_resize* resize_callback;
-		bb_wasm_memory_free* free_callback;
-		void* userdata;
-	} wasm_memory_config;
+	bb_wasm_memory_config wasm_memory_config;
 	size_t stack_size;
 	bool enable_debug;
 };
@@ -134,12 +138,6 @@ enum bb_debug_trap_mode
 };
 typedef enum bb_debug_trap_mode bb_debug_trap_mode;
 
-// typedef void* bb_malloc_func(size_t size, void* userdata);
-// typedef void* bb_realloc_func(void* mem, size_t size, void* userdata);
-// typedef void bb_free_func(void* mem, void* userdata);
-
-// void bb_set_memory_hooks(bb_alloc_func* alloc_func, bb_realloc_func* realloc_func, bb_free_func);
-
 const char* bb_error_str(bb_error err);
 
 bb_module_definition* bb_module_definition_init(bb_module_definition_init_opts opts);
@@ -149,7 +147,8 @@ bb_slice bb_module_definition_get_custom_section(const bb_module_definition* def
 
 bb_import_package* bb_import_package_init(const char* name);
 void bb_import_package_deinit(bb_import_package* package); // only deinit when all module_instances using the package have been deinited
-bb_error bb_import_package_add_function(bb_import_package* package, bb_host_function* func, const char* export_name, bb_valtype* params, size_t num_params, bb_valtype* returns, size_t num_returns, void* userdata);
+bb_error bb_import_package_add_function(bb_import_package* package, bb_host_function* func, const char* export_name, const bb_valtype* params, size_t num_params, const bb_valtype* returns, size_t num_returns, void* userdata);
+bb_error bb_import_package_add_memory(bb_import_package* package, const bb_wasm_memory_config* config, const char* export_name, uint32_t min_pages, uint32_t max_pages);
 
 void bb_set_debug_trace_mode(bb_debug_trace_mode mode);
 

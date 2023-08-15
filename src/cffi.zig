@@ -42,24 +42,16 @@ const CModuleDefinitionInitOpts = extern struct {
 
 const CHostFunction = *const fn (userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) void;
 
-const CImportFunction = extern struct {
-    name: ?[*:0]c_char,
-    func: ?CHostFunction,
-    params: ?[*]ValType,
-    num_params: usize,
-    returns: ?[*]ValType,
-    num_returns: usize,
+const CWasmMemoryConfig = extern struct {
+    resize: ?core.WasmMemoryResizeFunction,
+    free: ?core.WasmMemoryFreeFunction,
     userdata: ?*anyopaque,
 };
 
 const CModuleInstanceInstantiateOpts = extern struct {
     packages: ?[*]?*const ModuleImportPackage,
     num_packages: usize,
-    wasm_memory_config: extern struct {
-        resize: ?core.WasmMemoryResizeFunction,
-        free: ?core.WasmMemoryFreeFunction,
-        userdata: ?*anyopaque,
-    },
+    wasm_memory_config: CWasmMemoryConfig,
     stack_size: usize,
     enable_debug: bool,
 };
@@ -286,6 +278,54 @@ export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?
         };
 
         return CError.Ok;
+    }
+
+    return CError.InvalidParameter;
+}
+
+export fn bb_import_package_add_memory(package: ?*ModuleImportPackage, config: ?*CWasmMemoryConfig, c_name: ?[*:0]const c_char, min_pages: u32, max_pages: u32) CError {
+    if (package != null and config != null and c_name != null) {
+        if ((package.?.memories.items.len > 0)) {
+            return CError.InvalidParameter;
+        }
+        if (config.?.resize == null) {
+            return CError.InvalidParameter;
+        }
+        if (config.?.free == null) {
+            return CError.InvalidParameter;
+        }
+
+        const name: []const u8 = std.mem.sliceTo(c_name.?, 0);
+        const limits = core.Limits{
+            .min = min_pages,
+            .max = max_pages,
+        };
+
+        var allocator: *std.mem.Allocator = &package.?.allocator;
+
+        var mem_instance = allocator.create(core.MemoryInstance) catch return CError.OutOfMemory;
+
+        const wasm_memory_config = core.WasmMemoryExternal{
+            .resize_callback = config.?.resize.?,
+            .free_callback = config.?.free.?,
+            .userdata = config.?.userdata,
+        };
+
+        mem_instance.* = core.MemoryInstance.init(limits, wasm_memory_config);
+        if (mem_instance.grow(limits.min) == false) {
+            unreachable;
+        }
+
+        var mem_import = core.MemoryImport{
+            .name = name,
+            .data = .{ .Host = mem_instance },
+        };
+
+        package.?.memories.append(mem_import) catch {
+            mem_instance.deinit();
+            allocator.destroy(mem_instance);
+            return CError.OutOfMemory;
+        };
     }
 
     return CError.InvalidParameter;

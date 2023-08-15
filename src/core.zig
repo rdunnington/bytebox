@@ -9318,8 +9318,8 @@ pub const ModuleInstance = struct {
         const stack_size_f = @intToFloat(f64, stack_size);
 
         try self.stack.allocMemory(.{
-            .max_values = @floatToInt(u32, stack_size_f * 0.75),
-            .max_labels = @floatToInt(u16, stack_size_f * 0.24),
+            .max_values = @floatToInt(u32, stack_size_f * 0.85),
+            .max_labels = @floatToInt(u16, stack_size_f * 0.14),
             .max_frames = @floatToInt(u16, stack_size_f * 0.01),
         });
 
