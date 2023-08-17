@@ -4,6 +4,10 @@ const os = std.os;
 const mem = std.mem;
 const assert = std.debug.assert;
 
+const darwin = struct {
+    extern "c" fn madvise(ptr: [*]align(mem.page_size) u8, length: usize, advice: c_int) c_int;
+};
+
 pub fn StableArray(comptime T: type) type {
     return StableArrayAligned(T, @alignOf(T));
 }
@@ -76,7 +80,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                 mem.copy(T, range, new_items);
                 const after_subrange = start + new_items.len;
 
-                for (self.items[after_range..]) |item, i| {
+                for (self.items[after_range..], 0..) |item, i| {
                     self.items[after_subrange..][i] = item;
                 }
 
@@ -110,13 +114,13 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
         pub fn appendNTimes(self: *Self, value: T, n: usize) !void {
             const old_len = self.items.len;
             try self.resize(self.items.len + n);
-            mem.set(T, self.items[old_len..self.items.len], value);
+            @memset(self.items[old_len..self.items.len], value);
         }
 
         pub fn appendNTimesAssumeCapacity(self: *Self, value: T, n: usize) void {
             const new_len = self.items.len + n;
             assert(new_len <= self.capacity);
-            mem.set(T, self.items.ptr[self.items.len..new_len], value);
+            @memset(self.items.ptr[self.items.len..new_len], value);
             self.items.len = new_len;
         }
 
@@ -166,7 +170,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
             if (newlen == i) return self.pop();
 
             const old_item = self.items[i];
-            for (self.items[i..newlen]) |*b, j| b.* = self.items[i + 1 + j];
+            for (self.items[i..newlen], 0..) |*b, j| b.* = self.items[i + 1 + j];
             self.items[newlen] = undefined;
             self.items.len = newlen;
             return old_item;
@@ -196,15 +200,20 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
 
                 if (builtin.os.tag == .windows) {
                     const w = os.windows;
-                    const addr: usize = @ptrToInt(self.items.ptr) + new_capacity_bytes;
-                    w.VirtualFree(@intToPtr(w.PVOID, addr), bytes_to_free, w.MEM_DECOMMIT);
+                    const addr: usize = @intFromPtr(self.items.ptr) + new_capacity_bytes;
+                    w.VirtualFree(@as(w.PVOID, @ptrFromInt(addr)), bytes_to_free, w.MEM_DECOMMIT);
                 } else {
-                    var base_addr: usize = @ptrToInt(self.items.ptr);
+                    var base_addr: usize = @intFromPtr(self.items.ptr);
                     var offset_addr: usize = base_addr + new_capacity_bytes;
-                    var addr: [*]align(mem.page_size) u8 = @alignCast(mem.page_size, @intToPtr([*]u8, offset_addr));
+                    var addr: [*]align(mem.page_size) u8 = @ptrFromInt(offset_addr);
                     if (comptime builtin.target.isDarwin()) {
                         const MADV_DONTNEED = 4;
-                        darwin_madvise(addr, bytes_to_free, MADV_DONTNEED) catch unreachable;
+                        const err: c_int = darwin.madvise(addr, bytes_to_free, MADV_DONTNEED);
+                        switch (@as(os.darwin.E, @enumFromInt(err))) {
+                            os.E.INVAL => unreachable,
+                            os.E.NOMEM => unreachable,
+                            else => {},
+                        }
                     } else {
                         os.madvise(addr, bytes_to_free, std.c.MADV.DONTNEED) catch unreachable;
                     }
@@ -229,10 +238,10 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
             if (self.capacity > 0) {
                 if (builtin.os.tag == .windows) {
                     const w = os.windows;
-                    w.VirtualFree(@ptrCast(*anyopaque, self.items.ptr), 0, w.MEM_RELEASE);
+                    w.VirtualFree(@as(*anyopaque, @ptrCast(self.items.ptr)), 0, w.MEM_RELEASE);
                 } else {
                     var slice: []align(mem.page_size) const u8 = undefined;
-                    slice.ptr = @alignCast(mem.page_size, @ptrCast([*]u8, self.items.ptr));
+                    slice.ptr = @alignCast(@as([*]u8, @ptrCast(self.items.ptr)));
                     slice.len = self.max_virtual_alloc_bytes;
                     os.munmap(slice);
                 }
@@ -251,7 +260,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                     if (builtin.os.tag == .windows) {
                         const w = os.windows;
                         const addr: w.PVOID = try w.VirtualAlloc(null, self.max_virtual_alloc_bytes, w.MEM_RESERVE, w.PAGE_READWRITE);
-                        self.items.ptr = @ptrCast([*]T, @alignCast(alignment, addr));
+                        self.items.ptr = @alignCast(@ptrCast(addr));
                         self.items.len = 0;
                     } else {
                         const prot: u32 = std.c.PROT.READ | std.c.PROT.WRITE;
@@ -259,7 +268,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                         const fd: os.fd_t = -1;
                         const offset: usize = 0;
                         var slice = try os.mmap(null, self.max_virtual_alloc_bytes, prot, map, fd, offset);
-                        self.items.ptr = @ptrCast([*]T, @alignCast(alignment, slice.ptr));
+                        self.items.ptr = @alignCast(@ptrCast(slice.ptr));
                         self.items.len = 0;
                     }
                 } else if (current_capacity_bytes == self.max_virtual_alloc_bytes) {
@@ -269,7 +278,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
 
                 if (builtin.os.tag == .windows) {
                     const w = std.os.windows;
-                    _ = try w.VirtualAlloc(@ptrCast(w.PVOID, self.items.ptr), new_capacity_bytes, w.MEM_COMMIT, w.PAGE_READWRITE);
+                    _ = try w.VirtualAlloc(@as(w.PVOID, @ptrCast(self.items.ptr)), new_capacity_bytes, w.MEM_COMMIT, w.PAGE_READWRITE);
                 }
             }
 
@@ -310,30 +319,9 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
         }
 
         fn calcBytesUsedForCapacity(capacity: usize) usize {
-            return mem.alignForward(k_sizeof * capacity, mem.page_size);
+            return mem.alignForward(usize, k_sizeof * capacity, mem.page_size);
         }
     };
-}
-
-fn darwin_syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3),
-        : "rcx", "r11", "memory"
-    );
-}
-
-fn darwin_madvise(ptr: [*]align(mem.page_size) u8, length: usize, advice: u32) os.MadviseError!void {
-    if (darwin_syscall3(75, @ptrToInt(ptr), length, advice) == -1) {
-        return switch (os.errno()) {
-            os.c.INVAL => os.MadviseError.InvalidSyscall,
-            os.c.ENOMEM => os.MadviseError.OutOfMemory,
-            else => os.MadviseError.Unexpected,
-        };
-    }
 }
 
 const TEST_VIRTUAL_ALLOC_SIZE = 1024 * 1024 * 2; // 2 MB
@@ -356,7 +344,7 @@ test "append" {
     var a = StableArray(u8).init(TEST_VIRTUAL_ALLOC_SIZE);
     try a.appendSlice(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
     assert(a.calcTotalUsedBytes() == mem.page_size);
-    for (a.items) |v, i| {
+    for (a.items, 0..) |v, i| {
         assert(v == i);
     }
     a.deinit();
@@ -364,7 +352,7 @@ test "append" {
     var b = StableArrayAligned(u8, mem.page_size).init(TEST_VIRTUAL_ALLOC_SIZE);
     try b.appendSlice(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
     assert(b.calcTotalUsedBytes() == mem.page_size * 10);
-    for (b.items) |v, i| {
+    for (b.items, 0..) |v, i| {
         assert(v == i);
     }
     b.deinit();
@@ -374,9 +362,10 @@ test "shrinkAndFree" {
     var a = StableArray(u8).init(TEST_VIRTUAL_ALLOC_SIZE);
     try a.appendSlice(&[_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
     a.shrinkAndFree(5);
+
     assert(a.calcTotalUsedBytes() == mem.page_size);
     assert(a.items.len == 5);
-    for (a.items) |v, i| {
+    for (a.items, 0..) |v, i| {
         assert(v == i);
     }
     a.deinit();
@@ -386,7 +375,7 @@ test "shrinkAndFree" {
     b.shrinkAndFree(5);
     assert(b.calcTotalUsedBytes() == mem.page_size * 5);
     assert(b.items.len == 5);
-    for (b.items) |v, i| {
+    for (b.items, 0..) |v, i| {
         assert(v == i);
     }
     b.deinit();
@@ -397,7 +386,7 @@ test "shrinkAndFree" {
     assert(c.calcTotalUsedBytes() == mem.page_size * 3);
     assert(c.capacity == 6);
     assert(c.items.len == 5);
-    for (c.items) |v, i| {
+    for (c.items, 0..) |v, i| {
         assert(v == i);
     }
     c.deinit();

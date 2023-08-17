@@ -43,21 +43,21 @@ const WasiContext = struct {
 
         if (opts.argv) |argv| {
             context.argv = try context.allocator.dupe([]const u8, argv);
-            for (argv) |arg, i| {
+            for (argv, 0..) |arg, i| {
                 context.argv[i] = try context.strings.put(arg);
             }
         }
 
         if (opts.env) |env| {
             context.env = try context.allocator.dupe([]const u8, env);
-            for (env) |e, i| {
+            for (env, 0..) |e, i| {
                 context.env[i] = try context.strings.put(e);
             }
         }
 
         if (opts.dirs) |dirs| {
             context.dirs = try context.allocator.dupe([]const u8, dirs);
-            for (dirs) |dir, i| {
+            for (dirs, 0..) |dir, i| {
                 context.dirs[i] = try context.resolveAndCache(null, dir);
             }
         }
@@ -294,7 +294,7 @@ const WasiContext = struct {
 
     fn fromUserdata(userdata: ?*anyopaque) *WasiContext {
         std.debug.assert(userdata != null);
-        return @ptrCast(*WasiContext, @alignCast(8, userdata.?));
+        return @as(*WasiContext, @alignCast(@ptrCast(userdata.?)));
     }
 };
 
@@ -409,6 +409,13 @@ const Errno = enum(u8) {
             error.BadPathName => .INVAL,
             error.NullTerminatedPath => .ILSEQ,
             error.PathInvalidDepth => .PERM,
+            else => .INVAL,
+        };
+    }
+
+    fn getLastWin32Error() Errno {
+        const err = std.os.windows.kernel32.GetLastError();
+        return switch (err) {
             else => .INVAL,
         };
     }
@@ -560,7 +567,7 @@ const FD_OS_INVALID = switch (builtin.os.tag) {
 const Helpers = struct {
     fn signedCast(comptime T: type, value: anytype, errno: *Errno) T {
         if (value >= 0) {
-            return @intCast(T, value);
+            return @as(T, @intCast(value));
         }
         errno.* = Errno.INVAL;
         return 0;
@@ -596,7 +603,7 @@ const Helpers = struct {
     }
 
     fn writeFilestatToMemory(stat: *const std.os.wasi.filestat_t, offset: u32, module: *ModuleInstance, errno: *Errno) void {
-        const filetype = @enumToInt(stat.filetype);
+        const filetype = @intFromEnum(stat.filetype);
         Helpers.writeIntToMemory(u64, stat.dev, offset + 0, module, errno);
         Helpers.writeIntToMemory(u64, stat.ino, offset + 8, module, errno);
         Helpers.writeIntToMemory(u8, filetype, offset + 16, module, errno);
@@ -612,10 +619,10 @@ const Helpers = struct {
     }
 
     fn stringsSizesGet(module: *ModuleInstance, strings: [][]const u8, params: [*]const Val, returns: [*]Val) void {
-        const strings_count: u32 = @intCast(u32, strings.len);
+        const strings_count: u32 = @as(u32, @intCast(strings.len));
         var strings_length: u32 = 0;
         for (strings) |string| {
-            strings_length += @intCast(u32, string.len) + 1; // +1 for required null terminator of each string
+            strings_length += @as(u32, @intCast(string.len)) + 1; // +1 for required null terminator of each string
         }
 
         var errno = Errno.SUCCESS;
@@ -628,7 +635,7 @@ const Helpers = struct {
             writeIntToMemory(u32, strings_length, dest_string_length, module, &errno);
         }
 
-        returns[0] = Val{ .I32 = @enumToInt(errno) };
+        returns[0] = Val{ .I32 = @intFromEnum(errno) };
     }
 
     fn stringsGet(module: *ModuleInstance, strings: [][]const u8, params: [*]const Val, returns: [*]Val) void {
@@ -649,12 +656,12 @@ const Helpers = struct {
                     mem[string.len] = 0; // null terminator
 
                     dest_string_ptrs += @sizeOf(u32);
-                    dest_string_strings += @intCast(u32, string.len + 1);
+                    dest_string_strings += @as(u32, @intCast(string.len + 1));
                 }
             }
         }
 
-        returns[0] = Val{ .I32 = @enumToInt(errno) };
+        returns[0] = Val{ .I32 = @intFromEnum(errno) };
     }
 
     fn convertClockId(wasi_clockid: i32, errno: *Errno) i32 {
@@ -672,14 +679,14 @@ const Helpers = struct {
 
     fn posixTimespecToWasi(ts: std.os.system.timespec) std.os.wasi.timestamp_t {
         const ns_per_second = 1000000000;
-        const sec_part = @intCast(u64, ts.tv_sec);
-        const nsec_part = @intCast(u64, ts.tv_nsec);
+        const sec_part = @as(u64, @intCast(ts.tv_sec));
+        const nsec_part = @as(u64, @intCast(ts.tv_nsec));
         const timestamp_ns: u64 = (sec_part * ns_per_second) + nsec_part;
         return timestamp_ns;
     }
 
     fn filetimeToU64(ft: std.os.windows.FILETIME) u64 {
-        const v: u64 = (@intCast(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        const v: u64 = (@as(u64, @intCast(ft.dwHighDateTime)) << 32) | ft.dwLowDateTime;
         return v;
     }
 
@@ -834,8 +841,8 @@ const Helpers = struct {
             if (info.dwFileAttributes & std.os.windows.FILE_ATTRIBUTE_READONLY != 0) {
                 stat_wasi.fs_rights_base &= ~std.os.wasi.RIGHT.FD_WRITE;
             }
-        } else |err| {
-            errno.* = Errno.translateError(err);
+        } else {
+            errno.* = Errno.getLastWin32Error();
         }
 
         stat_wasi.fs_rights_inheriting = stat_wasi.fs_rights_base;
@@ -926,11 +933,11 @@ const Helpers = struct {
             access_mask |= w.GENERIC_READ | write_flags;
         }
 
-        const path_len_bytes = @intCast(u16, path_w.len * 2);
+        const path_len_bytes = @as(u16, @intCast(path_w.len * 2));
         var unicode_str = w.UNICODE_STRING{
             .Length = path_len_bytes,
             .MaximumLength = path_len_bytes,
-            .Buffer = @intToPtr([*]u16, @ptrToInt(path_w.ptr)),
+            .Buffer = @as([*]u16, @ptrFromInt(@intFromPtr(path_w.ptr))),
         };
         var attr = w.OBJECT_ATTRIBUTES{
             .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
@@ -1097,8 +1104,8 @@ const Helpers = struct {
             stat_wasi.atim = windowsFiletimeToWasi(info.ftLastAccessTime);
             stat_wasi.mtim = windowsFiletimeToWasi(info.ftLastWriteTime);
             stat_wasi.ctim = windowsFiletimeToWasi(info.ftCreationTime);
-        } else |err| {
-            errno.* = Errno.translateError(err);
+        } else {
+            errno.* = Errno.getLastWin32Error();
         }
 
         return stat_wasi;
@@ -1112,7 +1119,7 @@ const Helpers = struct {
         var stat_wasi: std.os.wasi.filestat_t = undefined;
 
         if (std.os.fstat(fd)) |stat| {
-            stat_wasi.dev = if (builtin.os.tag == .macos) @bitCast(u32, stat.dev) else stat.dev;
+            stat_wasi.dev = if (builtin.os.tag == .macos) @as(u32, @bitCast(stat.dev)) else stat.dev;
             stat_wasi.ino = stat.ino;
             stat_wasi.filetype = posixModeToWasiFiletype(stat.mode);
             stat_wasi.nlink = stat.nlink;
@@ -1170,11 +1177,11 @@ const Helpers = struct {
             return null;
         }
 
-        const path_len_bytes = @intCast(u16, path_w.len * 2);
+        const path_len_bytes = @as(u16, @intCast(path_w.len * 2));
         var unicode_str = w.UNICODE_STRING{
             .Length = path_len_bytes,
             .MaximumLength = path_len_bytes,
-            .Buffer = @intToPtr([*]u16, @ptrToInt(path_w.ptr)),
+            .Buffer = @as([*]u16, @ptrFromInt(@intFromPtr(path_w.ptr))),
         };
         var attr = w.OBJECT_ATTRIBUTES{
             .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
@@ -1322,7 +1329,7 @@ const Helpers = struct {
                     writer.writeIntLittle(u64, cookie) catch break;
                     writer.writeIntLittle(u64, entry.inode) catch break;
                     writer.writeIntLittle(u32, signedCast(u32, entry.filename.len, errno)) catch break;
-                    writer.writeIntLittle(u32, @enumToInt(entry.filetype)) catch break;
+                    writer.writeIntLittle(u32, @intFromEnum(entry.filetype)) catch break;
                     _ = writer.write(entry.filename) catch break;
 
                     file_index += 1;
@@ -1379,9 +1386,9 @@ const Helpers = struct {
         }
 
         if (rc == .SUCCESS) {
-            const file_info = @ptrCast(*WindowsApi.FILE_ID_FULL_DIR_INFORMATION, &file_info_buffer);
+            const file_info = @as(*WindowsApi.FILE_ID_FULL_DIR_INFORMATION, @ptrCast(&file_info_buffer));
 
-            const filename_utf16le = @ptrCast([*]u16, &file_info.FileName)[0 .. file_info.FileNameLength / @sizeOf(u16)];
+            const filename_utf16le = @as([*]u16, @ptrCast(&file_info.FileName))[0 .. file_info.FileNameLength / @sizeOf(u16)];
 
             var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
             var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
@@ -1401,7 +1408,7 @@ const Helpers = struct {
             };
 
             fd_info.dir_entries.append(WasiDirEntry{
-                .inode = @bitCast(u64, file_info.FileId),
+                .inode = @as(u64, @bitCast(file_info.FileId)),
                 .filetype = filetype,
                 .filename = filename_duped,
             }) catch |err| {
@@ -1445,12 +1452,12 @@ const Helpers = struct {
 
         var buffer_offset: usize = 0;
         while (buffer_offset < rc) {
-            const dirent_entry = @ptrCast(*align(1) dirent_t, dirent_buffer[buffer_offset..]);
+            const dirent_entry = @as(*align(1) dirent_t, @ptrCast(dirent_buffer[buffer_offset..]));
             buffer_offset += dirent_entry.d_reclen;
 
             // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
             // const filename: []u8 = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
-            const filename: []u8 = @ptrCast([*]u8, &dirent_entry.d_name)[0..dirent_entry.d_namlen];
+            const filename: []u8 = @as([*]u8, @ptrCast(&dirent_entry.d_name))[0..dirent_entry.d_namlen];
 
             const filetype: std.os.wasi.filetype_t = switch (dirent_entry.d_type) {
                 std.c.DT.UNKNOWN => .UNKNOWN,
@@ -1512,11 +1519,11 @@ const Helpers = struct {
 
         var buffer_offset: usize = 0;
         while (buffer_offset < rc) {
-            const dirent_entry = @ptrCast(*align(1) std.os.linux.dirent64, dirent_buffer[buffer_offset..]);
+            const dirent_entry = @as(*align(1) std.os.linux.dirent64, @ptrCast(dirent_buffer[buffer_offset..]));
             buffer_offset += dirent_entry.d_reclen;
 
             // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
-            const filename: []u8 = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
+            const filename: []u8 = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&dirent_entry.d_name)), 0);
 
             const filetype: std.os.wasi.filetype_t = switch (dirent_entry.d_type) {
                 std.os.linux.DT.BLK => .BLOCK_DEVICE,
@@ -1535,7 +1542,7 @@ const Helpers = struct {
             };
 
             fd_info.dir_entries.append(WasiDirEntry{
-                .inode = @bitCast(u64, dirent_entry.d_ino),
+                .inode = @as(u64, @bitCast(dirent_entry.d_ino)),
                 .filetype = filetype,
                 .filename = filename_duped,
             }) catch |err| {
@@ -1586,7 +1593,7 @@ fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, _: [
     const raw_exit_code = params[0].I32;
 
     if (raw_exit_code >= 0 and raw_exit_code < std.math.maxInt(u8)) {
-        const exit_code = @intCast(u8, raw_exit_code);
+        const exit_code = @as(u8, @intCast(raw_exit_code));
         std.os.exit(exit_code);
     } else {
         std.os.exit(1);
@@ -1643,7 +1650,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const 
         } else {
             var ts: std.os.system.timespec = undefined;
             if (std.os.clock_getres(system_clockid, &ts)) {
-                freqency_ns = @intCast(u64, ts.tv_nsec);
+                freqency_ns = @as(u64, @intCast(ts.tv_nsec));
             } else |_| {
                 errno = Errno.INVAL;
             }
@@ -1652,7 +1659,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const 
         Helpers.writeIntToMemory(u64, freqency_ns, timestamp_mem_begin, module, &errno);
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -1722,12 +1729,12 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
         Helpers.writeIntToMemory(u64, timestamp_ns, timestamp_mem_begin, module, &errno);
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
 
     var errno = Errno.SUCCESS;
 
@@ -1737,14 +1744,14 @@ fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
         };
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const fdstat_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
@@ -1753,7 +1760,7 @@ fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*
             const stat: std.os.wasi.fdstat_t = if (builtin.os.tag == .windows) Helpers.fdstatGetWindows(fd_os, &errno) else Helpers.fdstatGetPosix(fd_os, &errno);
 
             if (errno == .SUCCESS) {
-                Helpers.writeIntToMemory(u8, @enumToInt(stat.fs_filetype), fdstat_mem_offset + 0, module, &errno);
+                Helpers.writeIntToMemory(u8, @intFromEnum(stat.fs_filetype), fdstat_mem_offset + 0, module, &errno);
                 Helpers.writeIntToMemory(u16, stat.fs_flags, fdstat_mem_offset + 2, module, &errno);
                 Helpers.writeIntToMemory(u64, stat.fs_rights_base, fdstat_mem_offset + 8, module, &errno);
                 Helpers.writeIntToMemory(u64, stat.fs_rights_inheriting, fdstat_mem_offset + 16, module, &errno);
@@ -1761,14 +1768,14 @@ fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const fdflags: WasiFdFlags = Helpers.decodeFdFlags(params[1].I32);
 
     if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
@@ -1778,26 +1785,26 @@ fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: [
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_dir_wasi = @bitCast(u32, params[0].I32);
+    const fd_dir_wasi = @as(u32, @bitCast(params[0].I32));
     const prestat_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
         if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
-            const name_len: u32 = @intCast(u32, path_source.len);
+            const name_len: u32 = @as(u32, @intCast(path_source.len));
 
             Helpers.writeIntToMemory(u32, std.os.wasi.PREOPENTYPE_DIR, prestat_mem_offset + 0, module, &errno);
             Helpers.writeIntToMemory(u32, name_len, prestat_mem_offset + @sizeOf(u32), module, &errno);
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -1825,14 +1832,14 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
     const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
     const bytes_read_out_offset = Helpers.signedCast(u32, params[3].I32, &errno);
@@ -1843,7 +1850,7 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
             if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.readv(fd_info.fd, iov)) |read_bytes| {
                     if (read_bytes <= std.math.maxInt(u32)) {
-                        Helpers.writeIntToMemory(u32, @intCast(u32, read_bytes), bytes_read_out_offset, module, &errno);
+                        Helpers.writeIntToMemory(u32, @as(u32, @intCast(read_bytes)), bytes_read_out_offset, module, &errno);
                     } else {
                         errno = Errno.TOOBIG;
                     }
@@ -1854,14 +1861,14 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const dirent_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
     const dirent_mem_length = Helpers.signedCast(u32, params[2].I32, &errno);
     const cookie = Helpers.signedCast(u64, params[3].I64, &errno);
@@ -1876,29 +1883,29 @@ fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]co
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
-    const fd_to_wasi = @bitCast(u32, params[1].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
+    const fd_to_wasi = @as(u32, @bitCast(params[1].I32));
 
     context.fdRenumber(fd_wasi, fd_to_wasi, &errno);
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
     const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
-    const read_offset = @bitCast(u64, params[3].I64);
+    const read_offset = @as(u64, @bitCast(params[3].I64));
     const bytes_read_out_offset = Helpers.signedCast(u32, params[4].I32, &errno);
 
     if (errno == .SUCCESS) {
@@ -1907,7 +1914,7 @@ fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]cons
             if (Helpers.initIovecs(std.os.iovec, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.preadv(fd_info.fd, iov, read_offset)) |read_bytes| {
                     if (read_bytes <= std.math.maxInt(u32)) {
-                        Helpers.writeIntToMemory(u32, @intCast(u32, read_bytes), bytes_read_out_offset, module, &errno);
+                        Helpers.writeIntToMemory(u32, @as(u32, @intCast(read_bytes)), bytes_read_out_offset, module, &errno);
                     } else {
                         errno = Errno.TOOBIG;
                     }
@@ -1918,7 +1925,7 @@ fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]cons
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -1926,10 +1933,10 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Va
 
     var context = WasiContext.fromUserdata(userdata);
 
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const offset: i64 = params[1].I64;
     const length: i64 = params[2].I64;
-    const advice_wasi = @bitCast(u32, params[3].I32);
+    const advice_wasi = @as(u32, @bitCast(params[3].I32));
 
     if (Helpers.isStdioHandle(fd_wasi) == false) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
@@ -1950,7 +1957,7 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Va
                 };
 
                 if (errno == .SUCCESS) {
-                    const ret = @intToEnum(std.os.linux.E, std.os.system.fadvise(fd_info.fd, offset, length, advice));
+                    const ret = @as(std.os.linux.E, @enumFromInt(std.os.system.fadvise(fd_info.fd, offset, length, advice)));
                     errno = switch (ret) {
                         .SUCCESS => Errno.SUCCESS,
                         .SPIPE => Errno.SPIPE,
@@ -1965,7 +1972,7 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Va
         errno = Errno.BADF;
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -1973,7 +1980,7 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
 
     var context = WasiContext.fromUserdata(userdata);
 
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const offset: i64 = params[1].I64;
     const length_relative: i64 = params[2].I64;
 
@@ -1982,7 +1989,7 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
             const stat: std.os.wasi.filestat_t = Helpers.filestatGetWindows(fd_info.fd, &errno);
             if (errno == .SUCCESS) {
                 if (stat.size < offset + length_relative) {
-                    const length_total: u64 = @intCast(u64, offset + length_relative);
+                    const length_total: u64 = @as(u64, @intCast(offset + length_relative));
                     std.os.windows.SetFilePointerEx_BEGIN(fd_info.fd, length_total) catch |err| {
                         errno = Errno.translateError(err);
                     };
@@ -2017,7 +2024,7 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
             if (std.c.fstat(fd_info.fd, &stat) != -1) {
                 // fallocate() doesn't truncate the file if the total is less than the actual file length
                 // so we need to emulate that behavior here
-                const length_total = @intCast(u64, @as(i128, offset) + length_relative);
+                const length_total = @as(u64, @intCast(@as(i128, offset) + length_relative));
                 if (stat.size < length_total) {
                     std.os.ftruncate(fd_info.fd, length_total) catch |err| {
                         errno = Errno.translateError(err);
@@ -2029,7 +2036,7 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -2037,20 +2044,20 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val
 
     var context = WasiContext.fromUserdata(userdata);
 
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
 
     if (errno == .SUCCESS) {
         context.fdClose(fd_wasi, &errno);
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const filestat_out_mem_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
@@ -2067,14 +2074,14 @@ fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: 
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const size = Helpers.signedCast(u64, params[1].I64, &errno);
 
     if (errno == .SUCCESS) {
@@ -2087,17 +2094,17 @@ fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: 
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const timestamp_wasi_access = Helpers.signedCast(u64, params[1].I64, &errno);
     const timestamp_wasi_modified = Helpers.signedCast(u64, params[2].I64, &errno);
-    const fstflags = @bitCast(u32, params[3].I32);
+    const fstflags = @as(u32, @bitCast(params[3].I32));
 
     if (errno == .SUCCESS) {
         if (fstflags & std.os.wasi.FILESTAT_SET_ATIM != 0 and fstflags & std.os.wasi.FILESTAT_SET_ATIM_NOW != 0) {
@@ -2118,14 +2125,14 @@ fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params:
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const offset = params[1].I64;
     const whence_raw = params[2].I32;
     const filepos_out_offset = Helpers.signedCast(u32, params[3].I32, &errno);
@@ -2138,7 +2145,7 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
                     switch (whence) {
                         .Set => {
                             if (offset >= 0) {
-                                const offset_unsigned = @intCast(u64, offset);
+                                const offset_unsigned = @as(u64, @intCast(offset));
                                 std.os.lseek_SET(fd_os, offset_unsigned) catch |err| {
                                     errno = Errno.translateError(err);
                                 };
@@ -2170,7 +2177,7 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -2178,7 +2185,7 @@ fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
 
     const context = WasiContext.fromUserdata(userdata);
 
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const filepos_out_offset = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
@@ -2191,14 +2198,14 @@ fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
     const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
     const bytes_written_out_offset = Helpers.signedCast(u32, params[3].I32, &errno);
@@ -2208,7 +2215,7 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]cons
             var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
             if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.writev(fd_info.fd, iov)) |written_bytes| {
-                    Helpers.writeIntToMemory(u32, @intCast(u32, written_bytes), bytes_written_out_offset, module, &errno);
+                    Helpers.writeIntToMemory(u32, @as(u32, @intCast(written_bytes)), bytes_written_out_offset, module, &errno);
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
@@ -2216,14 +2223,14 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]cons
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
-    const fd_wasi = @bitCast(u32, params[0].I32);
+    const fd_wasi = @as(u32, @bitCast(params[0].I32));
     const iovec_array_begin = Helpers.signedCast(u32, params[1].I32, &errno);
     const iovec_array_count = Helpers.signedCast(u32, params[2].I32, &errno);
     const write_offset = Helpers.signedCast(u64, params[3].I64, &errno);
@@ -2234,7 +2241,7 @@ fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]con
             var stack_iov = [_]std.os.iovec_const{undefined} ** 1024;
             if (Helpers.initIovecs(std.os.iovec_const, &stack_iov, &errno, module, iovec_array_begin, iovec_array_count)) |iov| {
                 if (std.os.pwritev(fd_info.fd, iov, write_offset)) |written_bytes| {
-                    Helpers.writeIntToMemory(u32, @intCast(u32, written_bytes), bytes_written_out_offset, module, &errno);
+                    Helpers.writeIntToMemory(u32, @as(u32, @intCast(written_bytes)), bytes_written_out_offset, module, &errno);
                 } else |err| {
                     errno = Errno.translateError(err);
                 }
@@ -2242,14 +2249,14 @@ fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]con
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_dir_wasi = @bitCast(u32, params[0].I32);
+    const fd_dir_wasi = @as(u32, @bitCast(params[0].I32));
     const path_mem_offset: u32 = Helpers.signedCast(u32, params[1].I32, &errno);
     const path_mem_length: u32 = Helpers.signedCast(u32, params[2].I32, &errno);
 
@@ -2267,14 +2274,14 @@ fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
-    const fd_dir_wasi = @bitCast(u32, params[0].I32);
+    const fd_dir_wasi = @as(u32, @bitCast(params[0].I32));
     const lookup_flags: WasiLookupFlags = Helpers.decodeLookupFlags(params[1].I32);
     const path_mem_offset: u32 = Helpers.signedCast(u32, params[2].I32, &errno);
     const path_mem_length: u32 = Helpers.signedCast(u32, params[3].I32, &errno);
@@ -2306,7 +2313,7 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -2344,7 +2351,7 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]con
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -2375,7 +2382,7 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -2429,7 +2436,7 @@ fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -2460,7 +2467,7 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
@@ -2477,7 +2484,7 @@ fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val
         }
     }
 
-    returns[0] = Val{ .I32 = @enumToInt(errno) };
+    returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
 pub const WasiOpts = struct {

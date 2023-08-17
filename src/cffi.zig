@@ -7,11 +7,10 @@ const Val = core.Val;
 const ModuleDefinition = core.ModuleDefinition;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImportPackage = core.ModuleImportPackage;
-const c_char = u8;
 
 // C interface
 const CSlice = extern struct {
-    data: ?[*]c_char,
+    data: ?[*]u8,
     length: usize,
 };
 
@@ -37,7 +36,7 @@ const CError = enum(c_int) {
 };
 
 const CModuleDefinitionInitOpts = extern struct {
-    debug_name: ?[*:0]c_char,
+    debug_name: ?[*:0]u8,
 };
 
 const CHostFunction = *const fn (userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) void;
@@ -158,7 +157,7 @@ var cffi_gpa = std.heap.GeneralPurposeAllocator(.{}){};
 //     cffi_allocator.userdata = userdata;
 // }
 
-export fn bb_error_str(c_error: CError) [*:0]const c_char {
+export fn bb_error_str(c_error: CError) [*:0]const u8 {
     return switch (c_error) {
         .Ok => "BB_ERROR_OK",
         .Failed => "BB_ERROR_FAILED",
@@ -205,7 +204,7 @@ export fn bb_module_definition_deinit(module: ?*core.ModuleDefinition) void {
     }
 }
 
-export fn bb_module_definition_decode(module: ?*core.ModuleDefinition, data: ?[*]c_char, length: usize) CError {
+export fn bb_module_definition_decode(module: ?*core.ModuleDefinition, data: ?[*]u8, length: usize) CError {
     if (module != null and data != null) {
         const data_slice = data.?[0..length];
         if (module.?.decode(data_slice)) {
@@ -218,7 +217,7 @@ export fn bb_module_definition_decode(module: ?*core.ModuleDefinition, data: ?[*
     return CError.InvalidParameter;
 }
 
-export fn bb_module_definition_get_custom_section(module: ?*core.ModuleDefinition, name: ?[*:0]const c_char) CSlice {
+export fn bb_module_definition_get_custom_section(module: ?*core.ModuleDefinition, name: ?[*:0]const u8) CSlice {
     if (module != null and name != null) {
         const name_slice: []const u8 = std.mem.sliceTo(name.?, 0);
         if (module.?.getCustomSection(name_slice)) |section_data| {
@@ -235,7 +234,7 @@ export fn bb_module_definition_get_custom_section(module: ?*core.ModuleDefinitio
     };
 }
 
-export fn bb_import_package_init(c_name: ?[*:0]const c_char) ?*ModuleImportPackage {
+export fn bb_import_package_init(c_name: ?[*:0]const u8) ?*ModuleImportPackage {
     var package: ?*ModuleImportPackage = null;
     var allocator = cffi_gpa.allocator();
 
@@ -260,7 +259,7 @@ export fn bb_import_package_deinit(package: ?*ModuleImportPackage) void {
     }
 }
 
-export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?CHostFunction, c_name: ?[*:0]const c_char, c_params: ?[*]ValType, num_params: usize, c_returns: ?[*]ValType, num_returns: usize, userdata: ?*anyopaque) CError {
+export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?CHostFunction, c_name: ?[*:0]const u8, c_params: ?[*]ValType, num_params: usize, c_returns: ?[*]ValType, num_returns: usize, userdata: ?*anyopaque) CError {
     if (package != null and c_name != null and func != null) {
         if (num_params > 0 and c_params == null) {
             return CError.InvalidParameter;
@@ -283,7 +282,7 @@ export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?
     return CError.InvalidParameter;
 }
 
-export fn bb_import_package_add_memory(package: ?*ModuleImportPackage, config: ?*CWasmMemoryConfig, c_name: ?[*:0]const c_char, min_pages: u32, max_pages: u32) CError {
+export fn bb_import_package_add_memory(package: ?*ModuleImportPackage, config: ?*CWasmMemoryConfig, c_name: ?[*:0]const u8, min_pages: u32, max_pages: u32) CError {
     if (package != null and config != null and c_name != null) {
         if ((package.?.memories.items.len > 0)) {
             return CError.InvalidParameter;
@@ -409,7 +408,7 @@ export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModu
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[*:0]const c_char, out_handle: ?*CFuncHandle) CError {
+export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[*:0]const u8, out_handle: ?*CFuncHandle) CError {
     if (module != null and c_func_name != null and out_handle != null) {
         const func_name = std.mem.sliceTo(c_func_name.?, 0);
 
@@ -417,7 +416,7 @@ export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[
 
         if (module.?.getFunctionHandle(func_name)) |handle| {
             out_handle.?.index = handle.index;
-            out_handle.?.type = @enumToInt(handle.type);
+            out_handle.?.type = @intFromEnum(handle.type);
             return CError.Ok;
         } else |err| {
             std.debug.assert(err == error.ExportUnknownFunction);
@@ -460,7 +459,7 @@ export fn bb_module_instance_invoke(module: ?*ModuleInstance, c_handle: CFuncHan
     if (module != null and c_handle.index != INVALID_FUNC_INDEX) {
         const handle = core.FunctionHandle{
             .index = c_handle.index,
-            .type = @intToEnum(core.FunctionHandleType, c_handle.type),
+            .type = @as(core.FunctionHandleType, @enumFromInt(c_handle.type)),
         };
 
         const invoke_opts = core.ModuleInstance.InvokeOpts{
@@ -536,10 +535,10 @@ export fn bb_module_instance_mem_grow(module: ?*ModuleInstance, num_pages: usize
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name: ?[*:0]const c_char) CGlobalExport {
+export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name: ?[*:0]const u8) CGlobalExport {
     comptime {
-        std.debug.assert(@enumToInt(CGlobalMut.Immutable) == @enumToInt(core.GlobalMut.Immutable));
-        std.debug.assert(@enumToInt(CGlobalMut.Mutable) == @enumToInt(core.GlobalMut.Mutable));
+        std.debug.assert(@intFromEnum(CGlobalMut.Immutable) == @intFromEnum(core.GlobalMut.Immutable));
+        std.debug.assert(@intFromEnum(CGlobalMut.Mutable) == @intFromEnum(core.GlobalMut.Mutable));
     }
 
     if (module != null and c_global_name != null) {
@@ -548,7 +547,7 @@ export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name
             return CGlobalExport{
                 .value = global.val,
                 .type = global.valtype,
-                .mut = @intToEnum(CGlobalMut, @enumToInt(global.mut)),
+                .mut = @as(CGlobalMut, @enumFromInt(@intFromEnum(global.mut))),
             };
         } else |_| {}
     }

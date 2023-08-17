@@ -34,7 +34,7 @@ export fn run(max_counter: i32) i32 {
     while (y < HEIGHT) : (y += 1) {
         var x: u32 = 0;
         while (x < WIDTH) : (x += 1) {
-            const c = Complex.init(@intToFloat(f32, x), @intToFloat(f32, y));
+            const c = Complex.init(@as(f32, @floatFromInt(x)), @as(f32, @floatFromInt(y)));
             const color: Color = mandelbrot(c, max_counter);
             pixels[y * HEIGHT + x] = color;
         }

@@ -304,7 +304,7 @@ pub fn main() !void {
     var params = std.ArrayList(bytebox.Val).init(allocator);
     defer params.deinit();
     try params.resize(invoke_args.len);
-    for (func_export.params) |valtype, i| {
+    for (func_export.params, 0..) |valtype, i| {
         const arg: []const u8 = invoke_args[i];
         switch (valtype) {
             .I32 => {
@@ -368,7 +368,7 @@ pub fn main() !void {
         if (returns.items.len > 0) {
             const return_types = func_export.returns;
             try std.fmt.format(writer, ":\n", .{});
-            for (returns.items) |_, i| {
+            for (returns.items, 0..) |_, i| {
                 switch (return_types[i]) {
                     .I32 => try std.fmt.format(writer, "  {} (i32)\n", .{returns.items[i]}),
                     .I64 => try std.fmt.format(writer, "  {} (i64)\n", .{returns.items[i]}),
@@ -412,6 +412,6 @@ fn writeSignature(strbuf: *std.ArrayList(u8), info: *const bytebox.FunctionExpor
 
 fn valtypeToString(valtype: ValType) []const u8 {
     return switch (valtype) {
-        inline else => |v| @typeInfo(ValType).Enum.fields[@enumToInt(v)].name,
+        inline else => |v| @typeInfo(ValType).Enum.fields[@intFromEnum(v)].name,
     };
 }
