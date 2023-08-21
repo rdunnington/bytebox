@@ -12,10 +12,10 @@ const ModuleImportPackage = core.ModuleImportPackage;
 const WasiContext = struct {
     const FdInfo = struct {
         fd: std.os.fd_t,
-        fd_wasi: u32,
         path_absolute: []const u8,
         rights: WasiRights,
         is_preopen: bool,
+        open_handles: u32 = 1,
         dir_entries: std.ArrayList(WasiDirEntry),
     };
 
@@ -23,8 +23,13 @@ const WasiContext = struct {
     argv: [][]const u8 = &[_][]u8{},
     env: [][]const u8 = &[_][]u8{},
     dirs: [][]const u8 = &[_][]u8{},
-    fd_table: std.AutoHashMap(u32, FdInfo),
-    fd_path_lookup: std.StringHashMap(*FdInfo),
+
+    // having a master table with a side table of wasi file descriptors lets us map multiple wasi fds into the same
+    // master entry
+    fd_table: std.ArrayList(FdInfo),
+    fd_wasi_table: std.AutoHashMap(u32, u32), // fd_wasi -> fd_table index
+    fd_path_lookup: std.StringHashMap(u32), // path_absolute -> fd_table index
+
     strings: StringPool,
     next_fd_id: u32 = 3,
     allocator: std.mem.Allocator,
@@ -32,8 +37,9 @@ const WasiContext = struct {
     fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) !WasiContext {
         var context = WasiContext{
             .cwd = "",
-            .fd_table = std.AutoHashMap(u32, FdInfo).init(allocator),
-            .fd_path_lookup = std.StringHashMap(*FdInfo).init(allocator),
+            .fd_table = std.ArrayList(FdInfo).init(allocator),
+            .fd_wasi_table = std.AutoHashMap(u32, u32).init(allocator),
+            .fd_path_lookup = std.StringHashMap(u32).init(allocator),
             .strings = StringPool.init(1024 * 1024 * 4, allocator), // 4MB for absolute paths
             .allocator = allocator,
         };
@@ -70,9 +76,14 @@ const WasiContext = struct {
         const path_stderr = try context.strings.put("stderr");
 
         var empty_dir_entries = std.ArrayList(WasiDirEntry).init(allocator);
-        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .fd_wasi = 0, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .fd_wasi = 1, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .fd_wasi = 2, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+
+        try context.fd_table.ensureTotalCapacity(3 + context.dirs.len);
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        try context.fd_wasi_table.put(0, 0);
+        try context.fd_wasi_table.put(1, 1);
+        try context.fd_wasi_table.put(2, 2);
 
         for (context.dirs) |dir_path| {
             std.debug.print("opening preopen: {s}\n", .{dir_path});
@@ -107,13 +118,13 @@ const WasiContext = struct {
     }
 
     fn deinit(self: *WasiContext) void {
-        var fd_table_values = self.fd_table.valueIterator();
-        while (fd_table_values.next()) |item| {
+        for (self.fd_table.items) |item| {
             item.dir_entries.deinit();
         }
-        self.strings.deinit();
         self.fd_table.deinit();
+        self.fd_wasi_table.deinit();
         self.fd_path_lookup.deinit();
+        self.strings.deinit();
     }
 
     fn resolveAndCache(self: *WasiContext, fd_info_dir: ?*FdInfo, path: []const u8) ![]const u8 {
@@ -173,8 +184,8 @@ const WasiContext = struct {
     }
 
     fn fdLookup(self: *const WasiContext, fd_wasi: u32, errno: *Errno) ?*FdInfo {
-        if (self.fd_table.getPtr(fd_wasi)) |info| {
-            return info;
+        if (self.fd_wasi_table.get(fd_wasi)) |fd_table_index| {
+            return &self.fd_table.items[fd_table_index];
         }
 
         errno.* = Errno.BADF;
@@ -183,7 +194,8 @@ const WasiContext = struct {
 
     fn fdDirPath(self: *WasiContext, fd_wasi: u32, errno: *Errno) ?[]const u8 {
         if (Helpers.isStdioHandle(fd_wasi) == false) { // std handles are 0, 1, 2 so they're not valid paths
-            if (self.fd_table.get(fd_wasi)) |info| {
+            if (self.fd_wasi_table.get(fd_wasi)) |fd_table_index| {
+                const info: *FdInfo = &self.fd_table.items[fd_table_index];
                 const path_relative = info.path_absolute[self.cwd.len + 1 ..]; // +1 to skip the last path separator
                 return path_relative;
             }
@@ -197,8 +209,17 @@ const WasiContext = struct {
         std.debug.print("fdOpen: fd '{s}' with path '{s}'\n", .{ if (fd_info_dir) |f| f.path_absolute else "null", path });
         if (self.resolveAndCache(fd_info_dir, path)) |resolved_path| {
             // std.debug.print("\tresolved path: '{s}'\n", .{resolved_path});
-            if (self.fd_path_lookup.get(resolved_path)) |existing| {
-                return existing.fd_wasi;
+
+            // Found an entry for this path, just reuse it while creating a new wasi fd
+            if (self.fd_path_lookup.get(resolved_path)) |fd_table_index| {
+                var fd_wasi: u32 = self.next_fd_id;
+                self.next_fd_id += 1;
+                self.fd_wasi_table.put(fd_wasi, fd_table_index) catch |err| {
+                    errno.* = Errno.translateError(err);
+                    return null;
+                };
+                self.fd_table.items[fd_table_index].open_handles += 1;
+                return fd_wasi;
             }
 
             const open_func = if (builtin.os.tag == .windows) Helpers.openPathWindows else Helpers.openPathPosix;
@@ -216,19 +237,23 @@ const WasiContext = struct {
 
                 const info = FdInfo{
                     .fd = fd_os,
-                    .fd_wasi = fd_wasi,
                     .path_absolute = resolved_path,
                     .rights = rights,
                     .is_preopen = is_preopen,
                     .dir_entries = std.ArrayList(WasiDirEntry).init(self.allocator),
                 };
+                const fd_table_index: u32 = @intCast(self.fd_table.items.len);
 
-                self.fd_table.put(fd_wasi, info) catch {
-                    errno.* = Errno.NOMEM;
+                self.fd_table.append(info) catch |err| {
+                    errno.* = Errno.translateError(err);
                     return null;
                 };
-                self.fd_path_lookup.put(resolved_path, self.fd_table.getPtr(fd_wasi).?) catch {
-                    errno.* = Errno.NOMEM;
+                self.fd_wasi_table.put(fd_wasi, fd_table_index) catch |err| {
+                    errno.* = Errno.translateError(err);
+                    return null;
+                };
+                self.fd_path_lookup.put(resolved_path, fd_table_index) catch |err| {
+                    errno.* = Errno.translateError(err);
                     return null;
                 };
 
@@ -244,69 +269,80 @@ const WasiContext = struct {
     }
 
     fn fdUpdate(self: *WasiContext, fd_wasi: u32, new_fd: std.os.fd_t) void {
-        if (self.fd_table.getPtr(fd_wasi)) |fd_info| {
-            fd_info.fd = new_fd;
+        if (self.fd_wasi_table.get(fd_wasi)) |fd_table_index| {
+            self.fd_table.items[fd_table_index].fd = new_fd;
         } else {
             unreachable; // fdUpdate should always be nested inside an fdLookup
         }
     }
 
     fn fdRenumber(self: *WasiContext, fd_wasi: u32, fd_wasi_new: u32, errno: *Errno) void {
-        if (self.fd_table.getPtr(fd_wasi)) |fd_info| {
+        if (self.fd_wasi_table.get(fd_wasi)) |fd_table_index| {
+            const fd_info: *const FdInfo = &self.fd_table.items[fd_table_index];
+
             if (fd_info.is_preopen) {
                 errno.* = Errno.NOTSUP;
                 return;
             }
 
-            if (self.fd_table.getPtr(fd_wasi_new)) |found_info| {
-                if (found_info.is_preopen) {
-                    errno.* = Errno.NOTSUP;
-                    return;
-                }
+            if (self.fd_wasi_table.get(fd_wasi_new)) |fd_other_table_index| {
+                // need to replace the existing entry with the new one
+                if (fd_other_table_index != fd_table_index) {
+                    const fd_info_other: *const FdInfo = &self.fd_table.items[fd_table_index];
+                    if (fd_info_other.is_preopen) {
+                        errno.* = Errno.NOTSUP;
+                        return;
+                    }
 
-                std.os.close(found_info.fd);
-                _ = self.fd_path_lookup.remove(found_info.path_absolute);
-                _ = self.fd_table.remove(fd_wasi_new);
+                    var unused: Errno = undefined;
+                    self.fdClose(fd_wasi_new, &unused);
+                }
             }
 
-            self.fd_table.put(fd_wasi_new, fd_info.*) catch |err| {
+            self.fd_wasi_table.put(fd_wasi_new, fd_table_index) catch |err| {
                 errno.* = Errno.translateError(err);
                 return;
             };
 
-            self.fd_path_lookup.getPtr(fd_info.path_absolute).?.* = self.fd_table.getPtr(fd_wasi_new).?;
-
-            _ = self.fd_table.remove(fd_wasi);
+            _ = self.fd_wasi_table.remove(fd_wasi);
         } else {
             errno.* = Errno.BADF;
         }
     }
 
     fn fdClose(self: *WasiContext, fd_wasi: u32, errno: *Errno) void {
-        if (self.fd_table.getPtr(fd_wasi)) |fd_info| {
+        if (self.fd_wasi_table.get(fd_wasi)) |fd_table_index| {
+            var fd_info: *FdInfo = &self.fd_table.items[fd_table_index];
+
+            _ = self.fd_wasi_table.remove(fd_wasi);
             _ = self.fd_path_lookup.remove(fd_info.path_absolute);
-            std.os.close(fd_info.fd);
-            _ = self.fd_table.remove(fd_wasi);
+
+            // TODO we essentially leak these to avoid invalidating indexes. Would be nice to have a freelist and reuse empty indices
+            fd_info.open_handles -= 1;
+            if (fd_info.open_handles == 0) {
+                std.os.close(fd_info.fd);
+            }
         } else {
             errno.* = Errno.BADF;
         }
     }
 
-    // The main intention for this function is to close all fd when a path is unlinked.
+    // The main intention for this function is to close all wasi fd when a path is unlinked.
     fn fdCleanup(self: *WasiContext, path_absolute: []const u8) void {
-        if (self.fd_path_lookup.get(path_absolute)) |fd_info| {
-            std.os.close(fd_info.fd);
-            _ = self.fd_table.remove(fd_info.fd_wasi);
+        if (self.fd_path_lookup.get(path_absolute)) |fd_table_index| {
+            std.os.close(self.fd_table.items[fd_table_index].fd);
+
+            self.fd_table.items[fd_table_index].open_handles = 0;
+
+            var iter = self.fd_wasi_table.iterator();
+            while (iter.next()) |kv| {
+                if (kv.value_ptr.* == fd_table_index) {
+                    self.fd_wasi_table.removeByPtr(kv.key_ptr);
+                }
+            }
+
             _ = self.fd_path_lookup.remove(path_absolute);
         }
-
-        // var iter = self.fd_table.iterator();
-        // while (iter.next()) |kv| {
-        //     if (std.mem.eql(u8, kv.value_ptr.path_absolute, path_absolute)) {
-        //         std.os.close(kv.value_ptr.fd);
-        //         self.fd_table.removeByPtr(kv.key_ptr);
-        //     }
-        // }
     }
 
     fn hasPathAccess(self: *WasiContext, fd_info: *const FdInfo, relative_path: []const u8, errno: *Errno) bool {
