@@ -9,7 +9,7 @@ Bytebox is a Webassembly VM.
 ## Getting started
 
 ### Requirements
-Bytebox currently builds with [Zig 0.10.x](https://ziglang.org/download) to avoid churn on zig master.
+Bytebox currently builds with [Zig 0.11.x](https://ziglang.org/download) to avoid churn on zig master.
 
 ### Run
 
@@ -68,6 +68,8 @@ pub fn main() !void {
     try module_instance.instantiate(.{});
 }
 ```
+
+Inter-language FFI is also supported. See `src/bytebox.h` for an overview in C. To use bytebox as a static library, link with the built library in `zig-out/lib/`. Note that Zig assumes a default stack size of 8MB, so you'll need to ensure the same in your program.
 
 ## Status
 
@@ -154,7 +156,6 @@ These tasks must be completed to enter alpha:
 To enter beta:
 * No breaking API changes after this point
 * Performance competitive with other well-known interpreters (e.g. [micro-wasm-runtime](https://github.com/bytecodealliance/wasm-micro-runtime), [wasm3](https://github.com/wasm3/wasm3))
-* C API for easier integration with other languages.
 
 To have a 1.0 release:
 * Tested with a wide variety of wasm programs
