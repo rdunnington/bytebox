@@ -12,6 +12,7 @@ const ModuleImportPackage = core.ModuleImportPackage;
 const WasiContext = struct {
     const FdInfo = struct {
         fd: std.os.fd_t,
+        fd_wasi: u32,
         path_absolute: []const u8,
         rights: WasiRights,
         is_preopen: bool,
@@ -23,6 +24,7 @@ const WasiContext = struct {
     env: [][]const u8 = &[_][]u8{},
     dirs: [][]const u8 = &[_][]u8{},
     fd_table: std.AutoHashMap(u32, FdInfo),
+    fd_path_lookup: std.StringHashMap(*FdInfo),
     strings: StringPool,
     next_fd_id: u32 = 3,
     allocator: std.mem.Allocator,
@@ -31,6 +33,7 @@ const WasiContext = struct {
         var context = WasiContext{
             .cwd = "",
             .fd_table = std.AutoHashMap(u32, FdInfo).init(allocator),
+            .fd_path_lookup = std.StringHashMap(*FdInfo).init(allocator),
             .strings = StringPool.init(1024 * 1024 * 4, allocator), // 4MB for absolute paths
             .allocator = allocator,
         };
@@ -67,12 +70,13 @@ const WasiContext = struct {
         const path_stderr = try context.strings.put("stderr");
 
         var empty_dir_entries = std.ArrayList(WasiDirEntry).init(allocator);
-        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        try context.fd_table.put(0, FdInfo{ .fd = std.io.getStdIn().handle, .fd_wasi = 0, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        try context.fd_table.put(1, FdInfo{ .fd = std.io.getStdOut().handle, .fd_wasi = 1, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        try context.fd_table.put(2, FdInfo{ .fd = std.io.getStdErr().handle, .fd_wasi = 2, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
 
         for (context.dirs) |dir_path| {
-            const fd_dir: ?std.os.fd_t = null;
+            std.debug.print("opening preopen: {s}\n", .{dir_path});
+
             const openflags = WasiOpenFlags{
                 .creat = false,
                 .directory = true,
@@ -96,7 +100,7 @@ const WasiContext = struct {
             };
             var unused: Errno = undefined;
             const is_preopen = true;
-            _ = context.fdOpen(fd_dir, dir_path, lookupflags, openflags, fdflags, rights, is_preopen, &unused);
+            _ = context.fdOpen(null, dir_path, lookupflags, openflags, fdflags, rights, is_preopen, &unused);
         }
 
         return context;
@@ -109,9 +113,10 @@ const WasiContext = struct {
         }
         self.strings.deinit();
         self.fd_table.deinit();
+        self.fd_path_lookup.deinit();
     }
 
-    fn resolveAndCache(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8) ![]const u8 {
+    fn resolveAndCache(self: *WasiContext, fd_info_dir: ?*FdInfo, path: []const u8) ![]const u8 {
         if (std.mem.indexOf(u8, path, &[_]u8{0})) |_| {
             return error.NullTerminatedPath;
         }
@@ -136,14 +141,20 @@ const WasiContext = struct {
         var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
         const allocator = fba.allocator();
 
-        var path_dir: []const u8 = "";
-        if (fd_dir) |fd| {
-            var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            path_dir = try std.os.getFdPath(fd, &path_buffer);
-        }
+        // var path_dir: []const u8 = "";
+        // if (fd_dir) |fd| {
+        //     var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        //     path_dir = try std.os.getFdPath(fd, &path_buffer);
+        // }
 
-        const paths = [_][]const u8{ path_dir, path };
+        const dir_path = if (fd_info_dir) |info| info.path_absolute else self.cwd;
 
+        // const dir_path = try dir.realpath(".", &static_path_buffer);
+        // std.debug.print("attempting to resolve from dir '{s}' subpath '{s}'\n", .{ dir_path, path });
+
+        const paths = [_][]const u8{ dir_path, path };
+
+        // if (dir.realpathAlloc(allocator, path)) |resolved_path| {
         if (std.fs.path.resolve(allocator, &paths)) |resolved_path| {
             // preserve trailing slash
             var final_path = resolved_path;
@@ -156,6 +167,7 @@ const WasiContext = struct {
             const cached_path: []const u8 = try self.strings.findOrPut(final_path);
             return cached_path;
         } else |err| {
+            // std.debug.print("realpathAlloc failed trying to resolve path {s}\n", .{path});
             return err;
         }
     }
@@ -181,8 +193,14 @@ const WasiContext = struct {
         return null;
     }
 
-    fn fdOpen(self: *WasiContext, fd_dir: ?std.os.fd_t, path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, is_preopen: bool, errno: *Errno) ?u32 {
-        if (self.resolveAndCache(fd_dir, path)) |resolved_path| {
+    fn fdOpen(self: *WasiContext, fd_info_dir: ?*FdInfo, path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, is_preopen: bool, errno: *Errno) ?u32 {
+        std.debug.print("fdOpen: fd '{s}' with path '{s}'\n", .{ if (fd_info_dir) |f| f.path_absolute else "null", path });
+        if (self.resolveAndCache(fd_info_dir, path)) |resolved_path| {
+            // std.debug.print("\tresolved path: '{s}'\n", .{resolved_path});
+            if (self.fd_path_lookup.get(resolved_path)) |existing| {
+                return existing.fd_wasi;
+            }
+
             const open_func = if (builtin.os.tag == .windows) Helpers.openPathWindows else Helpers.openPathPosix;
 
             // if a path ends with a separator, posix treats it as a directory even if the flag isn't set, so make sure
@@ -198,6 +216,7 @@ const WasiContext = struct {
 
                 const info = FdInfo{
                     .fd = fd_os,
+                    .fd_wasi = fd_wasi,
                     .path_absolute = resolved_path,
                     .rights = rights,
                     .is_preopen = is_preopen,
@@ -208,55 +227,66 @@ const WasiContext = struct {
                     errno.* = Errno.NOMEM;
                     return null;
                 };
+                self.fd_path_lookup.put(resolved_path, self.fd_table.getPtr(fd_wasi).?) catch {
+                    errno.* = Errno.NOMEM;
+                    return null;
+                };
 
+                // std.debug.print("\tsuccess! resolved path: {s}\n", .{resolved_path});
                 return fd_wasi;
             }
         } else |err| {
             errno.* = Errno.translateError(err);
+            // std.debug.print("\tfailed with err {!}, errno: {}\n", .{ err, errno.* });
         }
 
         return null;
     }
 
-    fn fdUpdate(self: *WasiContext, wasi_fd: u32, new_fd: std.os.fd_t) void {
-        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
+    fn fdUpdate(self: *WasiContext, fd_wasi: u32, new_fd: std.os.fd_t) void {
+        if (self.fd_table.getPtr(fd_wasi)) |fd_info| {
             fd_info.fd = new_fd;
         } else {
             unreachable; // fdUpdate should always be nested inside an fdLookup
         }
     }
 
-    fn fdRenumber(self: *WasiContext, wasi_fd: u32, wasi_fd_new: u32, errno: *Errno) void {
-        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
+    fn fdRenumber(self: *WasiContext, fd_wasi: u32, fd_wasi_new: u32, errno: *Errno) void {
+        if (self.fd_table.getPtr(fd_wasi)) |fd_info| {
             if (fd_info.is_preopen) {
                 errno.* = Errno.NOTSUP;
                 return;
             }
 
-            if (self.fd_table.getPtr(wasi_fd_new)) |found_info| {
+            if (self.fd_table.getPtr(fd_wasi_new)) |found_info| {
                 if (found_info.is_preopen) {
                     errno.* = Errno.NOTSUP;
                     return;
                 }
 
                 std.os.close(found_info.fd);
-                _ = self.fd_table.remove(wasi_fd_new);
+                _ = self.fd_path_lookup.remove(found_info.path_absolute);
+                _ = self.fd_table.remove(fd_wasi_new);
             }
 
-            self.fd_table.put(wasi_fd_new, fd_info.*) catch |err| {
+            self.fd_table.put(fd_wasi_new, fd_info.*) catch |err| {
                 errno.* = Errno.translateError(err);
                 return;
             };
-            _ = self.fd_table.remove(wasi_fd);
+
+            self.fd_path_lookup.getPtr(fd_info.path_absolute).?.* = self.fd_table.getPtr(fd_wasi_new).?;
+
+            _ = self.fd_table.remove(fd_wasi);
         } else {
             errno.* = Errno.BADF;
         }
     }
 
-    fn fdClose(self: *WasiContext, wasi_fd: u32, errno: *Errno) void {
-        if (self.fd_table.getPtr(wasi_fd)) |fd_info| {
+    fn fdClose(self: *WasiContext, fd_wasi: u32, errno: *Errno) void {
+        if (self.fd_table.getPtr(fd_wasi)) |fd_info| {
+            _ = self.fd_path_lookup.remove(fd_info.path_absolute);
             std.os.close(fd_info.fd);
-            _ = self.fd_table.remove(wasi_fd);
+            _ = self.fd_table.remove(fd_wasi);
         } else {
             errno.* = Errno.BADF;
         }
@@ -264,22 +294,33 @@ const WasiContext = struct {
 
     // The main intention for this function is to close all fd when a path is unlinked.
     fn fdCleanup(self: *WasiContext, path_absolute: []const u8) void {
-        var iter = self.fd_table.iterator();
-        while (iter.next()) |kv| {
-            if (std.mem.eql(u8, kv.value_ptr.path_absolute, path_absolute)) {
-                std.os.close(kv.value_ptr.fd);
-                self.fd_table.removeByPtr(kv.key_ptr);
-            }
+        if (self.fd_path_lookup.get(path_absolute)) |fd_info| {
+            std.os.close(fd_info.fd);
+            _ = self.fd_table.remove(fd_info.fd_wasi);
+            _ = self.fd_path_lookup.remove(path_absolute);
         }
+
+        // var iter = self.fd_table.iterator();
+        // while (iter.next()) |kv| {
+        //     if (std.mem.eql(u8, kv.value_ptr.path_absolute, path_absolute)) {
+        //         std.os.close(kv.value_ptr.fd);
+        //         self.fd_table.removeByPtr(kv.key_ptr);
+        //     }
+        // }
     }
 
     fn hasPathAccess(self: *WasiContext, fd_info: *const FdInfo, relative_path: []const u8, errno: *Errno) bool {
+        errno.* = Errno.PERM;
+
         if (self.dirs.len > 0) {
             const paths = [_][]const u8{ fd_info.path_absolute, relative_path };
+
             if (std.fs.path.resolve(self.allocator, &paths)) |resolved_path| {
+                defer self.allocator.free(resolved_path);
                 for (self.dirs) |allowdir| {
                     // can use startsWith to check because all the paths have been passed through resolve() already
                     if (std.mem.startsWith(u8, resolved_path, allowdir)) {
+                        errno.* = Errno.SUCCESS;
                         return true;
                     }
                 }
@@ -288,7 +329,8 @@ const WasiContext = struct {
             }
         }
 
-        errno.* = Errno.PERM;
+        // std.debug.print("hasPathAccess failed for path {s} with errno {}\n", .{ relative_path, errno.* });
+
         return false;
     }
 
@@ -573,17 +615,21 @@ const Helpers = struct {
         return 0;
     }
 
-    fn resolvePath(fd_os_dir: std.os.fd_t, path_relative: []const u8, path_buffer: []u8, errno: *Errno) ?[]const u8 {
-        const path_dir = std.os.getFdPath(fd_os_dir, path_buffer[0..std.fs.MAX_PATH_BYTES]) catch |err| {
-            errno.* = Errno.translateError(err);
-            return null;
-        };
+    fn resolvePath(fd_info: *const WasiContext.FdInfo, path_relative: []const u8, path_buffer: []u8, _: *Errno) ?[]const u8 {
+        // const path_dir = std.os.getFdPath(fd_os_dir, path_buffer[0..std.fs.MAX_PATH_BYTES]) catch |err| {
+        //     errno.* = Errno.translateError(err);
+        //     return null;
+        // };
 
         var fba = std.heap.FixedBufferAllocator.init(path_buffer[std.fs.MAX_PATH_BYTES..]);
         const allocator = fba.allocator();
 
-        const paths = [_][]const u8{ path_dir, path_relative };
+        const paths = [_][]const u8{ fd_info.path_absolute, path_relative };
         const resolved_path = std.fs.path.resolve(allocator, &paths) catch unreachable;
+        // const dir = std.fs.Dir{ .fd = fd_os_dir };
+        // const resolved_path = dir.realpathAlloc(allocator, path_relative) catch unreachable;
+        // const resolved_path = std.fs.path.resolve(allocator, paths);
+
         return resolved_path;
     }
 
@@ -1208,6 +1254,8 @@ const Helpers = struct {
             0,
         );
 
+        // std.debug.print("openPath win32: '{s}' got rc {}", .{ path, rc });
+
         // emulate the posix behavior on windows
         if (lookupflags.symlink_follow == false) {
             if (rc != .OBJECT_NAME_INVALID) {
@@ -1248,6 +1296,47 @@ const Helpers = struct {
         }
 
         return null;
+
+        // var flags: u32 = 0;
+        // if (openflags.creat) {
+        //     flags |= std.os.O.CREAT;
+        // }
+        // if (openflags.directory) {
+        //     flags |= std.os.O.DIRECTORY;
+        // }
+        // if (openflags.excl) {
+        //     flags |= std.os.O.EXCL;
+        // }
+        // if (openflags.trunc) {
+        //     flags |= std.os.O.TRUNC;
+        // }
+
+        // if (lookupflags.symlink_follow == false) {
+        //     flags |= std.os.O.NOFOLLOW;
+        // }
+
+        // const fdflags_os = fdflagsToFlagsPosix(fdflags);
+        // flags |= fdflags_os;
+
+        // if (rights.fd_read and rights.fd_write) {
+        //     if (openflags.directory) {
+        //         flags |= std.os.O.RDONLY;
+        //     } else {
+        //         flags |= std.os.O.RDWR;
+        //     }
+        // } else if (rights.fd_read) {
+        //     flags |= std.os.O.RDONLY;
+        // } else if (rights.fd_write) {
+        //     flags |= std.os.O.WRONLY;
+        // }
+
+        // const mode: std.os.mode_t = 0;
+        // if (std.os.open(path, flags, mode)) |fd| {
+        //     return fd;
+        // } else |err| {
+        //     errno.* = Errno.translateError(err);
+        //     return null;
+        // }
     }
 
     fn openPathPosix(path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
@@ -1732,7 +1821,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     const context = WasiContext.fromUserdata(userdata);
     const fd_wasi = @as(u32, @bitCast(params[0].I32));
 
@@ -1747,7 +1836,7 @@ fn wasi_fd_datasync(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1771,7 +1860,7 @@ fn wasi_fd_fdstat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1788,7 +1877,7 @@ fn wasi_fd_fdstat_set_flags(userdata: ?*anyopaque, _: *ModuleInstance, params: [
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1807,7 +1896,7 @@ fn wasi_fd_prestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -1835,7 +1924,7 @@ fn wasi_fd_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_read(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1864,7 +1953,7 @@ fn wasi_fd_read(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1886,7 +1975,7 @@ fn wasi_fd_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]co
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1898,7 +1987,7 @@ fn wasi_fd_renumber(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1928,7 +2017,7 @@ fn wasi_fd_pread(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]cons
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -1975,7 +2064,7 @@ fn wasi_fd_advise(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Va
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2039,7 +2128,7 @@ fn wasi_fd_allocate(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const 
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_close(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2053,7 +2142,7 @@ fn wasi_fd_close(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2077,7 +2166,7 @@ fn wasi_fd_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params: 
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2097,7 +2186,7 @@ fn wasi_fd_filestat_set_size(userdata: ?*anyopaque, _: *ModuleInstance, params: 
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2128,7 +2217,7 @@ fn wasi_fd_filestat_set_times(userdata: ?*anyopaque, _: *ModuleInstance, params:
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2180,7 +2269,7 @@ fn wasi_fd_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     const context = WasiContext.fromUserdata(userdata);
@@ -2201,7 +2290,7 @@ fn wasi_fd_tell(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_write(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2226,7 +2315,7 @@ fn wasi_fd_write(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]cons
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
 
-fn wasi_fd_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
+fn fd_wasi_pwrite(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
     var errno = Errno.SUCCESS;
 
     var context = WasiContext.fromUserdata(userdata);
@@ -2343,13 +2432,16 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]con
                     rights_sanitized.fd_seek = !openflags.directory; // directories don't have seek rights
 
                     const is_preopen = false;
-                    if (context.fdOpen(fd_info.fd, path, lookupflags, openflags, fdflags, rights_sanitized, is_preopen, &errno)) |fd_opened_wasi| {
+                    if (context.fdOpen(fd_info, path, lookupflags, openflags, fdflags, rights_sanitized, is_preopen, &errno)) |fd_opened_wasi| {
+                        std.debug.print("wasi_path_open opened path '{s}' with fd_wasi '{}'\n", .{ path, fd_opened_wasi });
                         Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                     }
                 }
             }
         }
     }
+
+    std.debug.print("wasi_path_open returned errno {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
@@ -2368,7 +2460,7 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
                     var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
-                    if (Helpers.resolvePath(fd_info.fd, path, &static_path_buffer, &errno)) |resolved_path| {
+                    if (Helpers.resolvePath(fd_info, path, &static_path_buffer, &errno)) |resolved_path| {
                         std.os.unlinkat(FD_OS_INVALID, resolved_path, std.os.AT.REMOVEDIR) catch |err| {
                             errno = Errno.translateError(err);
                         };
@@ -2404,7 +2496,7 @@ fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]
                         if (context.hasPathAccess(fd_info, link_path, &errno)) {
                             if (builtin.os.tag == .windows) {
                                 var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
-                                if (Helpers.resolvePath(fd_info.fd, link_path, &static_path_buffer, &errno)) |resolved_link_path| {
+                                if (Helpers.resolvePath(fd_info, link_path, &static_path_buffer, &errno)) |resolved_link_path| {
                                     const w = std.os.windows;
 
                                     const link_contents_w: w.PathSpace = w.sliceToPrefixedFileW(link_contents) catch |err| blk: {
@@ -2453,7 +2545,7 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
                     var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
-                    if (Helpers.resolvePath(fd_info.fd, path, &static_path_buffer, &errno)) |resolved_path| {
+                    if (Helpers.resolvePath(fd_info, path, &static_path_buffer, &errno)) |resolved_path| {
                         std.os.unlinkat(FD_OS_INVALID, resolved_path, 0) catch |err| {
                             errno = Errno.translateError(err);
                         };
@@ -2509,25 +2601,25 @@ pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) !ModuleImportPa
     try imports.addHostFunction("clock_time_get", &[_]ValType{ .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_clock_time_get, context);
     try imports.addHostFunction("environ_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_get, context);
     try imports.addHostFunction("environ_sizes_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_environ_sizes_get, context);
-    try imports.addHostFunction("fd_advise", &[_]ValType{ .I32, .I64, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_advise, context);
-    try imports.addHostFunction("fd_allocate", &[_]ValType{ .I32, .I64, .I64 }, &[_]ValType{.I32}, wasi_fd_allocate, context);
-    try imports.addHostFunction("fd_close", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_close, context);
-    try imports.addHostFunction("fd_datasync", &[_]ValType{.I32}, &[_]ValType{.I32}, wasi_fd_datasync, context);
-    try imports.addHostFunction("fd_fdstat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_get, context);
-    try imports.addHostFunction("fd_fdstat_set_flags", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_fdstat_set_flags, context);
-    try imports.addHostFunction("fd_filestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_filestat_get, context);
-    try imports.addHostFunction("fd_filestat_set_size", &[_]ValType{ .I32, .I64 }, &[_]ValType{.I32}, wasi_fd_filestat_set_size, context);
-    try imports.addHostFunction("fd_filestat_set_times", &[_]ValType{ .I32, .I64, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_filestat_set_times, context);
-    try imports.addHostFunction("fd_pread", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pread, context);
-    try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_dir_name, context);
-    try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_prestat_get, context);
-    try imports.addHostFunction("fd_pwrite", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_pwrite, context);
-    try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_read, context);
-    try imports.addHostFunction("fd_readdir", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, wasi_fd_readdir, context);
-    try imports.addHostFunction("fd_renumber", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_renumber, context);
-    try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_seek, context);
-    try imports.addHostFunction("fd_tell", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_tell, context);
-    try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_fd_write, context);
+    try imports.addHostFunction("fd_advise", &[_]ValType{ .I32, .I64, .I64, .I32 }, &[_]ValType{.I32}, fd_wasi_advise, context);
+    try imports.addHostFunction("fd_allocate", &[_]ValType{ .I32, .I64, .I64 }, &[_]ValType{.I32}, fd_wasi_allocate, context);
+    try imports.addHostFunction("fd_close", &[_]ValType{.I32}, &[_]ValType{.I32}, fd_wasi_close, context);
+    try imports.addHostFunction("fd_datasync", &[_]ValType{.I32}, &[_]ValType{.I32}, fd_wasi_datasync, context);
+    try imports.addHostFunction("fd_fdstat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_fdstat_get, context);
+    try imports.addHostFunction("fd_fdstat_set_flags", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_fdstat_set_flags, context);
+    try imports.addHostFunction("fd_filestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_filestat_get, context);
+    try imports.addHostFunction("fd_filestat_set_size", &[_]ValType{ .I32, .I64 }, &[_]ValType{.I32}, fd_wasi_filestat_set_size, context);
+    try imports.addHostFunction("fd_filestat_set_times", &[_]ValType{ .I32, .I64, .I64, .I32 }, &[_]ValType{.I32}, fd_wasi_filestat_set_times, context);
+    try imports.addHostFunction("fd_pread", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, fd_wasi_pread, context);
+    try imports.addHostFunction("fd_prestat_dir_name", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_prestat_dir_name, context);
+    try imports.addHostFunction("fd_prestat_get", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_prestat_get, context);
+    try imports.addHostFunction("fd_pwrite", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, fd_wasi_pwrite, context);
+    try imports.addHostFunction("fd_read", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_read, context);
+    try imports.addHostFunction("fd_readdir", &[_]ValType{ .I32, .I32, .I32, .I64, .I32 }, &[_]ValType{.I32}, fd_wasi_readdir, context);
+    try imports.addHostFunction("fd_renumber", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_renumber, context);
+    try imports.addHostFunction("fd_seek", &[_]ValType{ .I32, .I64, .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_seek, context);
+    try imports.addHostFunction("fd_tell", &[_]ValType{ .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_tell, context);
+    try imports.addHostFunction("fd_write", &[_]ValType{ .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, fd_wasi_write, context);
     try imports.addHostFunction("path_create_directory", &[_]ValType{ .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_create_directory, context);
     try imports.addHostFunction("path_filestat_get", &[_]ValType{ .I32, .I32, .I32, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_filestat_get, context);
     try imports.addHostFunction("path_open", &[_]ValType{ .I32, .I32, .I32, .I32, .I32, .I64, .I64, .I32, .I32 }, &[_]ValType{.I32}, wasi_path_open, context);
