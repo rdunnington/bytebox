@@ -25,8 +25,9 @@ const WasiContext = struct {
     dirs: [][]const u8 = &[_][]u8{},
 
     // having a master table with a side table of wasi file descriptors lets us map multiple wasi fds into the same
-    // master entry
+    // master entry and avoid duplicating OS handles, which has proved buggy on win32
     fd_table: std.ArrayList(FdInfo),
+    fd_table_freelist: std.ArrayList(u32),
     fd_wasi_table: std.AutoHashMap(u32, u32), // fd_wasi -> fd_table index
     fd_path_lookup: std.StringHashMap(u32), // path_absolute -> fd_table index
 
@@ -38,6 +39,7 @@ const WasiContext = struct {
         var context = WasiContext{
             .cwd = "",
             .fd_table = std.ArrayList(FdInfo).init(allocator),
+            .fd_table_freelist = std.ArrayList(u32).init(allocator),
             .fd_wasi_table = std.AutoHashMap(u32, u32).init(allocator),
             .fd_path_lookup = std.StringHashMap(u32).init(allocator),
             .strings = StringPool.init(1024 * 1024 * 4, allocator), // 4MB for absolute paths
@@ -235,19 +237,31 @@ const WasiContext = struct {
                 var fd_wasi: u32 = self.next_fd_id;
                 self.next_fd_id += 1;
 
-                const info = FdInfo{
-                    .fd = fd_os,
-                    .path_absolute = resolved_path,
-                    .rights = rights,
-                    .is_preopen = is_preopen,
-                    .dir_entries = std.ArrayList(WasiDirEntry).init(self.allocator),
-                };
-                const fd_table_index: u32 = @intCast(self.fd_table.items.len);
+                var info: *FdInfo = undefined;
+                var fd_table_index: u32 = undefined;
 
-                self.fd_table.append(info) catch |err| {
-                    errno.* = Errno.translateError(err);
-                    return null;
-                };
+                if (self.fd_table_freelist.popOrNull()) |free_index| {
+                    fd_table_index = free_index;
+                    info = &self.fd_table.items[free_index];
+                } else {
+                    self.fd_table_freelist.ensureTotalCapacity(self.fd_table.items.len + 1) catch |err| {
+                        errno.* = Errno.translateError(err);
+                        return null;
+                    };
+                    fd_table_index = @intCast(self.fd_table.items.len);
+                    info = self.fd_table.addOne() catch |err| {
+                        errno.* = Errno.translateError(err);
+                        return null;
+                    };
+                }
+
+                info.fd = fd_os;
+                info.path_absolute = resolved_path;
+                info.rights = rights;
+                info.is_preopen = is_preopen;
+                info.open_handles = 1;
+                info.dir_entries = std.ArrayList(WasiDirEntry).init(self.allocator);
+
                 self.fd_wasi_table.put(fd_wasi, fd_table_index) catch |err| {
                     errno.* = Errno.translateError(err);
                     return null;
@@ -317,10 +331,10 @@ const WasiContext = struct {
             _ = self.fd_wasi_table.remove(fd_wasi);
             _ = self.fd_path_lookup.remove(fd_info.path_absolute);
 
-            // TODO we essentially leak these to avoid invalidating indexes. Would be nice to have a freelist and reuse empty indices
             fd_info.open_handles -= 1;
             if (fd_info.open_handles == 0) {
                 std.os.close(fd_info.fd);
+                self.fd_table_freelist.appendAssumeCapacity(fd_table_index); // capacity was allocated when the associated fd_table slot was allocated
             }
         } else {
             errno.* = Errno.BADF;
@@ -330,10 +344,6 @@ const WasiContext = struct {
     // The main intention for this function is to close all wasi fd when a path is unlinked.
     fn fdCleanup(self: *WasiContext, path_absolute: []const u8) void {
         if (self.fd_path_lookup.get(path_absolute)) |fd_table_index| {
-            std.os.close(self.fd_table.items[fd_table_index].fd);
-
-            self.fd_table.items[fd_table_index].open_handles = 0;
-
             var iter = self.fd_wasi_table.iterator();
             while (iter.next()) |kv| {
                 if (kv.value_ptr.* == fd_table_index) {
@@ -342,6 +352,11 @@ const WasiContext = struct {
             }
 
             _ = self.fd_path_lookup.remove(path_absolute);
+
+            var fd_info: *FdInfo = &self.fd_table.items[fd_table_index];
+            std.os.close(fd_info.fd);
+            fd_info.open_handles = 0;
+            self.fd_table_freelist.appendAssumeCapacity(fd_table_index); // capacity was allocated when the associated fd_table slot was allocated
         }
     }
 
