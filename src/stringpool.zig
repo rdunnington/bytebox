@@ -35,7 +35,7 @@ pub fn put(self: *StringPool, str: []const u8) ![]const u8 {
     // alignment requirements for StringLenType may require the buffer to be 1 byte larger than string size + sizeOf(StringLenType)
     // so take care not to include the final byte in the string + size byte buffer
     const string_and_size_num_bytes: usize = str.len + @sizeOf(StringLenType);
-    const alloc_size = std.mem.alignForward(string_and_size_num_bytes, @alignOf(StringLenType));
+    const alloc_size = std.mem.alignForward(usize, string_and_size_num_bytes, @alignOf(StringLenType));
     const str_offset_begin: usize = self.buffer.items.len;
     const str_offset_end: usize = str_offset_begin + string_and_size_num_bytes;
     const aligned_buffer_end: usize = str_offset_begin + alloc_size;
@@ -44,8 +44,8 @@ pub fn put(self: *StringPool, str: []const u8) ![]const u8 {
     try self.lookup.put(hash, str_offset_begin);
 
     var bytes: []u8 = self.buffer.items[str_offset_begin..str_offset_end];
-    var str_len: *StringLenType = @ptrCast(*StringLenType, @alignCast(@alignOf(StringLenType), bytes.ptr));
-    str_len.* = @intCast(StringLenType, str.len);
+    var str_len: *StringLenType = @alignCast(@ptrCast(bytes.ptr));
+    str_len.* = @as(StringLenType, @intCast(str.len));
     var str_bytes: []u8 = bytes[@sizeOf(StringLenType)..];
     std.mem.copy(u8, str_bytes, str);
 
@@ -57,7 +57,7 @@ pub fn find(self: *StringPool, str: []const u8) ?[]const u8 {
 
     if (self.lookup.get(hash)) |string_bytes_begin| {
         var str_bytes: [*]u8 = self.buffer.items[string_bytes_begin..].ptr;
-        var str_len: *StringLenType = @ptrCast(*StringLenType, @alignCast(@alignOf(StringLenType), str_bytes));
+        var str_len: *StringLenType = @alignCast(@ptrCast(str_bytes));
         var pooled_str: []u8 = str_bytes[@sizeOf(StringLenType) .. @sizeOf(StringLenType) + str_len.*];
         return pooled_str;
     }

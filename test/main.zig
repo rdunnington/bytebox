@@ -189,19 +189,19 @@ fn strcmp(a: []const u8, b: []const u8) bool {
 fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
     const Helpers = struct {
         fn parseI8(str: []const u8) !i8 {
-            return std.fmt.parseInt(i8, str, 10) catch @bitCast(i8, try std.fmt.parseInt(u8, str, 10));
+            return std.fmt.parseInt(i8, str, 10) catch @as(i8, @bitCast(try std.fmt.parseInt(u8, str, 10)));
         }
 
         fn parseI16(str: []const u8) !i16 {
-            return std.fmt.parseInt(i16, str, 10) catch @bitCast(i16, try std.fmt.parseInt(u16, str, 10));
+            return std.fmt.parseInt(i16, str, 10) catch @as(i16, @bitCast(try std.fmt.parseInt(u16, str, 10)));
         }
 
         fn parseI32(str: []const u8) !i32 {
-            return std.fmt.parseInt(i32, str, 10) catch @bitCast(i32, try std.fmt.parseInt(u32, str, 10));
+            return std.fmt.parseInt(i32, str, 10) catch @as(i32, @bitCast(try std.fmt.parseInt(u32, str, 10)));
         }
 
         fn parseI64(str: []const u8) !i64 {
-            return std.fmt.parseInt(i64, str, 10) catch @bitCast(i64, try std.fmt.parseInt(u64, str, 10));
+            return std.fmt.parseInt(i64, str, 10) catch @as(i64, @bitCast(try std.fmt.parseInt(u64, str, 10)));
         }
 
         fn parseF32(str: []const u8) !f32 {
@@ -209,7 +209,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
                 return std.math.nan_f32; // don't differentiate between arithmetic/canonical nan
             } else {
                 const int = try std.fmt.parseInt(u32, str, 10);
-                return @bitCast(f32, int);
+                return @as(f32, @bitCast(int));
             }
         }
 
@@ -218,7 +218,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
                 return std.math.nan_f64; // don't differentiate between arithmetic/canonical nan
             } else {
                 const int = try std.fmt.parseInt(u64, str, 10);
-                return @bitCast(f64, int);
+                return @as(f64, @bitCast(int));
             }
         }
 
@@ -237,8 +237,8 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
                 else => unreachable,
             };
 
-            for (parsed_values) |*v, i| {
-                v.* = try parse_func(json_strings[i].String);
+            for (&parsed_values, 0..) |*v, i| {
+                v.* = try parse_func(json_strings[i].string);
             }
 
             var parsed_bytes = std.mem.sliceAsBytes(&parsed_values);
@@ -251,52 +251,52 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
     const json_type = obj.get("type").?;
     const json_value = obj.get("value").?;
 
-    if (strcmp("i32", json_type.String)) {
-        const int = try Helpers.parseI32(json_value.String);
+    if (strcmp("i32", json_type.string)) {
+        const int = try Helpers.parseI32(json_value.string);
         return TaggedVal{ .type = .I32, .val = Val{ .I32 = int } };
-    } else if (strcmp("i64", json_type.String)) {
-        const int = try Helpers.parseI64(json_value.String);
+    } else if (strcmp("i64", json_type.string)) {
+        const int = try Helpers.parseI64(json_value.string);
         return TaggedVal{ .type = .I64, .val = Val{ .I64 = int } };
-    } else if (strcmp("f32", json_type.String)) {
-        var float: f32 = try Helpers.parseF32(json_value.String);
+    } else if (strcmp("f32", json_type.string)) {
+        var float: f32 = try Helpers.parseF32(json_value.string);
         return TaggedVal{ .type = .F32, .val = Val{ .F32 = float } };
-    } else if (strcmp("f64", json_type.String)) {
-        var float: f64 = try Helpers.parseF64(json_value.String);
+    } else if (strcmp("f64", json_type.string)) {
+        var float: f64 = try Helpers.parseF64(json_value.string);
         return TaggedVal{ .type = .F64, .val = Val{ .F64 = float } };
-    } else if (strcmp("v128", json_type.String)) {
+    } else if (strcmp("v128", json_type.string)) {
         const json_lane_type = obj.get("lane_type").?;
         var vec: v128 = undefined;
-        if (strcmp("i8", json_lane_type.String)) {
-            vec = try Helpers.parseValuesIntoVec(i8, json_value.Array.items);
-        } else if (strcmp("i16", json_lane_type.String)) {
-            vec = try Helpers.parseValuesIntoVec(i16, json_value.Array.items);
-        } else if (strcmp("i32", json_lane_type.String)) {
-            vec = try Helpers.parseValuesIntoVec(i32, json_value.Array.items);
-        } else if (strcmp("i64", json_lane_type.String)) {
-            vec = try Helpers.parseValuesIntoVec(i64, json_value.Array.items);
-        } else if (strcmp("f32", json_lane_type.String)) {
-            vec = try Helpers.parseValuesIntoVec(f32, json_value.Array.items);
-        } else if (strcmp("f64", json_lane_type.String)) {
-            vec = try Helpers.parseValuesIntoVec(f64, json_value.Array.items);
+        if (strcmp("i8", json_lane_type.string)) {
+            vec = try Helpers.parseValuesIntoVec(i8, json_value.array.items);
+        } else if (strcmp("i16", json_lane_type.string)) {
+            vec = try Helpers.parseValuesIntoVec(i16, json_value.array.items);
+        } else if (strcmp("i32", json_lane_type.string)) {
+            vec = try Helpers.parseValuesIntoVec(i32, json_value.array.items);
+        } else if (strcmp("i64", json_lane_type.string)) {
+            vec = try Helpers.parseValuesIntoVec(i64, json_value.array.items);
+        } else if (strcmp("f32", json_lane_type.string)) {
+            vec = try Helpers.parseValuesIntoVec(f32, json_value.array.items);
+        } else if (strcmp("f64", json_lane_type.string)) {
+            vec = try Helpers.parseValuesIntoVec(f64, json_value.array.items);
         } else {
             unreachable;
         }
 
         return TaggedVal{ .type = .V128, .val = Val{ .V128 = vec } };
-    } else if (strcmp("externref", json_type.String)) {
+    } else if (strcmp("externref", json_type.string)) {
         const val: Val = blk: {
-            if (strcmp("null", json_value.String)) {
+            if (strcmp("null", json_value.string)) {
                 break :blk Val.nullRef(ValType.ExternRef) catch unreachable;
             } else {
-                const int = try std.fmt.parseInt(u32, json_value.String, 10);
+                const int = try std.fmt.parseInt(u32, json_value.string, 10);
                 break :blk Val{ .ExternRef = int };
             }
         };
         return TaggedVal{ .type = .ExternRef, .val = val };
-    } else if (strcmp("funcref", json_type.String) and strcmp("null", json_value.String)) {
+    } else if (strcmp("funcref", json_type.string) and strcmp("null", json_value.string)) {
         return TaggedVal{ .type = .FuncRef, .val = Val.nullRef(ValType.FuncRef) catch unreachable };
     } else {
-        print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.String, json_value.String });
+        print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.string, json_value.string });
     }
 
     unreachable;
@@ -348,7 +348,7 @@ fn parseLaneTypedVal(obj: std.json.ObjectMap) !LaneTypedVal {
     var lane_type = V128LaneType.I8x16;
     if (v.type == .V128) {
         const json_lane_type = obj.get("lane_type").?;
-        lane_type = V128LaneType.fromString(json_lane_type.String);
+        lane_type = V128LaneType.fromString(json_lane_type.string);
     }
 
     return LaneTypedVal{
@@ -443,74 +443,73 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
 fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.ArrayList(Command) {
     const Helpers = struct {
         fn parseAction(json_action: *std.json.Value, fallback_module: []const u8, _allocator: std.mem.Allocator) !Action {
-            const json_type = json_action.Object.getPtr("type").?;
+            const json_type = json_action.object.getPtr("type").?;
             var action_type: ActionType = undefined;
-            if (strcmp("invoke", json_type.String)) {
+            if (strcmp("invoke", json_type.string)) {
                 action_type = .Invocation;
-            } else if (strcmp("get", json_type.String)) {
+            } else if (strcmp("get", json_type.string)) {
                 action_type = .Get;
             } else {
                 unreachable;
             }
 
-            const json_field = json_action.Object.getPtr("field").?;
+            const json_field = json_action.object.getPtr("field").?;
 
-            const json_args_or_null = json_action.Object.getPtr("args");
+            const json_args_or_null = json_action.object.getPtr("args");
             var args = std.ArrayList(LaneTypedVal).init(_allocator);
             if (json_args_or_null) |json_args| {
-                for (json_args.Array.items) |item| {
-                    var val: LaneTypedVal = try parseLaneTypedVal(item.Object);
+                for (json_args.array.items) |item| {
+                    var val: LaneTypedVal = try parseLaneTypedVal(item.object);
                     try args.append(val);
                 }
             }
 
             var module: []const u8 = try _allocator.dupe(u8, fallback_module);
-            const json_module_or_null = json_action.Object.getPtr("module");
+            const json_module_or_null = json_action.object.getPtr("module");
             if (json_module_or_null) |json_module| {
-                module = try _allocator.dupe(u8, json_module.String);
+                module = try _allocator.dupe(u8, json_module.string);
             }
 
             return Action{
                 .type = action_type,
                 .module = module,
-                .field = try _allocator.dupe(u8, json_field.String),
+                .field = try _allocator.dupe(u8, json_field.string),
                 .args = args,
             };
         }
 
         fn parseBadModuleError(json_command: *const std.json.Value, _allocator: std.mem.Allocator) !BadModuleError {
-            const json_filename = json_command.Object.get("filename").?;
-            const json_expected = json_command.Object.get("text").?;
+            const json_filename = json_command.object.get("filename").?;
+            const json_expected = json_command.object.get("text").?;
 
             return BadModuleError{
-                .module = try _allocator.dupe(u8, json_filename.String),
-                .expected_error = try _allocator.dupe(u8, json_expected.String),
+                .module = try _allocator.dupe(u8, json_filename.string),
+                .expected_error = try _allocator.dupe(u8, json_expected.string),
             };
         }
     };
 
     // print("json_path: {s}\n", .{json_path});
     var json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
-    var parser = std.json.Parser.init(allocator, false);
-    var tree = try parser.parse(json_data);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
 
     var fallback_module: []const u8 = "";
     defer allocator.free(fallback_module);
 
     var commands = std.ArrayList(Command).init(allocator);
 
-    const json_commands = tree.root.Object.getPtr("commands").?;
-    for (json_commands.Array.items) |json_command| {
-        const json_command_type = json_command.Object.getPtr("type").?;
+    const json_commands = parsed.value.object.getPtr("commands").?;
+    for (json_commands.array.items) |json_command| {
+        const json_command_type = json_command.object.getPtr("type").?;
 
-        if (strcmp("module", json_command_type.String)) {
-            const json_filename = json_command.Object.getPtr("filename").?;
-            var filename: []const u8 = try allocator.dupe(u8, json_filename.String);
+        if (strcmp("module", json_command_type.string)) {
+            const json_filename = json_command.object.getPtr("filename").?;
+            var filename: []const u8 = try allocator.dupe(u8, json_filename.string);
             fallback_module = filename;
 
             var name = try allocator.dupe(u8, filename);
-            if (json_command.Object.getPtr("name")) |json_module_name| {
-                name = try allocator.dupe(u8, json_module_name.String);
+            if (json_command.object.getPtr("name")) |json_module_name| {
+                name = try allocator.dupe(u8, json_module_name.string);
             }
 
             var command = Command{
@@ -520,12 +519,12 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
-        } else if (strcmp("register", json_command_type.String)) {
-            const json_as = json_command.Object.getPtr("as").?;
-            var json_import_name: []const u8 = json_as.String;
+        } else if (strcmp("register", json_command_type.string)) {
+            const json_as = json_command.object.getPtr("as").?;
+            var json_import_name: []const u8 = json_as.string;
             var json_module_name: []const u8 = fallback_module;
-            if (json_command.Object.getPtr("name")) |json_name| {
-                json_module_name = json_name.String;
+            if (json_command.object.getPtr("name")) |json_name| {
+                json_module_name = json_name.string;
             }
 
             // print("json_module_name: {s}, json_import_name: {s}\n", .{ json_module_name, json_import_name });
@@ -538,17 +537,17 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_return", json_command_type.String) or strcmp("action", json_command_type.String)) {
-            const json_action = json_command.Object.getPtr("action").?;
+        } else if (strcmp("assert_return", json_command_type.string) or strcmp("action", json_command_type.string)) {
+            const json_action = json_command.object.getPtr("action").?;
 
             var action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
             var expected_returns_or_null: ?std.ArrayList(LaneTypedVal) = null;
-            const json_expected_or_null = json_command.Object.getPtr("expected");
+            const json_expected_or_null = json_command.object.getPtr("expected");
             if (json_expected_or_null) |json_expected| {
                 var expected_returns = std.ArrayList(LaneTypedVal).init(allocator);
-                for (json_expected.Array.items) |item| {
-                    try expected_returns.append(try parseLaneTypedVal(item.Object));
+                for (json_expected.array.items) |item| {
+                    try expected_returns.append(try parseLaneTypedVal(item.object));
                 }
                 expected_returns_or_null = expected_returns;
             }
@@ -560,21 +559,21 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_trap", json_command_type.String) or strcmp("assert_exhaustion", json_command_type.String)) {
-            const json_action = json_command.Object.getPtr("action").?;
+        } else if (strcmp("assert_trap", json_command_type.string) or strcmp("assert_exhaustion", json_command_type.string)) {
+            const json_action = json_command.object.getPtr("action").?;
 
             var action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
-            const json_text = json_command.Object.getPtr("text").?;
+            const json_text = json_command.object.getPtr("text").?;
 
             var command = Command{
                 .AssertTrap = CommandAssertTrap{
                     .action = action,
-                    .expected_error = try allocator.dupe(u8, json_text.String),
+                    .expected_error = try allocator.dupe(u8, json_text.string),
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_malformed", json_command_type.String)) {
+        } else if (strcmp("assert_malformed", json_command_type.string)) {
             var command = Command{
                 .AssertMalformed = CommandAssertMalformed{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
@@ -583,21 +582,21 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             if (std.mem.endsWith(u8, command.AssertMalformed.err.module, ".wasm")) {
                 try commands.append(command);
             }
-        } else if (strcmp("assert_invalid", json_command_type.String)) {
+        } else if (strcmp("assert_invalid", json_command_type.string)) {
             var command = Command{
                 .AssertInvalid = CommandAssertInvalid{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_unlinkable", json_command_type.String)) {
+        } else if (strcmp("assert_unlinkable", json_command_type.string)) {
             var command = Command{
                 .AssertUnlinkable = CommandAssertUnlinkable{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
             try commands.append(command);
-        } else if (strcmp("assert_uninstantiable", json_command_type.String)) {
+        } else if (strcmp("assert_uninstantiable", json_command_type.string)) {
             var command = Command{
                 .AssertUninstantiable = CommandAssertUninstantiable{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
@@ -605,7 +604,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             };
             try commands.append(command);
         } else {
-            print("unknown command type: {s}\n", .{json_command_type.String});
+            print("unknown command type: {s}\n", .{json_command_type.string});
             unreachable;
         }
     }
@@ -984,12 +983,12 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                     fn printVector(lane_type: V128LaneType, vec: v128) void {
                         switch (lane_type) {
-                            .I8x16 => print("{}, ", .{@bitCast(i8x16, vec)}),
-                            .I16x8 => print("{}, ", .{@bitCast(i16x8, vec)}),
-                            .I32x4 => print("{}, ", .{@bitCast(i32x4, vec)}),
-                            .I64x2 => print("{}, ", .{@bitCast(i64x2, vec)}),
-                            .F32x4 => print("{}, ", .{@bitCast(f32x4, vec)}),
-                            .F64x2 => print("{}, ", .{@bitCast(f64x2, vec)}),
+                            .I8x16 => print("{}, ", .{@as(i8x16, @bitCast(vec))}),
+                            .I16x8 => print("{}, ", .{@as(i16x8, @bitCast(vec))}),
+                            .I32x4 => print("{}, ", .{@as(i32x4, @bitCast(vec))}),
+                            .I64x2 => print("{}, ", .{@as(i64x2, @bitCast(vec))}),
+                            .F32x4 => print("{}, ", .{@as(f32x4, @bitCast(vec))}),
+                            .F64x2 => print("{}, ", .{@as(f64x2, @bitCast(vec))}),
                         }
                     }
                 };
@@ -1055,7 +1054,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 if (action_succeeded) {
                     if (c.expected_returns) |expected| {
-                        for (returns) |r, i| {
+                        for (returns, 0..) |r, i| {
                             var pass = false;
 
                             const return_type: ValType = return_types.?[i];
@@ -1081,8 +1080,8 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             } else {
                                 const V128ExpectHelper = struct {
                                     fn expect(comptime VectorType: type, actual_value: v128, expected_value_: v128, return_index: usize, returns_length: usize, module_: *const Module, command_: *const CommandAssertReturn) bool {
-                                        const actual_typed = @bitCast(VectorType, actual_value);
-                                        const expected_typed = @bitCast(VectorType, expected_value_);
+                                        const actual_typed = @as(VectorType, @bitCast(actual_value));
+                                        const expected_typed = @as(VectorType, @bitCast(expected_value_));
 
                                         var is_equal = true;
                                         const child_type = @typeInfo(VectorType).Vector.child;

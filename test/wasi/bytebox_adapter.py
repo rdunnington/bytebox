@@ -29,5 +29,7 @@ PROG_ARGS = args.arg
 ENV_ARGS = [j for i in args.env for j in ["--env", i]]
 DIR_ARGS = [j for i in args.dir for j in ["--dir", i]]
 
-r = subprocess.run([BYTEBOX] + [TEST_FILE] + PROG_ARGS + ENV_ARGS + DIR_ARGS)
+ALL_ARGS = [BYTEBOX] + [TEST_FILE] + PROG_ARGS + ENV_ARGS + DIR_ARGS
+
+r = subprocess.run(ALL_ARGS)
 sys.exit(r.returncode)

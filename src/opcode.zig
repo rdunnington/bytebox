@@ -902,7 +902,7 @@ pub const WasmOpcode = enum(u16) {
     F64x2_Convert_Low_I32x4_U = 0xFDFF,
 
     pub fn toOpcode(wasm: WasmOpcode) Opcode {
-        const opcode_int = @enumToInt(wasm);
+        const opcode_int = @intFromEnum(wasm);
         var opcode: Opcode = undefined;
         if (opcode_int < ConversionTables.wasmOpcodeToOpcodeTable.len) {
             opcode = ConversionTables.wasmOpcodeToOpcodeTable[opcode_int];
@@ -923,7 +923,7 @@ pub const WasmOpcode = enum(u16) {
             if (type_opcode > std.math.maxInt(u8)) {
                 return error.MalformedIllegalOpcode;
             }
-            var byte2 = @intCast(u8, type_opcode);
+            var byte2 = @as(u8, @intCast(type_opcode));
             var extended: u16 = byte;
             extended = extended << 8;
             extended |= byte2;

@@ -10,7 +10,7 @@ const Benchmark = struct {
 };
 
 fn elapsedMilliseconds(timer: *std.time.Timer) f64 {
-    var ns_elapsed: f64 = @intToFloat(f64, timer.read());
+    var ns_elapsed: f64 = @as(f64, @floatFromInt(timer.read()));
     const ms_elapsed = ns_elapsed / 1000000.0;
     return ms_elapsed;
 }
