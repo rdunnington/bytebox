@@ -88,8 +88,6 @@ const WasiContext = struct {
         try context.fd_wasi_table.put(2, 2);
 
         for (context.dirs) |dir_path| {
-            std.debug.print("opening preopen: {s}\n", .{dir_path});
-
             const openflags = WasiOpenFlags{
                 .creat = false,
                 .directory = true,
@@ -154,20 +152,9 @@ const WasiContext = struct {
         var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
         const allocator = fba.allocator();
 
-        // var path_dir: []const u8 = "";
-        // if (fd_dir) |fd| {
-        //     var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        //     path_dir = try std.os.getFdPath(fd, &path_buffer);
-        // }
-
         const dir_path = if (fd_info_dir) |info| info.path_absolute else self.cwd;
-
-        // const dir_path = try dir.realpath(".", &static_path_buffer);
-        // std.debug.print("attempting to resolve from dir '{s}' subpath '{s}'\n", .{ dir_path, path });
-
         const paths = [_][]const u8{ dir_path, path };
 
-        // if (dir.realpathAlloc(allocator, path)) |resolved_path| {
         if (std.fs.path.resolve(allocator, &paths)) |resolved_path| {
             // preserve trailing slash
             var final_path = resolved_path;
@@ -180,7 +167,6 @@ const WasiContext = struct {
             const cached_path: []const u8 = try self.strings.findOrPut(final_path);
             return cached_path;
         } else |err| {
-            // std.debug.print("realpathAlloc failed trying to resolve path {s}\n", .{path});
             return err;
         }
     }
@@ -208,10 +194,7 @@ const WasiContext = struct {
     }
 
     fn fdOpen(self: *WasiContext, fd_info_dir: ?*FdInfo, path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, is_preopen: bool, errno: *Errno) ?u32 {
-        std.debug.print("fdOpen: fd '{s}' with path '{s}'\n", .{ if (fd_info_dir) |f| f.path_absolute else "null", path });
         if (self.resolveAndCache(fd_info_dir, path)) |resolved_path| {
-            // std.debug.print("\tresolved path: '{s}'\n", .{resolved_path});
-
             // Found an entry for this path, just reuse it while creating a new wasi fd
             if (self.fd_path_lookup.get(resolved_path)) |fd_table_index| {
                 var fd_wasi: u32 = self.next_fd_id;
@@ -271,12 +254,10 @@ const WasiContext = struct {
                     return null;
                 };
 
-                // std.debug.print("\tsuccess! resolved path: {s}\n", .{resolved_path});
                 return fd_wasi;
             }
         } else |err| {
             errno.* = Errno.translateError(err);
-            // std.debug.print("\tfailed with err {!}, errno: {}\n", .{ err, errno.* });
         }
 
         return null;
@@ -379,8 +360,6 @@ const WasiContext = struct {
                 errno.* = Errno.translateError(err);
             }
         }
-
-        // std.debug.print("hasPathAccess failed for path {s} with errno {}\n", .{ relative_path, errno.* });
 
         return false;
     }
@@ -667,20 +646,11 @@ const Helpers = struct {
     }
 
     fn resolvePath(fd_info: *const WasiContext.FdInfo, path_relative: []const u8, path_buffer: []u8, _: *Errno) ?[]const u8 {
-        // const path_dir = std.os.getFdPath(fd_os_dir, path_buffer[0..std.fs.MAX_PATH_BYTES]) catch |err| {
-        //     errno.* = Errno.translateError(err);
-        //     return null;
-        // };
-
         var fba = std.heap.FixedBufferAllocator.init(path_buffer[std.fs.MAX_PATH_BYTES..]);
         const allocator = fba.allocator();
 
         const paths = [_][]const u8{ fd_info.path_absolute, path_relative };
         const resolved_path = std.fs.path.resolve(allocator, &paths) catch unreachable;
-        // const dir = std.fs.Dir{ .fd = fd_os_dir };
-        // const resolved_path = dir.realpathAlloc(allocator, path_relative) catch unreachable;
-        // const resolved_path = std.fs.path.resolve(allocator, paths);
-
         return resolved_path;
     }
 
@@ -1305,8 +1275,6 @@ const Helpers = struct {
             0,
         );
 
-        // std.debug.print("openPath win32: '{s}' got rc {}", .{ path, rc });
-
         // emulate the posix behavior on windows
         if (lookupflags.symlink_follow == false) {
             if (rc != .OBJECT_NAME_INVALID) {
@@ -1347,47 +1315,6 @@ const Helpers = struct {
         }
 
         return null;
-
-        // var flags: u32 = 0;
-        // if (openflags.creat) {
-        //     flags |= std.os.O.CREAT;
-        // }
-        // if (openflags.directory) {
-        //     flags |= std.os.O.DIRECTORY;
-        // }
-        // if (openflags.excl) {
-        //     flags |= std.os.O.EXCL;
-        // }
-        // if (openflags.trunc) {
-        //     flags |= std.os.O.TRUNC;
-        // }
-
-        // if (lookupflags.symlink_follow == false) {
-        //     flags |= std.os.O.NOFOLLOW;
-        // }
-
-        // const fdflags_os = fdflagsToFlagsPosix(fdflags);
-        // flags |= fdflags_os;
-
-        // if (rights.fd_read and rights.fd_write) {
-        //     if (openflags.directory) {
-        //         flags |= std.os.O.RDONLY;
-        //     } else {
-        //         flags |= std.os.O.RDWR;
-        //     }
-        // } else if (rights.fd_read) {
-        //     flags |= std.os.O.RDONLY;
-        // } else if (rights.fd_write) {
-        //     flags |= std.os.O.WRONLY;
-        // }
-
-        // const mode: std.os.mode_t = 0;
-        // if (std.os.open(path, flags, mode)) |fd| {
-        //     return fd;
-        // } else |err| {
-        //     errno.* = Errno.translateError(err);
-        //     return null;
-        // }
     }
 
     fn openPathPosix(path: []const u8, lookupflags: WasiLookupFlags, openflags: WasiOpenFlags, fdflags: WasiFdFlags, rights: WasiRights, errno: *Errno) ?std.os.fd_t {
@@ -2484,15 +2411,12 @@ fn wasi_path_open(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]con
 
                     const is_preopen = false;
                     if (context.fdOpen(fd_info, path, lookupflags, openflags, fdflags, rights_sanitized, is_preopen, &errno)) |fd_opened_wasi| {
-                        std.debug.print("wasi_path_open opened path '{s}' with fd_wasi '{}'\n", .{ path, fd_opened_wasi });
                         Helpers.writeIntToMemory(u32, fd_opened_wasi, fd_out_mem_offset, module, &errno);
                     }
                 }
             }
         }
     }
-
-    std.debug.print("wasi_path_open returned errno {}\n", .{errno});
 
     returns[0] = Val{ .I32 = @intFromEnum(errno) };
 }
