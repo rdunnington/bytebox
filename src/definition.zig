@@ -1,7 +1,6 @@
-// This file contains types and code shared between both the ModuleDefinition and instances
+// This file contains types and code shared between both the ModuleDefinition and VMs
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const common = @import("common.zig");
 const StableArray = common.StableArray;
@@ -219,17 +218,17 @@ pub const Val = extern union {
 };
 
 test "Val.isNull" {
-    const v1 = Val.nullRef(.FuncRef);
-    const v2 = Val.nullRef(.ExternRef);
+    const v1: Val = try Val.nullRef(.FuncRef);
+    const v2: Val = try Val.nullRef(.ExternRef);
 
-    std.testing.expect(v1.isNull() == true);
-    std.testing.expect(v2.isNull() == true);
+    try std.testing.expect(v1.isNull() == true);
+    try std.testing.expect(v2.isNull() == true);
 
     const v3 = Val.funcrefFromIndex(12);
     const v4 = Val{ .ExternRef = 234 };
 
-    std.testing.expect(v3.isNull() == false);
-    std.testing.expect(v4.isNull() == false);
+    try std.testing.expect(v3.isNull() == false);
+    try std.testing.expect(v4.isNull() == false);
 }
 
 pub const TaggedVal = struct {
@@ -249,6 +248,23 @@ pub const TaggedVal = struct {
             .type = .FuncRef,
         };
     }
+
+    pub const HashMapContext = struct {
+        pub fn hash(self: @This(), v: TaggedVal) u64 {
+            _ = self;
+
+            var hasher = std.hash.Wyhash.init(0);
+            hasher.update(std.mem.asBytes(&v.val));
+            hasher.update(std.mem.asBytes(&v.type));
+            return hasher.final();
+        }
+
+        pub fn eql(self: @This(), a: TaggedVal, b: TaggedVal) bool {
+            _ = self;
+
+            return a.type == b.type and Val.eql(a.type, a.val, b.val);
+        }
+    };
 };
 
 pub const Limits = struct {
@@ -523,10 +539,20 @@ pub const FunctionTypeDefinition = struct {
 
 pub const FunctionDefinition = struct {
     type_index: u32,
-    offset_into_instructions: u32,
+    instructions_begin: u32,
+    instructions_end: u32,
     continuation: u32,
-    locals: std.ArrayList(ValType),
-    size: u32,
+    locals: std.ArrayList(ValType), // TODO use a slice of a large contiguous array instead
+
+    pub fn instructions(func: FunctionDefinition, module_def: ModuleDefinition) []Instruction {
+        return module_def.code.instructions.items[func.instructions_begin..func.instructions_end];
+    }
+
+    pub fn numParamsAndLocals(func: FunctionDefinition, module_def: ModuleDefinition) usize {
+        const func_type: *const FunctionTypeDefinition = &module_def.types.items[func.type_index];
+        const param_types: []const ValType = func_type.getParams();
+        return param_types.len + func.locals.items.len;
+    }
 };
 
 const ExportType = enum(u8) {
@@ -2797,8 +2823,8 @@ pub const ModuleDefinition = struct {
                             .locals = std.ArrayList(ValType).init(allocator),
 
                             // we'll fix these up later when we find them in the Code section
-                            .offset_into_instructions = 0,
-                            .size = 0,
+                            .instructions_begin = 0,
+                            .instructions_end = 0,
                             .continuation = 0,
                         };
 
@@ -3087,9 +3113,7 @@ pub const ModuleDefinition = struct {
                         const code_size = try common.decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
-                        var def: *FunctionDefinition = &self.functions.items[code_index];
-                        def.offset_into_instructions = @as(u32, @intCast(code_begin_pos));
-                        def.size = code_size;
+                        var func_def: *FunctionDefinition = &self.functions.items[code_index];
 
                         // parse locals
                         {
@@ -3105,7 +3129,7 @@ pub const ModuleDefinition = struct {
 
                             var locals_total: usize = 0;
                             var locals_index: u32 = 0;
-                            try def.locals.ensureTotalCapacity(num_locals);
+                            try func_def.locals.ensureTotalCapacity(num_locals);
                             while (locals_index < num_locals) : (locals_index += 1) {
                                 const n = try common.decodeLEB128(u32, reader);
                                 const local_type = try ValType.decode(reader);
@@ -3117,21 +3141,20 @@ pub const ModuleDefinition = struct {
                                 local_types.appendAssumeCapacity(TypeCount{ .valtype = local_type, .count = n });
                             }
 
-                            try def.locals.ensureTotalCapacity(locals_total);
+                            try func_def.locals.ensureTotalCapacity(locals_total);
 
                             for (local_types.items) |type_count| {
-                                def.locals.appendNTimesAssumeCapacity(type_count.valtype, type_count.count);
+                                func_def.locals.appendNTimesAssumeCapacity(type_count.valtype, type_count.count);
                             }
                         }
 
-                        const instruction_begin_offset = @as(u32, @intCast(instructions.items.len));
-                        self.functions.items[code_index].offset_into_instructions = instruction_begin_offset;
+                        func_def.instructions_begin = @intCast(instructions.items.len);
                         try block_stack.append(BlockData{
-                            .begin_index = instruction_begin_offset,
+                            .begin_index = func_def.instructions_begin,
                             .opcode = .Block,
                         });
 
-                        try validator.beginValidateCode(self, &self.functions.items[code_index]);
+                        try validator.beginValidateCode(self, func_def);
 
                         var parsing_code = true;
                         while (parsing_code) {
@@ -3157,7 +3180,7 @@ pub const ModuleDefinition = struct {
                                 if (block_stack.items.len == 0) {
                                     parsing_code = false;
 
-                                    def.continuation = instruction_index;
+                                    func_def.continuation = instruction_index;
 
                                     block_stack.clearRetainingCapacity();
 
@@ -3190,7 +3213,7 @@ pub const ModuleDefinition = struct {
                                 }
                             }
 
-                            try validator.validateCode(self, &self.functions.items[code_index], instruction);
+                            try validator.validateCode(self, func_def, instruction);
 
                             try self.code.wasm_address_to_instruction_index.put(@as(u32, @intCast(wasm_instruction_address)), instruction_index);
 
@@ -3203,6 +3226,8 @@ pub const ModuleDefinition = struct {
                         }
 
                         try validator.endValidateCode();
+
+                        func_def.instructions_end = @intCast(instructions.items.len);
 
                         const code_actual_size = stream.pos - code_begin_pos;
                         if (code_actual_size != code_size) {
@@ -3259,6 +3284,7 @@ pub const ModuleDefinition = struct {
 
     pub fn deinit(self: *ModuleDefinition) void {
         self.code.instructions.deinit();
+        self.code.wasm_address_to_instruction_index.deinit();
         for (self.code.branch_table.items) |*item| {
             item.label_ids.deinit();
         }
@@ -3292,6 +3318,10 @@ pub const ModuleDefinition = struct {
         }
         for (self.exports.globals.items) |*item| {
             self.allocator.free(item.name);
+        }
+
+        for (self.types.items) |*item| {
+            item.types.deinit();
         }
 
         self.types.deinit();

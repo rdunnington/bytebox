@@ -420,7 +420,7 @@ const Stack = struct {
 const FunctionInstance = struct {
     type_def_index: u32,
     def_index: u32,
-    offset_into_instructions: u32,
+    instructions_begin: u32,
     local_types: std.ArrayList(ValType),
 };
 
@@ -1312,7 +1312,7 @@ const InstructionFuncs = struct {
 
             return FuncCallData{
                 .code = module_instance.module_def.code.instructions.items.ptr,
-                .continuation = func.offset_into_instructions,
+                .continuation = func.instructions_begin,
             };
         }
 
@@ -5977,7 +5977,7 @@ pub const ModuleInstance = struct {
             var f = FunctionInstance{
                 .type_def_index = def_func.type_index,
                 .def_index = @as(u32, @intCast(i)),
-                .offset_into_instructions = def_func.offset_into_instructions,
+                .instructions_begin = def_func.instructions_begin,
                 .local_types = local_types,
             };
             try store.functions.append(f);
@@ -6388,7 +6388,7 @@ pub const ModuleInstance = struct {
 
         DebugTrace.traceFunction(self, self.stack.num_frames, func.def_index);
 
-        try InstructionFuncs.run(func.offset_into_instructions, self.module_def.code.instructions.items.ptr, &self.stack);
+        try InstructionFuncs.run(func.instructions_begin, self.module_def.code.instructions.items.ptr, &self.stack);
 
         if (returns.len > 0) {
             var index: i32 = @as(i32, @intCast(returns.len - 1));
