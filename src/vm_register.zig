@@ -66,7 +66,7 @@ const IRNode = struct {
     edges_out_count: u32,
 
     fn create(mir: *ModuleIR, index: usize) AllocError!*IRNode {
-        var node = try mir.ir.create();
+        var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .instruction_index = index,
             .edges_in = null,
@@ -75,6 +75,11 @@ const IRNode = struct {
             .edges_out_count = 0,
         };
         return node;
+    }
+
+    fn deinit(node: IRNode, allocator: std.mem.Allocator) void {
+        if (node.edges_in) |e| allocator.free(e[0..node.edges_in_count]);
+        if (node.edges_out) |e| allocator.free(e[0..node.edges_out_count]);
     }
 
     fn instruction(node: IRNode, module_def: ModuleDefinition) *Instruction {
@@ -186,19 +191,22 @@ const ModuleIR = struct {
     allocator: std.mem.Allocator,
     module_def: *const ModuleDefinition,
     functions: std.ArrayList(IRFunction),
-    ir: std.heap.MemoryPool(IRNode),
+    ir: StableArray(IRNode),
 
     fn init(allocator: std.mem.Allocator, module_def: *const ModuleDefinition) ModuleIR {
         return ModuleIR{
             .allocator = allocator,
             .module_def = module_def,
             .functions = std.ArrayList(IRFunction).init(allocator),
-            .ir = std.heap.MemoryPool(IRNode).init(allocator),
+            .ir = StableArray(IRNode).init(1024 * 1024 * 8),
         };
     }
 
     fn deinit(mir: *ModuleIR) void {
         mir.functions.deinit();
+        for (mir.ir.items) |node| {
+            node.deinit(mir.allocator);
+        }
         mir.ir.deinit();
     }
 
@@ -402,7 +410,8 @@ pub const RegisterVM = struct {
 
 test "ir1" {
     const filename =
-        \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
+        \\E:\Dev\third_party\zware\test\fact.wasm
+        // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
     ;
     var allocator = std.testing.allocator;
 

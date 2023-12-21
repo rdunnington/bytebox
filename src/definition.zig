@@ -3323,6 +3323,9 @@ pub const ModuleDefinition = struct {
         for (self.types.items) |*item| {
             item.types.deinit();
         }
+        for (self.functions.items) |*item| {
+            item.locals.deinit();
+        }
 
         self.types.deinit();
         self.imports.functions.deinit();
