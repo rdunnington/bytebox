@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 const builtin = @import("builtin");
 
@@ -188,6 +189,86 @@ const IRFunction = struct {
 };
 
 const ModuleIR = struct {
+    const IntermediateCompileData = struct {
+        const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
+
+        allocator: std.mem.Allocator,
+
+        // This stack is a record of the nodes to push values onto the stack. If an instruction would push
+        // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
+        // that we don't have to do any type checking here because the module has already been validated.
+        nodes_value_stack: std.ArrayList(*IRNode),
+
+        // This is a bit weird - since the Local_* instructions serve to just manipulate the locals into the stack,
+        // we need a way to represent what's in the locals slot as an SSA node. This array lets us do that. We also
+        // reuse the Local_Get instructions to indicate the "initial value" of the slot. Since our IRNode only stores
+        // indices to instructions, we'll just lazily set these when they're fetched for the first time.
+        locals: std.ArrayList(?*IRNode),
+
+        // Lets us collapse multiple const IR nodes with the same type/value into a single one
+        unique_constants: UniqueValueToIRNodeMap,
+
+        fn init(allocator: std.mem.Allocator) IntermediateCompileData {
+            return IntermediateCompileData{
+                .allocator = allocator,
+                .nodes_value_stack = std.ArrayList(*IRNode).init(allocator),
+                .locals = std.ArrayList(?*IRNode).init(allocator),
+                .unique_constants = UniqueValueToIRNodeMap.init(allocator),
+            };
+        }
+
+        fn warmup(self: *IntermediateCompileData, func_def: FunctionDefinition, module_def: ModuleDefinition) AllocError!void {
+            try self.locals.appendNTimes(null, func_def.numParamsAndLocals(module_def));
+        }
+
+        fn reset(self: *IntermediateCompileData) void {
+            self.nodes_value_stack.clearRetainingCapacity();
+            self.locals.clearRetainingCapacity();
+            self.unique_constants.clearRetainingCapacity();
+        }
+
+        fn deinit(self: *IntermediateCompileData) void {
+            self.nodes_value_stack.deinit();
+            self.locals.deinit();
+            self.unique_constants.deinit();
+        }
+
+        fn consumeValueStackNodes(self: *IntermediateCompileData, consumer: *IRNode, num_nodes: usize) AllocError!void {
+            var edges_buffer: [8]*IRNode = undefined;
+            var edges = edges_buffer[0..num_nodes];
+            for (edges) |*e| {
+                e.* = self.nodes_value_stack.pop();
+            }
+            try consumer.pushEdges(.In, edges, self.allocator);
+            for (edges) |e| {
+                var consumer_edges = [_]*IRNode{consumer};
+                try e.pushEdges(.Out, &consumer_edges, self.allocator);
+            }
+            try self.nodes_value_stack.append(consumer);
+        }
+
+        fn foldConstant(self: *IntermediateCompileData, mir: *ModuleIR, comptime valtype: ValType, instruction_index: usize, instruction: Instruction) AllocError!*IRNode {
+            var val: TaggedVal = undefined;
+            val.type = valtype;
+            val.val = switch (valtype) {
+                .I32 => Val{ .I32 = instruction.immediate.ValueI32 },
+                .I64 => Val{ .I64 = instruction.immediate.ValueI64 },
+                .F32 => Val{ .F32 = instruction.immediate.ValueF32 },
+                .F64 => Val{ .F64 = instruction.immediate.ValueF64 },
+                .V128 => Val{ .V128 = instruction.immediate.ValueVec },
+                else => @compileError("Unsupported const instruction"),
+            };
+
+            var res = try self.unique_constants.getOrPut(val);
+            if (res.found_existing == false) {
+                var node = try IRNode.create(mir, instruction_index);
+                res.value_ptr.* = node;
+            }
+            try self.nodes_value_stack.append(res.value_ptr.*);
+            return res.value_ptr.*;
+        }
+    };
+
     allocator: std.mem.Allocator,
     module_def: *const ModuleDefinition,
     functions: std.ArrayList(IRFunction),
@@ -211,29 +292,29 @@ const ModuleIR = struct {
     }
 
     fn compile(mir: *ModuleIR) AllocError!void {
+        var compile_data = IntermediateCompileData.init(mir.allocator);
+        defer compile_data.deinit();
+
         for (0..mir.module_def.functions.items.len) |i| {
             std.debug.print("mir.module_def.functions.items.len: {}, i: {}\n\n", .{ mir.module_def.functions.items.len, i });
-            try mir.compileFunc(i);
+            try mir.compileFunc(i, &compile_data);
+
+            compile_data.reset();
         }
     }
 
-    fn compileFunc(mir: *ModuleIR, index: usize) AllocError!void {
+    fn compileFunc(mir: *ModuleIR, index: usize, compile_data: *IntermediateCompileData) AllocError!void {
         const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
 
         const Helpers = struct {
-            fn foldConstant(map: *UniqueValueToIRNodeMap, mir_: *ModuleIR, instruction_index: usize, tagged_val: TaggedVal) AllocError!*IRNode {
-                var res = try map.getOrPut(tagged_val);
-                if (res.found_existing == false) {
-                    var node = try IRNode.create(mir_, instruction_index);
-                    res.value_ptr.* = node;
-                    return node;
-                }
-                return res.value_ptr.*;
-            }
-
             fn opcodeHasDefaultIRMapping(opcode: Opcode) bool {
                 return switch (opcode) {
                     .Noop,
+                    .Drop,
+                    .I32_Const,
+                    .I64_Const,
+                    .F32_Const,
+                    .F64_Const,
                     .Local_Get,
                     .Local_Set,
                     .Local_Tee,
@@ -243,24 +324,14 @@ const ModuleIR = struct {
             }
         };
 
-        const func: *FunctionDefinition = &mir.module_def.functions.items[index];
+        const func: *const FunctionDefinition = &mir.module_def.functions.items[index];
+        const func_type: *const FunctionTypeDefinition = func.typeDefinition(mir.module_def.*);
 
         std.debug.print("compiling func index {}\n", .{index});
 
-        // This stack is a record of the nodes to push values onto the stack. If an instruction would push
-        // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
-        // that we don't have to do any type checking here because the module has already been validated.
-        var value_stack_to_node = std.ArrayList(*IRNode).init(mir.allocator);
-        defer value_stack_to_node.deinit();
+        try compile_data.warmup(func.*, mir.module_def.*);
 
-        // This is a bit weird - since the Local_* instructions serve to just manipulate the locals into the stack,
-        // we need a way to represent what's in the locals slot as an SSA node. This array lets us do that. We also
-        // reuse the Local_Get instructions to indicate the "initial value" of the slot. Since our IRNode only stores
-        // indices to instructions, we'll just lazily set these when they're fetched for the first time.
-        var locals_array = std.ArrayList(?*IRNode).init(mir.allocator);
-        defer locals_array.deinit();
-        try locals_array.appendNTimes(null, func.numParamsAndLocals(mir.module_def.*));
-        var locals = locals_array.items; // for convenience later
+        var locals = compile_data.locals.items; // for convenience later
 
         // Lets us collapse multiple const IR nodes with the same type/value into a single one
         var unique_constants = UniqueValueToIRNodeMap.init(mir.allocator);
@@ -285,22 +356,31 @@ const ModuleIR = struct {
             std.debug.print("opcode: {}\n", .{instruction.opcode});
 
             switch (instruction.opcode) {
+                // .Loop => {
+                //     instruction.
+                // },
+                // .If => {},
+                .Return => {
+                    try compile_data.consumeValueStackNodes(node.?, func_type.getReturns().len);
+                },
                 .Drop => {
-                    _ = value_stack_to_node.pop();
+                    _ = compile_data.nodes_value_stack.pop();
                 },
                 .I32_Const => {
-                    node = try Helpers.foldConstant(&unique_constants, mir, instruction_index, TaggedVal{
-                        .val = Val{ .I32 = instruction.immediate.ValueI32 },
-                        .type = .I32,
-                    });
-                    try value_stack_to_node.append(node.?);
+                    assert(node == null);
+                    node = try compile_data.foldConstant(mir, .I32, instruction_index, instruction);
                 },
                 .I64_Const => {
-                    node = try Helpers.foldConstant(&unique_constants, mir, instruction_index, TaggedVal{
-                        .val = Val{ .I32 = instruction.immediate.ValueI32 },
-                        .type = .I32,
-                    });
-                    try value_stack_to_node.append(node.?);
+                    assert(node == null);
+                    node = try compile_data.foldConstant(mir, .I64, instruction_index, instruction);
+                },
+                .F32_Const => {
+                    assert(node == null);
+                    node = try compile_data.foldConstant(mir, .F32, instruction_index, instruction);
+                },
+                .F64_Const => {
+                    assert(node == null);
+                    node = try compile_data.foldConstant(mir, .F64, instruction_index, instruction);
                 },
                 .I32_Eq,
                 .I32_NE,
@@ -329,16 +409,7 @@ const ModuleIR = struct {
                 .I32_Rotr,
                 // TODO add a lot more of these simpler opcodes
                 => {
-                    var edges = [_]*IRNode{
-                        value_stack_to_node.pop(),
-                        value_stack_to_node.pop(),
-                    };
-                    try node.?.pushEdges(.In, &edges, mir.allocator);
-                    for (edges) |e| {
-                        var self_edges = [_]*IRNode{node.?};
-                        try e.pushEdges(.Out, &self_edges, mir.allocator);
-                    }
-                    try value_stack_to_node.append(node.?);
+                    try compile_data.consumeValueStackNodes(node.?, 2);
                 },
                 .I32_Eqz,
                 .I32_Clz,
@@ -347,34 +418,31 @@ const ModuleIR = struct {
                 .I32_Extend8_S,
                 .I32_Extend16_S,
                 => {
-                    var edges = [_]*IRNode{
-                        value_stack_to_node.pop(),
-                    };
-                    try node.?.pushEdges(.In, &edges, mir.allocator);
-                    for (edges) |e| {
-                        var self_edges = [_]*IRNode{node.?};
-                        try e.pushEdges(.Out, &self_edges, mir.allocator);
-                    }
-                    try value_stack_to_node.append(node.?);
+                    try compile_data.consumeValueStackNodes(node.?, 1);
                 },
                 .Local_Get => {
+                    assert(node == null);
+
                     const local: *?*IRNode = &locals[instruction.immediate.Index];
                     if (local.* == null) {
                         local.* = try IRNode.create(mir, instruction_index);
                     }
                     node = local.*;
-                    try value_stack_to_node.append(node.?);
+                    try compile_data.nodes_value_stack.append(node.?);
                 },
                 .Local_Set => {
-                    var n: *IRNode = value_stack_to_node.pop();
+                    assert(node == null);
+
+                    var n: *IRNode = compile_data.nodes_value_stack.pop();
                     locals[instruction.immediate.Index] = n;
                 },
                 .Local_Tee => {
-                    var n: *IRNode = value_stack_to_node.items[value_stack_to_node.items.len - 1];
+                    assert(node == null);
+                    var n: *IRNode = compile_data.nodes_value_stack.items[compile_data.nodes_value_stack.items.len - 1];
                     locals[instruction.immediate.Index] = n;
                 },
                 else => {
-                    std.log.warn("skipping node for opcode {}", .{instruction.opcode});
+                    std.log.warn("skipping node {}", .{instruction.opcode});
                 },
             }
 
