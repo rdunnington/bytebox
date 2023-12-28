@@ -966,6 +966,9 @@ pub const Instruction = struct {
                 if (std.meta.activeTag(immediate) == .Void) {
                     immediate = InstructionImmediates{ .Index = @as(u32, @intCast(module.code.branch_table.items.len)) };
                     try module.code.branch_table.append(branch_table);
+                } else {
+                    // don't need this anymore since we're reusing the existing one
+                    branch_table.label_ids.deinit();
                 }
             },
             .Call => {
@@ -3329,6 +3332,10 @@ pub const ModuleDefinition = struct {
         }
         for (self.functions.items) |*item| {
             item.locals.deinit();
+        }
+        for (self.elements.items) |*item| {
+            item.elems_value.deinit();
+            item.elems_expr.deinit();
         }
 
         self.types.deinit();
