@@ -52,6 +52,8 @@ const Val = def.Val;
 const ValType = def.ValType;
 const TaggedVal = def.TaggedVal;
 
+const INVALID_INSTRUCTION_INDEX: u32 = std.math.maxInt(u32);
+
 // High-level strategy:
 // 1. Transform the ModuleDefinition's bytecode into a sea-of-nodes type of IR.
 // 2. Perform constant folding, and other peephole optimizations.
@@ -60,16 +62,31 @@ const TaggedVal = def.TaggedVal;
 // 5. Implement the runtime instructions for the register-based bytecode
 
 const IRNode = struct {
-    instruction_index: usize,
+    opcode: Opcode,
+    instruction_index: u32,
     edges_in: ?[*]*IRNode,
     edges_in_count: u32,
     edges_out: ?[*]*IRNode,
     edges_out_count: u32,
 
-    fn create(mir: *ModuleIR, index: usize) AllocError!*IRNode {
+    fn createWithInstruction(mir: *ModuleIR, instruction_index: u32) AllocError!*IRNode {
         var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
-            .instruction_index = index,
+            .opcode = mir.module_def.code.instructions.items[instruction_index].opcode,
+            .instruction_index = instruction_index,
+            .edges_in = null,
+            .edges_in_count = 0,
+            .edges_out = null,
+            .edges_out_count = 0,
+        };
+        return node;
+    }
+
+    fn createStandalone(mir: *ModuleIR, opcode: Opcode) AllocError!*IRNode {
+        var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+        node.* = IRNode{
+            .opcode = opcode,
+            .instruction_index = INVALID_INSTRUCTION_INDEX,
             .edges_in = null,
             .edges_in_count = 0,
             .edges_out = null,
@@ -83,8 +100,11 @@ const IRNode = struct {
         if (node.edges_out) |e| allocator.free(e[0..node.edges_out_count]);
     }
 
-    fn instruction(node: IRNode, module_def: ModuleDefinition) *Instruction {
-        return &module_def.code.instructions.items[node.instruction_index];
+    fn instruction(node: IRNode, module_def: ModuleDefinition) ?*Instruction {
+        return if (node.instruction_index != INVALID_INSTRUCTION_INDEX)
+            &module_def.code.instructions.items[node.instruction_index]
+        else
+            null;
     }
 
     fn edgesIn(node: IRNode) []*IRNode {
@@ -148,14 +168,14 @@ const IRFunction = struct {
 
         while (nodes.items.len > 0) {
             const n: *const IRNode = nodes.pop();
+            const opcode: Opcode = n.opcode;
             const instruction = n.instruction(module_def);
-            const opcode: Opcode = instruction.opcode;
 
             var label_buffer: [256]u8 = undefined;
 
             const label = switch (opcode) {
-                .I32_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.immediate.ValueI32}) catch unreachable,
-                .Local_Get, .Local_Set, .Local_Tee => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.immediate.Index}) catch unreachable,
+                .I32_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueI32}) catch unreachable,
+                .Local_Get, .Local_Set, .Local_Tee => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.Index}) catch unreachable,
                 else => &[0]u8{},
             };
 
@@ -192,12 +212,25 @@ const ModuleIR = struct {
     const IntermediateCompileData = struct {
         const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
 
+        const PendingContinuationEdge = struct {
+            continuation: u32,
+            node: *IRNode,
+        };
+
         allocator: std.mem.Allocator,
 
         // This stack is a record of the nodes to push values onto the stack. If an instruction would push
         // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
         // that we don't have to do any type checking here because the module has already been validated.
-        nodes_value_stack: std.ArrayList(*IRNode),
+        value_stack: std.ArrayList(*IRNode),
+
+        // records the current block continuation
+        label_continuations: std.ArrayList(u32),
+
+        pending_continuation_edges: std.ArrayList(PendingContinuationEdge),
+
+        // when hitting an unconditional control transfer, we need to mark the rest of the stack values as unreachable just like in validation
+        is_unreachable: bool,
 
         // This is a bit weird - since the Local_* instructions serve to just manipulate the locals into the stack,
         // we need a way to represent what's in the locals slot as an SSA node. This array lets us do that. We also
@@ -211,7 +244,10 @@ const ModuleIR = struct {
         fn init(allocator: std.mem.Allocator) IntermediateCompileData {
             return IntermediateCompileData{
                 .allocator = allocator,
-                .nodes_value_stack = std.ArrayList(*IRNode).init(allocator),
+                .value_stack = std.ArrayList(*IRNode).init(allocator),
+                .label_continuations = std.ArrayList(u32).init(allocator),
+                .pending_continuation_edges = std.ArrayList(PendingContinuationEdge).init(allocator),
+                .is_unreachable = false,
                 .locals = std.ArrayList(?*IRNode).init(allocator),
                 .unique_constants = UniqueValueToIRNodeMap.init(allocator),
             };
@@ -219,35 +255,45 @@ const ModuleIR = struct {
 
         fn warmup(self: *IntermediateCompileData, func_def: FunctionDefinition, module_def: ModuleDefinition) AllocError!void {
             try self.locals.appendNTimes(null, func_def.numParamsAndLocals(module_def));
+            try self.label_continuations.append(func_def.continuation);
+            self.is_unreachable = false;
         }
 
         fn reset(self: *IntermediateCompileData) void {
-            self.nodes_value_stack.clearRetainingCapacity();
+            self.value_stack.clearRetainingCapacity();
+            self.label_continuations.clearRetainingCapacity();
+            self.pending_continuation_edges.clearRetainingCapacity();
             self.locals.clearRetainingCapacity();
             self.unique_constants.clearRetainingCapacity();
         }
 
         fn deinit(self: *IntermediateCompileData) void {
-            self.nodes_value_stack.deinit();
+            self.value_stack.deinit();
+            self.label_continuations.deinit();
+            self.pending_continuation_edges.deinit();
             self.locals.deinit();
             self.unique_constants.deinit();
         }
 
-        fn consumeValueStackNodes(self: *IntermediateCompileData, consumer: *IRNode, num_nodes: usize) AllocError!void {
+        fn popPushValueStackNodes(self: *IntermediateCompileData, consumer: *IRNode, num_consumed: usize, num_pushed: usize) AllocError!void {
+            if (self.is_unreachable) {
+                return;
+            }
+
             var edges_buffer: [8]*IRNode = undefined;
-            var edges = edges_buffer[0..num_nodes];
+            var edges = edges_buffer[0..num_consumed];
             for (edges) |*e| {
-                e.* = self.nodes_value_stack.pop();
+                e.* = self.value_stack.pop();
             }
             try consumer.pushEdges(.In, edges, self.allocator);
             for (edges) |e| {
                 var consumer_edges = [_]*IRNode{consumer};
                 try e.pushEdges(.Out, &consumer_edges, self.allocator);
             }
-            try self.nodes_value_stack.append(consumer);
+            try self.value_stack.appendNTimes(consumer, num_pushed);
         }
 
-        fn foldConstant(self: *IntermediateCompileData, mir: *ModuleIR, comptime valtype: ValType, instruction_index: usize, instruction: Instruction) AllocError!*IRNode {
+        fn foldConstant(self: *IntermediateCompileData, mir: *ModuleIR, comptime valtype: ValType, instruction_index: u32, instruction: Instruction) AllocError!*IRNode {
             var val: TaggedVal = undefined;
             val.type = valtype;
             val.val = switch (valtype) {
@@ -261,11 +307,22 @@ const ModuleIR = struct {
 
             var res = try self.unique_constants.getOrPut(val);
             if (res.found_existing == false) {
-                var node = try IRNode.create(mir, instruction_index);
+                var node = try IRNode.createWithInstruction(mir, instruction_index);
                 res.value_ptr.* = node;
             }
-            try self.nodes_value_stack.append(res.value_ptr.*);
+            if (self.is_unreachable == false) {
+                try self.value_stack.append(res.value_ptr.*);
+            }
             return res.value_ptr.*;
+        }
+
+        fn addPendingContinuationEdge(self: *IntermediateCompileData, node: *IRNode, label_id: u32) !void {
+            const last_label_index = self.label_continuations.items.len - 1;
+            var continuation: u32 = self.label_continuations.items[last_label_index - label_id];
+            try self.pending_continuation_edges.append(PendingContinuationEdge{
+                .node = node,
+                .continuation = continuation,
+            });
         }
     };
 
@@ -309,8 +366,10 @@ const ModuleIR = struct {
         const Helpers = struct {
             fn opcodeHasDefaultIRMapping(opcode: Opcode) bool {
                 return switch (opcode) {
+                    .Block,
                     .Noop,
                     .Drop,
+                    .End,
                     .I32_Const,
                     .I64_Const,
                     .F32_Const,
@@ -346,11 +405,11 @@ const ModuleIR = struct {
         var ir_root: ?*IRNode = null;
 
         for (instructions, 0..) |instruction, local_instruction_index| {
-            const instruction_index = func.instructions_begin + local_instruction_index;
+            const instruction_index: u32 = @intCast(func.instructions_begin + local_instruction_index);
 
             var node: ?*IRNode = null;
             if (Helpers.opcodeHasDefaultIRMapping(instruction.opcode)) {
-                node = try IRNode.create(mir, instruction_index);
+                node = try IRNode.createWithInstruction(mir, instruction_index);
             }
 
             std.debug.print("opcode: {}\n", .{instruction.opcode});
@@ -360,11 +419,56 @@ const ModuleIR = struct {
                 //     instruction.
                 // },
                 // .If => {},
+                .Block => {
+                    // compile_data.label_stack += 1;
+
+                    // try compile_data.label_stack.append(node);
+                    try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                },
+                .Loop => {
+                    // compile_data.label_stack += 1;
+                    // compile_data.label_stack.append(node);
+                    try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                },
+                .End => {
+                    // the last End opcode returns the values on the stack
+                    if (compile_data.label_continuations.items.len == 1) {
+                        node = try IRNode.createStandalone(mir, .Return);
+                        try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0);
+                        _ = compile_data.label_continuations.pop();
+                    }
+                },
+                .Branch_Table => {
+                    assert(node != null);
+
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+
+                    // var continuation_edges: std.ArrayList(*IRNode).init(allocator);
+                    // defer continuation_edges.deinit();
+
+                    const immediates: *const BranchTableImmediates = &mir.module_def.code.branch_table.items[instruction.immediate.Index];
+
+                    try compile_data.addPendingContinuationEdge(node.?, immediates.fallback_id);
+                    for (immediates.label_ids.items) |continuation| {
+                        try compile_data.addPendingContinuationEdge(node.?, continuation);
+                    }
+
+                    compile_data.is_unreachable = true;
+
+                    // try label_ids.append(immediates.fallback_id);
+                    // try label_ids.appendSlice(immediates.label_ids.items);
+
+                    // node.pushEdges(.Out, )
+                    // TODO need to somehow connect to the various labels it wants to jump to?
+                },
                 .Return => {
-                    try compile_data.consumeValueStackNodes(node.?, func_type.getReturns().len);
+                    try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0);
+                    compile_data.is_unreachable = true;
                 },
                 .Drop => {
-                    _ = compile_data.nodes_value_stack.pop();
+                    if (compile_data.is_unreachable == false) {
+                        _ = compile_data.value_stack.pop();
+                    }
                 },
                 .I32_Const => {
                     assert(node == null);
@@ -409,7 +513,7 @@ const ModuleIR = struct {
                 .I32_Rotr,
                 // TODO add a lot more of these simpler opcodes
                 => {
-                    try compile_data.consumeValueStackNodes(node.?, 2);
+                    try compile_data.popPushValueStackNodes(node.?, 2, 1);
                 },
                 .I32_Eqz,
                 .I32_Clz,
@@ -417,33 +521,64 @@ const ModuleIR = struct {
                 .I32_Popcnt,
                 .I32_Extend8_S,
                 .I32_Extend16_S,
+                .I64_Clz,
+                .I64_Ctz,
+                .I64_Popcnt,
+                .F32_Neg,
+                .F64_Neg,
                 => {
-                    try compile_data.consumeValueStackNodes(node.?, 1);
+                    try compile_data.popPushValueStackNodes(node.?, 1, 1);
                 },
                 .Local_Get => {
                     assert(node == null);
 
-                    const local: *?*IRNode = &locals[instruction.immediate.Index];
-                    if (local.* == null) {
-                        local.* = try IRNode.create(mir, instruction_index);
+                    if (compile_data.is_unreachable == false) {
+                        const local: *?*IRNode = &locals[instruction.immediate.Index];
+                        if (local.* == null) {
+                            local.* = try IRNode.createWithInstruction(mir, instruction_index);
+                        }
+                        node = local.*;
+                        try compile_data.value_stack.append(node.?);
                     }
-                    node = local.*;
-                    try compile_data.nodes_value_stack.append(node.?);
                 },
                 .Local_Set => {
                     assert(node == null);
 
-                    var n: *IRNode = compile_data.nodes_value_stack.pop();
-                    locals[instruction.immediate.Index] = n;
+                    if (compile_data.is_unreachable == false) {
+                        var n: *IRNode = compile_data.value_stack.pop();
+                        locals[instruction.immediate.Index] = n;
+                    }
                 },
                 .Local_Tee => {
                     assert(node == null);
-                    var n: *IRNode = compile_data.nodes_value_stack.items[compile_data.nodes_value_stack.items.len - 1];
-                    locals[instruction.immediate.Index] = n;
+                    if (compile_data.is_unreachable == false) {
+                        var n: *IRNode = compile_data.value_stack.items[compile_data.value_stack.items.len - 1];
+                        locals[instruction.immediate.Index] = n;
+                    }
                 },
                 else => {
                     std.log.warn("skipping node {}", .{instruction.opcode});
                 },
+            }
+
+            // resolve any pending continuations with the current node.
+            if (node) |current_node| {
+                var i: usize = 0;
+                while (i < compile_data.pending_continuation_edges.items.len) {
+                    var pending: *IntermediateCompileData.PendingContinuationEdge = &compile_data.pending_continuation_edges.items[i];
+
+                    if (pending.continuation == instruction_index) {
+                        var out_edges = [_]*IRNode{current_node};
+                        try pending.node.pushEdges(.Out, &out_edges, compile_data.allocator);
+
+                        var in_edges = [_]*IRNode{pending.node};
+                        try current_node.pushEdges(.In, &in_edges, compile_data.allocator);
+
+                        _ = compile_data.pending_continuation_edges.swapRemove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
             }
 
             if (ir_root == null) {
@@ -478,7 +613,9 @@ pub const RegisterVM = struct {
 
 test "ir1" {
     const filename =
-        \\E:\Dev\third_party\zware\test\fact.wasm
+        \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
+        // \\E:\Dev\zig_projects\bytebox\test\wasm\return\return.0.wasm
+        // \\E:\Dev\third_party\zware\test\fact.wasm
         // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
     ;
     var allocator = std.testing.allocator;
