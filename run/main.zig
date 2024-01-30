@@ -367,13 +367,13 @@ pub fn main() !void {
 
         if (returns.items.len > 0) {
             const return_types = func_export.returns;
-            try std.fmt.format(writer, ":\n", .{});
+            try std.fmt.format(writer, "return:\n", .{});
             for (returns.items, 0..) |_, i| {
                 switch (return_types[i]) {
-                    .I32 => try std.fmt.format(writer, "  {} (i32)\n", .{returns.items[i]}),
-                    .I64 => try std.fmt.format(writer, "  {} (i64)\n", .{returns.items[i]}),
-                    .F32 => try std.fmt.format(writer, "  {} (f32)\n", .{returns.items[i]}),
-                    .F64 => try std.fmt.format(writer, "  {} (f64)\n", .{returns.items[i]}),
+                    .I32 => try std.fmt.format(writer, "  {} (i32)\n", .{returns.items[i].I32}),
+                    .I64 => try std.fmt.format(writer, "  {} (i64)\n", .{returns.items[i].I64}),
+                    .F32 => try std.fmt.format(writer, "  {} (f32)\n", .{returns.items[i].F32}),
+                    .F64 => try std.fmt.format(writer, "  {} (f64)\n", .{returns.items[i].F64}),
                     .V128 => unreachable, // TODO support
                     .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
                     .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
