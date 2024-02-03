@@ -139,6 +139,34 @@ const IRNode = struct {
             },
         }
     }
+
+    fn hasSideEffects(node: *IRNode) bool {
+        return switch (node.opcode) {
+            .Call => true,
+            else => false,
+        };
+    }
+
+    // a node that has no out edges to returns or other calls with side effects
+    fn isIsland(node: *IRNode, unvisited: *std.ArrayList(*IRNode)) AllocError!bool {
+        unvisited.clearRetainingCapacity();
+
+        for (node.edgesOut()) |edge| {
+            try unvisited.append(edge);
+        }
+
+        while (unvisited.items.len > 0) {
+            var next: *IRNode = unvisited.pop();
+            if (next.opcode == .Return or next.hasSideEffects()) {
+                return false;
+            }
+            for (next.edgesOut()) |edge| {
+                try unvisited.append(edge);
+            }
+        }
+
+        return true;
+    }
 };
 
 const IRFunction = struct {
@@ -175,6 +203,10 @@ const IRFunction = struct {
 
             const label = switch (opcode) {
                 .I32_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueI32}) catch unreachable,
+                .I64_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueI64}) catch unreachable,
+                .F32_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueF32}) catch unreachable,
+                .F64_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueF64}) catch unreachable,
+                .Call => std.fmt.bufPrint(&label_buffer, "func {}", .{instruction.?.immediate.Index}) catch unreachable,
                 .Local_Get, .Local_Set, .Local_Tee => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.Index}) catch unreachable,
                 else => &[0]u8{},
             };
@@ -219,6 +251,8 @@ const ModuleIR = struct {
 
         allocator: std.mem.Allocator,
 
+        all_nodes: std.ArrayList(*IRNode),
+
         // This stack is a record of the nodes to push values onto the stack. If an instruction would push
         // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
         // that we don't have to do any type checking here because the module has already been validated.
@@ -241,15 +275,19 @@ const ModuleIR = struct {
         // Lets us collapse multiple const IR nodes with the same type/value into a single one
         unique_constants: UniqueValueToIRNodeMap,
 
+        scratch_node_list: std.ArrayList(*IRNode),
+
         fn init(allocator: std.mem.Allocator) IntermediateCompileData {
             return IntermediateCompileData{
                 .allocator = allocator,
+                .all_nodes = std.ArrayList(*IRNode).init(allocator),
                 .value_stack = std.ArrayList(*IRNode).init(allocator),
                 .label_continuations = std.ArrayList(u32).init(allocator),
                 .pending_continuation_edges = std.ArrayList(PendingContinuationEdge).init(allocator),
                 .is_unreachable = false,
                 .locals = std.ArrayList(?*IRNode).init(allocator),
                 .unique_constants = UniqueValueToIRNodeMap.init(allocator),
+                .scratch_node_list = std.ArrayList(*IRNode).init(allocator),
             };
         }
 
@@ -260,19 +298,23 @@ const ModuleIR = struct {
         }
 
         fn reset(self: *IntermediateCompileData) void {
+            self.all_nodes.clearRetainingCapacity();
             self.value_stack.clearRetainingCapacity();
             self.label_continuations.clearRetainingCapacity();
             self.pending_continuation_edges.clearRetainingCapacity();
             self.locals.clearRetainingCapacity();
             self.unique_constants.clearRetainingCapacity();
+            self.scratch_node_list.clearRetainingCapacity();
         }
 
         fn deinit(self: *IntermediateCompileData) void {
+            self.all_nodes.deinit();
             self.value_stack.deinit();
             self.label_continuations.deinit();
             self.pending_continuation_edges.deinit();
             self.locals.deinit();
             self.unique_constants.deinit();
+            self.scratch_node_list.deinit();
         }
 
         fn popPushValueStackNodes(self: *IntermediateCompileData, consumer: *IRNode, num_consumed: usize, num_pushed: usize) AllocError!void {
@@ -430,6 +472,9 @@ const ModuleIR = struct {
                     // compile_data.label_stack.append(node);
                     try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
                 },
+                // .If
+                // .Else
+
                 .End => {
                     // the last End opcode returns the values on the stack
                     if (compile_data.label_continuations.items.len == 1) {
@@ -438,6 +483,8 @@ const ModuleIR = struct {
                         _ = compile_data.label_continuations.pop();
                     }
                 },
+                // .Branch
+                // .Branch_If
                 .Branch_Table => {
                     assert(node != null);
 
@@ -465,6 +512,15 @@ const ModuleIR = struct {
                     try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0);
                     compile_data.is_unreachable = true;
                 },
+                .Call => {
+                    const calling_func_def: *const FunctionDefinition = &mir.module_def.functions.items[index];
+                    const calling_func_type: *const FunctionTypeDefinition = calling_func_def.typeDefinition(mir.module_def.*);
+                    const num_returns: usize = calling_func_type.getReturns().len;
+                    const num_params: usize = calling_func_type.getParams().len;
+
+                    try compile_data.popPushValueStackNodes(node.?, num_params, num_returns);
+                },
+                // .Call_Indirect
                 .Drop => {
                     if (compile_data.is_unreachable == false) {
                         _ = compile_data.value_stack.pop();
@@ -579,10 +635,28 @@ const ModuleIR = struct {
                         i += 1;
                     }
                 }
+
+                try compile_data.all_nodes.append(current_node);
             }
 
             if (ir_root == null) {
                 ir_root = node;
+            }
+        }
+
+        // resolve any nodes that have side effects that somehow became isolated
+        // TODO will have to stress test this with a bunch of different cases of nodes
+        for (compile_data.all_nodes.items[0 .. compile_data.all_nodes.items.len - 1]) |node| {
+            if (node.hasSideEffects()) {
+                if (try node.isIsland(&compile_data.scratch_node_list)) {
+                    var last_node: *IRNode = compile_data.all_nodes.items[compile_data.all_nodes.items.len - 1];
+
+                    var out_edges = [_]*IRNode{last_node};
+                    try node.pushEdges(.Out, &out_edges, compile_data.allocator);
+
+                    var in_edges = [_]*IRNode{node};
+                    try last_node.pushEdges(.In, &in_edges, compile_data.allocator);
+                }
             }
         }
 
@@ -613,8 +687,8 @@ pub const RegisterVM = struct {
 
 test "ir1" {
     const filename =
-        \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
-        // \\E:\Dev\zig_projects\bytebox\test\wasm\return\return.0.wasm
+        // \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
+        \\E:\Dev\zig_projects\bytebox\test\wasm\return\return.0.wasm
         // \\E:\Dev\third_party\zware\test\fact.wasm
         // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
     ;
