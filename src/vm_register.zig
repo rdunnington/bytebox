@@ -141,14 +141,20 @@ const IRNode = struct {
     }
 
     fn hasSideEffects(node: *IRNode) bool {
+        // We define a side-effect instruction as any could potential affect the Store or control flow
         return switch (node.opcode) {
             .Call => true,
+            .Return => true,
             else => false,
         };
     }
 
     // a node that has no out edges to returns or other calls with side effects
     fn isIsland(node: *IRNode, unvisited: *std.ArrayList(*IRNode)) AllocError!bool {
+        if (node.opcode == .Return) {
+            return false;
+        }
+
         unvisited.clearRetainingCapacity();
 
         for (node.edgesOut()) |edge| {
@@ -241,6 +247,62 @@ const IRFunction = struct {
 };
 
 const ModuleIR = struct {
+    const BlockStack = struct {
+        const Block = struct {
+            node_start_index: u32,
+            continuation: u32, // in instruction index space
+        };
+
+        nodes: std.ArrayList(*IRNode),
+        blocks: std.ArrayList(Block),
+
+        // const ContinuationType = enum {
+        //     .Normal,
+        //     .Loop,
+        // };
+
+        fn init(allocator: std.mem.Allocator) BlockStack {
+            return BlockStack{
+                .nodes = std.ArrayList(*IRNode).init(allocator),
+                .blocks = std.ArrayList(Block).init(allocator),
+            };
+        }
+
+        fn deinit(self: BlockStack) void {
+            self.nodes.deinit();
+            self.blocks.deinit();
+        }
+
+        fn pushBlock(self: *BlockStack, continuation: u32) AllocError!void {
+            try self.blocks.append(Block{
+                .node_start_index = @intCast(self.nodes.items.len),
+                .continuation = continuation,
+            });
+        }
+
+        fn pushNode(self: *BlockStack, node: *IRNode) AllocError!void {
+            try self.nodes.append(node);
+        }
+
+        fn popBlock(self: *BlockStack) void {
+            const block: Block = self.blocks.pop();
+
+            std.debug.assert(block.node_start_index <= self.nodes.items.len);
+            self.nodes.resize(block.node_start_index) catch unreachable; // should never grow the array
+        }
+
+        fn currentBlockNodes(self: *BlockStack) []*IRNode {
+            // std.debug.print(">>>>>>>> num block: {}\n", .{self.blocks.items.len});
+            const index: u32 = self.blocks.items[self.blocks.items.len - 1].node_start_index;
+            return self.nodes.items[index..];
+        }
+
+        fn reset(self: *BlockStack) void {
+            self.nodes.clearRetainingCapacity();
+            self.blocks.clearRetainingCapacity();
+        }
+    };
+
     const IntermediateCompileData = struct {
         const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
 
@@ -251,7 +313,9 @@ const ModuleIR = struct {
 
         allocator: std.mem.Allocator,
 
-        all_nodes: std.ArrayList(*IRNode),
+        // all_nodes: std.ArrayList(*IRNode),
+
+        blocks: BlockStack,
 
         // This stack is a record of the nodes to push values onto the stack. If an instruction would push
         // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
@@ -259,7 +323,7 @@ const ModuleIR = struct {
         value_stack: std.ArrayList(*IRNode),
 
         // records the current block continuation
-        label_continuations: std.ArrayList(u32),
+        // label_continuations: std.ArrayList(u32),
 
         pending_continuation_edges: std.ArrayList(PendingContinuationEdge),
 
@@ -275,64 +339,75 @@ const ModuleIR = struct {
         // Lets us collapse multiple const IR nodes with the same type/value into a single one
         unique_constants: UniqueValueToIRNodeMap,
 
-        scratch_node_list: std.ArrayList(*IRNode),
+        scratch_node_list_1: std.ArrayList(*IRNode),
+        scratch_node_list_2: std.ArrayList(*IRNode),
 
         fn init(allocator: std.mem.Allocator) IntermediateCompileData {
             return IntermediateCompileData{
                 .allocator = allocator,
-                .all_nodes = std.ArrayList(*IRNode).init(allocator),
+                // .all_nodes = std.ArrayList(*IRNode).init(allocator),
+                .blocks = BlockStack.init(allocator),
                 .value_stack = std.ArrayList(*IRNode).init(allocator),
-                .label_continuations = std.ArrayList(u32).init(allocator),
+                // .label_continuations = std.ArrayList(u32).init(allocator),
                 .pending_continuation_edges = std.ArrayList(PendingContinuationEdge).init(allocator),
                 .is_unreachable = false,
                 .locals = std.ArrayList(?*IRNode).init(allocator),
                 .unique_constants = UniqueValueToIRNodeMap.init(allocator),
-                .scratch_node_list = std.ArrayList(*IRNode).init(allocator),
+                .scratch_node_list_1 = std.ArrayList(*IRNode).init(allocator),
+                .scratch_node_list_2 = std.ArrayList(*IRNode).init(allocator),
             };
         }
 
         fn warmup(self: *IntermediateCompileData, func_def: FunctionDefinition, module_def: ModuleDefinition) AllocError!void {
             try self.locals.appendNTimes(null, func_def.numParamsAndLocals(module_def));
-            try self.label_continuations.append(func_def.continuation);
+            try self.scratch_node_list_1.ensureTotalCapacity(4096);
+            try self.scratch_node_list_2.ensureTotalCapacity(4096);
+            // try self.label_continuations.append(func_def.continuation);
             self.is_unreachable = false;
         }
 
         fn reset(self: *IntermediateCompileData) void {
-            self.all_nodes.clearRetainingCapacity();
+            // self.all_nodes.clearRetainingCapacity();
+            self.blocks.reset();
             self.value_stack.clearRetainingCapacity();
-            self.label_continuations.clearRetainingCapacity();
+            // self.label_continuations.clearRetainingCapacity();
             self.pending_continuation_edges.clearRetainingCapacity();
             self.locals.clearRetainingCapacity();
             self.unique_constants.clearRetainingCapacity();
-            self.scratch_node_list.clearRetainingCapacity();
+            self.scratch_node_list_1.clearRetainingCapacity();
+            self.scratch_node_list_2.clearRetainingCapacity();
         }
 
         fn deinit(self: *IntermediateCompileData) void {
-            self.all_nodes.deinit();
+            // self.all_nodes.deinit();
+            self.blocks.deinit();
             self.value_stack.deinit();
-            self.label_continuations.deinit();
+            // self.label_continuations.deinit();
             self.pending_continuation_edges.deinit();
             self.locals.deinit();
             self.unique_constants.deinit();
-            self.scratch_node_list.deinit();
+            self.scratch_node_list_1.deinit();
+            self.scratch_node_list_2.deinit();
         }
 
-        fn popPushValueStackNodes(self: *IntermediateCompileData, consumer: *IRNode, num_consumed: usize, num_pushed: usize) AllocError!void {
+        fn popPushValueStackNodes(self: *IntermediateCompileData, node: *IRNode, num_consumed: usize, num_pushed: usize) AllocError!void {
             if (self.is_unreachable) {
                 return;
             }
 
-            var edges_buffer: [8]*IRNode = undefined;
+            var edges_buffer: [8]*IRNode = undefined; // 8 should be more stack slots than any one instruction can pop
+            std.debug.assert(num_consumed <= edges_buffer.len);
+
             var edges = edges_buffer[0..num_consumed];
             for (edges) |*e| {
                 e.* = self.value_stack.pop();
             }
-            try consumer.pushEdges(.In, edges, self.allocator);
+            try node.pushEdges(.In, edges, self.allocator);
             for (edges) |e| {
-                var consumer_edges = [_]*IRNode{consumer};
+                var consumer_edges = [_]*IRNode{node};
                 try e.pushEdges(.Out, &consumer_edges, self.allocator);
             }
-            try self.value_stack.appendNTimes(consumer, num_pushed);
+            try self.value_stack.appendNTimes(node, num_pushed);
         }
 
         fn foldConstant(self: *IntermediateCompileData, mir: *ModuleIR, comptime valtype: ValType, instruction_index: u32, instruction: Instruction) AllocError!*IRNode {
@@ -359,8 +434,8 @@ const ModuleIR = struct {
         }
 
         fn addPendingContinuationEdge(self: *IntermediateCompileData, node: *IRNode, label_id: u32) !void {
-            const last_label_index = self.label_continuations.items.len - 1;
-            var continuation: u32 = self.label_continuations.items[last_label_index - label_id];
+            const last_block_index = self.blocks.blocks.items.len - 1;
+            var continuation: u32 = self.blocks.blocks.items[last_block_index - label_id].continuation;
             try self.pending_continuation_edges.append(PendingContinuationEdge{
                 .node = node,
                 .continuation = continuation,
@@ -408,10 +483,11 @@ const ModuleIR = struct {
         const Helpers = struct {
             fn opcodeHasDefaultIRMapping(opcode: Opcode) bool {
                 return switch (opcode) {
-                    .Block,
                     .Noop,
-                    .Drop,
+                    .Block,
+                    .Loop,
                     .End,
+                    .Drop,
                     .I32_Const,
                     .I64_Const,
                     .F32_Const,
@@ -431,6 +507,8 @@ const ModuleIR = struct {
         std.debug.print("compiling func index {}\n", .{index});
 
         try compile_data.warmup(func.*, mir.module_def.*);
+
+        try compile_data.blocks.pushBlock(func.continuation);
 
         var locals = compile_data.locals.items; // for convenience later
 
@@ -465,25 +543,68 @@ const ModuleIR = struct {
                     // compile_data.label_stack += 1;
 
                     // try compile_data.label_stack.append(node);
-                    try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                    // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                    try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation);
                 },
                 .Loop => {
                     // compile_data.label_stack += 1;
                     // compile_data.label_stack.append(node);
-                    try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                    // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                    try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
                 },
-                // .If
-                // .Else
-
+                .If => {
+                    try compile_data.blocks.pushBlock(instruction.immediate.If.end_continuation);
+                },
+                .IfNoElse => {
+                    try compile_data.blocks.pushBlock(instruction.immediate.If.end_continuation);
+                },
+                .Else => {},
                 .End => {
                     // the last End opcode returns the values on the stack
-                    if (compile_data.label_continuations.items.len == 1) {
+                    // if (compile_data.label_continuations.items.len == 1) {
+                    if (compile_data.blocks.blocks.items.len == 1) {
                         node = try IRNode.createStandalone(mir, .Return);
                         try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0);
-                        _ = compile_data.label_continuations.pop();
+                        // _ = compile_data.label_continuations.pop();
                     }
+
+                    // At the end of every block, we ensure all nodes with side effects are still in the graph. Order matters
+                    // since mutations to the Store or control flow changes must happen in the order of the original instructions.
+                    {
+                        var nodes_with_side_effects: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                        defer nodes_with_side_effects.clearRetainingCapacity();
+
+                        var current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
+
+                        for (current_block_nodes) |block_node| {
+                            if (block_node.hasSideEffects()) {
+                                try nodes_with_side_effects.append(block_node);
+                            }
+                        }
+
+                        if (nodes_with_side_effects.items.len >= 2) {
+                            var i: i32 = @intCast(nodes_with_side_effects.items.len - 2);
+                            while (i >= 0) : (i -= 1) {
+                                var ii: u32 = @intCast(i);
+                                var node_a: *IRNode = nodes_with_side_effects.items[ii];
+                                if (try node_a.isIsland(&compile_data.scratch_node_list_2)) {
+                                    var node_b: *IRNode = nodes_with_side_effects.items[ii + 1];
+
+                                    var in_edges = [_]*IRNode{node_b};
+                                    try node_a.pushEdges(.Out, &in_edges, compile_data.allocator);
+
+                                    var out_edges = [_]*IRNode{node_a};
+                                    try node_b.pushEdges(.In, &out_edges, compile_data.allocator);
+                                }
+                            }
+                        }
+                    }
+
+                    compile_data.blocks.popBlock();
                 },
-                // .Branch
+                // .Branch => {
+
+                // },
                 // .Branch_If
                 .Branch_Table => {
                     assert(node != null);
@@ -636,7 +757,9 @@ const ModuleIR = struct {
                     }
                 }
 
-                try compile_data.all_nodes.append(current_node);
+                // try compile_data.all_nodes.append(current_node);
+
+                try compile_data.blocks.pushNode(current_node);
             }
 
             if (ir_root == null) {
@@ -646,19 +769,19 @@ const ModuleIR = struct {
 
         // resolve any nodes that have side effects that somehow became isolated
         // TODO will have to stress test this with a bunch of different cases of nodes
-        for (compile_data.all_nodes.items[0 .. compile_data.all_nodes.items.len - 1]) |node| {
-            if (node.hasSideEffects()) {
-                if (try node.isIsland(&compile_data.scratch_node_list)) {
-                    var last_node: *IRNode = compile_data.all_nodes.items[compile_data.all_nodes.items.len - 1];
+        // for (compile_data.all_nodes.items[0 .. compile_data.all_nodes.items.len - 1]) |node| {
+        //     if (node.hasSideEffects()) {
+        //         if (try node.isIsland(&compile_data.scratch_node_list_1)) {
+        //             var last_node: *IRNode = compile_data.all_nodes.items[compile_data.all_nodes.items.len - 1];
 
-                    var out_edges = [_]*IRNode{last_node};
-                    try node.pushEdges(.Out, &out_edges, compile_data.allocator);
+        //             var out_edges = [_]*IRNode{last_node};
+        //             try node.pushEdges(.Out, &out_edges, compile_data.allocator);
 
-                    var in_edges = [_]*IRNode{node};
-                    try last_node.pushEdges(.In, &in_edges, compile_data.allocator);
-                }
-            }
-        }
+        //             var in_edges = [_]*IRNode{node};
+        //             try last_node.pushEdges(.In, &in_edges, compile_data.allocator);
+        //         }
+        //     }
+        // }
 
         try mir.functions.append(IRFunction{
             .def_index = index,
