@@ -63,6 +63,7 @@ const INVALID_INSTRUCTION_INDEX: u32 = std.math.maxInt(u32);
 
 const IRNode = struct {
     opcode: Opcode,
+    is_phi: bool,
     instruction_index: u32,
     edges_in: ?[*]*IRNode,
     edges_in_count: u32,
@@ -73,6 +74,7 @@ const IRNode = struct {
         var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .opcode = mir.module_def.code.instructions.items[instruction_index].opcode,
+            .is_phi = false,
             .instruction_index = instruction_index,
             .edges_in = null,
             .edges_in_count = 0,
@@ -86,7 +88,22 @@ const IRNode = struct {
         var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .opcode = opcode,
+            .is_phi = false,
             .instruction_index = INVALID_INSTRUCTION_INDEX,
+            .edges_in = null,
+            .edges_in_count = 0,
+            .edges_out = null,
+            .edges_out_count = 0,
+        };
+        return node;
+    }
+
+    fn createPhi(mir: *ModuleIR) AllocError!*IRNode {
+        var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+        node.* = IRNode{
+            .opcode = .Invalid,
+            .is_phi = true,
+            .instruction_index = 0,
             .edges_in = null,
             .edges_in_count = 0,
             .edges_out = null,
@@ -138,18 +155,36 @@ const IRNode = struct {
                 node.edges_out_count = @intCast(new.len);
             },
         }
+
+        if (node.is_phi) {
+            std.debug.assert(node.edges_in_count <= 2);
+            std.debug.assert(node.edges_out_count <= 1);
+        }
     }
 
     fn hasSideEffects(node: *IRNode) bool {
-        // We define a side-effect instruction as any could potential affect the Store or control flow
+        // We define a side-effect instruction as any that could affect the Store or control flow
         return switch (node.opcode) {
             .Call => true,
-            .Return => true,
             else => false,
         };
     }
 
-    // a node that has no out edges to returns or other calls with side effects
+    fn controlsFlow(node: *IRNode) bool {
+        return switch (node.opcode) {
+            .If,
+            .IfNoElse,
+            .Else,
+            .Return,
+            .Branch,
+            .Branch_If,
+            .Branch_Table,
+            => true,
+            else => false,
+        };
+    }
+
+    // a node that has no out edges to instructions with side effects or control flow
     fn isIsland(node: *IRNode, unvisited: *std.ArrayList(*IRNode)) AllocError!bool {
         if (node.opcode == .Return) {
             return false;
@@ -163,13 +198,15 @@ const IRNode = struct {
 
         while (unvisited.items.len > 0) {
             var next: *IRNode = unvisited.pop();
-            if (next.opcode == .Return or next.hasSideEffects()) {
+            if (next.opcode == .Return or next.hasSideEffects() or node.controlsFlow()) {
                 return false;
             }
             for (next.edgesOut()) |edge| {
                 try unvisited.append(edge);
             }
         }
+
+        unvisited.clearRetainingCapacity();
 
         return true;
     }
@@ -251,10 +288,12 @@ const ModuleIR = struct {
         const Block = struct {
             node_start_index: u32,
             continuation: u32, // in instruction index space
+            phi_nodes: []*IRNode,
         };
 
         nodes: std.ArrayList(*IRNode),
         blocks: std.ArrayList(Block),
+        phi_nodes: std.ArrayList(*IRNode),
 
         // const ContinuationType = enum {
         //     .Normal,
@@ -265,6 +304,7 @@ const ModuleIR = struct {
             return BlockStack{
                 .nodes = std.ArrayList(*IRNode).init(allocator),
                 .blocks = std.ArrayList(Block).init(allocator),
+                .phi_nodes = std.ArrayList(*IRNode).init(allocator),
             };
         }
 
@@ -277,6 +317,18 @@ const ModuleIR = struct {
             try self.blocks.append(Block{
                 .node_start_index = @intCast(self.nodes.items.len),
                 .continuation = continuation,
+                .phi_nodes = &[_]*IRNode{},
+            });
+        }
+
+        fn pushBlockWithPhi(self: *BlockStack, continuation: u32, phi_nodes: []*IRNode) AllocError!void {
+            const start_slice_index = self.phi_nodes.items.len;
+            try self.phi_nodes.appendSlice(phi_nodes);
+
+            try self.blocks.append(Block{
+                .node_start_index = @intCast(self.nodes.items.len),
+                .continuation = continuation,
+                .phi_nodes = self.phi_nodes.items[start_slice_index..],
             });
         }
 
@@ -288,7 +340,10 @@ const ModuleIR = struct {
             const block: Block = self.blocks.pop();
 
             std.debug.assert(block.node_start_index <= self.nodes.items.len);
-            self.nodes.resize(block.node_start_index) catch unreachable; // should never grow the array
+
+            // should never grow these arrays
+            self.nodes.resize(block.node_start_index) catch unreachable;
+            self.phi_nodes.resize(self.phi_nodes.items.len - block.phi_nodes.len) catch unreachable;
         }
 
         fn currentBlockNodes(self: *BlockStack) []*IRNode {
@@ -433,9 +488,16 @@ const ModuleIR = struct {
             return res.value_ptr.*;
         }
 
-        fn addPendingContinuationEdge(self: *IntermediateCompileData, node: *IRNode, label_id: u32) !void {
+        fn addPendingEdgeLabel(self: *IntermediateCompileData, node: *IRNode, label_id: u32) !void {
             const last_block_index = self.blocks.blocks.items.len - 1;
             var continuation: u32 = self.blocks.blocks.items[last_block_index - label_id].continuation;
+            try self.pending_continuation_edges.append(PendingContinuationEdge{
+                .node = node,
+                .continuation = continuation,
+            });
+        }
+
+        fn addPendingEdgeContinuation(self: *IntermediateCompileData, node: *IRNode, continuation: u32) !void {
             try self.pending_continuation_edges.append(PendingContinuationEdge{
                 .node = node,
                 .continuation = continuation,
@@ -553,13 +615,42 @@ const ModuleIR = struct {
                     try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
                 },
                 .If => {
-                    try compile_data.blocks.pushBlock(instruction.immediate.If.end_continuation);
+                    var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                    defer compile_data.scratch_node_list_1.clearRetainingCapacity();
+
+                    std.debug.assert(phi_nodes.items.len == 0);
+
+                    for (0..instruction.immediate.If.num_returns) |_| {
+                        try phi_nodes.append(try IRNode.createPhi(mir));
+                    }
+
+                    try compile_data.blocks.pushBlockWithPhi(instruction.immediate.If.end_continuation, phi_nodes.items[0..]);
+                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+
+                    // after the if consumes the value it needs, push the phi nodes on since these will be the return values
+                    // of the block
+                    try compile_data.value_stack.appendSlice(phi_nodes.items);
                 },
                 .IfNoElse => {
                     try compile_data.blocks.pushBlock(instruction.immediate.If.end_continuation);
+                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+
+                    // TODO figure out if there needs to be any phi nodes and if so what two inputs they have
                 },
-                .Else => {},
+                .Else => {
+                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+
+                    // TODO hook up the phi nodes with the stuffs
+                },
                 .End => {
+                    // TODO finish up anything with phi nodes?
+
                     // the last End opcode returns the values on the stack
                     // if (compile_data.label_continuations.items.len == 1) {
                     if (compile_data.blocks.blocks.items.len == 1) {
@@ -577,7 +668,7 @@ const ModuleIR = struct {
                         var current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
 
                         for (current_block_nodes) |block_node| {
-                            if (block_node.hasSideEffects()) {
+                            if (block_node.hasSideEffects() or block_node.controlsFlow()) {
                                 try nodes_with_side_effects.append(block_node);
                             }
                         }
@@ -602,10 +693,13 @@ const ModuleIR = struct {
 
                     compile_data.blocks.popBlock();
                 },
-                // .Branch => {
-
-                // },
-                // .Branch_If
+                .Branch => {
+                    try compile_data.addPendingEdgeLabel(node.?, instruction.immediate.LabelId);
+                    compile_data.is_unreachable = true;
+                },
+                .Branch_If => {
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+                },
                 .Branch_Table => {
                     assert(node != null);
 
@@ -616,9 +710,9 @@ const ModuleIR = struct {
 
                     const immediates: *const BranchTableImmediates = &mir.module_def.code.branch_table.items[instruction.immediate.Index];
 
-                    try compile_data.addPendingContinuationEdge(node.?, immediates.fallback_id);
+                    try compile_data.addPendingEdgeLabel(node.?, immediates.fallback_id);
                     for (immediates.label_ids.items) |continuation| {
-                        try compile_data.addPendingContinuationEdge(node.?, continuation);
+                        try compile_data.addPendingEdgeLabel(node.?, continuation);
                     }
 
                     compile_data.is_unreachable = true;
@@ -802,27 +896,41 @@ pub const RegisterVM = struct {
         defer mir.deinit();
 
         try mir.compile();
+
+        // wasm bytecode -> IR graph -> register-assigned IR graph ->
     }
 
     // pub fn instantiate() {}
     // pub fn invoke() {}
 };
 
-test "ir1" {
-    const filename =
-        // \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
-        \\E:\Dev\zig_projects\bytebox\test\wasm\return\return.0.wasm
-        // \\E:\Dev\third_party\zware\test\fact.wasm
-        // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
-    ;
+// register instructions get a slice of the overall set of register slots, which are pointers to actual
+// registers (?)
+
+// const RegInstruction = struct {
+//     numRegisters: u4, // wasm instructions don't read from more than 16 register slots at a time
+//     registerOffset: u28, // offset within the function register slot space to start
+//     opcode: Opcode,
+//     immediate: InstructionImmediates,
+
+//     fn numRegisters(self: RegInstruction) u4 {
+//         switch (self.opcode) {}
+//     }
+
+//     fn slots(self: RegInstruction, registers: []Val) []Val {
+//         return registers[self.registerOffset .. self.registerOffset + numRegisters];
+//     }
+// };
+
+fn runTestWithViz(wasm_filepath: []const u8, viz_dir: []const u8) !void {
     var allocator = std.testing.allocator;
 
     var cwd = std.fs.cwd();
-    var wasm_data: []u8 = try cwd.readFileAlloc(allocator, filename, 1024 * 1024 * 128);
+    var wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
     defer allocator.free(wasm_data);
 
     const module_def_opts = def.ModuleDefinitionOpts{
-        .debug_name = std.fs.path.basename(filename),
+        .debug_name = std.fs.path.basename(wasm_filepath),
     };
     var module_def = ModuleDefinition.init(allocator, module_def_opts);
     defer module_def.deinit();
@@ -834,11 +942,61 @@ test "ir1" {
     try mir.compile();
     for (mir.functions.items, 0..) |func, i| {
         var viz_path_buffer: [256]u8 = undefined;
-        const path_format =
-            \\E:\Dev\zig_projects\bytebox\viz\viz_{}.txt
-        ;
-        const viz_path = std.fmt.bufPrint(&viz_path_buffer, path_format, .{i}) catch unreachable;
+        const viz_path = std.fmt.bufPrint(&viz_path_buffer, "{s}\\viz_{}.txt", .{ viz_dir, i }) catch unreachable;
         std.debug.print("gen graph for func {}\n", .{i});
         try func.dumpVizGraph(viz_path, module_def, std.testing.allocator);
     }
+}
+
+// test "ir1" {
+//     const filename =
+//         // \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
+//         \\E:\Dev\zig_projects\bytebox\test\wasm\return\return.0.wasm
+//         // \\E:\Dev\third_party\zware\test\fact.wasm
+//         // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
+//     ;
+//     const viz_dir =
+//         \\E:\Dev\zig_projects\bytebox\viz
+//     ;
+//     try runTestWithViz(filename, viz_dir);
+
+//     // var allocator = std.testing.allocator;
+
+//     // var cwd = std.fs.cwd();
+//     // var wasm_data: []u8 = try cwd.readFileAlloc(allocator, filename, 1024 * 1024 * 128);
+//     // defer allocator.free(wasm_data);
+
+//     // const module_def_opts = def.ModuleDefinitionOpts{
+//     //     .debug_name = std.fs.path.basename(filename),
+//     // };
+//     // var module_def = ModuleDefinition.init(allocator, module_def_opts);
+//     // defer module_def.deinit();
+
+//     // try module_def.decode(wasm_data);
+
+//     // var mir = ModuleIR.init(allocator, &module_def);
+//     // defer mir.deinit();
+//     // try mir.compile();
+//     // for (mir.functions.items, 0..) |func, i| {
+//     //     var viz_path_buffer: [256]u8 = undefined;
+//     //     const path_format =
+//     //         \\E:\Dev\zig_projects\bytebox\viz\viz_{}.txt
+//     //     ;
+//     //     const viz_path = std.fmt.bufPrint(&viz_path_buffer, path_format, .{i}) catch unreachable;
+//     //     std.debug.print("gen graph for func {}\n", .{i});
+//     //     try func.dumpVizGraph(viz_path, module_def, std.testing.allocator);
+//     // }
+// }
+
+test "ir2" {
+    const filename =
+        // \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
+        \\E:\Dev\zig_projects\bytebox\test\reg\add.wasm
+        // \\E:\Dev\third_party\zware\test\fact.wasm
+        // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
+    ;
+    const viz_dir =
+        \\E:\Dev\zig_projects\bytebox\test\reg\
+    ;
+    try runTestWithViz(filename, viz_dir);
 }
