@@ -170,7 +170,7 @@ const IRNode = struct {
         };
     }
 
-    fn controlsFlow(node: *IRNode) bool {
+    fn isFlowControl(node: *IRNode) bool {
         return switch (node.opcode) {
             .If,
             .IfNoElse,
@@ -181,6 +181,35 @@ const IRNode = struct {
             .Branch_Table,
             => true,
             else => false,
+        };
+    }
+
+    fn needsRegisterSlot(node: *IRNode) bool {
+        // TODO fill this out
+        return switch (node.opcode) {
+            .If,
+            .IfNoElse,
+            .Else,
+            .Return,
+            .Branch,
+            .Branch_If,
+            .Branch_Table,
+            => false,
+            else => true,
+        };
+    }
+
+    fn numRegisterSlots(node: *IRNode) u32 {
+        return switch (node.opcode) {
+            .If,
+            .IfNoElse,
+            .Else,
+            .Return,
+            .Branch,
+            .Branch_If,
+            .Branch_Table,
+            => 0,
+            else => 1,
         };
     }
 
@@ -198,7 +227,7 @@ const IRNode = struct {
 
         while (unvisited.items.len > 0) {
             var next: *IRNode = unvisited.pop();
-            if (next.opcode == .Return or next.hasSideEffects() or node.controlsFlow()) {
+            if (next.opcode == .Return or next.hasSideEffects() or node.isFlowControl()) {
                 return false;
             }
             for (next.edgesOut()) |edge| {
@@ -212,12 +241,131 @@ const IRNode = struct {
     }
 };
 
+const RegisterSlots = struct {
+    const Slot = struct {
+        node: ?*IRNode,
+        prev: ?u32,
+    };
+
+    slots: std.ArrayList(Slot),
+    last_free: ?u32,
+
+    fn init(allocator: std.mem.Allocator) RegisterSlots {
+        return RegisterSlots{
+            .slots = std.ArrayList(Slot).init(allocator),
+            .last_free = null,
+        };
+    }
+
+    fn deinit(self: *RegisterSlots) void {
+        self.slots.deinit();
+    }
+
+    fn alloc(self: *RegisterSlots, node: *IRNode) AllocError!u32 {
+        if (self.last_free == null) {
+            self.last_free = @intCast(self.slots.items.len);
+            try self.slots.append(Slot{
+                .node = null,
+                .prev = null,
+            });
+        }
+
+        var index = self.last_free.?;
+        var slot: *Slot = &self.slots.items[index];
+        self.last_free = slot.prev;
+        slot.node = node;
+        slot.prev = null;
+
+        std.debug.print("pushed node {*} with opcode {} to index {}\n", .{ node, node.opcode, index });
+
+        return index;
+    }
+
+    fn freeAt(self: *RegisterSlots, node: *IRNode, index: u32) void {
+        var succes: bool = false;
+        var slot: *Slot = &self.slots.items[index];
+        if (slot.node == node) {
+            slot.node = null;
+            slot.prev = self.last_free;
+            self.last_free = index;
+            succes = true;
+        }
+
+        std.debug.print("attempting to free node {*} with opcode {} at index {}: {}\n", .{ node, node.opcode, index, succes });
+    }
+};
+
 const IRFunction = struct {
-    def_index: usize,
+    definition_index: usize,
     ir_root: *IRNode,
 
+    register_map: std.AutoHashMap(*const IRNode, u32),
+
+    fn init(definition_index: u32, ir_root: *IRNode, allocator: std.mem.Allocator) IRFunction {
+        return IRFunction{
+            .definition_index = definition_index,
+            .ir_root = ir_root,
+            .register_map = std.AutoHashMap(*const IRNode, u32).init(allocator),
+        };
+    }
+
+    fn deinit(self: *IRFunction) void {
+        self.register_map.deinit();
+    }
+
     fn definition(func: IRFunction, module_def: ModuleDefinition) *FunctionDefinition {
-        return &module_def.functions.items[func.def_index];
+        return &module_def.functions.items[func.definition_index];
+    }
+
+    fn regalloc(func: *IRFunction, allocator: std.mem.Allocator) AllocError!void {
+        std.debug.assert(func.ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
+
+        var slots = RegisterSlots.init(allocator);
+        defer slots.deinit();
+
+        var visit_queue = std.ArrayList(*IRNode).init(allocator);
+        defer visit_queue.deinit();
+        try visit_queue.append(func.ir_root);
+
+        var visited = std.AutoHashMap(*IRNode, void).init(allocator);
+        defer visited.deinit();
+
+        while (visit_queue.items.len > 0) {
+            var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+            try visited.put(node, {});
+
+            // mark output node slots as free - this is safe because the dataflow graph flows one way and the
+            // output can't be reused higher up in the graph
+            for (node.edgesOut()) |output_node| {
+                if (func.register_map.get(output_node)) |index| {
+                    slots.freeAt(output_node, index);
+                }
+            }
+
+            // allocate slots for this instruction
+            // TODO handle multiple output slots (e.g. results of a function call)
+            if (node.needsRegisterSlot()) {
+                const index: u32 = try slots.alloc(node);
+                try func.register_map.put(node, index);
+            }
+
+            // add inputs to the FIFO visit queue
+            for (node.edgesIn()) |input_node| {
+                if (visited.contains(input_node) == false) {
+                    try visit_queue.append(input_node);
+                }
+            }
+        }
+    }
+
+    fn codegen(func: *IRFunction, allocator: std.mem.Allocator) AllocError!void {
+        _ = func;
+        _ = allocator;
+        // walk the graph in breadth-first order
+        // once all a node's out edges have been visited, mark it visited
+        // when a node is visited, emit its instruction
+        // reverse the instructions array when finished (alternatively just emit in reverse order if we have the node count from regalloc)
+        unreachable;
     }
 
     fn dumpVizGraph(func: IRFunction, path: []u8, module_def: ModuleDefinition, allocator: std.mem.Allocator) !void {
@@ -243,22 +391,26 @@ const IRFunction = struct {
             const instruction = n.instruction(module_def);
 
             var label_buffer: [256]u8 = undefined;
-
             const label = switch (opcode) {
-                .I32_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueI32}) catch unreachable,
-                .I64_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueI64}) catch unreachable,
-                .F32_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueF32}) catch unreachable,
-                .F64_Const => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.ValueF64}) catch unreachable,
-                .Call => std.fmt.bufPrint(&label_buffer, "func {}", .{instruction.?.immediate.Index}) catch unreachable,
-                .Local_Get, .Local_Set, .Local_Tee => std.fmt.bufPrint(&label_buffer, "{}", .{instruction.?.immediate.Index}) catch unreachable,
+                .I32_Const => std.fmt.bufPrint(&label_buffer, ": {}", .{instruction.?.immediate.ValueI32}) catch unreachable,
+                .I64_Const => std.fmt.bufPrint(&label_buffer, ": {}", .{instruction.?.immediate.ValueI64}) catch unreachable,
+                .F32_Const => std.fmt.bufPrint(&label_buffer, ": {}", .{instruction.?.immediate.ValueF32}) catch unreachable,
+                .F64_Const => std.fmt.bufPrint(&label_buffer, ": {}", .{instruction.?.immediate.ValueF64}) catch unreachable,
+                .Call => std.fmt.bufPrint(&label_buffer, ": func {}", .{instruction.?.immediate.Index}) catch unreachable,
+                .Local_Get, .Local_Set, .Local_Tee => std.fmt.bufPrint(&label_buffer, ": {}", .{instruction.?.immediate.Index}) catch unreachable,
                 else => &[0]u8{},
             };
 
-            if (label.len > 0) {
-                try writer.print("\"{*}\" [label=\"{}: {s}\"]\n", .{ n, opcode, label });
-            } else {
-                try writer.print("\"{*}\" [label=\"{}\"]\n", .{ n, opcode });
-            }
+            var register_buffer: [64]u8 = undefined;
+            const register = blk: {
+                if (func.register_map.get(n)) |slot| {
+                    break :blk std.fmt.bufPrint(&register_buffer, " @reg {}", .{slot}) catch unreachable;
+                } else {
+                    break :blk &[0]u8{};
+                }
+            };
+
+            try writer.print("\"{*}\" [label=\"{}{s}{s}\"]\n", .{ n, opcode, label, register });
 
             for (n.edgesOut()) |e| {
                 try writer.print("\"{*}\" -> \"{*}\"\n", .{ n, e });
@@ -520,6 +672,9 @@ const ModuleIR = struct {
     }
 
     fn deinit(mir: *ModuleIR) void {
+        for (mir.functions.items) |*func| {
+            func.deinit();
+        }
         mir.functions.deinit();
         for (mir.ir.items) |node| {
             node.deinit(mir.allocator);
@@ -668,7 +823,7 @@ const ModuleIR = struct {
                         var current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
 
                         for (current_block_nodes) |block_node| {
-                            if (block_node.hasSideEffects() or block_node.controlsFlow()) {
+                            if (block_node.hasSideEffects() or block_node.isFlowControl()) {
                                 try nodes_with_side_effects.append(block_node);
                             }
                         }
@@ -856,8 +1011,12 @@ const ModuleIR = struct {
                 try compile_data.blocks.pushNode(current_node);
             }
 
-            if (ir_root == null) {
-                ir_root = node;
+            // TODO don't assume only one return node - there can be multiple in real functions
+            if (node) |n| {
+                if (n.opcode == .Return) {
+                    std.debug.assert(ir_root == null);
+                    ir_root = node;
+                }
             }
         }
 
@@ -877,10 +1036,13 @@ const ModuleIR = struct {
         //     }
         // }
 
-        try mir.functions.append(IRFunction{
-            .def_index = index,
-            .ir_root = ir_root.?,
-        });
+        try mir.functions.append(IRFunction.init(
+            @intCast(index),
+            ir_root.?,
+            mir.allocator,
+        ));
+
+        try mir.functions.items[mir.functions.items.len - 1].regalloc(mir.allocator);
     }
 };
 
