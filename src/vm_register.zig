@@ -358,14 +358,55 @@ const IRFunction = struct {
         }
     }
 
-    fn codegen(func: *IRFunction, allocator: std.mem.Allocator) AllocError!void {
-        _ = func;
-        _ = allocator;
+    fn codegen(func: *IRFunction, instructions: *std.ArrayList(RegInstruction), module_def: ModuleDefinition, allocator: std.mem.Allocator) AllocError!void {
         // walk the graph in breadth-first order
-        // once all a node's out edges have been visited, mark it visited
+
         // when a node is visited, emit its instruction
         // reverse the instructions array when finished (alternatively just emit in reverse order if we have the node count from regalloc)
-        unreachable;
+
+        const start_instruction_offset = instructions.items.len;
+
+        var visit_queue = std.ArrayList(*IRNode).init(allocator);
+        defer visit_queue.deinit();
+        try visit_queue.append(func.ir_root);
+
+        var visited = std.AutoHashMap(*IRNode, void).init(allocator);
+        defer visited.deinit();
+
+        while (visit_queue.items.len > 0) {
+            var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+
+            // only emit an instruction once all its out edges have been visited - this ensures all dependent instructions
+            // will be executed after this one
+            var all_out_edges_visited: bool = true;
+            for (node.edgesOut()) |output_node| {
+                if (visited.contains(output_node) == false) {
+                    all_out_edges_visited = false;
+                    break;
+                }
+            }
+
+            if (all_out_edges_visited) {
+                try visited.put(node, {});
+
+                instructions.append(RegInstruction{
+                    .registerSlotOffset = if (func.register_map.get(node)) |slot_index| slot_index else 0,
+                    .opcode = node.opcode,
+                    .immediate = node.instruction(module_def).?.immediate,
+                });
+            }
+
+            for (node.edgesIn()) |input_node| {
+                if (!visited.contains(input_node)) { // TODO do we need this?
+                    try visit_queue.append(input_node);
+                }
+            }
+        }
+
+        const end_instruction_offset = instructions.items.len;
+        var emitted_instructions = instructions.items[start_instruction_offset..end_instruction_offset];
+
+        std.mem.reverse(RegInstruction, emitted_instructions);
     }
 
     fn dumpVizGraph(func: IRFunction, path: []u8, module_def: ModuleDefinition, allocator: std.mem.Allocator) !void {
@@ -661,6 +702,8 @@ const ModuleIR = struct {
     module_def: *const ModuleDefinition,
     functions: std.ArrayList(IRFunction),
     ir: StableArray(IRNode),
+
+    // instructions: std.ArrayList(RegInstruction),
 
     fn init(allocator: std.mem.Allocator, module_def: *const ModuleDefinition) ModuleIR {
         return ModuleIR{
@@ -1069,20 +1112,19 @@ pub const RegisterVM = struct {
 // register instructions get a slice of the overall set of register slots, which are pointers to actual
 // registers (?)
 
-// const RegInstruction = struct {
-//     numRegisters: u4, // wasm instructions don't read from more than 16 register slots at a time
-//     registerOffset: u28, // offset within the function register slot space to start
-//     opcode: Opcode,
-//     immediate: InstructionImmediates,
+const RegInstruction = struct {
+    registerSlotOffset: u32, // offset within the function register slot space to start
+    opcode: Opcode,
+    immediate: def.InstructionImmediates,
 
-//     fn numRegisters(self: RegInstruction) u4 {
-//         switch (self.opcode) {}
-//     }
+    fn numRegisters(self: RegInstruction) u4 {
+        switch (self.opcode) {}
+    }
 
-//     fn slots(self: RegInstruction, registers: []Val) []Val {
-//         return registers[self.registerOffset .. self.registerOffset + numRegisters];
-//     }
-// };
+    fn registers(self: RegInstruction, register_slice: []Val) []Val {
+        return register_slice[self.registerOffset .. self.registerOffset + self.numRegisters()];
+    }
+};
 
 fn runTestWithViz(wasm_filepath: []const u8, viz_dir: []const u8) !void {
     var allocator = std.testing.allocator;
