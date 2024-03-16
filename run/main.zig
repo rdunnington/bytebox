@@ -253,7 +253,7 @@ pub fn main() !void {
         return;
     }
 
-    var module_instance = bytebox.ModuleInstance.init(&module_def, allocator);
+    var module_instance = try bytebox.ModuleInstance.init(&module_def, allocator);
     defer module_instance.deinit();
 
     var imports_wasi: bytebox.ModuleImportPackage = try wasi.initImports(.{
@@ -353,7 +353,7 @@ pub fn main() !void {
     var returns = std.ArrayList(bytebox.Val).init(allocator);
     try returns.resize(func_export.returns.len);
 
-    module_instance.invoke(func_handle, params.items, returns.items, .{}) catch |e| {
+    module_instance.invoke(func_handle, params.items.ptr, returns.items.ptr, .{}) catch |e| {
         var backtrace = module_instance.formatBacktrace(1, allocator) catch unreachable;
         std.log.err("Caught {} during function invoke. Backtrace:\n{s}\n", .{ e, backtrace.items });
         backtrace.deinit();

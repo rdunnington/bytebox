@@ -441,7 +441,6 @@ pub const Opcode = enum(u16) {
     F32x4_Convert_I32x4_U,
     I32x4_Trunc_Sat_F64x2_S_Zero,
     I32x4_Trunc_Sat_F64x2_U_Zero,
-
     F64x2_Convert_Low_I32x4_S,
     F64x2_Convert_Low_I32x4_U,
 
