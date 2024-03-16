@@ -1,5 +1,5 @@
 const def = @import("definition.zig");
-const vm = @import("vm_stack.zig");
+const inst = @import("instance.zig");
 pub const wasi = @import("wasi.zig");
 
 pub const i8x16 = def.i8x16;
@@ -29,21 +29,22 @@ pub const TaggedVal = def.TaggedVal;
 pub const Val = def.Val;
 pub const ValType = def.ValType;
 
-pub const UnlinkableError = vm.UnlinkableError;
-pub const UninstantiableError = vm.UninstantiableError;
-pub const ExportError = vm.ExportError;
-pub const TrapError = vm.TrapError;
+pub const UnlinkableError = inst.UnlinkableError;
+pub const UninstantiableError = inst.UninstantiableError;
+pub const ExportError = inst.ExportError;
+pub const TrapError = inst.TrapError;
 
-pub const DebugTrace = vm.DebugTrace;
-pub const GlobalImport = vm.GlobalImport;
-pub const GlobalInstance = vm.GlobalInstance;
-pub const MemoryImport = vm.MemoryImport;
-pub const MemoryInstance = vm.MemoryInstance;
-pub const ModuleImportPackage = vm.ModuleImportPackage;
-pub const ModuleInstance = vm.ModuleInstance;
-pub const ModuleInstantiateOpts = vm.ModuleInstantiateOpts;
-pub const TableImport = vm.TableImport;
-pub const TableInstance = vm.TableInstance;
-pub const WasmMemoryExternal = vm.WasmMemoryExternal;
-pub const WasmMemoryFreeFunction = vm.WasmMemoryFreeFunction;
-pub const WasmMemoryResizeFunction = vm.WasmMemoryResizeFunction;
+pub const DebugTrace = inst.DebugTrace;
+pub const GlobalImport = inst.GlobalImport;
+pub const GlobalInstance = inst.GlobalInstance;
+pub const MemoryImport = inst.MemoryImport;
+pub const MemoryInstance = inst.MemoryInstance;
+pub const ModuleImportPackage = inst.ModuleImportPackage;
+pub const ModuleInstance = inst.ModuleInstance;
+pub const ModuleInstantiateOpts = inst.ModuleInstantiateOpts;
+pub const TableImport = inst.TableImport;
+pub const TableInstance = inst.TableInstance;
+pub const WasmMemoryExternal = inst.WasmMemoryExternal;
+pub const WasmMemoryFreeFunction = inst.WasmMemoryFreeFunction;
+pub const WasmMemoryResizeFunction = inst.WasmMemoryResizeFunction;
+pub const InvokeOpts = inst.InvokeOpts;

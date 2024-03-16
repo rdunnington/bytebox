@@ -47,92 +47,31 @@ const TablePairImmediates = def.TablePairImmediates;
 const Val = def.Val;
 const ValType = def.ValType;
 
-pub const UnlinkableError = error{
-    UnlinkableUnknownImport,
-    UnlinkableIncompatibleImportType,
-};
+const inst = @import("instance.zig");
+const UnlinkableError = inst.UnlinkableError;
+const UninstantiableError = inst.UninstantiableError;
+const ExportError = inst.ExportError;
+const TrapError = inst.TrapError;
+const DebugTrace = inst.DebugTrace;
+const TableInstance = inst.TableInstance;
+const MemoryInstance = inst.MemoryInstance;
+const GlobalInstance = inst.GlobalInstance;
+const ElementInstance = inst.ElementInstance;
+const FunctionImport = inst.FunctionImport;
+const TableImport = inst.TableImport;
+const MemoryImport = inst.MemoryImport;
+const GlobalImport = inst.GlobalImport;
+const ModuleImportPackage = inst.ModuleImportPackage;
+const ModuleInstance = inst.ModuleInstance;
+const VM = inst.VM;
+const Store = inst.Store;
+const ModuleInstantiateOpts = inst.ModuleInstantiateOpts;
+const InvokeOpts = inst.InvokeOpts;
+const DebugTrapInstructionMode = inst.DebugTrapInstructionMode;
 
-pub const UninstantiableError = error{
-    UninstantiableOutOfBoundsTableAccess,
-    UninstantiableOutOfBoundsMemoryAccess,
-};
-
-pub const ExportError = error{
-    ExportUnknownFunction,
-    ExportUnknownGlobal,
-};
-
-pub const TrapError = error{
-    TrapDebug,
-    TrapUnreachable,
-    TrapIntegerDivisionByZero,
-    TrapIntegerOverflow,
-    TrapIndirectCallTypeMismatch,
-    TrapInvalidIntegerConversion,
-    TrapOutOfBoundsMemoryAccess,
-    TrapUndefinedElement,
-    TrapUninitializedElement,
-    TrapOutOfBoundsTableAccess,
-    TrapStackExhausted,
-    TrapUnknown,
-};
-
-pub const DebugTrace = struct {
-    pub const Mode = enum {
-        None,
-        Function,
-        Instruction,
-    };
-
-    pub fn setMode(new_mode: Mode) bool {
-        if (builtin.mode == .Debug) {
-            mode = new_mode;
-            return true;
-        }
-
-        return false;
-    }
-
-    fn shouldTraceFunctions() bool {
-        return builtin.mode == .Debug and mode == .Function;
-    }
-
-    fn shouldTraceInstructions() bool {
-        return builtin.mode == .Debug and mode == .Instruction;
-    }
-
-    fn printIndent(indent: u32) void {
-        var indent_level: u32 = 0;
-        while (indent_level < indent) : (indent_level += 1) {
-            std.debug.print("  ", .{});
-        }
-    }
-
-    fn traceHostFunction(module_instance: *const ModuleInstance, indent: u32, import_name: []const u8) void {
-        if (shouldTraceFunctions()) {
-            _ = module_instance;
-            const module_name = "<unknown_host_module>";
-
-            printIndent(indent);
-            std.debug.print("{s}!{s}\n", .{ module_name, import_name });
-        }
-    }
-
-    fn traceFunction(module_instance: *const ModuleInstance, indent: u32, func_index: u32) void {
-        if (shouldTraceFunctions()) {
-            const func_name_index: u32 = func_index + @as(u32, @intCast(module_instance.module_def.imports.functions.items.len));
-
-            const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
-            const module_name = name_section.getModuleName();
-            const function_name = name_section.findFunctionName(func_name_index);
-
-            printIndent(indent);
-            std.debug.print("{s}!{s}\n", .{ module_name, function_name });
-        }
-    }
-
+const DebugTraceStackVM = struct {
     fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Stack) void {
-        if (shouldTraceInstructions()) {
+        if (DebugTrace.shouldTraceInstructions()) {
             const frame: *const CallFrame = stack.topFrame();
             const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
             const module_name = name_section.getModuleName();
@@ -141,8 +80,13 @@ pub const DebugTrace = struct {
             std.debug.print("\t0x{x} - {s}!{s}: {s}\n", .{ pc, module_name, function_name, instruction_name });
         }
     }
+};
 
-    var mode: Mode = .None;
+const FunctionInstance = struct {
+    type_def_index: u32,
+    def_index: u32,
+    instructions_begin: u32,
+    local_types: std.ArrayList(ValType),
 };
 
 const Label = struct {
@@ -175,16 +119,14 @@ const Stack = struct {
     mem: []u8,
     allocator: std.mem.Allocator,
 
-    const Self = @This();
-
     const AllocOpts = struct {
         max_values: u32,
         max_labels: u16,
         max_frames: u16,
     };
 
-    fn init(allocator: std.mem.Allocator) Self {
-        var self = Self{
+    fn init(allocator: std.mem.Allocator) Stack {
+        var stack = Stack{
             .values = &[_]Val{},
             .labels = &[_]Label{},
             .frames = &[_]CallFrame{},
@@ -195,14 +137,16 @@ const Stack = struct {
             .allocator = allocator,
         };
 
-        return self;
+        return stack;
     }
 
-    fn deinit(self: *Self) void {
-        self.allocator.free(self.mem);
+    fn deinit(stack: *Stack) void {
+        if (stack.mem.len > 0) {
+            stack.allocator.free(stack.mem);
+        }
     }
 
-    fn allocMemory(self: *Self, opts: AllocOpts) !void {
+    fn allocMemory(stack: *Stack, opts: AllocOpts) !void {
         const alignment = @max(@alignOf(Val), @alignOf(Label), @alignOf(CallFrame));
         const values_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_values)) * @sizeOf(Val), alignment);
         const labels_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_labels)) * @sizeOf(Label), alignment);
@@ -212,193 +156,193 @@ const Stack = struct {
         const begin_labels = values_alloc_size;
         const begin_frames = values_alloc_size + labels_alloc_size;
 
-        self.mem = try self.allocator.alloc(u8, total_alloc_size);
-        self.values.ptr = @as([*]Val, @alignCast(@ptrCast(self.mem.ptr)));
-        self.values.len = opts.max_values;
-        self.labels.ptr = @as([*]Label, @alignCast(@ptrCast(self.mem[begin_labels..].ptr)));
-        self.labels.len = opts.max_labels;
-        self.frames.ptr = @as([*]CallFrame, @alignCast(@ptrCast(self.mem[begin_frames..].ptr)));
-        self.frames.len = opts.max_frames;
+        stack.mem = try stack.allocator.alloc(u8, total_alloc_size);
+        stack.values.ptr = @as([*]Val, @alignCast(@ptrCast(stack.mem.ptr)));
+        stack.values.len = opts.max_values;
+        stack.labels.ptr = @as([*]Label, @alignCast(@ptrCast(stack.mem[begin_labels..].ptr)));
+        stack.labels.len = opts.max_labels;
+        stack.frames.ptr = @as([*]CallFrame, @alignCast(@ptrCast(stack.mem[begin_frames..].ptr)));
+        stack.frames.len = opts.max_frames;
     }
 
-    fn checkExhausted(self: *Self, extra_values: u32) !void {
-        if (self.num_values + extra_values >= self.values.len) {
+    fn checkExhausted(stack: *Stack, extra_values: u32) !void {
+        if (stack.num_values + extra_values >= stack.values.len) {
             return error.TrapStackExhausted;
         }
     }
 
-    fn pushValue(self: *Self, value: Val) void {
-        self.values[self.num_values] = value;
-        self.num_values += 1;
+    fn pushValue(stack: *Stack, value: Val) void {
+        stack.values[stack.num_values] = value;
+        stack.num_values += 1;
     }
 
-    fn pushI32(self: *Self, v: i32) void {
-        self.values[self.num_values] = Val{ .I32 = v };
-        self.num_values += 1;
+    fn pushI32(stack: *Stack, v: i32) void {
+        stack.values[stack.num_values] = Val{ .I32 = v };
+        stack.num_values += 1;
     }
 
-    fn pushI64(self: *Self, v: i64) void {
-        self.values[self.num_values] = Val{ .I64 = v };
-        self.num_values += 1;
+    fn pushI64(stack: *Stack, v: i64) void {
+        stack.values[stack.num_values] = Val{ .I64 = v };
+        stack.num_values += 1;
     }
 
-    fn pushF32(self: *Self, v: f32) void {
-        self.values[self.num_values] = Val{ .F32 = v };
-        self.num_values += 1;
+    fn pushF32(stack: *Stack, v: f32) void {
+        stack.values[stack.num_values] = Val{ .F32 = v };
+        stack.num_values += 1;
     }
 
-    fn pushF64(self: *Self, v: f64) void {
-        self.values[self.num_values] = Val{ .F64 = v };
-        self.num_values += 1;
+    fn pushF64(stack: *Stack, v: f64) void {
+        stack.values[stack.num_values] = Val{ .F64 = v };
+        stack.num_values += 1;
     }
 
-    fn pushV128(self: *Self, v: v128) void {
-        self.values[self.num_values] = Val{ .V128 = v };
-        self.num_values += 1;
+    fn pushV128(stack: *Stack, v: v128) void {
+        stack.values[stack.num_values] = Val{ .V128 = v };
+        stack.num_values += 1;
     }
 
-    fn popValue(self: *Self) Val {
-        self.num_values -= 1;
-        var value: Val = self.values[self.num_values];
+    fn popValue(stack: *Stack) Val {
+        stack.num_values -= 1;
+        var value: Val = stack.values[stack.num_values];
         return value;
     }
 
-    fn topValue(self: *const Self) Val {
-        return self.values[self.num_values - 1];
+    fn topValue(stack: *const Stack) Val {
+        return stack.values[stack.num_values - 1];
     }
 
-    fn popI32(self: *Self) i32 {
-        self.num_values -= 1;
-        return self.values[self.num_values].I32;
+    fn popI32(stack: *Stack) i32 {
+        stack.num_values -= 1;
+        return stack.values[stack.num_values].I32;
     }
 
-    fn popI64(self: *Self) i64 {
-        self.num_values -= 1;
-        return self.values[self.num_values].I64;
+    fn popI64(stack: *Stack) i64 {
+        stack.num_values -= 1;
+        return stack.values[stack.num_values].I64;
     }
 
-    fn popF32(self: *Self) f32 {
-        self.num_values -= 1;
-        return self.values[self.num_values].F32;
+    fn popF32(stack: *Stack) f32 {
+        stack.num_values -= 1;
+        return stack.values[stack.num_values].F32;
     }
 
-    fn popF64(self: *Self) f64 {
-        self.num_values -= 1;
-        return self.values[self.num_values].F64;
+    fn popF64(stack: *Stack) f64 {
+        stack.num_values -= 1;
+        return stack.values[stack.num_values].F64;
     }
 
-    fn popV128(self: *Self) v128 {
-        self.num_values -= 1;
-        return self.values[self.num_values].V128;
+    fn popV128(stack: *Stack) v128 {
+        stack.num_values -= 1;
+        return stack.values[stack.num_values].V128;
     }
 
-    fn pushLabel(self: *Self, num_returns: u32, continuation: u32) !void {
-        if (self.num_labels < self.labels.len) {
-            self.labels[self.num_labels] = Label{
+    fn pushLabel(stack: *Stack, num_returns: u32, continuation: u32) !void {
+        if (stack.num_labels < stack.labels.len) {
+            stack.labels[stack.num_labels] = Label{
                 .num_returns = num_returns,
                 .continuation = continuation,
-                .start_offset_values = self.num_values,
+                .start_offset_values = stack.num_values,
             };
-            self.num_labels += 1;
+            stack.num_labels += 1;
         } else {
             return error.TrapStackExhausted;
         }
     }
 
-    fn popLabel(self: *Self) void {
-        self.num_labels -= 1;
+    fn popLabel(stack: *Stack) void {
+        stack.num_labels -= 1;
     }
 
-    fn findLabel(self: *const Self, id: u32) *const Label {
-        const index: usize = (self.num_labels - 1) - id;
-        return &self.labels[index];
+    fn findLabel(stack: *const Stack, id: u32) *const Label {
+        const index: usize = (stack.num_labels - 1) - id;
+        return &stack.labels[index];
     }
 
-    fn topLabel(self: *const Self) *const Label {
-        return &self.labels[self.num_labels - 1];
+    fn topLabel(stack: *const Stack) *const Label {
+        return &stack.labels[stack.num_labels - 1];
     }
 
-    fn frameLabel(self: *const Self) *const Label {
-        var frame: *const CallFrame = self.topFrame();
-        var frame_label: *const Label = &self.labels[frame.start_offset_labels];
+    fn frameLabel(stack: *const Stack) *const Label {
+        var frame: *const CallFrame = stack.topFrame();
+        var frame_label: *const Label = &stack.labels[frame.start_offset_labels];
         return frame_label;
     }
 
-    fn popAllUntilLabelId(self: *Self, label_id: u64, pop_final_label: bool, num_returns: usize) void {
-        var label_index: u16 = @as(u16, @intCast((self.num_labels - label_id) - 1));
-        var label: *const Label = &self.labels[label_index];
+    fn popAllUntilLabelId(stack: *Stack, label_id: u64, pop_final_label: bool, num_returns: usize) void {
+        var label_index: u16 = @as(u16, @intCast((stack.num_labels - label_id) - 1));
+        var label: *const Label = &stack.labels[label_index];
 
         if (pop_final_label) {
-            const source_begin: usize = self.num_values - num_returns;
-            const source_end: usize = self.num_values;
+            const source_begin: usize = stack.num_values - num_returns;
+            const source_end: usize = stack.num_values;
             const dest_begin: usize = label.start_offset_values;
             const dest_end: usize = label.start_offset_values + num_returns;
 
-            const returns_source: []const Val = self.values[source_begin..source_end];
-            const returns_dest: []Val = self.values[dest_begin..dest_end];
+            const returns_source: []const Val = stack.values[source_begin..source_end];
+            const returns_dest: []Val = stack.values[dest_begin..dest_end];
             std.mem.copy(Val, returns_dest, returns_source);
 
-            self.num_values = @as(u32, @intCast(dest_end));
-            self.num_labels = label_index;
+            stack.num_values = @as(u32, @intCast(dest_end));
+            stack.num_labels = label_index;
         } else {
-            self.num_values = label.start_offset_values;
-            self.num_labels = label_index + 1;
+            stack.num_values = label.start_offset_values;
+            stack.num_labels = label_index + 1;
         }
     }
 
-    fn pushFrame(self: *Self, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType, num_returns: u32) !void {
+    fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType, num_returns: u32) !void {
         const non_param_types: []const ValType = all_local_types[param_types.len..];
 
         // the stack should already be populated with the params to the function, so all that's
         // left to do is initialize the locals to their default values
-        var values_index_begin: u32 = self.num_values - @as(u32, @intCast(param_types.len));
-        var values_index_end: u32 = self.num_values + @as(u32, @intCast(non_param_types.len));
+        var values_index_begin: u32 = stack.num_values - @as(u32, @intCast(param_types.len));
+        var values_index_end: u32 = stack.num_values + @as(u32, @intCast(non_param_types.len));
 
-        if (self.num_frames < self.frames.len and values_index_end < self.values.len) {
-            var locals_and_params: []Val = self.values[values_index_begin..values_index_end];
-            var locals = self.values[self.num_values..values_index_end];
+        if (stack.num_frames < stack.frames.len and values_index_end < stack.values.len) {
+            var locals_and_params: []Val = stack.values[values_index_begin..values_index_end];
+            var locals = stack.values[stack.num_values..values_index_end];
 
-            self.num_values = values_index_end;
+            stack.num_values = values_index_end;
 
             for (non_param_types, 0..) |valtype, i| {
                 locals[i] = Val.default(valtype);
             }
 
-            self.frames[self.num_frames] = CallFrame{
+            stack.frames[stack.num_frames] = CallFrame{
                 .func = func,
                 .module_instance = module_instance,
                 .locals = locals_and_params,
                 .num_returns = num_returns,
                 .start_offset_values = values_index_begin,
-                .start_offset_labels = self.num_labels,
+                .start_offset_labels = stack.num_labels,
             };
-            self.num_frames += 1;
+            stack.num_frames += 1;
         } else {
             return error.TrapStackExhausted;
         }
     }
 
-    fn popFrame(self: *Self) ?FuncCallData {
-        var frame: *CallFrame = self.topFrame();
-        var frame_label: Label = self.labels[frame.start_offset_labels];
+    fn popFrame(stack: *Stack) ?FuncCallData {
+        var frame: *CallFrame = stack.topFrame();
+        var frame_label: Label = stack.labels[frame.start_offset_labels];
 
         const num_returns: usize = frame.num_returns;
-        const source_begin: usize = self.num_values - num_returns;
-        const source_end: usize = self.num_values;
+        const source_begin: usize = stack.num_values - num_returns;
+        const source_end: usize = stack.num_values;
         const dest_begin: usize = frame.start_offset_values;
         const dest_end: usize = frame.start_offset_values + num_returns;
 
-        const returns_source: []const Val = self.values[source_begin..source_end];
-        const returns_dest: []Val = self.values[dest_begin..dest_end];
+        const returns_source: []const Val = stack.values[source_begin..source_end];
+        const returns_dest: []Val = stack.values[dest_begin..dest_end];
         std.mem.copy(Val, returns_dest, returns_source);
 
-        self.num_values = @as(u32, @intCast(dest_end));
-        self.num_labels = frame.start_offset_labels;
-        self.num_frames -= 1;
+        stack.num_values = @as(u32, @intCast(dest_end));
+        stack.num_labels = frame.start_offset_labels;
+        stack.num_frames -= 1;
 
-        if (self.num_frames > 0) {
+        if (stack.num_frames > 0) {
             return FuncCallData{
-                .code = self.topFrame().module_instance.module_def.code.instructions.items.ptr,
+                .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
                 .continuation = frame_label.continuation,
             };
         }
@@ -406,239 +350,15 @@ const Stack = struct {
         return null;
     }
 
-    fn topFrame(self: *const Self) *CallFrame {
-        return &self.frames[self.num_frames - 1];
+    fn topFrame(stack: *const Stack) *CallFrame {
+        return &stack.frames[stack.num_frames - 1];
     }
 
-    fn popAll(self: *Self) void {
-        self.num_values = 0;
-        self.num_labels = 0;
-        self.num_frames = 0;
+    fn popAll(stack: *Stack) void {
+        stack.num_values = 0;
+        stack.num_labels = 0;
+        stack.num_frames = 0;
     }
-};
-
-const FunctionInstance = struct {
-    type_def_index: u32,
-    def_index: u32,
-    instructions_begin: u32,
-    local_types: std.ArrayList(ValType),
-};
-
-pub const GlobalExport = struct {
-    val: *Val,
-    valtype: ValType,
-    mut: GlobalMut,
-};
-
-pub const GlobalInstance = struct {
-    def: *GlobalDefinition,
-    value: Val,
-};
-
-pub const TableInstance = struct {
-    refs: std.ArrayList(Val), // should only be reftypes
-    reftype: ValType,
-    limits: Limits,
-
-    pub fn init(reftype: ValType, limits: Limits, allocator: std.mem.Allocator) !TableInstance {
-        std.debug.assert(reftype.isRefType());
-
-        var table = TableInstance{
-            .refs = std.ArrayList(Val).init(allocator),
-            .reftype = reftype,
-            .limits = limits,
-        };
-
-        if (limits.min > 0) {
-            try table.refs.appendNTimes(try Val.nullRef(reftype), limits.min);
-        }
-        return table;
-    }
-
-    pub fn deinit(table: *TableInstance) void {
-        table.refs.deinit();
-    }
-
-    fn grow(table: *TableInstance, length: usize, init_value: Val) bool {
-        const max = if (table.limits.max) |m| m else std.math.maxInt(i32);
-        std.debug.assert(table.refs.items.len == table.limits.min);
-
-        var old_length: usize = table.limits.min;
-        if (old_length + length > max) {
-            return false;
-        }
-
-        table.limits.min = @as(u32, @intCast(old_length + length));
-
-        table.refs.appendNTimes(init_value, length) catch return false;
-        return true;
-    }
-
-    fn init_range_val(table: *TableInstance, module: *ModuleInstance, elems: []const Val, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
-        if (table.refs.items.len < start_table_index + init_length) {
-            return error.TrapOutOfBoundsTableAccess;
-        }
-
-        if (elems.len < start_elem_index + init_length) {
-            return error.TrapOutOfBoundsTableAccess;
-        }
-
-        var elem_range = elems[start_elem_index .. start_elem_index + init_length];
-        var table_range = table.refs.items[start_table_index .. start_table_index + init_length];
-
-        var index: u32 = 0;
-        while (index < elem_range.len) : (index += 1) {
-            var val: Val = elem_range[index];
-
-            if (table.reftype == .FuncRef) {
-                val.FuncRef.module_instance = module;
-            }
-
-            table_range[index] = val;
-        }
-    }
-
-    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32, store: *Store) !void {
-        if (start_table_index < 0 or table.refs.items.len < start_table_index + init_length) {
-            return error.TrapOutOfBoundsTableAccess;
-        }
-
-        if (start_elem_index < 0 or elems.len < start_elem_index + init_length) {
-            return error.TrapOutOfBoundsTableAccess;
-        }
-
-        var elem_range = elems[start_elem_index .. start_elem_index + init_length];
-        var table_range = table.refs.items[start_table_index .. start_table_index + init_length];
-
-        var index: u32 = 0;
-        while (index < elem_range.len) : (index += 1) {
-            var val: Val = elem_range[index].resolve(store);
-
-            if (table.reftype == .FuncRef) {
-                val.FuncRef.module_instance = module;
-            }
-
-            table_range[index] = val;
-        }
-    }
-};
-
-pub const WasmMemoryResizeFunction = *const fn (mem: ?[*]u8, new_size_bytes: usize, old_size_bytes: usize, userdata: ?*anyopaque) ?[*]u8;
-pub const WasmMemoryFreeFunction = *const fn (mem: ?[*]u8, size_bytes: usize, userdata: ?*anyopaque) void;
-
-pub const WasmMemoryExternal = struct {
-    resize_callback: WasmMemoryResizeFunction,
-    free_callback: WasmMemoryFreeFunction,
-    userdata: ?*anyopaque,
-};
-
-pub const MemoryInstance = struct {
-    const BackingMemoryType = enum(u8) {
-        Internal,
-        External,
-    };
-
-    const BackingMemory = union(BackingMemoryType) {
-        Internal: StableArray(u8),
-        External: struct {
-            buffer: []u8,
-            params: WasmMemoryExternal,
-        },
-    };
-
-    const k_page_size: usize = MemoryDefinition.k_page_size;
-    const k_max_pages: usize = MemoryDefinition.k_max_pages;
-
-    limits: Limits,
-    mem: BackingMemory,
-
-    pub fn init(limits: Limits, params: ?WasmMemoryExternal) MemoryInstance {
-        const max_pages = if (limits.max) |max| @max(1, max) else k_max_pages;
-
-        var mem = if (params == null) BackingMemory{
-            .Internal = StableArray(u8).init(max_pages * k_page_size),
-        } else BackingMemory{ .External = .{
-            .buffer = &[0]u8{},
-            .params = params.?,
-        } };
-
-        var instance = MemoryInstance{
-            .limits = Limits{ .min = 0, .max = @as(u32, @intCast(max_pages)) },
-            .mem = mem,
-        };
-
-        return instance;
-    }
-
-    pub fn deinit(self: *MemoryInstance) void {
-        switch (self.mem) {
-            .Internal => |*m| m.deinit(),
-            .External => |*m| m.params.free_callback(m.buffer.ptr, m.buffer.len, m.params.userdata),
-        }
-    }
-
-    pub fn size(self: *const MemoryInstance) usize {
-        return switch (self.mem) {
-            .Internal => |m| m.items.len / k_page_size,
-            .External => |m| m.buffer.len / k_page_size,
-        };
-    }
-
-    pub fn grow(self: *MemoryInstance, num_pages: usize) bool {
-        if (num_pages == 0) {
-            return true;
-        }
-
-        const total_pages = self.limits.min + num_pages;
-        const max_pages = if (self.limits.max) |max| max else k_max_pages;
-
-        if (total_pages > max_pages) {
-            return false;
-        }
-
-        const commit_size: usize = (self.limits.min + num_pages) * k_page_size;
-
-        switch (self.mem) {
-            .Internal => |*m| m.resize(commit_size) catch return false,
-            .External => |*m| {
-                var new_mem: ?[*]u8 = m.params.resize_callback(m.buffer.ptr, commit_size, m.buffer.len, m.params.userdata);
-                if (new_mem == null) {
-                    return false;
-                }
-                m.buffer = new_mem.?[0..commit_size];
-            },
-        }
-
-        self.limits.min = @as(u32, @intCast(total_pages));
-
-        return true;
-    }
-
-    pub fn buffer(self: *const MemoryInstance) []u8 {
-        return switch (self.mem) {
-            .Internal => |m| m.items,
-            .External => |m| m.buffer,
-        };
-    }
-
-    fn ensureMinSize(self: *MemoryInstance, size_bytes: usize) !void {
-        if (self.limits.min * k_page_size < size_bytes) {
-            var num_min_pages = std.math.divCeil(usize, size_bytes, k_page_size) catch unreachable;
-            if (num_min_pages > self.limits.max.?) {
-                return error.TrapOutOfBoundsMemoryAccess;
-            }
-
-            var needed_pages = num_min_pages - self.limits.min;
-            if (self.resize(needed_pages) == false) {
-                unreachable;
-            }
-        }
-    }
-};
-
-const ElementInstance = struct {
-    refs: std.ArrayList(Val),
-    reftype: ValType,
 };
 
 // TODO move all definition stuff into definition.zig and vm stuff into vm_stack.zig
@@ -1345,7 +1065,8 @@ const InstructionFuncs = struct {
                     }
                 },
                 .Wasm => |data| {
-                    const func_instance: *const FunctionInstance = &data.module_instance.store.functions.items[data.index];
+                    var stack_vm: *StackVM = StackVM.fromVM(data.module_instance.vm);
+                    const func_instance: *const FunctionInstance = &stack_vm.functions.items[data.index];
                     return try call(pc, stack, data.module_instance, func_instance);
                 },
             }
@@ -1829,7 +1550,8 @@ const InstructionFuncs = struct {
         _ = code;
 
         const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
-        if (root_module_instance.debug_state) |*debug_state| {
+        const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
+        if (root_stackvm.debug_state) |*debug_state| {
             if (debug_state.trap_counter > 0) {
                 debug_state.trap_counter -= 1;
                 if (debug_state.trap_counter == 0) {
@@ -1839,7 +1561,7 @@ const InstructionFuncs = struct {
             }
         }
 
-        DebugTrace.traceInstruction(name, pc, stack);
+        DebugTraceStackVM.traceInstruction(name, pc, stack);
     }
 
     fn op_Invalid(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
@@ -1855,9 +1577,10 @@ const InstructionFuncs = struct {
     fn op_DebugTrap(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("DebugTrap", pc, code, stack);
         var root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
+        const stack_vm = StackVM.fromVM(root_module_instance.vm);
 
-        std.debug.assert(root_module_instance.debug_state != null);
-        root_module_instance.debug_state.?.pc = pc;
+        std.debug.assert(stack_vm.debug_state != null);
+        stack_vm.debug_state.?.pc = pc;
 
         return error.TrapDebug;
     }
@@ -1993,11 +1716,12 @@ const InstructionFuncs = struct {
         const func_index: u32 = code[pc].immediate.Index;
         const module_instance: *ModuleInstance = stack.topFrame().module_instance;
         const store: *const Store = &module_instance.store;
+        const stack_vm = StackVM.fromVM(module_instance.vm);
 
         var next: FuncCallData = undefined;
         if (func_index >= store.imports.functions.items.len) {
             const func_instance_index = func_index - store.imports.functions.items.len;
-            const func: *const FunctionInstance = &store.functions.items[@as(usize, @intCast(func_instance_index))];
+            const func: *const FunctionInstance = &stack_vm.functions.items[@as(usize, @intCast(func_instance_index))];
             next = try OpHelpers.call(pc, stack, module_instance, func);
         } else {
             var func_import = &store.imports.functions.items[func_index];
@@ -2032,10 +1756,11 @@ const InstructionFuncs = struct {
 
         var call_module: *ModuleInstance = ref.FuncRef.module_instance.?;
         var call_store = &call_module.store;
+        var call_stackvm = StackVM.fromVM(call_module.vm);
 
         var next: FuncCallData = undefined;
         if (func_index >= call_store.imports.functions.items.len) {
-            const func: *const FunctionInstance = &call_store.functions.items[func_index - call_store.imports.functions.items.len];
+            const func: *const FunctionInstance = &call_stackvm.functions.items[func_index - call_store.imports.functions.items.len];
             if (func.type_def_index != immediates.type_index) {
                 const func_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[func.type_def_index];
                 const immediate_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[immediates.type_index];
@@ -5441,279 +5166,16 @@ const InstructionFuncs = struct {
     }
 };
 
-const ImportType = enum(u8) {
-    Host,
-    Wasm,
-};
+pub const StackVM = struct {
+    const TrapType = enum {
+        Step,
+        Explicit,
+    };
 
-const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void;
-
-const HostFunction = struct {
-    userdata: ?*anyopaque,
-    func_def: FunctionTypeDefinition,
-    callback: HostFunctionCallback,
-};
-
-const ImportDataWasm = struct {
-    module_instance: *ModuleInstance,
-    index: u32,
-};
-
-pub const FunctionImport = struct {
-    name: []const u8,
-    data: union(ImportType) {
-        Host: HostFunction,
-        Wasm: ImportDataWasm,
-    },
-
-    fn dupe(import: *const FunctionImport, allocator: std.mem.Allocator) !FunctionImport {
-        var copy = import.*;
-        copy.name = try allocator.dupe(u8, copy.name);
-        switch (copy.data) {
-            .Host => |*data| {
-                var func_def = FunctionTypeDefinition{
-                    .types = std.ArrayList(ValType).init(allocator),
-                    .num_params = data.func_def.num_params,
-                };
-                try func_def.types.appendSlice(data.func_def.types.items);
-                data.func_def = func_def;
-            },
-            .Wasm => {},
-        }
-
-        return copy;
-    }
-
-    fn isTypeSignatureEql(import: *const FunctionImport, type_signature: *const FunctionTypeDefinition) bool {
-        var type_comparer = FunctionTypeDefinition.SortContext{};
-        switch (import.data) {
-            .Host => |data| {
-                return type_comparer.eql(&data.func_def, type_signature);
-            },
-            .Wasm => |data| {
-                var func_type_def: *const FunctionTypeDefinition = data.module_instance.findFuncTypeDef(data.index);
-                return type_comparer.eql(func_type_def, type_signature);
-            },
-        }
-    }
-};
-
-pub const TableImport = struct {
-    name: []const u8,
-    data: union(ImportType) {
-        Host: *TableInstance,
-        Wasm: ImportDataWasm,
-    },
-
-    fn dupe(import: *const TableImport, allocator: std.mem.Allocator) !TableImport {
-        var copy = import.*;
-        copy.name = try allocator.dupe(u8, copy.name);
-        return copy;
-    }
-};
-
-pub const MemoryImport = struct {
-    name: []const u8,
-    data: union(ImportType) {
-        Host: *MemoryInstance,
-        Wasm: ImportDataWasm,
-    },
-
-    fn dupe(import: *const MemoryImport, allocator: std.mem.Allocator) !MemoryImport {
-        var copy = import.*;
-        copy.name = try allocator.dupe(u8, copy.name);
-        return copy;
-    }
-};
-
-pub const GlobalImport = struct {
-    name: []const u8,
-    data: union(ImportType) {
-        Host: *GlobalInstance,
-        Wasm: ImportDataWasm,
-    },
-
-    fn dupe(import: *const GlobalImport, allocator: std.mem.Allocator) !GlobalImport {
-        var copy = import.*;
-        copy.name = try allocator.dupe(u8, copy.name);
-        return copy;
-    }
-};
-
-pub const ModuleImportPackage = struct {
-    name: []const u8,
-    instance: ?*ModuleInstance,
-    userdata: ?*anyopaque,
-    functions: std.ArrayList(FunctionImport),
-    tables: std.ArrayList(TableImport),
-    memories: std.ArrayList(MemoryImport),
-    globals: std.ArrayList(GlobalImport),
-    allocator: std.mem.Allocator,
-
-    pub fn init(name: []const u8, instance: ?*ModuleInstance, userdata: ?*anyopaque, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImportPackage {
-        return ModuleImportPackage{
-            .name = try allocator.dupe(u8, name),
-            .instance = instance,
-            .userdata = userdata,
-            .functions = std.ArrayList(FunctionImport).init(allocator),
-            .tables = std.ArrayList(TableImport).init(allocator),
-            .memories = std.ArrayList(MemoryImport).init(allocator),
-            .globals = std.ArrayList(GlobalImport).init(allocator),
-            .allocator = allocator,
-        };
-    }
-
-    pub fn addHostFunction(self: *ModuleImportPackage, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback, userdata: ?*anyopaque) std.mem.Allocator.Error!void {
-        std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
-
-        var type_list = std.ArrayList(ValType).init(self.allocator);
-        try type_list.appendSlice(param_types);
-        try type_list.appendSlice(return_types);
-
-        try self.functions.append(FunctionImport{
-            .name = try self.allocator.dupe(u8, name),
-            .data = .{
-                .Host = HostFunction{
-                    .userdata = userdata,
-                    .func_def = FunctionTypeDefinition{
-                        .types = type_list,
-                        .num_params = @as(u32, @intCast(param_types.len)),
-                    },
-                    .callback = callback,
-                },
-            },
-        });
-    }
-
-    pub fn deinit(self: *ModuleImportPackage) void {
-        self.allocator.free(self.name);
-
-        for (self.functions.items) |*item| {
-            self.allocator.free(item.name);
-            switch (item.data) {
-                .Host => |h| h.func_def.types.deinit(),
-                else => {},
-            }
-        }
-        self.functions.deinit();
-
-        for (self.tables.items) |*item| {
-            self.allocator.free(item.name);
-        }
-        self.tables.deinit();
-
-        for (self.memories.items) |*item| {
-            self.allocator.free(item.name);
-        }
-        self.memories.deinit();
-
-        for (self.globals.items) |*item| {
-            self.allocator.free(item.name);
-        }
-        self.globals.deinit();
-    }
-};
-
-pub const Store = struct {
-    functions: std.ArrayList(FunctionInstance),
-    tables: std.ArrayList(TableInstance),
-    memories: std.ArrayList(MemoryInstance),
-    globals: std.ArrayList(GlobalInstance),
-    elements: std.ArrayList(ElementInstance),
-    imports: struct {
-        functions: std.ArrayList(FunctionImport),
-        tables: std.ArrayList(TableImport),
-        memories: std.ArrayList(MemoryImport),
-        globals: std.ArrayList(GlobalImport),
-    },
-
-    fn init(allocator: std.mem.Allocator) Store {
-        var store = Store{
-            .imports = .{
-                .functions = std.ArrayList(FunctionImport).init(allocator),
-                .tables = std.ArrayList(TableImport).init(allocator),
-                .memories = std.ArrayList(MemoryImport).init(allocator),
-                .globals = std.ArrayList(GlobalImport).init(allocator),
-            },
-            .functions = std.ArrayList(FunctionInstance).init(allocator),
-            .tables = std.ArrayList(TableInstance).init(allocator),
-            .memories = std.ArrayList(MemoryInstance).init(allocator),
-            .globals = std.ArrayList(GlobalInstance).init(allocator),
-            .elements = std.ArrayList(ElementInstance).init(allocator),
-        };
-
-        return store;
-    }
-
-    fn deinit(self: *Store) void {
-        self.functions.deinit();
-
-        for (self.tables.items) |*item| {
-            item.deinit();
-        }
-        self.tables.deinit();
-
-        for (self.memories.items) |*item| {
-            item.deinit();
-        }
-        self.memories.deinit();
-
-        self.globals.deinit();
-        self.elements.deinit();
-    }
-
-    fn getTable(self: *Store, index: usize) *TableInstance {
-        if (self.imports.tables.items.len <= index) {
-            var instance_index = index - self.imports.tables.items.len;
-            return &self.tables.items[instance_index];
-        } else {
-            var import: *TableImport = &self.imports.tables.items[index];
-            return switch (import.data) {
-                .Host => |data| data,
-                .Wasm => |data| data.module_instance.store.getTable(data.index),
-            };
-        }
-    }
-
-    fn getMemory(self: *Store, index: usize) *MemoryInstance {
-        if (self.imports.memories.items.len <= index) {
-            var instance_index = index - self.imports.memories.items.len;
-            return &self.memories.items[instance_index];
-        } else {
-            var import: *MemoryImport = &self.imports.memories.items[index];
-            return switch (import.data) {
-                .Host => |data| data,
-                .Wasm => |data| data.module_instance.store.getMemory(data.index),
-            };
-        }
-    }
-
-    pub fn getGlobal(self: *Store, index: usize) *GlobalInstance { // TODO make private
-        if (self.imports.globals.items.len <= index) {
-            var instance_index = index - self.imports.globals.items.len;
-            return &self.globals.items[instance_index];
-        } else {
-            var import: *GlobalImport = &self.imports.globals.items[index];
-            return switch (import.data) {
-                .Host => |data| data,
-                .Wasm => |data| data.module_instance.store.getGlobal(data.index),
-            };
-        }
-    }
-};
-
-pub const ModuleInstantiateOpts = struct {
-    /// imports is not owned by ModuleInstance - caller must ensure its memory outlives ModuleInstance
-    imports: ?[]const ModuleImportPackage = null,
-    wasm_memory_external: ?WasmMemoryExternal = null,
-    stack_size: usize = 0,
-    enable_debug: bool = false,
-};
-
-pub const ModuleInstance = struct {
     const TrappedOpcode = struct {
         address: u32,
         opcode: Opcode,
+        type: TrapType,
     };
 
     const DebugState = struct {
@@ -5729,142 +5191,37 @@ pub const ModuleInstance = struct {
         }
     };
 
-    allocator: std.mem.Allocator,
     stack: Stack,
-    store: Store,
-    module_def: *const ModuleDefinition,
-    debug_state: ?DebugState = null,
-    userdata: ?*anyopaque = null, // any host data associated with this module
-    is_instantiated: bool = false,
+    functions: std.ArrayList(FunctionInstance),
+    debug_state: ?DebugState,
 
-    pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) ModuleInstance {
-        return ModuleInstance{
-            .allocator = allocator,
-            .stack = Stack.init(allocator),
-            .store = Store.init(allocator),
-            .module_def = module_def,
-        };
+    fn fromVM(vm: *VM) *StackVM {
+        return @as(*StackVM, @alignCast(@ptrCast(vm.impl)));
     }
 
-    pub fn deinit(self: *ModuleInstance) void {
+    pub fn init(vm: *VM) void {
+        var self: *StackVM = fromVM(vm);
+        self.stack = Stack.init(vm.allocator);
+        self.functions = std.ArrayList(FunctionInstance).init(vm.allocator);
+        self.debug_state = null;
+    }
+
+    pub fn deinit(vm: *VM) void {
+        var self: *StackVM = fromVM(vm);
+        self.functions.deinit();
         self.stack.deinit();
-        self.store.deinit();
         if (self.debug_state) |*debug_state| {
             debug_state.trapped_opcodes.deinit();
         }
     }
 
-    pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
-        const Helpers = struct {
-            fn areLimitsCompatible(def_limits: *const Limits, instance_limits: *const Limits) bool {
-                if (def_limits.max != null and instance_limits.max == null) {
-                    return false;
-                }
-
-                var def_max: u32 = if (def_limits.max) |max| max else std.math.maxInt(u32);
-                var instance_max: u32 = if (instance_limits.max) |max| max else 0;
-
-                return def_limits.min <= instance_limits.min and def_max >= instance_max;
-            }
-
-            // TODO probably should change the imports search to a hashed lookup of module_name+item_name -> array of items to make this faster
-            fn findImportInMultiple(comptime T: type, names: *const ImportNames, imports_or_null: ?[]const ModuleImportPackage) UnlinkableError!*const T {
-                if (imports_or_null) |_imports| {
-                    for (_imports) |*module_imports| {
-                        const wildcard_name = std.mem.eql(u8, module_imports.name, "*");
-                        if (wildcard_name or std.mem.eql(u8, names.module_name, module_imports.name)) {
-                            switch (T) {
-                                FunctionImport => {
-                                    if (findImportInSingle(FunctionImport, names, module_imports)) |import| {
-                                        return import;
-                                    }
-                                    if (findImportInSingle(TableImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                },
-                                TableImport => {
-                                    if (findImportInSingle(TableImport, names, module_imports)) |import| {
-                                        return import;
-                                    }
-                                    if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                },
-                                MemoryImport => {
-                                    if (findImportInSingle(MemoryImport, names, module_imports)) |import| {
-                                        return import;
-                                    }
-                                    if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(TableImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(GlobalImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                },
-                                GlobalImport => {
-                                    if (findImportInSingle(GlobalImport, names, module_imports)) |import| {
-                                        return import;
-                                    }
-                                    if (findImportInSingle(FunctionImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(TableImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                    if (findImportInSingle(MemoryImport, names, module_imports)) |_| {
-                                        return error.UnlinkableIncompatibleImportType;
-                                    }
-                                },
-                                else => unreachable,
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                return error.UnlinkableUnknownImport;
-            }
-
-            fn findImportInSingle(comptime T: type, names: *const ImportNames, module_imports: *const ModuleImportPackage) ?*const T {
-                var items: []const T = switch (T) {
-                    FunctionImport => module_imports.functions.items,
-                    TableImport => module_imports.tables.items,
-                    MemoryImport => module_imports.memories.items,
-                    GlobalImport => module_imports.globals.items,
-                    else => unreachable,
-                };
-
-                for (items) |*item| {
-                    if (std.mem.eql(u8, names.import_name, item.name)) {
-                        return item;
-                    }
-                }
-
-                return null;
-            }
-        };
-
-        std.debug.assert(self.is_instantiated == false);
+    pub fn instantiate(vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void {
+        var self: *StackVM = fromVM(vm);
 
         if (opts.enable_debug) {
             self.debug_state = DebugState{
                 .pc = 0,
-                .trapped_opcodes = std.ArrayList(TrappedOpcode).init(self.allocator),
+                .trapped_opcodes = std.ArrayList(TrappedOpcode).init(vm.allocator),
             };
         }
 
@@ -5877,99 +5234,12 @@ pub const ModuleInstance = struct {
             .max_frames = @as(u16, @intFromFloat(stack_size_f * 0.01)),
         });
 
-        var store: *Store = &self.store;
-        var module_def: *const ModuleDefinition = self.module_def;
-        var allocator = self.allocator;
-
-        for (module_def.imports.functions.items) |*func_import_def| {
-            var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, opts.imports);
-
-            const type_def: *const FunctionTypeDefinition = &module_def.types.items[func_import_def.type_index];
-            const is_type_signature_eql: bool = import_func.isTypeSignatureEql(type_def);
-
-            if (is_type_signature_eql == false) {
-                return error.UnlinkableIncompatibleImportType;
-            }
-
-            try store.imports.functions.append(try import_func.dupe(allocator));
-        }
-
-        for (module_def.imports.tables.items) |*table_import_def| {
-            var import_table: *const TableImport = try Helpers.findImportInMultiple(TableImport, &table_import_def.names, opts.imports);
-
-            var is_eql: bool = undefined;
-            switch (import_table.data) {
-                .Host => |table_instance| {
-                    is_eql = table_instance.reftype == table_import_def.reftype and
-                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
-                },
-                .Wasm => |data| {
-                    const table_instance: *const TableInstance = data.module_instance.store.getTable(data.index);
-                    is_eql = table_instance.reftype == table_import_def.reftype and
-                        Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
-                },
-            }
-
-            if (is_eql == false) {
-                return error.UnlinkableIncompatibleImportType;
-            }
-
-            try store.imports.tables.append(try import_table.dupe(allocator));
-        }
-
-        for (module_def.imports.memories.items) |*memory_import_def| {
-            var import_memory: *const MemoryImport = try Helpers.findImportInMultiple(MemoryImport, &memory_import_def.names, opts.imports);
-
-            var is_eql: bool = undefined;
-            switch (import_memory.data) {
-                .Host => |memory_instance| {
-                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
-                },
-                .Wasm => |data| {
-                    const memory_instance: *const MemoryInstance = data.module_instance.store.getMemory(data.index);
-                    is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
-                },
-            }
-
-            if (is_eql == false) {
-                return error.UnlinkableIncompatibleImportType;
-            }
-
-            try store.imports.memories.append(try import_memory.dupe(allocator));
-        }
-
-        for (module_def.imports.globals.items) |*global_import_def| {
-            var import_global: *const GlobalImport = try Helpers.findImportInMultiple(GlobalImport, &global_import_def.names, opts.imports);
-
-            var is_eql: bool = undefined;
-            switch (import_global.data) {
-                .Host => |global_instance| {
-                    is_eql = global_import_def.valtype == global_instance.def.valtype and
-                        global_import_def.mut == global_instance.def.mut;
-                },
-                .Wasm => |data| {
-                    const global_instance: *const GlobalInstance = data.module_instance.store.getGlobal(data.index);
-                    is_eql = global_import_def.valtype == global_instance.def.valtype and
-                        global_import_def.mut == global_instance.def.mut;
-                },
-            }
-
-            if (is_eql == false) {
-                return error.UnlinkableIncompatibleImportType;
-            }
-
-            try store.imports.globals.append(try import_global.dupe(allocator));
-        }
-
-        // instantiate the rest of the needed module definitions
-
-        try store.functions.ensureTotalCapacity(module_def.functions.items.len);
-
-        for (module_def.functions.items, 0..) |*def_func, i| {
-            const func_type: *const FunctionTypeDefinition = &module_def.types.items[def_func.type_index];
+        try self.functions.ensureTotalCapacity(module.module_def.functions.items.len);
+        for (module.module_def.functions.items, 0..) |*def_func, i| {
+            const func_type: *const FunctionTypeDefinition = &module.module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
 
-            var local_types = std.ArrayList(ValType).init(allocator);
+            var local_types = std.ArrayList(ValType).init(vm.allocator);
             try local_types.ensureTotalCapacity(param_types.len + def_func.locals.items.len);
             local_types.appendSliceAssumeCapacity(param_types);
             local_types.appendSliceAssumeCapacity(def_func.locals.items);
@@ -5980,235 +5250,13 @@ pub const ModuleInstance = struct {
                 .instructions_begin = def_func.instructions_begin,
                 .local_types = local_types,
             };
-            try store.functions.append(f);
-        }
-
-        try store.tables.ensureTotalCapacity(module_def.imports.tables.items.len + module_def.tables.items.len);
-
-        for (module_def.tables.items) |*def_table| {
-            var t = try TableInstance.init(def_table.reftype, def_table.limits, allocator);
-            try store.tables.append(t);
-        }
-
-        try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
-
-        for (module_def.memories.items) |*def_memory| {
-            var memory = MemoryInstance.init(def_memory.limits, opts.wasm_memory_external);
-            if (memory.grow(def_memory.limits.min) == false) {
-                unreachable;
-            }
-            try store.memories.append(memory);
-        }
-
-        try store.globals.ensureTotalCapacity(module_def.imports.globals.items.len + module_def.globals.items.len);
-
-        for (module_def.globals.items) |*def_global| {
-            var global = GlobalInstance{
-                .def = def_global,
-                .value = def_global.expr.resolve(store),
-            };
-            if (def_global.valtype == .FuncRef) {
-                global.value.FuncRef.module_instance = self;
-            }
-            try store.globals.append(global);
-        }
-
-        // iterate over elements and init the ones needed
-        try store.elements.ensureTotalCapacity(module_def.elements.items.len);
-        for (module_def.elements.items) |*def_elem| {
-            var elem = ElementInstance{
-                .refs = std.ArrayList(Val).init(allocator),
-                .reftype = def_elem.reftype,
-            };
-
-            // instructions using passive elements just use the module definition's data to avoid an extra copy
-            if (def_elem.mode == .Active) {
-                std.debug.assert(def_elem.table_index < store.imports.tables.items.len + store.tables.items.len);
-
-                var table: *TableInstance = store.getTable(def_elem.table_index);
-
-                var start_table_index_i32: i32 = if (def_elem.offset) |offset| offset.resolveTo(store, i32) else 0;
-                if (start_table_index_i32 < 0) {
-                    return error.UninstantiableOutOfBoundsTableAccess;
-                }
-
-                var start_table_index = @as(u32, @intCast(start_table_index_i32));
-
-                if (def_elem.elems_value.items.len > 0) {
-                    var elems = def_elem.elems_value.items;
-                    try table.init_range_val(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index);
-                } else {
-                    var elems = def_elem.elems_expr.items;
-                    try table.init_range_expr(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index, store);
-                }
-            } else if (def_elem.mode == .Passive) {
-                if (def_elem.elems_value.items.len > 0) {
-                    try elem.refs.resize(def_elem.elems_value.items.len);
-                    var index: usize = 0;
-                    while (index < elem.refs.items.len) : (index += 1) {
-                        elem.refs.items[index] = def_elem.elems_value.items[index];
-                        if (elem.reftype == .FuncRef) {
-                            elem.refs.items[index].FuncRef.module_instance = self;
-                        }
-                    }
-                } else {
-                    try elem.refs.resize(def_elem.elems_expr.items.len);
-                    var index: usize = 0;
-                    while (index < elem.refs.items.len) : (index += 1) {
-                        elem.refs.items[index] = def_elem.elems_expr.items[index].resolve(store);
-                        if (elem.reftype == .FuncRef) {
-                            elem.refs.items[index].FuncRef.module_instance = self;
-                        }
-                    }
-                }
-            }
-
-            store.elements.appendAssumeCapacity(elem);
-        }
-
-        for (module_def.datas.items) |*def_data| {
-            // instructions using passive elements just use the module definition's data to avoid an extra copy
-            if (def_data.mode == .Active) {
-                var memory_index: u32 = def_data.memory_index.?;
-                var memory: *MemoryInstance = store.getMemory(memory_index);
-
-                const num_bytes: usize = def_data.bytes.items.len;
-                const offset_begin: usize = (def_data.offset.?).resolveTo(store, u32);
-                const offset_end: usize = offset_begin + num_bytes;
-
-                const mem_buffer: []u8 = memory.buffer();
-
-                if (mem_buffer.len < offset_end) {
-                    return error.UninstantiableOutOfBoundsMemoryAccess;
-                }
-
-                var destination = mem_buffer[offset_begin..offset_end];
-                std.mem.copy(u8, destination, def_data.bytes.items);
-            }
-        }
-
-        if (module_def.start_func_index) |func_index| {
-            const params = &[0]Val{};
-            var returns = &[0]Val{};
-
-            const num_imports = module_def.imports.functions.items.len;
-            if (func_index >= num_imports) {
-                var instance_index = func_index - num_imports;
-                try self.invokeInternal(instance_index, params, returns);
-            } else {
-                try self.invokeImportInternal(func_index, params, returns, .{});
-            }
+            try self.functions.append(f);
         }
     }
 
-    pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImportPackage {
-        var imports = try ModuleImportPackage.init(name, self, null, self.allocator);
+    pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void {
+        var self: *StackVM = fromVM(vm);
 
-        for (self.module_def.exports.functions.items) |*item| {
-            try imports.functions.append(FunctionImport{
-                .name = try imports.allocator.dupe(u8, item.name),
-                .data = .{
-                    .Wasm = ImportDataWasm{
-                        .module_instance = self,
-                        .index = item.index,
-                    },
-                },
-            });
-        }
-
-        for (self.module_def.exports.tables.items) |*item| {
-            try imports.tables.append(TableImport{
-                .name = try imports.allocator.dupe(u8, item.name),
-                .data = .{
-                    .Wasm = ImportDataWasm{
-                        .module_instance = self,
-                        .index = item.index,
-                    },
-                },
-            });
-        }
-
-        for (self.module_def.exports.memories.items) |*item| {
-            try imports.memories.append(MemoryImport{
-                .name = try imports.allocator.dupe(u8, item.name),
-                .data = .{
-                    .Wasm = ImportDataWasm{
-                        .module_instance = self,
-                        .index = item.index,
-                    },
-                },
-            });
-        }
-
-        for (self.module_def.exports.globals.items) |*item| {
-            try imports.globals.append(GlobalImport{
-                .name = try imports.allocator.dupe(u8, item.name),
-                .data = .{
-                    .Wasm = ImportDataWasm{
-                        .module_instance = self,
-                        .index = item.index,
-                    },
-                },
-            });
-        }
-
-        return imports;
-    }
-
-    pub fn getFunctionHandle(self: *const ModuleInstance, func_name: []const u8) ExportError!FunctionHandle {
-        for (self.module_def.exports.functions.items) |func_export| {
-            if (std.mem.eql(u8, func_name, func_export.name)) {
-                if (func_export.index >= self.module_def.imports.functions.items.len) {
-                    var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
-                    return FunctionHandle{
-                        .index = @as(u32, @intCast(func_index)),
-                        .type = .Export,
-                    };
-                } else {
-                    return FunctionHandle{
-                        .index = @as(u32, @intCast(func_export.index)),
-                        .type = .Import,
-                    };
-                }
-            }
-        }
-
-        for (self.store.imports.functions.items, 0..) |*func_import, i| {
-            if (std.mem.eql(u8, func_name, func_import.name)) {
-                return FunctionHandle{
-                    .index = @as(u32, @intCast(i)),
-                    .type = .Import,
-                };
-            }
-        }
-
-        return error.ExportUnknownFunction;
-    }
-
-    pub fn getFunctionInfo(self: *const ModuleInstance, handle: FunctionHandle) FunctionExport {
-        return self.module_def.getFunctionExport(handle);
-    }
-
-    pub fn getGlobalExport(self: *ModuleInstance, global_name: []const u8) ExportError!GlobalExport {
-        for (self.module_def.exports.globals.items) |*global_export| {
-            if (std.mem.eql(u8, global_name, global_export.name)) {
-                var global: *GlobalInstance = self.getGlobalWithIndex(global_export.index);
-                return GlobalExport{
-                    .val = &global.value,
-                    .valtype = global.def.valtype,
-                    .mut = global.def.mut,
-                };
-            }
-        }
-
-        return error.ExportUnknownGlobal;
-    }
-
-    pub const InvokeOpts = struct {
-        trap_on_start: bool = false,
-    };
-
-    pub fn invoke(self: *ModuleInstance, handle: FunctionHandle, params: []const Val, returns: []Val, opts: InvokeOpts) anyerror!void {
         if (self.debug_state) |*debug_state| {
             debug_state.pc = 0;
             debug_state.is_invoking = true;
@@ -6219,19 +5267,32 @@ pub const ModuleInstance = struct {
         }
 
         switch (handle.type) {
-            .Export => try self.invokeInternal(handle.index, params, returns),
-            .Import => try self.invokeImportInternal(handle.index, params, returns, opts),
+            .Export => try self.invokeInternal(module, handle.index, params, returns),
+            .Import => try invokeImportInternal(module, handle.index, params, returns, opts),
         }
     }
 
-    /// Use to resume an invoked function after it returned error.DebugTrap
-    pub fn resumeInvoke(self: *ModuleInstance, returns: []Val) anyerror!void {
+    pub fn invokeWithIndex(vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void {
+        var self: *StackVM = fromVM(vm);
+
+        const num_imports = module.module_def.imports.functions.items.len;
+        if (func_index >= num_imports) {
+            var instance_index = func_index - num_imports;
+            try self.invokeInternal(module, instance_index, params, returns);
+        } else {
+            try invokeImportInternal(module, func_index, params, returns, .{});
+        }
+    }
+
+    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
+        var self: *StackVM = fromVM(vm);
+
         std.debug.assert(self.debug_state != null);
-        std.debug.assert(self.debug_state.is_invoking);
+        std.debug.assert(self.debug_state.?.is_invoking);
 
         const debug_state = &self.debug_state.?;
         const opcode: Opcode = blk: {
-            for (debug_state.trapped_opcodes) |op| {
+            for (debug_state.trapped_opcodes.items) |op| {
                 if (op.address == debug_state.pc) {
                     break :blk op.opcode;
                 }
@@ -6240,7 +5301,7 @@ pub const ModuleInstance = struct {
         };
 
         const op_func = InstructionFuncs.lookup(opcode);
-        try op_func(debug_state.pc, self.module_def.code.instructions.items.ptr, &self.stack);
+        try op_func(debug_state.pc, module.module_def.code.instructions.items.ptr, &self.stack);
 
         if (returns.len > 0) {
             var index: i32 = @as(i32, @intCast(returns.len - 1));
@@ -6253,7 +5314,9 @@ pub const ModuleInstance = struct {
         debug_state.onInvokeFinished();
     }
 
-    pub fn step(self: *ModuleInstance, returns: []Val) !void {
+    pub fn step(vm: *VM, module: *ModuleInstance, returns: []Val) !void {
+        var self: *StackVM = fromVM(vm);
+
         const debug_state = &self.debug_state.?;
 
         if (debug_state.is_invoking == false) {
@@ -6264,84 +5327,47 @@ pub const ModuleInstance = struct {
         // since the current instruction may branch.
         debug_state.trap_counter = 2;
 
-        try self.resumeInvoke(returns);
+        try vm.resumeInvoke(module, returns);
     }
 
-    pub const DebugTrapInstructionMode = enum {
-        Enable,
-        Disable,
-    };
+    pub fn setDebugTrap(vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) !bool {
+        var self: *StackVM = fromVM(vm);
 
-    pub fn setDebugTrap(self: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) !bool {
         std.debug.assert(self.debug_state != null);
-        const instruction_index = self.module_instance.module_def.code.wasm_address_to_instruction_index.get(wasm_address) orelse return false;
+        const instruction_index = module.module_def.code.wasm_address_to_instruction_index.get(wasm_address) orelse return false;
 
         var debug_state = &self.debug_state.?;
-        for (debug_state.trapped_opcodes, 0..) |*existing, i| {
-            if (existing.address == instruction_index and (existing.type == .Step or type == .Explicit)) {
+        for (debug_state.trapped_opcodes.items, 0..) |*existing, i| {
+            if (existing.address == instruction_index and (existing.type == .Step or existing.type == .Explicit)) {
                 switch (mode) {
-                    .Enable => return,
+                    .Enable => {},
                     .Disable => {
                         _ = debug_state.trapped_opcodes.swapRemove(i);
                     },
                 }
-                return;
+                return true;
             }
         }
 
         if (mode == .Enable) {
-            var instructions: []Instruction = self.module_def.code.instructions.items;
+            var instructions: []Instruction = module.module_def.code.instructions.items;
             const original_op = instructions[instruction_index].opcode;
             instructions[instruction_index].opcode = .DebugTrap;
 
             try debug_state.trapped_opcodes.append(TrappedOpcode{
-                .op = original_op,
+                .opcode = original_op,
                 .address = instruction_index,
-                .type = type,
+                .type = .Explicit,
             });
-        }
-
-        return true;
-    }
-
-    pub fn memorySlice(self: *ModuleInstance, offset: usize, length: usize) []u8 {
-        const memory: *MemoryInstance = self.store.getMemory(0);
-
-        const buffer = memory.buffer();
-        if (offset + length < buffer.len) {
-            var data: []u8 = buffer[offset .. offset + length];
-            return data;
-        }
-
-        return "";
-    }
-
-    pub fn memoryAll(self: *ModuleInstance) []u8 {
-        const memory: *MemoryInstance = self.store.getMemory(0);
-        const buffer = memory.buffer();
-        return buffer;
-    }
-
-    pub fn memoryGrow(self: *ModuleInstance, num_pages: usize) bool {
-        const memory: *MemoryInstance = self.store.getMemory(0);
-        return memory.grow(num_pages);
-    }
-
-    pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
-        var bytes: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
-        std.mem.writeIntLittle(T, &bytes, value);
-
-        var destination = self.memorySlice(offset, bytes.len);
-        if (destination.len == bytes.len) {
-            std.mem.copy(u8, destination, &bytes);
             return true;
         }
 
         return false;
     }
 
-    /// Caller owns returned memory and must free via allocator.free()
-    pub fn formatBacktrace(self: *ModuleInstance, indent: u8, allocator: std.mem.Allocator) !std.ArrayList(u8) {
+    pub fn formatBacktrace(vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8) {
+        var self: *StackVM = fromVM(vm);
+
         var buffer = std.ArrayList(u8).init(allocator);
         try buffer.ensureTotalCapacity(512);
         var writer = buffer.writer();
@@ -6367,33 +5393,44 @@ pub const ModuleInstance = struct {
         return buffer;
     }
 
-    fn invokeInternal(self: *ModuleInstance, func_instance_index: usize, params: []const Val, returns: []Val) !void {
-        const func: FunctionInstance = self.store.functions.items[func_instance_index];
-        const func_def: FunctionDefinition = self.module_def.functions.items[func.def_index];
-        const func_type: *const FunctionTypeDefinition = &self.module_def.types.items[func.type_def_index];
+    pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition {
+        var self: *StackVM = fromVM(vm);
+
+        var func_instance: *const FunctionInstance = &self.functions.items[local_func_index];
+        var func_type_def: *const FunctionTypeDefinition = &module.module_def.types.items[func_instance.type_def_index];
+        return func_type_def;
+    }
+
+    fn invokeInternal(self: *StackVM, module: *ModuleInstance, func_instance_index: usize, params: [*]const Val, returns: [*]Val) !void {
+        const func: FunctionInstance = self.functions.items[func_instance_index];
+        const func_def: FunctionDefinition = module.module_def.functions.items[func.def_index];
+        const func_type: *const FunctionTypeDefinition = &module.module_def.types.items[func.type_def_index];
         const param_types: []const ValType = func_type.getParams();
         const return_types: []const ValType = func_type.getReturns();
+
+        var params_slice = params[0..param_types.len];
+        var returns_slice = returns[0..return_types.len];
 
         // Ensure any leftover stack state doesn't pollute this invoke. Can happen if the previous invoke returned an error.
         self.stack.popAll();
 
         // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
         // on the value stack
-        for (params) |v| {
+        for (params_slice) |v| {
             self.stack.pushValue(v);
         }
 
-        try self.stack.pushFrame(&func, self, param_types, func.local_types.items, func_type.calcNumReturns());
+        try self.stack.pushFrame(&func, module, param_types, func.local_types.items, func_type.calcNumReturns());
         try self.stack.pushLabel(@as(u32, @intCast(return_types.len)), func_def.continuation);
 
-        DebugTrace.traceFunction(self, self.stack.num_frames, func.def_index);
+        DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
 
-        try InstructionFuncs.run(func.instructions_begin, self.module_def.code.instructions.items.ptr, &self.stack);
+        try InstructionFuncs.run(func.instructions_begin, module.module_def.code.instructions.items.ptr, &self.stack);
 
-        if (returns.len > 0) {
-            var index: i32 = @as(i32, @intCast(returns.len - 1));
+        if (returns_slice.len > 0) {
+            var index: i32 = @as(i32, @intCast(returns_slice.len - 1));
             while (index >= 0) {
-                returns[@as(usize, @intCast(index))] = self.stack.popValue();
+                returns_slice[@as(usize, @intCast(index))] = self.stack.popValue();
                 index -= 1;
             }
         }
@@ -6403,50 +5440,19 @@ pub const ModuleInstance = struct {
         }
     }
 
-    fn invokeImportInternal(self: *ModuleInstance, import_index: usize, params: []const Val, returns: []Val, opts: InvokeOpts) !void {
-        const func_import: *const FunctionImport = &self.store.imports.functions.items[import_index];
+    fn invokeImportInternal(module: *ModuleInstance, import_index: usize, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) !void {
+        const func_import: *const FunctionImport = &module.store.imports.functions.items[import_index];
         switch (func_import.data) {
             .Host => |data| {
-                DebugTrace.traceHostFunction(self, 1, func_import.name);
+                DebugTrace.traceHostFunction(module, 1, func_import.name);
 
-                data.callback(data.userdata, self, params.ptr, returns.ptr);
+                data.callback(data.userdata, module, params, returns);
             },
             .Wasm => |data| {
-                var instance: *ModuleInstance = data.module_instance;
-                const handle: FunctionHandle = try instance.getFunctionHandle(func_import.name); // TODO could cache this in the func_import
-                try instance.invoke(handle, params, returns, opts);
+                var import_instance: *ModuleInstance = data.module_instance;
+                const handle: FunctionHandle = try import_instance.getFunctionHandle(func_import.name); // TODO could cache this in the func_import
+                try import_instance.vm.invoke(import_instance, handle, params, returns, opts);
             },
-        }
-    }
-
-    fn findFuncTypeDef(self: *ModuleInstance, index: usize) *const FunctionTypeDefinition {
-        const num_imports: usize = self.store.imports.functions.items.len;
-        if (index >= num_imports) {
-            var local_func_index: usize = index - num_imports;
-            var func_instance: *const FunctionInstance = &self.store.functions.items[local_func_index];
-            var func_type_def: *const FunctionTypeDefinition = &self.module_def.types.items[func_instance.type_def_index];
-            return func_type_def;
-        } else {
-            var import: *const FunctionImport = &self.store.imports.functions.items[index];
-            var func_type_def: *const FunctionTypeDefinition = switch (import.data) {
-                .Host => |data| &data.func_def,
-                .Wasm => |data| data.module_instance.findFuncTypeDef(data.index),
-            };
-            return func_type_def;
-        }
-    }
-
-    fn getGlobalWithIndex(self: *ModuleInstance, index: usize) *GlobalInstance {
-        const num_imports: usize = self.module_def.imports.globals.items.len;
-        if (index >= num_imports) {
-            var local_global_index: usize = index - self.module_def.imports.globals.items.len;
-            return &self.store.globals.items[local_global_index];
-        } else {
-            var import: *const GlobalImport = &self.store.imports.globals.items[index];
-            return switch (import.data) {
-                .Host => |data| data,
-                .Wasm => |data| data.module_instance.getGlobalWithIndex(data.index),
-            };
         }
     }
 };

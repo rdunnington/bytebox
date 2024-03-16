@@ -1,12 +1,14 @@
 const std = @import("std");
-const core = @import("core.zig");
-const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
+const AllocError = std.mem.Allocator.Error;
 
+const core = @import("core.zig");
 const ValType = core.ValType;
 const Val = core.Val;
 const ModuleDefinition = core.ModuleDefinition;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImportPackage = core.ModuleImportPackage;
+
+const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
 
 // C interface
 const CSlice = extern struct {
@@ -348,7 +350,10 @@ export fn bb_module_instance_init(module_definition: ?*ModuleDefinition) ?*Modul
         module = allocator.create(core.ModuleInstance) catch null;
 
         if (module) |m| {
-            m.* = core.ModuleInstance.init(module_definition.?, allocator);
+            m.* = core.ModuleInstance.init(module_definition.?, allocator) catch {
+                // TODO log out of memory?
+                return null;
+            };
         }
     }
 
@@ -462,14 +467,14 @@ export fn bb_module_instance_invoke(module: ?*ModuleInstance, c_handle: CFuncHan
             .type = @as(core.FunctionHandleType, @enumFromInt(c_handle.type)),
         };
 
-        const invoke_opts = core.ModuleInstance.InvokeOpts{
+        const invoke_opts = core.InvokeOpts{
             .trap_on_start = opts.trap_on_start,
         };
 
         var params_slice: []const Val = if (params != null) params.?[0..num_params] else &[_]Val{};
         var returns_slice: []Val = if (returns != null) returns.?[0..num_returns] else &[_]Val{};
 
-        if (module.?.invoke(handle, params_slice, returns_slice, invoke_opts)) {
+        if (module.?.invoke(handle, params_slice.ptr, returns_slice.ptr, invoke_opts)) {
             return CError.Ok;
         } else |err| {
             return translateError(err);

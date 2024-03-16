@@ -10,10 +10,10 @@ const Opcode = opcodes.Opcode;
 const WasmOpcode = opcodes.WasmOpcode;
 
 // HACK: just get the code working, will need to resolve anything dependent on this eventually
-const vm = @import("vm_stack.zig");
-const ModuleInstance = vm.ModuleInstance;
-const Store = vm.Store;
-const GlobalInstance = vm.GlobalInstance;
+const inst = @import("instance.zig");
+const ModuleInstance = inst.ModuleInstance;
+const Store = inst.Store;
+const GlobalInstance = inst.GlobalInstance;
 
 pub const MalformedError = error{
     MalformedMagicSignature,
@@ -603,6 +603,12 @@ pub const GlobalDefinition = struct {
     valtype: ValType,
     mut: GlobalMut,
     expr: ConstantExpression,
+};
+
+pub const GlobalExport = struct {
+    val: *Val,
+    valtype: ValType,
+    mut: GlobalMut,
 };
 
 pub const TableDefinition = struct {

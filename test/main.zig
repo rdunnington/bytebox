@@ -927,7 +927,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 else => {},
             }
 
-            module.inst = bytebox.ModuleInstance.init(&module.def.?, allocator);
+            module.inst = try bytebox.ModuleInstance.init(&module.def.?, allocator);
             (module.inst.?).instantiate(.{ .imports = imports.items }) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
@@ -1025,7 +1025,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         defer vals.deinit();
 
                         const func_handle: bytebox.FunctionHandle = try (module.inst.?).getFunctionHandle(c.action.field);
-                        (module.inst.?).invoke(func_handle, vals.items, returns, .{}) catch |e| {
+                        (module.inst.?).invoke(func_handle, vals.items.ptr, returns.ptr, .{}) catch |e| {
                             if (!g_verbose_logging) {
                                 PrintTestHelper.log(module.filename, c.action.field, c.action.args.items);
                                 // print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
@@ -1174,7 +1174,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         defer vals.deinit();
 
                         const func_handle: bytebox.FunctionHandle = try (module.inst.?).getFunctionHandle(c.action.field);
-                        (module.inst.?).invoke(func_handle, vals.items, returns, .{}) catch |e| {
+                        (module.inst.?).invoke(func_handle, vals.items.ptr, returns.ptr, .{}) catch |e| {
                             action_failed = true;
                             caught_error = e;
 
