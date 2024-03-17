@@ -624,6 +624,7 @@ const TestOpts = struct {
     command_filter_or_null: ?[]const u8 = null,
     module_filter_or_null: ?[]const u8 = null,
     force_wasm_regen_only: bool = false,
+    log_suite: bool = false,
 };
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackage {
@@ -1223,8 +1224,6 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    // var allocator: std.mem.Allocator = std.heap.c_allocator;
-
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -1258,6 +1257,9 @@ pub fn main() !void {
                 \\      regenerate the wasm files and json driver, then run the test. This command
                 \\      will force regeneration of said files and skip running all tests.
                 \\
+                \\    --log-suite
+                \\      Log the name of each suite and aggregate test result.
+                \\
                 \\    --verbose
                 \\      Turn on verbose logging for each step of the test suite run.
                 \\
@@ -1284,6 +1286,8 @@ pub fn main() !void {
         } else if (strcmp("--force-wasm-regen-only", arg)) {
             opts.force_wasm_regen_only = true;
             print("Force-regenerating wasm files and driver .json, skipping test run\n", .{});
+        } else if (strcmp("--log-suite", arg)) {
+            opts.log_suite = true;
         } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
             g_verbose_logging = true;
             print("verbose logging: on\n", .{});
@@ -1497,10 +1501,16 @@ pub fn main() !void {
         }
 
         if (opts.force_wasm_regen_only == false) {
-            logVerbose("Running test suite: {s}\n", .{suite});
+            if (opts.log_suite or g_verbose_logging) {
+                print("Running test suite: {s}\n", .{suite});
+            }
 
             var success: bool = try run(allocator, suite_path, &opts);
             did_all_succeed = did_all_succeed and success;
+
+            if (success and opts.log_suite and !g_verbose_logging) {
+                print("\tSuccess\n", .{});
+            }
         }
     }
 

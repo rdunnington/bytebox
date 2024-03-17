@@ -13,13 +13,19 @@ jobs:
       - uses: actions/checkout@v2
         with:
           submodules: 'true'
+
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.11.0
+
       - uses: mwilliamson/setup-wabt-action@v2
         with:
           wabt-version: "1.0.31"
-      - run: zig build test
+
+      - name: Run wasm testsuite
+        run: |
+          zig build
+          zig build test -- --log-suite
 
   wasi-testsuite:
     strategy:
@@ -48,7 +54,7 @@ jobs:
         working-directory: test/wasi/wasi-testsuite/test-runner
         run: python3 -m pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Run wasi testsuite
         run: |
           zig build
           python3 test/wasi/wasi-testsuite/test-runner/wasi_test_runner.py -t ./test/wasi/wasi-testsuite/tests/rust/testsuite/ ./test/wasi/wasi-testsuite/tests/c/testsuite/ ./test/wasi/wasi-testsuite/tests/assemblyscript/testsuite/ -r ./test/wasi/bytebox_adapter.py
