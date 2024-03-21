@@ -614,8 +614,8 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
 const Module = struct {
     filename: []const u8 = "",
-    def: ?bytebox.ModuleDefinition = null,
-    inst: ?bytebox.ModuleInstance = null,
+    def: ?*bytebox.ModuleDefinition = null,
+    inst: ?*bytebox.ModuleInstance = null,
 };
 
 const TestOpts = struct {
@@ -758,11 +758,11 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
             // key memory is owned by commands list, so no need to free
 
             allocator.free(kv.value_ptr.filename); // ^^^
-            if (kv.value_ptr.def) |*def| {
-                def.deinit();
+            if (kv.value_ptr.def) |def| {
+                def.destroy();
             }
-            if (kv.value_ptr.inst) |*inst| {
-                inst.deinit();
+            if (kv.value_ptr.inst) |inst| {
+                inst.destroy();
             }
         }
         name_to_module.deinit();
@@ -866,7 +866,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
             module.filename = try allocator.dupe(u8, module_filename);
 
-            module.def = bytebox.ModuleDefinition.init(allocator, .{ .debug_name = std.fs.path.basename(module_filename) });
+            module.def = try bytebox.createModuleDefinition(allocator, .{ .debug_name = std.fs.path.basename(module_filename) });
             (module.def.?).decode(module_data) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
@@ -928,7 +928,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 else => {},
             }
 
-            module.inst = try bytebox.ModuleInstance.init(&module.def.?, allocator);
+            module.inst = try bytebox.createModuleInstance(.Stack, module.def.?, allocator);
             (module.inst.?).instantiate(.{ .imports = imports.items }) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
