@@ -1,6 +1,7 @@
 // This file contains types and code shared between both the ModuleDefinition and VMs
 
 const std = @import("std");
+const AllocError = std.mem.Allocator.Error;
 
 const common = @import("common.zig");
 const StableArray = common.StableArray;
@@ -2593,8 +2594,9 @@ pub const ModuleDefinition = struct {
 
     is_decoded: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, opts: ModuleDefinitionOpts) ModuleDefinition {
-        return ModuleDefinition{
+    pub fn create(allocator: std.mem.Allocator, opts: ModuleDefinitionOpts) AllocError!*ModuleDefinition {
+        var def = try allocator.create(ModuleDefinition);
+        def.* = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
                 .instructions = std.ArrayList(Instruction).init(allocator),
@@ -2622,8 +2624,9 @@ pub const ModuleDefinition = struct {
             .datas = std.ArrayList(DataDefinition).init(allocator),
             .custom_sections = std.ArrayList(CustomSection).init(allocator),
             .name_section = NameCustomSection.init(allocator),
-            .debug_name = opts.debug_name,
+            .debug_name = try allocator.dupe(u8, opts.debug_name),
         };
+        return def;
     }
 
     pub fn decode(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
@@ -3295,7 +3298,7 @@ pub const ModuleDefinition = struct {
         }
     }
 
-    pub fn deinit(self: *ModuleDefinition) void {
+    pub fn destroy(self: *ModuleDefinition) void {
         self.code.instructions.deinit();
         self.code.wasm_address_to_instruction_index.deinit();
         for (self.code.branch_table.items) |*item| {
@@ -3366,6 +3369,11 @@ pub const ModuleDefinition = struct {
             item.data.deinit();
         }
         self.custom_sections.deinit();
+
+        self.allocator.free(self.debug_name);
+
+        var allocator = self.allocator;
+        allocator.destroy(self);
     }
 
     pub fn getCustomSection(self: *const ModuleDefinition, name: []const u8) ?[]u8 {

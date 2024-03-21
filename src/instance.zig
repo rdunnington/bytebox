@@ -28,9 +28,6 @@ const Val = def.Val;
 const ValType = def.ValType;
 const GlobalExport = def.GlobalExport;
 
-// HACK remove this dependency by pushing the create stuff up one level
-const StackVM = @import("vm_stack.zig").StackVM;
-
 pub const UnlinkableError = error{
     UnlinkableUnknownImport,
     UnlinkableIncompatibleImportType,
@@ -708,19 +705,23 @@ pub const ModuleInstance = struct {
     is_instantiated: bool = false,
     vm: *VM,
 
-    // TODO move this to a "create" function that allocates memory for the instance so it has a stable pointer
-    pub fn init(module_def: *const ModuleDefinition, allocator: std.mem.Allocator) AllocError!ModuleInstance {
-        return ModuleInstance{
+    pub fn create(module_def: *const ModuleDefinition, vm: *VM, allocator: std.mem.Allocator) AllocError!*ModuleInstance {
+        var inst = try allocator.create(ModuleInstance);
+        inst.* = ModuleInstance{
             .allocator = allocator,
             .store = Store.init(allocator),
             .module_def = module_def,
-            .vm = try VM.create(StackVM, allocator), // TODO make this a parameter so this file doesn't have to know about VM implementations, core can know about it and wrap it all up.
+            .vm = vm,
         };
+        return inst;
     }
 
-    pub fn deinit(self: *ModuleInstance) void {
+    pub fn destroy(self: *ModuleInstance) void {
         self.vm.destroy();
         self.store.deinit();
+
+        var allocator = self.allocator;
+        allocator.destroy(self);
     }
 
     pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
