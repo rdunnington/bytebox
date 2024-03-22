@@ -3,6 +3,7 @@ const bytebox = @import("bytebox");
 const ValType = bytebox.ValType;
 const Val = bytebox.Val;
 const TaggedVal = bytebox.TaggedVal;
+const VmType = bytebox.VmType;
 const v128 = bytebox.v128;
 const i8x16 = bytebox.i8x16;
 const i16x8 = bytebox.i16x8;
@@ -619,6 +620,7 @@ const Module = struct {
 };
 
 const TestOpts = struct {
+    vm_type: VmType = .Stack,
     suite_filter_or_null: ?[]const u8 = null,
     test_filter_or_null: ?[]const u8 = null,
     command_filter_or_null: ?[]const u8 = null,
@@ -928,7 +930,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 else => {},
             }
 
-            module.inst = try bytebox.createModuleInstance(.Stack, module.def.?, allocator);
+            module.inst = try bytebox.createModuleInstance(opts.vm_type, module.def.?, allocator);
             (module.inst.?).instantiate(.{ .imports = imports.items }) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
@@ -1220,6 +1222,17 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     return !did_fail_any_test;
 }
 
+pub fn parse_vm_type(backend_str: []const u8) VmType {
+    if (strcmp("stack", backend_str)) {
+        return .Stack;
+    } else if (strcmp("register", backend_str)) {
+        return .Register;
+    } else {
+        print("Failed parsing backend string '{s}'. Expected 'stack' or 'register'.", .{backend_str});
+        return .Stack;
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
@@ -1236,6 +1249,8 @@ pub fn main() !void {
             const help_text =
                 \\
                 \\Usage: {s} [OPTION]...
+                \\    --backend <type>
+                \\      Options are: stack (default), register
                 \\
                 \\    --suite <suitename>
                 \\      Only run tests belonging to the given suite. Examples: i32, br_if,
@@ -1267,6 +1282,9 @@ pub fn main() !void {
             ;
             print(help_text, .{args[0]});
             return;
+        } else if (strcmp("--backend", arg)) {
+            args_index += 1;
+            opts.vm_type = parse_vm_type(args[args_index]);
         } else if (strcmp("--suite", arg)) {
             args_index += 1;
             opts.suite_filter_or_null = args[args_index];

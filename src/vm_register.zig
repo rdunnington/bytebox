@@ -52,6 +52,13 @@ const Val = def.Val;
 const ValType = def.ValType;
 const TaggedVal = def.TaggedVal;
 
+const inst = @import("instance.zig");
+const VM = inst.VM;
+const ModuleInstance = inst.ModuleInstance;
+const InvokeOpts = inst.InvokeOpts;
+const DebugTrapInstructionMode = inst.DebugTrapInstructionMode;
+const ModuleInstantiateOpts = inst.ModuleInstantiateOpts;
+
 const INVALID_INSTRUCTION_INDEX: u32 = std.math.maxInt(u32);
 
 // High-level strategy:
@@ -1090,10 +1097,74 @@ const ModuleIR = struct {
 };
 
 pub const RegisterVM = struct {
-    allocator: std.mem.Allocator,
+    pub fn init(vm: *VM) void {
+        _ = vm;
+    }
 
-    pub fn init(allocator: std.mem.Allocator) RegisterVM {
-        return RegisterVM{ .allocator = allocator };
+    pub fn deinit(vm: *VM) void {
+        _ = vm;
+    }
+
+    pub fn instantiate(vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void {
+        _ = vm;
+        _ = module;
+        _ = opts;
+        return error.Unimplemented;
+    }
+
+    pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void {
+        _ = vm;
+        _ = module;
+        _ = handle;
+        _ = params;
+        _ = returns;
+        _ = opts;
+        return error.Unimplemented;
+    }
+
+    pub fn invokeWithIndex(vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void {
+        _ = vm;
+        _ = module;
+        _ = func_index;
+        _ = params;
+        _ = returns;
+        return error.Unimplemented;
+    }
+
+    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
+        _ = vm;
+        _ = module;
+        _ = returns;
+        return error.Unimplemented;
+    }
+
+    pub fn step(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
+        _ = vm;
+        _ = module;
+        _ = returns;
+        return error.Unimplemented;
+    }
+
+    pub fn setDebugTrap(vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) anyerror!bool {
+        _ = vm;
+        _ = module;
+        _ = wasm_address;
+        _ = mode;
+        return error.Unimplemented;
+    }
+
+    pub fn formatBacktrace(vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8) {
+        _ = vm;
+        _ = indent;
+        _ = allocator;
+        return error.Unimplemented;
+    }
+
+    pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition {
+        _ = vm;
+        _ = module;
+        _ = local_func_index;
+        return &dummy_func_type_def;
     }
 
     pub fn compile(vm: *RegisterVM, module_def: ModuleDefinition) AllocError!void {
@@ -1104,9 +1175,11 @@ pub const RegisterVM = struct {
 
         // wasm bytecode -> IR graph -> register-assigned IR graph ->
     }
+};
 
-    // pub fn instantiate() {}
-    // pub fn invoke() {}
+const dummy_func_type_def = FunctionTypeDefinition{
+    .types = undefined,
+    .num_params = 0,
 };
 
 // register instructions get a slice of the overall set of register slots, which are pointers to actual
@@ -1136,19 +1209,19 @@ fn runTestWithViz(wasm_filepath: []const u8, viz_dir: []const u8) !void {
     const module_def_opts = def.ModuleDefinitionOpts{
         .debug_name = std.fs.path.basename(wasm_filepath),
     };
-    var module_def = ModuleDefinition.init(allocator, module_def_opts);
-    defer module_def.deinit();
+    var module_def = try ModuleDefinition.create(allocator, module_def_opts);
+    defer module_def.destroy();
 
     try module_def.decode(wasm_data);
 
-    var mir = ModuleIR.init(allocator, &module_def);
+    var mir = ModuleIR.init(allocator, module_def);
     defer mir.deinit();
     try mir.compile();
     for (mir.functions.items, 0..) |func, i| {
         var viz_path_buffer: [256]u8 = undefined;
         const viz_path = std.fmt.bufPrint(&viz_path_buffer, "{s}\\viz_{}.txt", .{ viz_dir, i }) catch unreachable;
         std.debug.print("gen graph for func {}\n", .{i});
-        try func.dumpVizGraph(viz_path, module_def, std.testing.allocator);
+        try func.dumpVizGraph(viz_path, module_def.*, std.testing.allocator);
     }
 }
 
@@ -1192,15 +1265,15 @@ fn runTestWithViz(wasm_filepath: []const u8, viz_dir: []const u8) !void {
 //     // }
 // }
 
-test "ir2" {
-    const filename =
-        // \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
-        \\E:\Dev\zig_projects\bytebox\test\reg\add.wasm
-        // \\E:\Dev\third_party\zware\test\fact.wasm
-        // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
-    ;
-    const viz_dir =
-        \\E:\Dev\zig_projects\bytebox\test\reg\
-    ;
-    try runTestWithViz(filename, viz_dir);
-}
+// test "ir2" {
+//     const filename =
+//         // \\E:\Dev\zig_projects\bytebox\test\wasm\br_table\br_table.0.wasm
+//         \\E:\Dev\zig_projects\bytebox\test\reg\add.wasm
+//         // \\E:\Dev\third_party\zware\test\fact.wasm
+//         // \\E:\Dev\zig_projects\bytebox\test\wasm\i32\i32.0.wasm
+//     ;
+//     const viz_dir =
+//         \\E:\Dev\zig_projects\bytebox\test\reg\
+//     ;
+//     try runTestWithViz(filename, viz_dir);
+// }

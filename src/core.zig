@@ -58,16 +58,15 @@ pub fn createModuleDefinition(allocator: std.mem.Allocator, opts: ModuleDefiniti
     return try ModuleDefinition.create(allocator, opts);
 }
 
-pub const VmKind = enum {
+pub const VmType = enum {
     Stack,
     Register,
 };
 
-pub fn createModuleInstance(comptime vm_kind: VmKind, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) AllocError!*ModuleInstance {
-    const vm_type = switch (vm_kind) {
-        .Stack => vm_stack.StackVM,
-        .Register => vm_stack.RegisterVM,
+pub fn createModuleInstance(vm_type: VmType, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) AllocError!*ModuleInstance {
+    var vm: *inst.VM = switch (vm_type) {
+        .Stack => try inst.VM.create(vm_stack.StackVM, allocator),
+        .Register => try inst.VM.create(vm_register.RegisterVM, allocator),
     };
-    var vm: *inst.VM = try inst.VM.create(vm_type, allocator);
     return try ModuleInstance.create(module_def, vm, allocator);
 }
