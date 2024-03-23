@@ -539,10 +539,10 @@ pub const FunctionTypeDefinition = struct {
 };
 
 pub const FunctionDefinition = struct {
-    type_index: u32,
-    instructions_begin: u32,
-    instructions_end: u32,
-    continuation: u32,
+    type_index: usize,
+    instructions_begin: usize,
+    instructions_end: usize,
+    continuation: usize,
     locals: std.ArrayList(ValType), // TODO use a slice of a large contiguous array instead
 
     pub fn instructions(func: FunctionDefinition, module_def: ModuleDefinition) []Instruction {
@@ -1253,7 +1253,7 @@ const CustomSection = struct {
 pub const NameCustomSection = struct {
     const NameAssoc = struct {
         name: []const u8,
-        func_index: u32,
+        func_index: usize,
 
         fn cmp(_: void, a: NameAssoc, b: NameAssoc) bool {
             return a.func_index < b.func_index;
@@ -1355,7 +1355,7 @@ pub const NameCustomSection = struct {
         return self.module_name;
     }
 
-    pub fn findFunctionName(self: *const NameCustomSection, func_index: u32) []const u8 {
+    pub fn findFunctionName(self: *const NameCustomSection, func_index: usize) []const u8 {
         if (func_index < self.function_names.items.len) {
             if (self.function_names.items[func_index].func_index == func_index) {
                 return self.function_names.items[func_index].name;
@@ -1629,7 +1629,7 @@ const ModuleValidator = struct {
                 frame.is_unreachable = true;
             }
 
-            fn popPushFuncTypes(validator: *ModuleValidator, type_index: u32, module_: *const ModuleDefinition) !void {
+            fn popPushFuncTypes(validator: *ModuleValidator, type_index: usize, module_: *const ModuleDefinition) !void {
                 const func_type: *const FunctionTypeDefinition = &module_.types.items[type_index];
 
                 try popReturnTypes(validator, func_type.getParams());
@@ -1740,7 +1740,7 @@ const ModuleValidator = struct {
                     return error.ValidationUnknownFunction;
                 }
 
-                var type_index: u32 = module.getFuncTypeIndex(func_index);
+                var type_index: usize = module.getFuncTypeIndex(func_index);
                 try Helpers.popPushFuncTypes(self, type_index, module);
             },
             .Call_Indirect => {
@@ -3166,7 +3166,7 @@ pub const ModuleDefinition = struct {
 
                         func_def.instructions_begin = @intCast(instructions.items.len);
                         try block_stack.append(BlockData{
-                            .begin_index = func_def.instructions_begin,
+                            .begin_index = @intCast(func_def.instructions_begin),
                             .opcode = .Block,
                         });
 
@@ -3543,7 +3543,7 @@ pub const ModuleDefinition = struct {
         }
     }
 
-    fn getFuncTypeIndex(self: *const ModuleDefinition, func_index: usize) u32 {
+    fn getFuncTypeIndex(self: *const ModuleDefinition, func_index: usize) usize {
         if (func_index < self.imports.functions.items.len) {
             const func_def: *const FunctionImportDefinition = &self.imports.functions.items[func_index];
             return func_def.type_index;

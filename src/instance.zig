@@ -99,9 +99,9 @@ pub const DebugTrace = struct {
         }
     }
 
-    pub fn traceFunction(module_instance: *const ModuleInstance, indent: u32, func_index: u32) void {
+    pub fn traceFunction(module_instance: *const ModuleInstance, indent: u32, func_index: usize) void {
         if (shouldTraceFunctions()) {
-            const func_name_index: u32 = func_index + @as(u32, @intCast(module_instance.module_def.imports.functions.items.len));
+            const func_name_index: usize = func_index + module_instance.module_def.imports.functions.items.len;
 
             const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
             const module_name = name_section.getModuleName();
