@@ -1,8 +1,8 @@
 // C interface for bytebox wasm runtime.
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 struct bb_slice
 {
@@ -147,7 +147,7 @@ bb_error bb_module_definition_decode(bb_module_definition* definition, const cha
 bb_slice bb_module_definition_get_custom_section(const bb_module_definition* definition, const char* name);
 
 bb_import_package* bb_import_package_init(const char* name);
-void bb_import_package_deinit(bb_import_package* package); // only deinit when all module_instances using the package have been deinited
+void bb_import_package_deinit(bb_import_package* package);	  // only deinit when all module_instances using the package have been destroyed
 bb_error bb_import_package_add_function(bb_import_package* package, bb_host_function* func, const char* export_name, const bb_valtype* params, size_t num_params, const bb_valtype* returns, size_t num_returns, void* userdata);
 bb_error bb_import_package_add_memory(bb_import_package* package, const bb_wasm_memory_config* config, const char* export_name, uint32_t min_pages, uint32_t max_pages);
 
