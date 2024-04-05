@@ -523,6 +523,17 @@ export fn bb_module_instance_mem_grow(module: ?*ModuleInstance, num_pages: usize
     return CError.InvalidParameter;
 }
 
+export fn bb_module_instance_mem_grow_absolute(module: ?*ModuleInstance, total_pages: usize) CError {
+    if (module != null) {
+        if (module.?.memoryGrowAbsolute(total_pages)) {
+            return CError.Ok;
+        } else {
+            return CError.Failed;
+        }
+    }
+    return CError.InvalidParameter;
+}
+
 export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name: ?[*:0]const u8) CGlobalExport {
     comptime {
         std.debug.assert(@intFromEnum(CGlobalMut.Immutable) == @intFromEnum(core.GlobalMut.Immutable));

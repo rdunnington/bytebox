@@ -165,6 +165,7 @@ bb_error bb_module_instance_debug_set_trap(bb_module_instance* instance, uint32_
 void* bb_module_instance_mem(bb_module_instance* instance, size_t offset, size_t length);
 bb_slice bb_module_instance_mem_all(bb_module_instance* instance);
 bb_error bb_module_instance_mem_grow(bb_module_instance* instance, size_t num_pages);
+bb_error bb_module_instance_mem_grow_absolute(bb_module_instance* instance, size_t total_pages);
 bb_global bb_module_instance_find_global(bb_module_instance* instance, const char* global_name);
 
 bool bb_func_handle_isvalid(bb_func_handle handle);
