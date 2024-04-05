@@ -231,8 +231,8 @@ pub const MemoryInstance = struct {
         },
     };
 
-    const k_page_size: usize = MemoryDefinition.k_page_size;
-    const k_max_pages: usize = MemoryDefinition.k_max_pages;
+    pub const k_page_size: usize = MemoryDefinition.k_page_size;
+    pub const k_max_pages: usize = MemoryDefinition.k_max_pages;
 
     limits: Limits,
     mem: BackingMemory,
@@ -297,6 +297,15 @@ pub const MemoryInstance = struct {
         self.limits.min = @as(u32, @intCast(total_pages));
 
         return true;
+    }
+
+    pub fn growAbsolute(self: *MemoryInstance, total_pages: usize) bool {
+        if (self.limits.min >= total_pages) {
+            return true;
+        }
+
+        const pages_to_grow = total_pages - self.limits.min;
+        return self.grow(pages_to_grow);
     }
 
     pub fn buffer(self: *const MemoryInstance) []u8 {
@@ -1169,6 +1178,11 @@ pub const ModuleInstance = struct {
     pub fn memoryGrow(self: *ModuleInstance, num_pages: usize) bool {
         const memory: *MemoryInstance = self.store.getMemory(0);
         return memory.grow(num_pages);
+    }
+
+    pub fn memoryGrowAbsolute(self: *ModuleInstance, total_pages: usize) bool {
+        const memory: *MemoryInstance = self.store.getMemory(0);
+        return memory.growAbsolute(total_pages);
     }
 
     pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
