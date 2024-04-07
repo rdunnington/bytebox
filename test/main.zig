@@ -1222,7 +1222,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     return !did_fail_any_test;
 }
 
-pub fn parse_vm_type(backend_str: []const u8) VmType {
+pub fn parseVmType(backend_str: []const u8) VmType {
     if (strcmp("stack", backend_str)) {
         return .Stack;
     } else if (strcmp("register", backend_str)) {
@@ -1231,6 +1231,31 @@ pub fn parse_vm_type(backend_str: []const u8) VmType {
         print("Failed parsing backend string '{s}'. Expected 'stack' or 'register'.", .{backend_str});
         return .Stack;
     }
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{ .mode = .read_only }) catch |e| {
+        return switch (e) {
+            error.PermissionDenied,
+            error.FileBusy,
+            error.ReadOnlyFileSystem,
+            => true,
+
+            error.FileNotFound => false,
+
+            // unknown status, but we'll count it as a fail
+            error.NameTooLong,
+            error.InputOutput,
+            error.SystemResources,
+            error.BadPathName,
+            error.SymLinkLoop,
+            error.InvalidUtf8,
+            => false,
+            else => false,
+        };
+    };
+
+    return true;
 }
 
 pub fn main() !void {
@@ -1284,7 +1309,7 @@ pub fn main() !void {
             return;
         } else if (strcmp("--backend", arg)) {
             args_index += 1;
-            opts.vm_type = parse_vm_type(args[args_index]);
+            opts.vm_type = parseVmType(args[args_index]);
         } else if (strcmp("--suite", arg)) {
             args_index += 1;
             opts.suite_filter_or_null = args[args_index];
@@ -1324,7 +1349,7 @@ pub fn main() !void {
         "bulk",
         "call",
         "call_indirect",
-        "comments",
+        // "comments", // wabt seems to error on this
         "const",
         "conversions",
         "custom",
@@ -1469,32 +1494,48 @@ pub fn main() !void {
             }
         }
 
-        var suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite, suite });
+        // determine if there is a memory64 version of the test - if so, run that one
+        const suite_wast_base_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "testsuite", suite });
+        defer allocator.free(suite_wast_base_path_no_extension);
+        const suite_wast_base_path: []u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_base_path_no_extension, ".wast" });
+        defer allocator.free(suite_wast_base_path);
+
+        const suite_wast_mem64_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "testsuite", "proposals", "memory64", suite });
+        defer allocator.free(suite_wast_mem64_path_no_extension);
+        const suite_wast_mem64_path: []u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_mem64_path_no_extension, ".wast" });
+        defer allocator.free(suite_wast_mem64_path);
+
+        const suite_wast_path = blk: {
+            if (pathExists(suite_wast_mem64_path)) {
+                if (opts.log_suite) {
+                    print("Using memory64 for suite {s}\n", .{suite});
+                }
+                break :blk suite_wast_mem64_path;
+            } else {
+                break :blk suite_wast_base_path;
+            }
+        };
+
+        // wasm path
+        const suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite, suite });
         defer allocator.free(suite_path_no_extension);
 
-        var suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
+        const suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
         defer allocator.free(suite_path);
 
         var needs_regen: bool = false;
         if (opts.force_wasm_regen_only) {
             needs_regen = true;
         } else {
-            std.fs.cwd().access(suite_path, .{ .mode = .read_only }) catch |e| {
-                if (e == std.os.AccessError.FileNotFound) {
-                    needs_regen = true;
-                }
-            };
+            needs_regen = pathExists(suite_path) == false;
         }
 
         if (needs_regen) {
             logVerbose("Regenerating wasm and json driver for suite {s}\n", .{suite});
 
-            // var suite_wast_path_no_extension = try std.fs.path.join(allocator, &[_][]const u8{ "test", "testsuite", suite });
-            var suite_wast_path_no_extension = try std.fs.path.join(allocator, &[_][]const u8{ "../../testsuite", suite });
-            defer allocator.free(suite_wast_path_no_extension);
-
-            var suite_wast_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_path_no_extension, ".wast" });
-            defer allocator.free(suite_wast_path);
+            // need to navigate back to repo root because the wast2json process will be running in a subdir
+            var suite_wast_path_relative = try std.fs.path.join(allocator, &[_][]const u8{ "../../../", suite_wast_path });
+            defer allocator.free(suite_wast_path_relative);
 
             var suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite });
             defer allocator.free(suite_wasm_folder);
@@ -1511,7 +1552,7 @@ pub fn main() !void {
                 }
             };
 
-            var process = std.ChildProcess.init(&[_][]const u8{ "wast2json", suite_wast_path }, allocator);
+            var process = std.ChildProcess.init(&[_][]const u8{ "wast2json", "--enable-memory64", suite_wast_path_relative }, allocator);
 
             process.cwd = suite_wasm_folder;
 

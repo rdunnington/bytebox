@@ -269,21 +269,21 @@ pub const TaggedVal = struct {
 };
 
 pub const Limits = struct {
-    min: u32,
-    max: ?u32,
+    min: u64,
+    max: ?u64,
 
     fn decode(reader: anytype) !Limits {
         const has_max = try reader.readByte();
         if (has_max > 1) {
             return error.MalformedLimits;
         }
-        const min = try common.decodeLEB128(u32, reader);
-        var max: ?u32 = null;
+        const min = try common.decodeLEB128(u64, reader);
+        var max: ?u64 = null;
 
         switch (has_max) {
             0 => {},
             1 => {
-                max = try common.decodeLEB128(u32, reader);
+                max = try common.decodeLEB128(u64, reader);
                 if (max.? < min) {
                     return error.ValidationLimitsMinMustNotBeLargerThanMax;
                 }

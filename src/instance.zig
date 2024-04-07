@@ -740,8 +740,8 @@ pub const ModuleInstance = struct {
                     return false;
                 }
 
-                var def_max: u32 = if (def_limits.max) |max| max else std.math.maxInt(u32);
-                var instance_max: u32 = if (instance_limits.max) |max| max else 0;
+                var def_max: u64 = if (def_limits.max) |max| max else std.math.maxInt(u64);
+                var instance_max: u64 = if (instance_limits.max) |max| max else 0;
 
                 return def_limits.min <= instance_limits.min and def_max >= instance_max;
             }
