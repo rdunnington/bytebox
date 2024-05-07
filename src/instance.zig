@@ -248,7 +248,11 @@ pub const MemoryInstance = struct {
         } };
 
         var instance = MemoryInstance{
-            .limits = Limits{ .min = 0, .max = @as(u32, @intCast(max_pages)) },
+            .limits = Limits{
+                .min = 0,
+                .max = @as(u32, @intCast(max_pages)),
+                .limit_type = limits.limit_type,
+            },
             .mem = mem,
         };
 
@@ -736,9 +740,12 @@ pub const ModuleInstance = struct {
     pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def_limits: *const Limits, instance_limits: *const Limits) bool {
-                if (def_limits.max != null and instance_limits.max == null) {
+                if (def_limits.limit_type != instance_limits.limit_type) {
                     return false;
                 }
+                // if (def_limits.max != null and instance_limits.max == null) {
+                //     return false;
+                // }
 
                 var def_max: u64 = if (def_limits.max) |max| max else std.math.maxInt(u64);
                 var instance_max: u64 = if (instance_limits.max) |max| max else 0;

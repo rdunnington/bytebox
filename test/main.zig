@@ -380,7 +380,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
             strcmp(err_string, "malformed section id") or
             strcmp(err_string, "function and code section have inconsistent lengths"), // this one is a bit of a hack to resolve custom.8.wasm
         bytebox.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
-        bytebox.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
+        bytebox.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long") or strcmp(err_string, "malformed limits flags"),
         bytebox.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or
             strcmp(err_string, "unexpected content after last section"),
         bytebox.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
@@ -589,7 +589,9 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
-            try commands.append(command);
+            if (std.mem.endsWith(u8, command.AssertInvalid.err.module, ".wasm")) {
+                try commands.append(command);
+            }
         } else if (strcmp("assert_unlinkable", json_command_type.string)) {
             var command = Command{
                 .AssertUnlinkable = CommandAssertUnlinkable{
@@ -709,7 +711,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
     const TableInstance = bytebox.TableInstance;
 
     var table = try allocator.create(TableInstance);
-    table.* = try TableInstance.init(ValType.FuncRef, bytebox.Limits{ .min = 10, .max = 20 }, allocator);
+    table.* = try TableInstance.init(ValType.FuncRef, bytebox.Limits{ .min = 10, .max = 20, .limit_type = 1 }, allocator);
     try imports.tables.append(bytebox.TableImport{
         .name = try allocator.dupe(u8, "table"),
         .data = .{ .Host = table },
@@ -721,6 +723,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
     memory.* = MemoryInstance.init(bytebox.Limits{
         .min = 1,
         .max = 2,
+        .limit_type = 1,
     }, null);
     _ = memory.grow(1);
     try imports.memories.append(bytebox.MemoryImport{

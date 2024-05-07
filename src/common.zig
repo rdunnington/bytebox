@@ -24,6 +24,58 @@ pub fn decodeLEB128(comptime T: type, reader: anytype) !T {
     }
 }
 
+pub const LogLevel = enum(c_int) {
+    Info,
+    Error,
+};
+
+pub const Logger = struct {
+    const LogFn = *const fn (level: LogLevel, text: [:0]const u8) void;
+
+    log_fn: ?LogFn,
+
+    pub fn default() Logger {
+        return .{
+            .log_fn = &defaultLog,
+        };
+    }
+
+    pub fn empty() Logger {
+        return .{
+            .log_fn = null,
+        };
+    }
+
+    fn defaultLog(level: LogLevel, text: [:0]const u8) void {
+        var writer = switch (level) {
+            .Info => std.io.getStdOut().writer(),
+            .Error => std.io.getStdErr().writer(),
+        };
+        nosuspend writer.writeAll(text) catch |e| {
+            std.debug.print("Failed logging due to error: {}\n", .{e});
+        };
+    }
+
+    pub fn info(self: Logger, comptime format: []const u8, args: anytype) void {
+        self.log(.Info, format, args);
+    }
+
+    pub fn err(self: Logger, comptime format: []const u8, args: anytype) void {
+        self.log(.Error, format, args);
+    }
+
+    pub fn log(self: Logger, level: LogLevel, comptime format: []const u8, args: anytype) void {
+        if (self.log_fn) |logger| {
+            var buf: [512]u8 = undefined;
+            const formatted = std.fmt.bufPrintZ(&buf, format ++ "\n", args) catch |e| {
+                std.debug.print("Failed logging due to error: {}\n", .{e});
+                return;
+            };
+            logger(level, formatted);
+        }
+    }
+};
+
 pub const ScratchAllocator = struct {
     buffer: StableArray(u8),
 
