@@ -627,6 +627,7 @@ const TestOpts = struct {
     test_filter_or_null: ?[]const u8 = null,
     command_filter_or_null: ?[]const u8 = null,
     module_filter_or_null: ?[]const u8 = null,
+    trace_mode: bytebox.DebugTrace.Mode = .None,
     force_wasm_regen_only: bool = false,
     log_suite: bool = false,
 };
@@ -1295,6 +1296,10 @@ pub fn main() !void {
                 \\    --test <testname>
                 \\      Run all tests where the 'field' in the json driver matches this filter.
                 \\
+                \\    --trace <level>
+                \\      Print debug traces while executing the test at the given level. <level> can
+                \\      be: none (default), function, instruction
+                \\
                 \\    --force-wasm-regen-only
                 \\      By default, if a given testsuite can't find its' .json file driver, it will
                 \\      regenerate the wasm files and json driver, then run the test. This command
@@ -1329,6 +1334,14 @@ pub fn main() !void {
             args_index += 1;
             opts.test_filter_or_null = args[args_index];
             print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
+        } else if (strcmp("--trace", arg)) {
+            args_index += 1;
+            if (bytebox.DebugTrace.parseMode(args[args_index])) |mode| {
+                bytebox.DebugTrace.setMode(mode);
+            } else {
+                print("got invalid trace mode '{s}', check help for allowed options", .{args[args_index]});
+                return;
+            }
         } else if (strcmp("--force-wasm-regen-only", arg)) {
             opts.force_wasm_regen_only = true;
             print("Force-regenerating wasm files and driver .json, skipping test run\n", .{});

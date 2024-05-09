@@ -102,12 +102,8 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--trace")) {
             arg_index += 1;
             if (getArgSafe(arg_index, args)) |mode_str| {
-                if (std.ascii.eqlIgnoreCase(mode_str, "function") or std.ascii.eqlIgnoreCase(mode_str, "func")) {
-                    opts.trace = TraceMode.Function;
-                } else if (std.ascii.eqlIgnoreCase(mode_str, "instruction") or std.ascii.eqlIgnoreCase(mode_str, "instr")) {
-                    opts.trace = TraceMode.Instruction;
-                } else if (std.ascii.eqlIgnoreCase(mode_str, "none")) {
-                    opts.trace = TraceMode.None;
+                if (bytebox.DebugTrace.parseMode(mode_str)) |mode| {
+                    opts.trace = mode;
                 } else {
                     opts.invalid_arg = mode_str;
                 }
@@ -220,9 +216,7 @@ pub fn main() !void {
     }
 
     if (opts.trace != .None) {
-        if (bytebox.DebugTrace.setMode(opts.trace) == false) {
-            try stderr.print("Failed to set trace mode to {}. Option unavailable in non-debug builds.\n", .{opts.trace});
-        }
+        bytebox.DebugTrace.setMode(opts.trace);
     }
 
     std.debug.assert(opts.filename != null);

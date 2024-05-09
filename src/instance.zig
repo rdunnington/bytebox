@@ -65,21 +65,28 @@ pub const DebugTrace = struct {
         Instruction,
     };
 
-    pub fn setMode(new_mode: Mode) bool {
-        if (builtin.mode == .Debug) {
-            mode = new_mode;
-            return true;
-        }
+    pub fn setMode(new_mode: Mode) void {
+        mode = new_mode;
+    }
 
-        return false;
+    pub fn parseMode(mode_str: []const u8) ?Mode {
+        if (std.ascii.eqlIgnoreCase(mode_str, "function") or std.ascii.eqlIgnoreCase(mode_str, "func")) {
+            return .Function;
+        } else if (std.ascii.eqlIgnoreCase(mode_str, "instruction") or std.ascii.eqlIgnoreCase(mode_str, "instr")) {
+            return .Instruction;
+        } else if (std.ascii.eqlIgnoreCase(mode_str, "none")) {
+            return .None;
+        } else {
+            return null;
+        }
     }
 
     pub fn shouldTraceFunctions() bool {
-        return builtin.mode == .Debug and mode == .Function;
+        return mode == .Function;
     }
 
     pub fn shouldTraceInstructions() bool {
-        return builtin.mode == .Debug and mode == .Instruction;
+        return mode == .Instruction;
     }
 
     pub fn printIndent(indent: u32) void {
