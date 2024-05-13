@@ -6,8 +6,8 @@ const vm_stack = @import("vm_stack.zig");
 const vm_register = @import("vm_register.zig");
 pub const wasi = @import("wasi.zig");
 
-const LogLevel = common.LogLevel;
-const Logging = common.Logging;
+pub const LogLevel = common.LogLevel;
+pub const Logger = common.Logger;
 
 pub const i8x16 = def.i8x16;
 pub const u8x16 = def.u8x16;

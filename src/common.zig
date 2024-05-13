@@ -47,10 +47,11 @@ pub const Logger = struct {
     }
 
     fn defaultLog(level: LogLevel, text: [:0]const u8) void {
-        var writer = switch (level) {
-            .Info => std.io.getStdOut().writer(),
-            .Error => std.io.getStdErr().writer(),
+        var fd = switch (level) {
+            .Info => std.io.getStdOut(),
+            .Error => std.io.getStdErr(),
         };
+        var writer = fd.writer();
         nosuspend writer.writeAll(text) catch |e| {
             std.debug.print("Failed logging due to error: {}\n", .{e});
         };
@@ -65,8 +66,11 @@ pub const Logger = struct {
     }
 
     pub fn log(self: Logger, level: LogLevel, comptime format: []const u8, args: anytype) void {
+        if (self.log_fn == null) {
+            std.debug.print(">>>>>>>>>>>> crap\n", .{});
+        }
         if (self.log_fn) |logger| {
-            var buf: [512]u8 = undefined;
+            var buf: [2048]u8 = undefined;
             const formatted = std.fmt.bufPrintZ(&buf, format ++ "\n", args) catch |e| {
                 std.debug.print("Failed logging due to error: {}\n", .{e});
                 return;

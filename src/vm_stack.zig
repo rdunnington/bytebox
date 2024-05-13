@@ -2083,8 +2083,12 @@ const InstructionFuncs = struct {
         const memory_index: usize = 0;
         var memory_instance: *const MemoryInstance = stack.topFrame().module_instance.store.getMemory(memory_index);
 
-        const num_pages: i32 = @as(i32, @intCast(memory_instance.size()));
-        stack.pushI32(num_pages);
+        switch (memory_instance.limits.indexType()) {
+            .I32 => stack.pushI32(@intCast(memory_instance.size())),
+            .I64 => stack.pushI64(@intCast(memory_instance.size())),
+            else => unreachable,
+        }
+
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -2094,13 +2098,21 @@ const InstructionFuncs = struct {
         var memory_instance: *MemoryInstance = stack.topFrame().module_instance.store.getMemory(memory_index);
 
         const old_num_pages: i32 = @as(i32, @intCast(memory_instance.limits.min));
-        const num_pages: i32 = stack.popI32();
+        const num_pages: i64 = switch (memory_instance.limits.indexType()) {
+            .I32 => stack.popI32(),
+            .I64 => stack.popI64(),
+            else => unreachable,
+        };
 
         if (num_pages >= 0 and memory_instance.grow(@as(usize, @intCast(num_pages)))) {
             stack.pushI32(old_num_pages);
             try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
         } else {
-            stack.pushI32(-1);
+            switch (memory_instance.limits.indexType()) {
+                .I32 => stack.pushI32(-1),
+                .I64 => stack.pushI64(-1),
+                else => unreachable,
+            }
             try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
         }
     }

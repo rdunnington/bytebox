@@ -275,13 +275,13 @@ pub const Limits = struct {
     limit_type: u8,
 
     // limit_type table:
-    // 0x00 n:u32        ⇒ i32, {min n, max ϵ}, 0
+    // 0x00 n:u32        ⇒ i32, {min n, max ?}, 0
     // 0x01 n:u32 m:u32  ⇒ i32, {min n, max m}, 0
-    // 0x02 n:u32        ⇒ i32, {min n, max ϵ}, 1  ;; from threads proposal
+    // 0x02 n:u32        ⇒ i32, {min n, max ?}, 1  ;; from threads proposal
     // 0x03 n:u32 m:u32  ⇒ i32, {min n, max m}, 1  ;; from threads proposal
-    // 0x04 n:u64        ⇒ i64, {min n, max ϵ}, 0
+    // 0x04 n:u64        ⇒ i64, {min n, max ?}, 0
     // 0x05 n:u64 m:u64  ⇒ i64, {min n, max m}, 0
-    // 0x06 n:u64        ⇒ i64, {min n, max ϵ}, 1  ;; from threads proposal
+    // 0x06 n:u64        ⇒ i64, {min n, max ?}, 1  ;; from threads proposal
     // 0x07 n:u64 m:u64  ⇒ i64, {min n, max m}, 1  ;; from threads proposal
 
     fn decode(reader: anytype) !Limits {
@@ -1484,6 +1484,18 @@ const ModuleValidator = struct {
         }
     }
 
+    fn getMemoryLimits(module: *const ModuleDefinition) Limits {
+        if (module.imports.memories.items.len > 0) {
+            return module.imports.memories.items[0].limits;
+        }
+
+        if (module.memories.items.len > 0) {
+            return module.memories.items[0].limits;
+        }
+
+        unreachable;
+    }
+
     fn validateElementIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.elements.items.len <= index) {
             return error.ValidationUnknownElement;
@@ -1600,14 +1612,14 @@ const ModuleValidator = struct {
 
             fn validateLoadOp(validator: *ModuleValidator, module_: *const ModuleDefinition, load_type: ValType) !void {
                 try validateMemoryIndex(module_);
-                const offset_type = module_.memories.items[0].limits.indexType();
+                const offset_type: ValType = getMemoryLimits(module_).indexType();
                 try validator.popType(offset_type);
                 try validator.pushType(load_type);
             }
 
             fn validateStoreOp(validator: *ModuleValidator, module_: *const ModuleDefinition, store_type: ValType) !void {
                 try validateMemoryIndex(module_);
-                const offset_type = module_.memories.items[0].limits.indexType();
+                const offset_type: ValType = getMemoryLimits(module_).indexType();
                 try validator.popType(store_type);
                 try validator.popType(offset_type);
             }
@@ -1872,12 +1884,14 @@ const ModuleValidator = struct {
             },
             .Memory_Size => {
                 try validateMemoryIndex(module);
-                try self.pushType(.I32);
+                const offset_type: ValType = getMemoryLimits(module).indexType();
+                try self.pushType(offset_type);
             },
             .Memory_Grow => {
                 try validateMemoryIndex(module);
-                try self.popType(.I32);
-                try self.pushType(.I32);
+                const offset_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(offset_type);
+                try self.pushType(offset_type);
             },
             .I32_Const => {
                 try self.pushType(.I32);
@@ -2087,9 +2101,10 @@ const ModuleValidator = struct {
             .Memory_Init => {
                 try validateMemoryIndex(module);
                 try validateDataIndex(instruction.immediate.Index, module);
-                try self.popType(.I32);
-                try self.popType(.I32);
-                try self.popType(.I32);
+                const offset_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(offset_type);
+                try self.popType(offset_type);
+                try self.popType(offset_type);
             },
             .Data_Drop => {
                 if (module.data_count != null) {
@@ -2100,9 +2115,10 @@ const ModuleValidator = struct {
             },
             .Memory_Copy, .Memory_Fill => {
                 try validateMemoryIndex(module);
+                const offset_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(offset_type);
                 try self.popType(.I32);
-                try self.popType(.I32);
-                try self.popType(.I32);
+                try self.popType(offset_type);
             },
             .Table_Init => {
                 const pair: TablePairImmediates = instruction.immediate.TablePair;
