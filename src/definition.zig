@@ -1612,16 +1612,16 @@ const ModuleValidator = struct {
 
             fn validateLoadOp(validator: *ModuleValidator, module_: *const ModuleDefinition, load_type: ValType) !void {
                 try validateMemoryIndex(module_);
-                const offset_type: ValType = getMemoryLimits(module_).indexType();
-                try validator.popType(offset_type);
+                const index_type: ValType = getMemoryLimits(module_).indexType();
+                try validator.popType(index_type);
                 try validator.pushType(load_type);
             }
 
             fn validateStoreOp(validator: *ModuleValidator, module_: *const ModuleDefinition, store_type: ValType) !void {
                 try validateMemoryIndex(module_);
-                const offset_type: ValType = getMemoryLimits(module_).indexType();
+                const index_type: ValType = getMemoryLimits(module_).indexType();
                 try validator.popType(store_type);
-                try validator.popType(offset_type);
+                try validator.popType(index_type);
             }
 
             fn validateVectorLane(comptime T: type, laneidx: u32) !void {
@@ -1884,14 +1884,14 @@ const ModuleValidator = struct {
             },
             .Memory_Size => {
                 try validateMemoryIndex(module);
-                const offset_type: ValType = getMemoryLimits(module).indexType();
-                try self.pushType(offset_type);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.pushType(index_type);
             },
             .Memory_Grow => {
                 try validateMemoryIndex(module);
-                const offset_type: ValType = getMemoryLimits(module).indexType();
-                try self.popType(offset_type);
-                try self.pushType(offset_type);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
+                try self.pushType(index_type);
             },
             .I32_Const => {
                 try self.pushType(.I32);
@@ -2101,10 +2101,10 @@ const ModuleValidator = struct {
             .Memory_Init => {
                 try validateMemoryIndex(module);
                 try validateDataIndex(instruction.immediate.Index, module);
-                const offset_type: ValType = getMemoryLimits(module).indexType();
-                try self.popType(offset_type);
-                try self.popType(offset_type);
-                try self.popType(offset_type);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
+                try self.popType(index_type);
+                try self.popType(index_type);
             },
             .Data_Drop => {
                 if (module.data_count != null) {
@@ -2113,12 +2113,19 @@ const ModuleValidator = struct {
                     return error.MalformedMissingDataCountSection;
                 }
             },
-            .Memory_Copy, .Memory_Fill => {
+            .Memory_Fill => {
                 try validateMemoryIndex(module);
-                const offset_type: ValType = getMemoryLimits(module).indexType();
-                try self.popType(offset_type);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
                 try self.popType(.I32);
-                try self.popType(offset_type);
+                try self.popType(index_type);
+            },
+            .Memory_Copy => {
+                try validateMemoryIndex(module);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
+                try self.popType(index_type);
+                try self.popType(index_type);
             },
             .Table_Init => {
                 const pair: TablePairImmediates = instruction.immediate.TablePair;

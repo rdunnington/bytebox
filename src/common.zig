@@ -66,9 +66,6 @@ pub const Logger = struct {
     }
 
     pub fn log(self: Logger, level: LogLevel, comptime format: []const u8, args: anytype) void {
-        if (self.log_fn == null) {
-            std.debug.print(">>>>>>>>>>>> crap\n", .{});
-        }
         if (self.log_fn) |logger| {
             var buf: [2048]u8 = undefined;
             const formatted = std.fmt.bufPrintZ(&buf, format ++ "\n", args) catch |e| {

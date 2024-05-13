@@ -10,23 +10,19 @@
 #define PAGE_SIZE (64 * KB)
 #define PAGES_PER_GB (GB / PAGE_SIZE)
 
-void assert(int value)
-{
-	if (value == 0)
-	{
-		__builtin_trap();
-	}
-}
+#define assert(value) if (value == 0) return -1
 
-__attribute__((visibility("default"))) void memtest(int32_t val_i32, int64_t val_i64, float val_f32, double val_f64)
+__attribute__((visibility("default"))) int64_t memtest(int32_t val_i32, int64_t val_i64, float val_f32, double val_f64)
 {
-	__builtin_wasm_memory_grow(0, PAGES_PER_GB * 8); // memory.grow
-	char* mem = (char*)(GB * 4);
-	char* mem_stores = (char*)(GB * 5);
-	char* mem_loads = (char*)(GB * 6);
+	int64_t start_page = __builtin_wasm_memory_grow(0, PAGES_PER_GB * 2); // memory.grow
+	assert(start_page != -1);
 
-	size_t num_pages = __builtin_wasm_memory_size(0); // memory.size
-	assert(num_pages == (PAGES_PER_GB * 8));
+	char* mem = (char*)(start_page);
+	char* mem_stores = mem + MB * 1;
+	char* mem_loads = mem + MB * 2;
+
+	int64_t num_pages = __builtin_wasm_memory_size(0); // memory.size
+	assert(num_pages >= (PAGES_PER_GB * 2));
 
 	*(int32_t*)(mem_stores + 0) = *(int32_t*)(mem_loads + 0); // i32.load -> i32.store
 	*(int64_t*)(mem_stores + 8) = *(int64_t*)(mem_loads + 8); // i64.load -> i64.store
@@ -59,4 +55,6 @@ __attribute__((visibility("default"))) void memtest(int32_t val_i32, int64_t val
 	
 	__builtin_memset(mem + KB, 0xFF, KB); // memory.fill
 	__builtin_memcpy(mem + KB * 4, mem + KB * 3, KB); // memory.copy
+
+	return 0;
 }

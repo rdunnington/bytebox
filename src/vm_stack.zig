@@ -236,6 +236,15 @@ const Stack = struct {
         return stack.values[stack.num_values].V128;
     }
 
+    fn popIndexType(stack: *Stack) i64 {
+        const index_type: ValType = stack.topFrame().module_instance.store.getMemory(0).limits.indexType();
+        return switch (index_type) {
+            .I32 => stack.popI32(),
+            .I64 => stack.popI64(),
+            else => unreachable,
+        };
+    }
+
     fn pushLabel(stack: *Stack, num_returns: u32, continuation: u32) !void {
         if (stack.num_labels < stack.labels.len) {
             stack.labels[stack.num_labels] = Label{
@@ -931,11 +940,13 @@ const InstructionFuncs = struct {
             return @as(T, @intFromFloat(truncated));
         }
 
-        fn loadFromMem(comptime T: type, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) !T {
+        fn loadFromMem(comptime T: type, stack: *Stack, offset_from_memarg: usize) TrapError!T {
+            var offset_from_stack: i64 = stack.popIndexType();
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
+            const store: *Store = &stack.topFrame().module_instance.store;
             const memory: *const MemoryInstance = store.getMemory(0);
             const offset: usize = offset_from_memarg + @as(usize, @intCast(offset_from_stack));
 
@@ -988,13 +999,15 @@ const InstructionFuncs = struct {
             return ret;
         }
 
-        fn storeInMem(value: anytype, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) !void {
+        fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: usize) !void {
+            const offset_from_stack: i64 = stack.popIndexType();
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
+            const store: *Store = &stack.topFrame().module_instance.store;
             const memory: *MemoryInstance = store.getMemory(0);
-            const offset: usize = offset_from_memarg + @as(u32, @intCast(offset_from_stack));
+            const offset: usize = offset_from_memarg + @as(usize, @intCast(offset_from_stack));
 
             const bit_count = @bitSizeOf(@TypeOf(value));
             const write_type = switch (bit_count) {
@@ -1359,8 +1372,7 @@ const InstructionFuncs = struct {
 
             var vec = @as(T, @bitCast(stack.popV128()));
             const immediate = instruction.immediate.MemoryOffsetAndLane;
-            const offset_from_stack: i32 = stack.popI32();
-            const scalar = try loadFromMem(vec_type_info.child, &stack.topFrame().module_instance.store, immediate.offset, offset_from_stack);
+            const scalar = try loadFromMem(vec_type_info.child, stack, immediate.offset);
             vec[immediate.laneidx] = scalar;
             stack.pushV128(@as(v128, @bitCast(vec)));
         }
@@ -1376,8 +1388,7 @@ const InstructionFuncs = struct {
             const vec_type_info = @typeInfo(T).Vector;
 
             const mem_offset = instruction.immediate.MemoryOffset;
-            const offset_from_stack: i32 = stack.popI32();
-            const scalar = try loadFromMem(vec_type_info.child, &stack.topFrame().module_instance.store, mem_offset, offset_from_stack);
+            const scalar = try loadFromMem(vec_type_info.child, stack, mem_offset);
             var vec: T = @splat(0);
             vec[0] = scalar;
             stack.pushV128(@as(v128, @bitCast(vec)));
@@ -1386,9 +1397,8 @@ const InstructionFuncs = struct {
         fn vectorStoreLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
             var vec = @as(T, @bitCast(stack.popV128()));
             const immediate = instruction.immediate.MemoryOffsetAndLane;
-            const offset_from_stack: i32 = stack.popI32();
             const scalar = vec[immediate.laneidx];
-            try storeInMem(scalar, &stack.topFrame().module_instance.store, immediate.offset, offset_from_stack);
+            try storeInMem(scalar, stack, immediate.offset);
             stack.pushV128(@as(v128, @bitCast(vec)));
         }
 
@@ -1895,112 +1905,98 @@ const InstructionFuncs = struct {
 
     fn op_I32_Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Load", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value = try OpHelpers.loadFromMem(i32, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value = try OpHelpers.loadFromMem(i32, stack, code[pc].immediate.MemoryOffset);
         stack.pushI32(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Load", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value = try OpHelpers.loadFromMem(i64, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value = try OpHelpers.loadFromMem(i64, stack, code[pc].immediate.MemoryOffset);
         stack.pushI64(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("F32_Load", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value = try OpHelpers.loadFromMem(f32, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value = try OpHelpers.loadFromMem(f32, stack, code[pc].immediate.MemoryOffset);
         stack.pushF32(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("F64_Load", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value = try OpHelpers.loadFromMem(f64, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value = try OpHelpers.loadFromMem(f64, stack, code[pc].immediate.MemoryOffset);
         stack.pushF64(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Load8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Load8_S", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: i32 = try OpHelpers.loadFromMem(i8, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: i32 = try OpHelpers.loadFromMem(i8, stack, code[pc].immediate.MemoryOffset);
         stack.pushI32(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Load8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Load8_U", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: u32 = try OpHelpers.loadFromMem(u8, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: u32 = try OpHelpers.loadFromMem(u8, stack, code[pc].immediate.MemoryOffset);
         stack.pushI32(@as(i32, @bitCast(value)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Load16_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Load16_S", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: i32 = try OpHelpers.loadFromMem(i16, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: i32 = try OpHelpers.loadFromMem(i16, stack, code[pc].immediate.MemoryOffset);
         stack.pushI32(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Load16_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Load16_U", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: u32 = try OpHelpers.loadFromMem(u16, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: u32 = try OpHelpers.loadFromMem(u16, stack, code[pc].immediate.MemoryOffset);
         stack.pushI32(@as(i32, @bitCast(value)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Load8_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Load8_S", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: i64 = try OpHelpers.loadFromMem(i8, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: i64 = try OpHelpers.loadFromMem(i8, stack, code[pc].immediate.MemoryOffset);
         stack.pushI64(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Load8_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Load8_U", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: u64 = try OpHelpers.loadFromMem(u8, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: u64 = try OpHelpers.loadFromMem(u8, stack, code[pc].immediate.MemoryOffset);
         stack.pushI64(@as(i64, @bitCast(value)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Load16_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Load16_S", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: i64 = try OpHelpers.loadFromMem(i16, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: i64 = try OpHelpers.loadFromMem(i16, stack, code[pc].immediate.MemoryOffset);
         stack.pushI64(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Load16_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Load16_U", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: u64 = try OpHelpers.loadFromMem(u16, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: u64 = try OpHelpers.loadFromMem(u16, stack, code[pc].immediate.MemoryOffset);
         stack.pushI64(@as(i64, @bitCast(value)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Load32_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Load32_S", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: i64 = try OpHelpers.loadFromMem(i32, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: i64 = try OpHelpers.loadFromMem(i32, stack, code[pc].immediate.MemoryOffset);
         stack.pushI64(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Load32_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Load32_U", pc, code, stack);
-        var offset_from_stack: i32 = stack.popI32();
-        var value: u64 = try OpHelpers.loadFromMem(u32, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        var value: u64 = try OpHelpers.loadFromMem(u32, stack, code[pc].immediate.MemoryOffset);
         stack.pushI64(@as(i64, @bitCast(value)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -2008,72 +2004,63 @@ const InstructionFuncs = struct {
     fn op_I32_Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Store", pc, code, stack);
         const value: i32 = stack.popI32();
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Store", pc, code, stack);
         const value: i64 = stack.popI64();
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("F32_Store", pc, code, stack);
         const value: f32 = stack.popF32();
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("F64_Store", pc, code, stack);
         const value: f64 = stack.popF64();
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Store8(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Store8", pc, code, stack);
         const value: i8 = @as(i8, @truncate(stack.popI32()));
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Store16(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I32_Store16", pc, code, stack);
         const value: i16 = @as(i16, @truncate(stack.popI32()));
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Store8(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Store8", pc, code, stack);
         const value: i8 = @as(i8, @truncate(stack.popI64()));
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Store16(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Store16", pc, code, stack);
         const value: i16 = @as(i16, @truncate(stack.popI64()));
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Store32(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("I64_Store32", pc, code, stack);
         const value: i32 = @as(i32, @truncate(stack.popI64()));
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -3634,8 +3621,7 @@ const InstructionFuncs = struct {
 
     fn op_V128_Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("V128_Load", pc, code, stack);
-        const offset_from_stack: i32 = stack.popI32();
-        const value = try OpHelpers.loadFromMem(v128, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        const value = try OpHelpers.loadFromMem(v128, stack, code[pc].immediate.MemoryOffset);
         stack.pushV128(value);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -3678,8 +3664,7 @@ const InstructionFuncs = struct {
 
     fn op_V128_Load8_Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("V128_Load8_Splat", pc, code, stack);
-        const offset_from_stack: i32 = stack.popI32();
-        const scalar = try OpHelpers.loadFromMem(u8, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        const scalar = try OpHelpers.loadFromMem(u8, stack, code[pc].immediate.MemoryOffset);
         const vec: u8x16 = @splat(scalar);
         stack.pushV128(@as(v128, @bitCast(vec)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -3687,8 +3672,7 @@ const InstructionFuncs = struct {
 
     fn op_V128_Load16_Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("V128_Load16_Splat", pc, code, stack);
-        const offset_from_stack: i32 = stack.popI32();
-        const scalar = try OpHelpers.loadFromMem(u16, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        const scalar = try OpHelpers.loadFromMem(u16, stack, code[pc].immediate.MemoryOffset);
         const vec: u16x8 = @splat(scalar);
         stack.pushV128(@as(v128, @bitCast(vec)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -3696,8 +3680,7 @@ const InstructionFuncs = struct {
 
     fn op_V128_Load32_Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("V128_Load32_Splat", pc, code, stack);
-        const offset_from_stack: i32 = stack.popI32();
-        const scalar = try OpHelpers.loadFromMem(u32, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        const scalar = try OpHelpers.loadFromMem(u32, stack, code[pc].immediate.MemoryOffset);
         const vec: u32x4 = @splat(scalar);
         stack.pushV128(@as(v128, @bitCast(vec)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -3705,8 +3688,7 @@ const InstructionFuncs = struct {
 
     fn op_V128_Load64_Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("V128_Load64_Splat", pc, code, stack);
-        const offset_from_stack: i32 = stack.popI32();
-        const scalar = try OpHelpers.loadFromMem(u64, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        const scalar = try OpHelpers.loadFromMem(u64, stack, code[pc].immediate.MemoryOffset);
         const vec: u64x2 = @splat(scalar);
         stack.pushV128(@as(v128, @bitCast(vec)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -4100,8 +4082,7 @@ const InstructionFuncs = struct {
         try debugPreamble("V128_Store", pc, code, stack);
 
         const value: v128 = stack.popV128();
-        const offset_from_stack: i32 = stack.popI32();
-        try OpHelpers.storeInMem(value, &stack.topFrame().module_instance.store, code[pc].immediate.MemoryOffset, offset_from_stack);
+        try OpHelpers.storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
