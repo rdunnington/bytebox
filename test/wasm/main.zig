@@ -1511,12 +1511,12 @@ pub fn main() !void {
         }
 
         // determine if there is a memory64 version of the test - if so, run that one
-        const suite_wast_base_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "testsuite", suite });
+        const suite_wast_base_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-testsuite", suite });
         defer allocator.free(suite_wast_base_path_no_extension);
         const suite_wast_base_path: []u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_base_path_no_extension, ".wast" });
         defer allocator.free(suite_wast_base_path);
 
-        const suite_wast_mem64_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "testsuite", "proposals", "memory64", suite });
+        const suite_wast_mem64_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-testsuite", "proposals", "memory64", suite });
         defer allocator.free(suite_wast_mem64_path_no_extension);
         const suite_wast_mem64_path: []u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_mem64_path_no_extension, ".wast" });
         defer allocator.free(suite_wast_mem64_path);
