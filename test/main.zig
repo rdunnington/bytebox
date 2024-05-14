@@ -1480,7 +1480,7 @@ pub fn main() !void {
             needs_regen = true;
         } else {
             std.fs.cwd().access(suite_path, .{ .mode = .read_only }) catch |e| {
-                if (e == std.os.AccessError.FileNotFound) {
+                if (e == std.posix.AccessError.FileNotFound) {
                     needs_regen = true;
                 }
             };
@@ -1533,6 +1533,6 @@ pub fn main() !void {
     }
 
     if (did_all_succeed == false) {
-        std.os.exit(1);
+        std.process.exit(1);
     }
 }

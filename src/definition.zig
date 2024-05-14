@@ -1196,7 +1196,7 @@ pub const Instruction = struct {
                 immediate = InstructionImmediates{ .ValueVec = try decodeVec(reader) };
             },
             .I8x16_Shuffle => {
-                const lane_indices: [16]u8 = undefined;
+                var lane_indices: [16]u8 = undefined;
                 for (&lane_indices) |*v| {
                     const laneidx: u8 = try reader.readByte();
                     v.* = laneidx;

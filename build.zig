@@ -123,7 +123,7 @@ fn buildWasmLib(b: *Build, filepath: []const u8, optimize: std.builtin.Mode) *Co
     var filename: []const u8 = std.fs.path.basename(filepath);
     const filename_no_extension: []const u8 = filename[0 .. filename.len - 4];
 
-    const lib = b.addSharedLibrary(.{
+    const lib = b.addExecutable(.{
         .name = filename_no_extension,
         .root_source_file = b.path(filepath),
         .target = b.resolveTargetQuery(.{
@@ -132,6 +132,7 @@ fn buildWasmLib(b: *Build, filepath: []const u8, optimize: std.builtin.Mode) *Co
         }),
         .optimize = optimize,
     });
+    lib.entry = .disabled;
 
     // const mode = b.standardOptimizeOption();
     // lib.setBuildMode(mode);
