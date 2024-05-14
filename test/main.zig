@@ -207,7 +207,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
 
         fn parseF32(str: []const u8) !f32 {
             if (std.mem.startsWith(u8, str, "nan:")) {
-                return std.math.nan_f32; // don't differentiate between arithmetic/canonical nan
+                return std.math.nan(f32); // don't differentiate between arithmetic/canonical nan
             } else {
                 const int = try std.fmt.parseInt(u32, str, 10);
                 return @as(f32, @bitCast(int));
@@ -216,7 +216,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
 
         fn parseF64(str: []const u8) !f64 {
             if (std.mem.startsWith(u8, str, "nan:")) {
-                return std.math.nan_f64; // don't differentiate between arithmetic/canonical nan
+                return std.math.nan(f64); // don't differentiate between arithmetic/canonical nan
             } else {
                 const int = try std.fmt.parseInt(u64, str, 10);
                 return @as(f64, @bitCast(int));

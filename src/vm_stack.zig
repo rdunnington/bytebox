@@ -1224,7 +1224,7 @@ const InstructionFuncs = struct {
             const vec = @as(T, @bitCast(stack.popV128()));
             var arr: [type_info.len]child_type = undefined;
             for (&arr, 0..) |*v, i| {
-                v.* = @as(child_type, @bitCast(std.math.absCast(vec[i])));
+                v.* = @as(child_type, @bitCast(@abs(vec[i])));
             }
             const abs: T = arr;
             stack.pushV128(@as(v128, @bitCast(abs)));
@@ -4978,7 +4978,7 @@ const InstructionFuncs = struct {
     fn op_F32x4_Abs(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("F32x4_Abs", pc, code, stack);
         const vec = @as(f32x4, @bitCast(stack.popV128()));
-        const abs = @fabs(vec);
+        const abs = @abs(vec);
         stack.pushV128(@as(v128, @bitCast(abs)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -5050,7 +5050,7 @@ const InstructionFuncs = struct {
     fn op_F64x2_Abs(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("F64x2_Abs", pc, code, stack);
         const vec = @as(f64x2, @bitCast(stack.popV128()));
-        const abs = @fabs(vec);
+        const abs = @abs(vec);
         stack.pushV128(@as(v128, @bitCast(abs)));
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
