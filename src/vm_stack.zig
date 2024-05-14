@@ -2533,8 +2533,7 @@ const InstructionFuncs = struct {
         try debugPreamble("I32_Rem_S", pc, code, stack);
         const v2: i32 = stack.popI32();
         const v1: i32 = stack.popI32();
-        const denom = @abs(v2);
-        const value = std.math.rem(i32, v1, denom) catch |e| {
+        const value = std.math.rem(i32, v1, v2) catch |e| {
             if (e == error.DivisionByZero) {
                 return error.TrapIntegerDivisionByZero;
             } else {
@@ -2726,8 +2725,7 @@ const InstructionFuncs = struct {
         try debugPreamble("I64_Rem_S", pc, code, stack);
         const v2: i64 = stack.popI64();
         const v1: i64 = stack.popI64();
-        const denom = @abs(v2);
-        const value = std.math.rem(i64, v1, denom) catch |e| {
+        const value = std.math.rem(i64, v1, v2) catch |e| {
             if (e == error.DivisionByZero) {
                 return error.TrapIntegerDivisionByZero;
             } else {
