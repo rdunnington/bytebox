@@ -184,7 +184,7 @@ export fn bb_error_str(c_error: CError) [*:0]const u8 {
 }
 
 export fn bb_module_definition_create(c_opts: CModuleDefinitionInitOpts) ?*core.ModuleDefinition {
-    var allocator = cffi_gpa.allocator();
+    const allocator = cffi_gpa.allocator();
 
     const debug_name: []const u8 = if (c_opts.debug_name == null) "" else std.mem.sliceTo(c_opts.debug_name.?, 0);
     const opts_translated = core.ModuleDefinitionOpts{
@@ -310,7 +310,7 @@ export fn bb_import_package_add_memory(package: ?*ModuleImportPackage, config: ?
             unreachable;
         }
 
-        var mem_import = core.MemoryImport{
+        const mem_import = core.MemoryImport{
             .name = name,
             .data = .{ .Host = mem_instance },
         };
@@ -335,7 +335,7 @@ export fn bb_set_debug_trace_mode(c_mode: CDebugTraceMode) void {
 }
 
 export fn bb_module_instance_create(module_definition: ?*ModuleDefinition) ?*ModuleInstance {
-    var allocator = cffi_gpa.allocator();
+    const allocator = cffi_gpa.allocator();
 
     var module: ?*core.ModuleInstance = null;
 
@@ -361,7 +361,7 @@ export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModu
     if (module != null and c_opts.packages != null and num_wasm_memory_callbacks != 1) {
         const packages: []?*const ModuleImportPackage = c_opts.packages.?[0..c_opts.num_packages];
 
-        var allocator = cffi_gpa.allocator();
+        const allocator = cffi_gpa.allocator();
         var flat_packages = std.ArrayList(ModuleImportPackage).init(allocator);
         defer flat_packages.deinit();
 
@@ -454,8 +454,8 @@ export fn bb_module_instance_invoke(module: ?*ModuleInstance, c_handle: CFuncHan
             .trap_on_start = opts.trap_on_start,
         };
 
-        var params_slice: []const Val = if (params != null) params.?[0..num_params] else &[_]Val{};
-        var returns_slice: []Val = if (returns != null) returns.?[0..num_returns] else &[_]Val{};
+        const params_slice: []const Val = if (params != null) params.?[0..num_params] else &[_]Val{};
+        const returns_slice: []Val = if (returns != null) returns.?[0..num_returns] else &[_]Val{};
 
         if (module.?.invoke(handle, params_slice.ptr, returns_slice.ptr, invoke_opts)) {
             return CError.Ok;
@@ -490,7 +490,7 @@ export fn bb_module_instance_debug_set_trap(module: ?*ModuleInstance, address: u
 
 export fn bb_module_instance_mem(module: ?*ModuleInstance, offset: usize, length: usize) ?*anyopaque {
     if (module != null and length > 0) {
-        var mem = module.?.memorySlice(offset, length);
+        const mem = module.?.memorySlice(offset, length);
         return if (mem.len > 0) mem.ptr else null;
     }
 
@@ -499,7 +499,7 @@ export fn bb_module_instance_mem(module: ?*ModuleInstance, offset: usize, length
 
 export fn bb_module_instance_mem_all(module: ?*ModuleInstance) CSlice {
     if (module != null) {
-        var mem = module.?.memoryAll();
+        const mem = module.?.memoryAll();
         return CSlice{
             .data = mem.ptr,
             .length = mem.len,

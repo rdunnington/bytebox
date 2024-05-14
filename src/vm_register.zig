@@ -78,7 +78,7 @@ const IRNode = struct {
     edges_out_count: u32,
 
     fn createWithInstruction(mir: *ModuleIR, instruction_index: u32) AllocError!*IRNode {
-        var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+        const node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .opcode = mir.module_def.code.instructions.items[instruction_index].opcode,
             .is_phi = false,
@@ -92,7 +92,7 @@ const IRNode = struct {
     }
 
     fn createStandalone(mir: *ModuleIR, opcode: Opcode) AllocError!*IRNode {
-        var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+        const node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .opcode = opcode,
             .is_phi = false,
@@ -106,7 +106,7 @@ const IRNode = struct {
     }
 
     fn createPhi(mir: *ModuleIR) AllocError!*IRNode {
-        var node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+        const node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .opcode = .Invalid,
             .is_phi = true,
@@ -277,7 +277,7 @@ const RegisterSlots = struct {
             });
         }
 
-        var index = self.last_free.?;
+        const index = self.last_free.?;
         var slot: *Slot = &self.slots.items[index];
         self.last_free = slot.prev;
         slot.node = node;
@@ -411,7 +411,7 @@ const IRFunction = struct {
         }
 
         const end_instruction_offset = instructions.items.len;
-        var emitted_instructions = instructions.items[start_instruction_offset..end_instruction_offset];
+        const emitted_instructions = instructions.items[start_instruction_offset..end_instruction_offset];
 
         std.mem.reverse(RegInstruction, emitted_instructions);
     }
@@ -653,7 +653,7 @@ const ModuleIR = struct {
             var edges_buffer: [8]*IRNode = undefined; // 8 should be more stack slots than any one instruction can pop
             std.debug.assert(num_consumed <= edges_buffer.len);
 
-            var edges = edges_buffer[0..num_consumed];
+            const edges = edges_buffer[0..num_consumed];
             for (edges) |*e| {
                 e.* = self.value_stack.pop();
             }
@@ -677,9 +677,9 @@ const ModuleIR = struct {
                 else => @compileError("Unsupported const instruction"),
             };
 
-            var res = try self.unique_constants.getOrPut(val);
+            const res = try self.unique_constants.getOrPut(val);
             if (res.found_existing == false) {
-                var node = try IRNode.createWithInstruction(mir, instruction_index);
+                const node = try IRNode.createWithInstruction(mir, instruction_index);
                 res.value_ptr.* = node;
             }
             if (self.is_unreachable == false) {
@@ -690,7 +690,7 @@ const ModuleIR = struct {
 
         fn addPendingEdgeLabel(self: *IntermediateCompileData, node: *IRNode, label_id: u32) !void {
             const last_block_index = self.blocks.blocks.items.len - 1;
-            var continuation: u32 = self.blocks.blocks.items[last_block_index - label_id].continuation;
+            const continuation: u32 = self.blocks.blocks.items[last_block_index - label_id].continuation;
             try self.pending_continuation_edges.append(PendingContinuationEdge{
                 .node = node,
                 .continuation = continuation,
@@ -870,7 +870,7 @@ const ModuleIR = struct {
                         var nodes_with_side_effects: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
                         defer nodes_with_side_effects.clearRetainingCapacity();
 
-                        var current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
+                        const current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
 
                         for (current_block_nodes) |block_node| {
                             if (block_node.hasSideEffects() or block_node.isFlowControl()) {
@@ -881,7 +881,7 @@ const ModuleIR = struct {
                         if (nodes_with_side_effects.items.len >= 2) {
                             var i: i32 = @intCast(nodes_with_side_effects.items.len - 2);
                             while (i >= 0) : (i -= 1) {
-                                var ii: u32 = @intCast(i);
+                                const ii: u32 = @intCast(i);
                                 var node_a: *IRNode = nodes_with_side_effects.items[ii];
                                 if (try node_a.isIsland(&compile_data.scratch_node_list_2)) {
                                     var node_b: *IRNode = nodes_with_side_effects.items[ii + 1];
@@ -1021,14 +1021,14 @@ const ModuleIR = struct {
                     assert(node == null);
 
                     if (compile_data.is_unreachable == false) {
-                        var n: *IRNode = compile_data.value_stack.pop();
+                        const n: *IRNode = compile_data.value_stack.pop();
                         locals[instruction.immediate.Index] = n;
                     }
                 },
                 .Local_Tee => {
                     assert(node == null);
                     if (compile_data.is_unreachable == false) {
-                        var n: *IRNode = compile_data.value_stack.items[compile_data.value_stack.items.len - 1];
+                        const n: *IRNode = compile_data.value_stack.items[compile_data.value_stack.items.len - 1];
                         locals[instruction.immediate.Index] = n;
                     }
                 },
@@ -1203,7 +1203,7 @@ fn runTestWithViz(wasm_filepath: []const u8, viz_dir: []const u8) !void {
     var allocator = std.testing.allocator;
 
     var cwd = std.fs.cwd();
-    var wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
+    const wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
     defer allocator.free(wasm_data);
 
     const module_def_opts = def.ModuleDefinitionOpts{

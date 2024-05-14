@@ -203,9 +203,9 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                     const addr: usize = @intFromPtr(self.items.ptr) + new_capacity_bytes;
                     w.VirtualFree(@as(w.PVOID, @ptrFromInt(addr)), bytes_to_free, w.MEM_DECOMMIT);
                 } else {
-                    var base_addr: usize = @intFromPtr(self.items.ptr);
-                    var offset_addr: usize = base_addr + new_capacity_bytes;
-                    var addr: [*]align(mem.page_size) u8 = @ptrFromInt(offset_addr);
+                    const base_addr: usize = @intFromPtr(self.items.ptr);
+                    const offset_addr: usize = base_addr + new_capacity_bytes;
+                    const addr: [*]align(mem.page_size) u8 = @ptrFromInt(offset_addr);
                     if (comptime builtin.target.isDarwin()) {
                         const MADV_DONTNEED = 4;
                         const err: c_int = darwin.madvise(addr, bytes_to_free, MADV_DONTNEED);

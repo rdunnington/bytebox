@@ -138,7 +138,7 @@ pub const ValType = enum(c_int) {
     }
 
     fn decodeReftype(reader: anytype) !ValType {
-        var valtype = try decode(reader);
+        const valtype = try decode(reader);
         if (isRefType(valtype) == false) {
             return error.MalformedReferenceType;
         }
@@ -509,7 +509,7 @@ pub const FunctionTypeDefinition = struct {
             }
 
             for (a.types.items, 0..) |typeA, i| {
-                var typeB = b.types.items[i];
+                const typeB = b.types.items[i];
                 if (typeA != typeB) {
                     return false;
                 }
@@ -519,13 +519,13 @@ pub const FunctionTypeDefinition = struct {
         }
 
         fn less(context: Self, a: *FunctionTypeDefinition, b: *FunctionTypeDefinition) bool {
-            var ord = Self.order(context, a, b);
+            const ord = Self.order(context, a, b);
             return ord == std.math.Order.lt;
         }
 
         fn order(context: Self, a: *FunctionTypeDefinition, b: *FunctionTypeDefinition) std.math.Order {
-            var hashA = Self.hash(context, a);
-            var hashB = Self.hash(context, b);
+            const hashA = Self.hash(context, a);
+            const hashB = Self.hash(context, b);
 
             if (hashA < hashB) {
                 return std.math.Order.lt;
@@ -651,7 +651,7 @@ pub const DataDefinition = struct {
     mode: DataMode,
 
     fn decode(reader: anytype, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) !DataDefinition {
-        var data_type: u32 = try common.decodeLEB128(u32, reader);
+        const data_type: u32 = try common.decodeLEB128(u32, reader);
         if (data_type > 2) {
             return error.MalformedDataType;
         }
@@ -670,10 +670,10 @@ pub const DataDefinition = struct {
             offset = try ConstantExpression.decode(reader, module_def, .Immutable, .I32);
         }
 
-        var num_bytes = try common.decodeLEB128(u32, reader);
+        const num_bytes = try common.decodeLEB128(u32, reader);
         var bytes = std.ArrayList(u8).init(allocator);
         try bytes.resize(num_bytes);
-        var num_read = try reader.read(bytes.items);
+        const num_read = try reader.read(bytes.items);
         if (num_read != num_bytes) {
             return error.MalformedUnexpectedEnd;
         }
@@ -726,7 +726,7 @@ const MemArg = struct {
 
     fn decode(reader: anytype, comptime bitwidth: u32) !MemArg {
         std.debug.assert(bitwidth % 8 == 0);
-        var memarg = MemArg{
+        const memarg = MemArg{
             .alignment = try common.decodeLEB128(u32, reader),
             .offset = try common.decodeLEB128(u32, reader),
         };
@@ -825,11 +825,11 @@ pub const Instruction = struct {
                         blocktype = BlockTypeValue{ .Void = {} };
                     } else {
                         _reader.context.pos -= 1; // move the stream backwards 1 byte to reconstruct the integer
-                        var index_33bit = try common.decodeLEB128(i33, _reader);
+                        const index_33bit = try common.decodeLEB128(i33, _reader);
                         if (index_33bit < 0) {
                             return error.MalformedBytecode;
                         }
-                        var index: u32 = @as(u32, @intCast(index_33bit));
+                        const index: u32 = @as(u32, @intCast(index_33bit));
                         if (index < _module.types.items.len) {
                             blocktype = BlockTypeValue{ .TypeIndex = index };
                         } else {
@@ -837,7 +837,7 @@ pub const Instruction = struct {
                         }
                     }
                 } else {
-                    var valtype: ValType = valtype_or_err catch unreachable;
+                    const valtype: ValType = valtype_or_err catch unreachable;
                     blocktype = BlockTypeValue{ .ValType = valtype };
                 }
 
@@ -875,7 +875,7 @@ pub const Instruction = struct {
         };
 
         const wasm_op: WasmOpcode = try WasmOpcode.decode(reader);
-        var opcode: Opcode = wasm_op.toOpcode();
+        const opcode: Opcode = wasm_op.toOpcode();
         var immediate = InstructionImmediates{ .Void = {} };
 
         switch (opcode) {
@@ -951,10 +951,10 @@ pub const Instruction = struct {
 
                 var index: u32 = 0;
                 while (index < table_length) : (index += 1) {
-                    var id = try common.decodeLEB128(u32, reader);
+                    const id = try common.decodeLEB128(u32, reader);
                     label_ids.addOneAssumeCapacity().* = id;
                 }
-                var fallback_id = try common.decodeLEB128(u32, reader);
+                const fallback_id = try common.decodeLEB128(u32, reader);
 
                 var branch_table = BranchTableImmediates{
                     .label_ids = label_ids,
@@ -988,105 +988,105 @@ pub const Instruction = struct {
                 } };
             },
             .I32_Load => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Load => {
-                var memarg = try MemArg.decode(reader, 64);
+                const memarg = try MemArg.decode(reader, 64);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .F32_Load => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .F64_Load => {
-                var memarg = try MemArg.decode(reader, 64);
+                const memarg = try MemArg.decode(reader, 64);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I32_Load8_S => {
-                var memarg = try MemArg.decode(reader, 8);
+                const memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I32_Load8_U => {
-                var memarg = try MemArg.decode(reader, 8);
+                const memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I32_Load16_S => {
-                var memarg = try MemArg.decode(reader, 16);
+                const memarg = try MemArg.decode(reader, 16);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I32_Load16_U => {
-                var memarg = try MemArg.decode(reader, 16);
+                const memarg = try MemArg.decode(reader, 16);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Load8_S => {
-                var memarg = try MemArg.decode(reader, 8);
+                const memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Load8_U => {
-                var memarg = try MemArg.decode(reader, 8);
+                const memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Load16_S => {
-                var memarg = try MemArg.decode(reader, 16);
+                const memarg = try MemArg.decode(reader, 16);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Load16_U => {
-                var memarg = try MemArg.decode(reader, 16);
+                const memarg = try MemArg.decode(reader, 16);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Load32_S => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Load32_U => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I32_Store => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Store => {
-                var memarg = try MemArg.decode(reader, 64);
+                const memarg = try MemArg.decode(reader, 64);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .F32_Store => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .F64_Store => {
-                var memarg = try MemArg.decode(reader, 64);
+                const memarg = try MemArg.decode(reader, 64);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I32_Store8 => {
-                var memarg = try MemArg.decode(reader, 8);
+                const memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I32_Store16 => {
-                var memarg = try MemArg.decode(reader, 16);
+                const memarg = try MemArg.decode(reader, 16);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Store8 => {
-                var memarg = try MemArg.decode(reader, 8);
+                const memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Store16 => {
-                var memarg = try MemArg.decode(reader, 16);
+                const memarg = try MemArg.decode(reader, 16);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I64_Store32 => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .Memory_Size => {
-                var reserved = try reader.readByte();
+                const reserved = try reader.readByte();
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
             },
             .Memory_Grow => {
-                var reserved = try reader.readByte();
+                const reserved = try reader.readByte();
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
@@ -1100,13 +1100,13 @@ pub const Instruction = struct {
 
                 immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) }; // dataidx
 
-                var reserved = try reader.readByte();
+                const reserved = try reader.readByte();
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
             },
             .Ref_Null => {
-                var valtype = try ValType.decode(reader);
+                const valtype = try ValType.decode(reader);
                 if (valtype.isRefType() == false) {
                     return error.MalformedBytecode;
                 }
@@ -1130,7 +1130,7 @@ pub const Instruction = struct {
                 }
             },
             .Memory_Fill => {
-                var reserved = try reader.readByte();
+                const reserved = try reader.readByte();
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
@@ -1154,49 +1154,49 @@ pub const Instruction = struct {
                 immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) }; // elemidx
             },
             .V128_Load => {
-                var memarg = try MemArg.decode(reader, 128);
+                const memarg = try MemArg.decode(reader, 128);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load8x8_S, .V128_Load8x8_U => {
-                var memarg = try MemArg.decode(reader, 8 * 8);
+                const memarg = try MemArg.decode(reader, 8 * 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load16x4_S, .V128_Load16x4_U => {
-                var memarg = try MemArg.decode(reader, 16 * 4);
+                const memarg = try MemArg.decode(reader, 16 * 4);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load32x2_S, .V128_Load32x2_U => {
-                var memarg = try MemArg.decode(reader, 32 * 2);
+                const memarg = try MemArg.decode(reader, 32 * 2);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load8_Splat => {
-                var memarg = try MemArg.decode(reader, 8);
+                const memarg = try MemArg.decode(reader, 8);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load16_Splat => {
-                var memarg = try MemArg.decode(reader, 16);
+                const memarg = try MemArg.decode(reader, 16);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load32_Splat => {
-                var memarg = try MemArg.decode(reader, 32);
+                const memarg = try MemArg.decode(reader, 32);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load64_Splat => {
-                var memarg = try MemArg.decode(reader, 64);
+                const memarg = try MemArg.decode(reader, 64);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .I8x16_Extract_Lane_S, .I8x16_Extract_Lane_U, .I8x16_Replace_Lane, .I16x8_Extract_Lane_S, .I16x8_Extract_Lane_U, .I16x8_Replace_Lane, .I32x4_Extract_Lane, .I32x4_Replace_Lane, .I64x2_Extract_Lane, .I64x2_Replace_Lane, .F32x4_Extract_Lane, .F32x4_Replace_Lane, .F64x2_Extract_Lane, .F64x2_Replace_Lane => {
                 immediate = InstructionImmediates{ .Index = try reader.readByte() }; // laneidx
             },
             .V128_Store => {
-                var memarg = try MemArg.decode(reader, 128);
+                const memarg = try MemArg.decode(reader, 128);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Const => {
                 immediate = InstructionImmediates{ .ValueVec = try decodeVec(reader) };
             },
             .I8x16_Shuffle => {
-                var lane_indices: [16]u8 = undefined;
+                const lane_indices: [16]u8 = undefined;
                 for (&lane_indices) |*v| {
                     const laneidx: u8 = try reader.readByte();
                     v.* = laneidx;
@@ -1228,11 +1228,11 @@ pub const Instruction = struct {
                 immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 64);
             },
             .V128_Load32_Zero => {
-                var memarg = try MemArg.decode(reader, 128);
+                const memarg = try MemArg.decode(reader, 128);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Load64_Zero => {
-                var memarg = try MemArg.decode(reader, 128);
+                const memarg = try MemArg.decode(reader, 128);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             else => {},
@@ -1298,7 +1298,7 @@ pub const NameCustomSection = struct {
     fn decodeInternal(self: *NameCustomSection, module_definition: *const ModuleDefinition, bytes: []const u8) !void {
         const DecodeHelpers = struct {
             fn readName(stream: anytype) ![]const u8 {
-                var reader = stream.reader();
+                const reader = stream.reader();
                 const name_length = try common.decodeLEB128(u32, reader);
                 const name: []const u8 = stream.buffer[stream.pos .. stream.pos + name_length];
                 try stream.seekBy(name_length);
@@ -1488,8 +1488,8 @@ const ModuleValidator = struct {
                     else => unreachable,
                 };
 
-                var start_types: []const ValType = blocktype.getBlocktypeParamTypes(module_);
-                var end_types: []const ValType = blocktype.getBlocktypeReturnTypes(module_);
+                const start_types: []const ValType = blocktype.getBlocktypeParamTypes(module_);
+                const end_types: []const ValType = blocktype.getBlocktypeReturnTypes(module_);
                 try popReturnTypes(validator, start_types);
 
                 try validator.pushControl(instruction_.opcode, start_types, end_types);
@@ -1619,7 +1619,7 @@ const ModuleValidator = struct {
                     return error.ValidationUnknownLabel;
                 }
                 const stack_index = validator.control_stack.items.len - control_index - 1;
-                var frame: *ControlFrame = &validator.control_stack.items[stack_index];
+                const frame: *ControlFrame = &validator.control_stack.items[stack_index];
                 return if (frame.opcode != .Loop) frame.end_types else frame.start_types;
             }
 
@@ -1697,7 +1697,7 @@ const ModuleValidator = struct {
                 }
             },
             .Branch_Table => {
-                var immediates: *const BranchTableImmediates = &module.code.branch_table.items[instruction.immediate.Index];
+                const immediates: *const BranchTableImmediates = &module.code.branch_table.items[instruction.immediate.Index];
 
                 const fallback_block_return_types: []const ValType = try Helpers.getControlTypes(self, immediates.fallback_id);
 
@@ -1740,7 +1740,7 @@ const ModuleValidator = struct {
                     return error.ValidationUnknownFunction;
                 }
 
-                var type_index: u32 = module.getFuncTypeIndex(func_index);
+                const type_index: u32 = module.getFuncTypeIndex(func_index);
                 try Helpers.popPushFuncTypes(self, type_index, module);
             },
             .Call_Indirect => {
@@ -1990,7 +1990,7 @@ const ModuleValidator = struct {
                 try self.pushType(instruction.immediate.ValType);
             },
             .Ref_Is_Null => {
-                var valtype_or_null: ?ValType = try self.popAnyType();
+                const valtype_or_null: ?ValType = try self.popAnyType();
                 if (valtype_or_null) |valtype| {
                     if (valtype.isRefType() == false) {
                         return error.ValidationTypeMismatch;
@@ -2113,7 +2113,7 @@ const ModuleValidator = struct {
 
                 try self.popType(.I32);
                 if (try self.popAnyType()) |init_type| {
-                    var table_reftype: ValType = try getTableReftype(module, instruction.immediate.Index);
+                    const table_reftype: ValType = try getTableReftype(module, instruction.immediate.Index);
                     if (init_type != table_reftype) {
                         return error.ValidationTypeMismatch;
                     }
@@ -2129,7 +2129,7 @@ const ModuleValidator = struct {
                 try validateTableIndex(instruction.immediate.Index, module);
                 try self.popType(.I32);
                 if (try self.popAnyType()) |valtype| {
-                    var table_reftype: ValType = try getTableReftype(module, instruction.immediate.Index);
+                    const table_reftype: ValType = try getTableReftype(module, instruction.immediate.Index);
                     if (valtype != table_reftype) {
                         return error.ValidationTypeMismatch;
                     }
@@ -2495,11 +2495,11 @@ const ModuleValidator = struct {
     fn pushControl(self: *ModuleValidator, opcode: Opcode, start_types: []const ValType, end_types: []const ValType) !void {
         const control_types_start_index: usize = self.control_types.items.len;
         try self.control_types.appendSlice(start_types);
-        var control_start_types: []const ValType = self.control_types.items[control_types_start_index..self.control_types.items.len];
+        const control_start_types: []const ValType = self.control_types.items[control_types_start_index..self.control_types.items.len];
 
         const control_types_end_index: usize = self.control_types.items.len;
         try self.control_types.appendSlice(end_types);
-        var control_end_types: []const ValType = self.control_types.items[control_types_end_index..self.control_types.items.len];
+        const control_end_types: []const ValType = self.control_types.items[control_types_end_index..self.control_types.items.len];
 
         try self.control_stack.append(ControlFrame{
             .opcode = opcode,
@@ -2538,7 +2538,7 @@ const ModuleValidator = struct {
     }
 
     fn freeControlTypes(self: *ModuleValidator, frame: *const ControlFrame) !void {
-        var num_used_types: usize = frame.start_types.len + frame.end_types.len;
+        const num_used_types: usize = frame.start_types.len + frame.end_types.len;
         try self.control_types.resize(self.control_types.items.len - num_used_types);
     }
 };
@@ -2595,7 +2595,7 @@ pub const ModuleDefinition = struct {
     is_decoded: bool = false,
 
     pub fn create(allocator: std.mem.Allocator, opts: ModuleDefinitionOpts) AllocError!*ModuleDefinition {
-        var def = try allocator.create(ModuleDefinition);
+        const def = try allocator.create(ModuleDefinition);
         def.* = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
@@ -2633,7 +2633,7 @@ pub const ModuleDefinition = struct {
         std.debug.assert(self.is_decoded == false);
 
         self.decode_internal(wasm) catch |e| {
-            var wrapped_error: anyerror = switch (e) {
+            const wrapped_error: anyerror = switch (e) {
                 error.EndOfStream => error.MalformedUnexpectedEnd,
                 else => e,
             };
@@ -2660,9 +2660,9 @@ pub const ModuleDefinition = struct {
             fn readName(reader: anytype, _allocator: std.mem.Allocator) ![]const u8 {
                 const name_length = try common.decodeLEB128(u32, reader);
 
-                var name: []u8 = try _allocator.alloc(u8, name_length);
+                const name: []u8 = try _allocator.alloc(u8, name_length);
                 errdefer _allocator.free(name);
-                var read_length = try reader.read(name);
+                const read_length = try reader.read(name);
                 if (read_length != name_length) {
                     return error.MalformedUnexpectedEnd;
                 }
@@ -2684,11 +2684,11 @@ pub const ModuleDefinition = struct {
 
         // wasm header
         {
-            const magic = try reader.readIntBig(u32);
+            const magic = try reader.readInt(u32, .big);
             if (magic != 0x0061736D) {
                 return error.MalformedMagicSignature;
             }
-            const version = try reader.readIntLittle(u32);
+            const version = try reader.readInt(u32, .little);
             if (version != 1) {
                 return error.MalformedUnsupportedWasmVersion;
             }
@@ -2709,7 +2709,7 @@ pub const ModuleDefinition = struct {
                         return error.MalformedUnexpectedEnd;
                     }
 
-                    var name = try DecodeHelpers.readName(reader, allocator);
+                    const name = try DecodeHelpers.readName(reader, allocator);
                     errdefer allocator.free(name);
 
                     var section = CustomSection{
@@ -2752,7 +2752,7 @@ pub const ModuleDefinition = struct {
                         while (params_left > 0) {
                             params_left -= 1;
 
-                            var param_type = try ValType.decode(reader);
+                            const param_type = try ValType.decode(reader);
                             try func.types.append(param_type);
                         }
 
@@ -2761,7 +2761,7 @@ pub const ModuleDefinition = struct {
                         while (returns_left > 0) {
                             returns_left -= 1;
 
-                            var return_type = try ValType.decode(reader);
+                            const return_type = try ValType.decode(reader);
                             try func.types.append(return_type);
                         }
 
@@ -2773,10 +2773,10 @@ pub const ModuleDefinition = struct {
 
                     var import_index: u32 = 0;
                     while (import_index < num_imports) : (import_index += 1) {
-                        var module_name: []const u8 = try DecodeHelpers.readName(reader, allocator);
+                        const module_name: []const u8 = try DecodeHelpers.readName(reader, allocator);
                         errdefer allocator.free(module_name);
 
-                        var import_name: []const u8 = try DecodeHelpers.readName(reader, allocator);
+                        const import_name: []const u8 = try DecodeHelpers.readName(reader, allocator);
                         errdefer allocator.free(import_name);
 
                         const names = ImportNames{
@@ -2834,7 +2834,7 @@ pub const ModuleDefinition = struct {
 
                     var func_index: u32 = 0;
                     while (func_index < num_funcs) : (func_index += 1) {
-                        var func = FunctionDefinition{
+                        const func = FunctionDefinition{
                             .type_index = try common.decodeLEB128(u32, reader),
                             .locals = std.ArrayList(ValType).init(allocator),
 
@@ -2878,7 +2878,7 @@ pub const ModuleDefinition = struct {
 
                     var memory_index: u32 = 0;
                     while (memory_index < num_memories) : (memory_index += 1) {
-                        var limits = try Limits.decode(reader);
+                        const limits = try Limits.decode(reader);
 
                         if (limits.min > MemoryDefinition.k_max_pages) {
                             return error.ValidationMemoryMaxPagesExceeded;
@@ -2893,7 +2893,7 @@ pub const ModuleDefinition = struct {
                             }
                         }
 
-                        var def = MemoryDefinition{
+                        const def = MemoryDefinition{
                             .limits = limits,
                         };
                         try self.memories.append(def);
@@ -2906,8 +2906,8 @@ pub const ModuleDefinition = struct {
 
                     var global_index: u32 = 0;
                     while (global_index < num_globals) : (global_index += 1) {
-                        var valtype = try ValType.decode(reader);
-                        var mut = try GlobalMut.decode(reader);
+                        const valtype = try ValType.decode(reader);
+                        const mut = try GlobalMut.decode(reader);
 
                         const expr = try ConstantExpression.decode(reader, self, .Immutable, valtype);
 
@@ -2935,11 +2935,11 @@ pub const ModuleDefinition = struct {
 
                     var export_index: u32 = 0;
                     while (export_index < num_exports) : (export_index += 1) {
-                        var name: []const u8 = try DecodeHelpers.readName(reader, allocator);
+                        const name: []const u8 = try DecodeHelpers.readName(reader, allocator);
                         errdefer allocator.free(name);
 
                         {
-                            var getOrPutResult = try export_names.getOrPut(name);
+                            const getOrPutResult = try export_names.getOrPut(name);
                             if (getOrPutResult.found_existing == true) {
                                 return error.ValidationDuplicateExportName;
                             }
@@ -2986,7 +2986,7 @@ pub const ModuleDefinition = struct {
                     if (self.start_func_index.? < self.imports.functions.items.len) {
                         func_type_index = self.imports.functions.items[self.start_func_index.?].type_index;
                     } else {
-                        var local_func_index = self.start_func_index.? - self.imports.functions.items.len;
+                        const local_func_index = self.start_func_index.? - self.imports.functions.items.len;
                         func_type_index = self.functions.items[local_func_index].type_index;
                     }
 
@@ -2998,7 +2998,7 @@ pub const ModuleDefinition = struct {
                 .Element => {
                     const ElementHelpers = struct {
                         fn readOffsetExpr(_reader: anytype, _module: *const ModuleDefinition) !ConstantExpression {
-                            var expr = try ConstantExpression.decode(_reader, _module, .Immutable, .I32);
+                            const expr = try ConstantExpression.decode(_reader, _module, .Immutable, .I32);
                             return expr;
                         }
 
@@ -3022,13 +3022,13 @@ pub const ModuleDefinition = struct {
 
                             var elem_index: u32 = 0;
                             while (elem_index < num_elems) : (elem_index += 1) {
-                                var expr = try ConstantExpression.decode(_reader, _module, .Any, expected_reftype);
+                                const expr = try ConstantExpression.decode(_reader, _module, .Any, expected_reftype);
                                 try elems.append(expr);
                             }
                         }
 
                         fn readNullElemkind(_reader: anytype) !void {
-                            var null_elemkind = try _reader.readByte();
+                            const null_elemkind = try _reader.readByte();
                             if (null_elemkind != 0x00) {
                                 return error.MalformedBytecode;
                             }
@@ -3041,7 +3041,7 @@ pub const ModuleDefinition = struct {
 
                     var segment_index: u32 = 0;
                     while (segment_index < num_segments) : (segment_index += 1) {
-                        var flags = try common.decodeLEB128(u32, reader);
+                        const flags = try common.decodeLEB128(u32, reader);
 
                         var def = ElementDefinition{
                             .mode = ElementMode.Active,
@@ -3217,7 +3217,7 @@ pub const ModuleDefinition = struct {
                                             else => unreachable,
                                         }
 
-                                        var else_index_or_null = if_to_else_offsets.get(block.begin_index);
+                                        const else_index_or_null = if_to_else_offsets.get(block.begin_index);
                                         if (else_index_or_null) |index| {
                                             var else_instruction: *Instruction = &instructions.items[index];
                                             else_instruction.immediate = block_instruction.immediate;
@@ -3264,7 +3264,7 @@ pub const ModuleDefinition = struct {
 
                     var data_index: u32 = 0;
                     while (data_index < num_datas) : (data_index += 1) {
-                        var data = try DataDefinition.decode(reader, self, allocator);
+                        const data = try DataDefinition.decode(reader, self, allocator);
                         try self.datas.append(data);
                     }
                 },
@@ -3274,7 +3274,7 @@ pub const ModuleDefinition = struct {
                 },
             }
 
-            var consumed_bytes = stream.pos - section_start_pos;
+            const consumed_bytes = stream.pos - section_start_pos;
             if (section_size_bytes != consumed_bytes) {
                 return error.MalformedSectionSizeMismatch;
             }
@@ -3393,8 +3393,8 @@ pub const ModuleDefinition = struct {
         };
 
         const type_def: *const FunctionTypeDefinition = &self.types.items[type_index];
-        var params: []const ValType = type_def.getParams();
-        var returns: []const ValType = type_def.getReturns();
+        const params: []const ValType = type_def.getParams();
+        const returns: []const ValType = type_def.getReturns();
 
         return FunctionExport{
             .params = params,

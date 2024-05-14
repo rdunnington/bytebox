@@ -148,7 +148,7 @@ pub const TableInstance = struct {
         const max = if (table.limits.max) |m| m else std.math.maxInt(i32);
         std.debug.assert(table.refs.items.len == table.limits.min);
 
-        var old_length: usize = table.limits.min;
+        const old_length: usize = table.limits.min;
         if (old_length + length > max) {
             return false;
         }
@@ -168,7 +168,7 @@ pub const TableInstance = struct {
             return error.TrapOutOfBoundsTableAccess;
         }
 
-        var elem_range = elems[start_elem_index .. start_elem_index + init_length];
+        const elem_range = elems[start_elem_index .. start_elem_index + init_length];
         var table_range = table.refs.items[start_table_index .. start_table_index + init_length];
 
         var index: u32 = 0;
@@ -240,14 +240,14 @@ pub const MemoryInstance = struct {
     pub fn init(limits: Limits, params: ?WasmMemoryExternal) MemoryInstance {
         const max_pages = if (limits.max) |max| @max(1, max) else k_max_pages;
 
-        var mem = if (params == null) BackingMemory{
+        const mem = if (params == null) BackingMemory{
             .Internal = StableArray(u8).init(max_pages * k_page_size),
         } else BackingMemory{ .External = .{
             .buffer = &[0]u8{},
             .params = params.?,
         } };
 
-        var instance = MemoryInstance{
+        const instance = MemoryInstance{
             .limits = Limits{ .min = 0, .max = @as(u32, @intCast(max_pages)) },
             .mem = mem,
         };
@@ -317,12 +317,12 @@ pub const MemoryInstance = struct {
 
     fn ensureMinSize(self: *MemoryInstance, size_bytes: usize) !void {
         if (self.limits.min * k_page_size < size_bytes) {
-            var num_min_pages = std.math.divCeil(usize, size_bytes, k_page_size) catch unreachable;
+            const num_min_pages = std.math.divCeil(usize, size_bytes, k_page_size) catch unreachable;
             if (num_min_pages > self.limits.max.?) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
-            var needed_pages = num_min_pages - self.limits.min;
+            const needed_pages = num_min_pages - self.limits.min;
             if (self.resize(needed_pages) == false) {
                 unreachable;
             }
@@ -385,7 +385,7 @@ pub const FunctionImport = struct {
                 return type_comparer.eql(&data.func_def, type_signature);
             },
             .Wasm => |data| {
-                var func_type_def: *const FunctionTypeDefinition = data.module_instance.findFuncTypeDef(data.index);
+                const func_type_def: *const FunctionTypeDefinition = data.module_instance.findFuncTypeDef(data.index);
                 return type_comparer.eql(func_type_def, type_signature);
             },
         }
@@ -521,7 +521,7 @@ pub const Store = struct {
     },
 
     fn init(allocator: std.mem.Allocator) Store {
-        var store = Store{
+        const store = Store{
             .imports = .{
                 .functions = std.ArrayList(FunctionImport).init(allocator),
                 .tables = std.ArrayList(TableImport).init(allocator),
@@ -554,10 +554,10 @@ pub const Store = struct {
 
     pub fn getTable(self: *Store, index: usize) *TableInstance {
         if (self.imports.tables.items.len <= index) {
-            var instance_index = index - self.imports.tables.items.len;
+            const instance_index = index - self.imports.tables.items.len;
             return &self.tables.items[instance_index];
         } else {
-            var import: *TableImport = &self.imports.tables.items[index];
+            const import: *TableImport = &self.imports.tables.items[index];
             return switch (import.data) {
                 .Host => |data| data,
                 .Wasm => |data| data.module_instance.store.getTable(data.index),
@@ -567,10 +567,10 @@ pub const Store = struct {
 
     pub fn getMemory(self: *Store, index: usize) *MemoryInstance {
         if (self.imports.memories.items.len <= index) {
-            var instance_index = index - self.imports.memories.items.len;
+            const instance_index = index - self.imports.memories.items.len;
             return &self.memories.items[instance_index];
         } else {
-            var import: *MemoryImport = &self.imports.memories.items[index];
+            const import: *MemoryImport = &self.imports.memories.items[index];
             return switch (import.data) {
                 .Host => |data| data,
                 .Wasm => |data| data.module_instance.store.getMemory(data.index),
@@ -580,10 +580,10 @@ pub const Store = struct {
 
     pub fn getGlobal(self: *Store, index: usize) *GlobalInstance { // TODO make private
         if (self.imports.globals.items.len <= index) {
-            var instance_index = index - self.imports.globals.items.len;
+            const instance_index = index - self.imports.globals.items.len;
             return &self.globals.items[instance_index];
         } else {
-            var import: *GlobalImport = &self.imports.globals.items[index];
+            const import: *GlobalImport = &self.imports.globals.items[index];
             return switch (import.data) {
                 .Host => |data| data,
                 .Wasm => |data| data.module_instance.store.getGlobal(data.index),
@@ -645,7 +645,7 @@ pub const VM = struct {
         var mem = try allocator.alloc(u8, total_alloc_size);
 
         var vm: *VM = @as(*VM, @alignCast(@ptrCast(mem.ptr)));
-        var impl: *T = @as(*T, @alignCast(@ptrCast(mem[vm_alloc_size..].ptr)));
+        const impl: *T = @as(*T, @alignCast(@ptrCast(mem[vm_alloc_size..].ptr)));
 
         vm.deinit_fn = T.deinit;
         vm.instantiate_fn = T.instantiate;
@@ -669,7 +669,7 @@ pub const VM = struct {
         vm.deinit_fn(vm);
 
         var allocator = vm.allocator;
-        var mem = vm.mem;
+        const mem = vm.mem;
         allocator.free(mem);
     }
 
@@ -715,7 +715,7 @@ pub const ModuleInstance = struct {
     vm: *VM,
 
     pub fn create(module_def: *const ModuleDefinition, vm: *VM, allocator: std.mem.Allocator) AllocError!*ModuleInstance {
-        var inst = try allocator.create(ModuleInstance);
+        const inst = try allocator.create(ModuleInstance);
         inst.* = ModuleInstance{
             .allocator = allocator,
             .store = Store.init(allocator),
@@ -740,8 +740,8 @@ pub const ModuleInstance = struct {
                     return false;
                 }
 
-                var def_max: u32 = if (def_limits.max) |max| max else std.math.maxInt(u32);
-                var instance_max: u32 = if (instance_limits.max) |max| max else 0;
+                const def_max: u32 = if (def_limits.max) |max| max else std.math.maxInt(u32);
+                const instance_max: u32 = if (instance_limits.max) |max| max else 0;
 
                 return def_limits.min <= instance_limits.min and def_max >= instance_max;
             }
@@ -820,7 +820,7 @@ pub const ModuleInstance = struct {
             }
 
             fn findImportInSingle(comptime T: type, names: *const ImportNames, module_imports: *const ModuleImportPackage) ?*const T {
-                var items: []const T = switch (T) {
+                const items: []const T = switch (T) {
                     FunctionImport => module_imports.functions.items,
                     TableImport => module_imports.tables.items,
                     MemoryImport => module_imports.memories.items,
@@ -842,7 +842,7 @@ pub const ModuleInstance = struct {
 
         var store: *Store = &self.store;
         var module_def: *const ModuleDefinition = self.module_def;
-        var allocator = self.allocator;
+        const allocator = self.allocator;
 
         for (module_def.imports.functions.items) |*func_import_def| {
             var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, opts.imports);
@@ -930,7 +930,7 @@ pub const ModuleInstance = struct {
         try store.tables.ensureTotalCapacity(module_def.imports.tables.items.len + module_def.tables.items.len);
 
         for (module_def.tables.items) |*def_table| {
-            var t = try TableInstance.init(def_table.reftype, def_table.limits, allocator);
+            const t = try TableInstance.init(def_table.reftype, def_table.limits, allocator);
             try store.tables.append(t);
         }
 
@@ -971,18 +971,18 @@ pub const ModuleInstance = struct {
 
                 var table: *TableInstance = store.getTable(def_elem.table_index);
 
-                var start_table_index_i32: i32 = if (def_elem.offset) |offset| offset.resolveTo(store, i32) else 0;
+                const start_table_index_i32: i32 = if (def_elem.offset) |offset| offset.resolveTo(store, i32) else 0;
                 if (start_table_index_i32 < 0) {
                     return error.UninstantiableOutOfBoundsTableAccess;
                 }
 
-                var start_table_index = @as(u32, @intCast(start_table_index_i32));
+                const start_table_index = @as(u32, @intCast(start_table_index_i32));
 
                 if (def_elem.elems_value.items.len > 0) {
-                    var elems = def_elem.elems_value.items;
+                    const elems = def_elem.elems_value.items;
                     try table.init_range_val(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index);
                 } else {
-                    var elems = def_elem.elems_expr.items;
+                    const elems = def_elem.elems_expr.items;
                     try table.init_range_expr(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index, store);
                 }
             } else if (def_elem.mode == .Passive) {
@@ -1013,7 +1013,7 @@ pub const ModuleInstance = struct {
         for (module_def.datas.items) |*def_data| {
             // instructions using passive elements just use the module definition's data to avoid an extra copy
             if (def_data.mode == .Active) {
-                var memory_index: u32 = def_data.memory_index.?;
+                const memory_index: u32 = def_data.memory_index.?;
                 var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
@@ -1026,13 +1026,13 @@ pub const ModuleInstance = struct {
                     return error.UninstantiableOutOfBoundsMemoryAccess;
                 }
 
-                var destination = mem_buffer[offset_begin..offset_end];
-                std.mem.copy(u8, destination, def_data.bytes.items);
+                const destination = mem_buffer[offset_begin..offset_end];
+                @memcpy(destination, def_data.bytes.items);
             }
         }
 
         if (module_def.start_func_index) |func_index| {
-            var no_vals: []Val = &[0]Val{};
+            const no_vals: []Val = &[0]Val{};
             try self.vm.invokeWithIndex(self, func_index, no_vals.ptr, no_vals.ptr);
         }
     }
@@ -1095,7 +1095,7 @@ pub const ModuleInstance = struct {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name)) {
                 if (func_export.index >= self.module_def.imports.functions.items.len) {
-                    var func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
+                    const func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
                     return FunctionHandle{
                         .index = @as(u32, @intCast(func_index)),
                         .type = .Export,
@@ -1162,7 +1162,7 @@ pub const ModuleInstance = struct {
 
         const buffer = memory.buffer();
         if (offset + length < buffer.len) {
-            var data: []u8 = buffer[offset .. offset + length];
+            const data: []u8 = buffer[offset .. offset + length];
             return data;
         }
 
@@ -1206,11 +1206,11 @@ pub const ModuleInstance = struct {
     fn findFuncTypeDef(self: *ModuleInstance, index: usize) *const FunctionTypeDefinition {
         const num_imports: usize = self.store.imports.functions.items.len;
         if (index >= num_imports) {
-            var local_func_index: usize = index - num_imports;
+            const local_func_index: usize = index - num_imports;
             return self.vm.findFuncTypeDef(self, local_func_index);
         } else {
-            var import: *const FunctionImport = &self.store.imports.functions.items[index];
-            var func_type_def: *const FunctionTypeDefinition = switch (import.data) {
+            const import: *const FunctionImport = &self.store.imports.functions.items[index];
+            const func_type_def: *const FunctionTypeDefinition = switch (import.data) {
                 .Host => |data| &data.func_def,
                 .Wasm => |data| data.module_instance.findFuncTypeDef(data.index),
             };
@@ -1221,10 +1221,10 @@ pub const ModuleInstance = struct {
     fn getGlobalWithIndex(self: *ModuleInstance, index: usize) *GlobalInstance {
         const num_imports: usize = self.module_def.imports.globals.items.len;
         if (index >= num_imports) {
-            var local_global_index: usize = index - self.module_def.imports.globals.items.len;
+            const local_global_index: usize = index - self.module_def.imports.globals.items.len;
             return &self.store.globals.items[local_global_index];
         } else {
-            var import: *const GlobalImport = &self.store.imports.globals.items[index];
+            const import: *const GlobalImport = &self.store.imports.globals.items[index];
             return switch (import.data) {
                 .Host => |data| data,
                 .Wasm => |data| data.module_instance.getGlobalWithIndex(data.index),

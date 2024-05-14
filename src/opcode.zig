@@ -915,14 +915,14 @@ pub const WasmOpcode = enum(u16) {
     }
 
     pub fn decode(reader: anytype) !WasmOpcode {
-        var byte = try reader.readByte();
+        const byte = try reader.readByte();
         var wasm_op: WasmOpcode = undefined;
         if (byte == 0xFC or byte == 0xFD) {
-            var type_opcode = try common.decodeLEB128(u32, reader);
+            const type_opcode = try common.decodeLEB128(u32, reader);
             if (type_opcode > std.math.maxInt(u8)) {
                 return error.MalformedIllegalOpcode;
             }
-            var byte2 = @as(u8, @intCast(type_opcode));
+            const byte2 = @as(u8, @intCast(type_opcode));
             var extended: u16 = byte;
             extended = extended << 8;
             extended |= byte2;

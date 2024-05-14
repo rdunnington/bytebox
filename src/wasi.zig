@@ -48,7 +48,7 @@ const WasiContext = struct {
 
         {
             var cwd_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            const cwd: []const u8 = try std.os.getcwd(&cwd_buffer);
+            const cwd: []const u8 = try std.process.getCwd(&cwd_buffer);
             context.cwd = try context.strings.put(cwd);
         }
 
@@ -77,7 +77,7 @@ const WasiContext = struct {
         const path_stdout = try context.strings.put("stdout");
         const path_stderr = try context.strings.put("stderr");
 
-        var empty_dir_entries = std.ArrayList(WasiDirEntry).init(allocator);
+        const empty_dir_entries = std.ArrayList(WasiDirEntry).init(allocator);
 
         try context.fd_table.ensureTotalCapacity(3 + context.dirs.len);
         context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
@@ -197,7 +197,7 @@ const WasiContext = struct {
         if (self.resolveAndCache(fd_info_dir, path)) |resolved_path| {
             // Found an entry for this path, just reuse it while creating a new wasi fd
             if (self.fd_path_lookup.get(resolved_path)) |fd_table_index| {
-                var fd_wasi: u32 = self.next_fd_id;
+                const fd_wasi: u32 = self.next_fd_id;
                 self.next_fd_id += 1;
                 self.fd_wasi_table.put(fd_wasi, fd_table_index) catch |err| {
                     errno.* = Errno.translateError(err);
@@ -217,7 +217,7 @@ const WasiContext = struct {
             }
 
             if (open_func(resolved_path, lookupflags, openflags2, fdflags, rights, errno)) |fd_os| {
-                var fd_wasi: u32 = self.next_fd_id;
+                const fd_wasi: u32 = self.next_fd_id;
                 self.next_fd_id += 1;
 
                 var info: *FdInfo = undefined;
@@ -1129,7 +1129,7 @@ const Helpers = struct {
         };
 
         if (fstflags & std.os.wasi.FILESTAT_SET_ATIM != 0) {
-            var ts: std.os.wasi.timespec = std.os.wasi.timespec.fromTimestamp(timestamp_wasi_access);
+            const ts: std.os.wasi.timespec = std.os.wasi.timespec.fromTimestamp(timestamp_wasi_access);
             times[0].tv_sec = ts.tv_sec;
             times[0].tv_nsec = ts.tv_nsec;
         }
@@ -1137,7 +1137,7 @@ const Helpers = struct {
             times[0].tv_nsec = UTIME_NOW;
         }
         if (fstflags & std.os.wasi.FILESTAT_SET_MTIM != 0) {
-            var ts: std.os.wasi.timespec = std.os.wasi.timespec.fromTimestamp(timestamp_wasi_modified);
+            const ts: std.os.wasi.timespec = std.os.wasi.timespec.fromTimestamp(timestamp_wasi_modified);
             times[1].tv_sec = ts.tv_sec;
             times[1].tv_nsec = ts.tv_nsec;
         }
@@ -1413,7 +1413,7 @@ const Helpers = struct {
             restart_scan = false;
         }
 
-        var bytes_written = signedCast(u32, fbs.pos, errno);
+        const bytes_written = signedCast(u32, fbs.pos, errno);
         return bytes_written;
     }
 
@@ -1459,7 +1459,7 @@ const Helpers = struct {
 
             var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
             var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
-            var allocator = fba.allocator();
+            const allocator = fba.allocator();
             const filename: []u8 = std.unicode.utf16leToUtf8Alloc(allocator, filename_utf16le) catch unreachable;
 
             var filetype: std.os.wasi.filetype_t = .REGULAR_FILE;
@@ -1469,7 +1469,7 @@ const Helpers = struct {
                 filetype = .SYMBOLIC_LINK;
             }
 
-            var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
+            const filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
                 errno.* = Errno.translateError(err);
                 return false;
             };
@@ -1539,7 +1539,7 @@ const Helpers = struct {
                 else => .UNKNOWN,
             };
 
-            var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
+            const filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
                 errno.* = Errno.translateError(err);
                 break;
             };
@@ -1603,7 +1603,7 @@ const Helpers = struct {
                 else => .UNKNOWN,
             };
 
-            var filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
+            const filename_duped = fd_info.dir_entries.allocator.dupe(u8, filename) catch |err| {
                 errno.* = Errno.translateError(err);
                 break;
             };
@@ -1630,12 +1630,12 @@ const Helpers = struct {
                 var reader = stream.reader();
 
                 for (iov) |*iovec| {
-                    const iov_base: u32 = reader.readIntLittle(u32) catch {
+                    const iov_base: u32 = reader.readInt(u32, .little) catch {
                         errno.* = Errno.INVAL;
                         return null;
                     };
 
-                    const iov_len: u32 = reader.readIntLittle(u32) catch {
+                    const iov_len: u32 = reader.readInt(u32, .little) catch {
                         errno.* = Errno.INVAL;
                         return null;
                     };
@@ -1661,29 +1661,29 @@ fn wasi_proc_exit(_: ?*anyopaque, _: *ModuleInstance, params: [*]const Val, _: [
 
     if (raw_exit_code >= 0 and raw_exit_code < std.math.maxInt(u8)) {
         const exit_code = @as(u8, @intCast(raw_exit_code));
-        std.os.exit(exit_code);
+        std.process.exit(exit_code);
     } else {
-        std.os.exit(1);
+        std.process.exit(1);
     }
 }
 
 fn wasi_args_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
-    var context = WasiContext.fromUserdata(userdata);
+    const context = WasiContext.fromUserdata(userdata);
     Helpers.stringsSizesGet(module, context.argv, params, returns);
 }
 
 fn wasi_args_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
-    var context = WasiContext.fromUserdata(userdata);
+    const context = WasiContext.fromUserdata(userdata);
     Helpers.stringsGet(module, context.argv, params, returns);
 }
 
 fn wasi_environ_sizes_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
-    var context = WasiContext.fromUserdata(userdata);
+    const context = WasiContext.fromUserdata(userdata);
     Helpers.stringsSizesGet(module, context.env, params, returns);
 }
 
 fn wasi_environ_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void {
-    var context = WasiContext.fromUserdata(userdata);
+    const context = WasiContext.fromUserdata(userdata);
     Helpers.stringsGet(module, context.env, params, returns);
 }
 
@@ -1944,7 +1944,7 @@ fn fd_wasi_readdir(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]co
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
             if (Helpers.getMemorySlice(module, dirent_mem_offset, dirent_mem_length, &errno)) |dirent_buffer| {
-                var bytes_written = Helpers.enumerateDirEntries(fd_info, cookie, dirent_buffer, &errno);
+                const bytes_written = Helpers.enumerateDirEntries(fd_info, cookie, dirent_buffer, &errno);
                 Helpers.writeIntToMemory(u32, bytes_written, bytes_written_out_offset, module, &errno);
             }
         }
@@ -2207,7 +2207,7 @@ fn fd_wasi_seek(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const
     if (errno == .SUCCESS) {
         if (context.fdLookup(fd_wasi, &errno)) |fd_info| {
             if (fd_info.rights.fd_seek) {
-                const fd_os: std.os.fd_t = fd_info.fd;
+                const fd_os: std.posix.fd_t = fd_info.fd;
                 if (Whence.fromInt(whence_raw)) |whence| {
                     switch (whence) {
                         .Set => {
