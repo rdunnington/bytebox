@@ -719,7 +719,7 @@ const Helpers = struct {
                 writeIntToMemory(u32, dest_string_strings, dest_string_ptrs, module, &errno);
 
                 if (getMemorySlice(module, dest_string_strings, string.len + 1, &errno)) |mem| {
-                    std.mem.copy(u8, mem[0..string.len], string);
+                    @memcpy(mem[0..string.len], string);
                     mem[string.len] = 0; // null terminator
 
                     dest_string_ptrs += @sizeOf(u32);
