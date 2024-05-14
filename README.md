@@ -56,15 +56,15 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    var wasm_data: []u8 = try std.fs.cwd().readFileAlloc(allocator, "example.wasm", 1024 * 128);
+    const wasm_data: []u8 = try std.fs.cwd().readFileAlloc(allocator, "example.wasm", 1024 * 128);
     defer allocator.free(wasm_data);
 
-    var module_definition = bytebox.ModuleDefinition.init(allocator, .{});
-    defer module_definition.deinit();
-    try module_definition.decode(wasm_data);
+    const module_def = try bytebox.createModuleDefinition(allocator, .{});
+    defer module_def.destroy();
+    try module_def.decode(wasm_data);
 
-    var module_instance = bytebox.ModuleInstance.init(&module_definition, allocator);
-    defer module_instance.deinit();
+    const module_instance = try bytebox.createModuleInstance(.Stack, module_def, allocator);
+    defer module_instance.destroy();
     try module_instance.instantiate(.{});
 }
 ```
