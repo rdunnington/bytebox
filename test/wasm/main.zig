@@ -1533,7 +1533,7 @@ pub fn main() !void {
         };
 
         // wasm path
-        const suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite, suite });
+        const suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite, suite });
         defer allocator.free(suite_path_no_extension);
 
         const suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
