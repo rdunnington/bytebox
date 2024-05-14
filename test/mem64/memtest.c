@@ -1,4 +1,5 @@
 // clang --target=wasm64-freestanding -mbulk-memory -nostdlib -O2 -Wl,--no-entry -Wl,--export-dynamic -o memtest.wasm memtest.c
+// zig cc --target=wasm64-freestanding -mbulk-memory -nostdlib -O2 -Wl,--no-entry -Wl,--export-dynamic -o memtest.wasm memtest.c
 
 #include <stddef.h>
 #include <stdint.h>
@@ -10,7 +11,7 @@
 #define PAGE_SIZE (64 * KB)
 #define PAGES_PER_GB (GB / PAGE_SIZE)
 
-#define assert(value) if (value == 0) return -1
+#define assert(value) if (value == 0) __builtin_trap()
 
 __attribute__((visibility("default"))) int64_t memtest(int32_t val_i32, int64_t val_i64, float val_f32, double val_f64)
 {
@@ -39,26 +40,27 @@ __attribute__((visibility("default"))) int64_t memtest(int32_t val_i32, int64_t 
 	assert(*(float*)(mem_stores + 16) == val_f32);
 	assert(*(double*)(mem_stores + 24) == val_f64);
 
-	int32_t store32 = 0;
-	store32 += (int32_t)*(int8_t*)(mem_loads + 32); // i32.load8_s
-	store32 += (int32_t)*(uint8_t*)(mem_loads + 40); // i32.load8_u
-	store32 += (int32_t)*(int16_t*)(mem_loads + 48); // i32.load16_s
-	store32 += (int32_t)*(uint16_t*)(mem_loads + 56); // i32.load16_s
+	int32_t load32 = 0;
+	load32 += (int32_t)*(int8_t*)(mem_loads + 32); // i32.load8_s
+	load32 += (int32_t)*(uint8_t*)(mem_loads + 40); // i32.load8_u
+	load32 += (int32_t)*(int16_t*)(mem_loads + 48); // i32.load16_s
+	load32 += (int32_t)*(uint16_t*)(mem_loads + 56); // i32.load16_s
 
-	int64_t store64 = 0;
-	store64 += (int64_t)*(int8_t*)(mem_loads + 64); // i64.load8_s
-	store64 += (int64_t)*(uint8_t*)(mem_loads + 72); // i64.load8_u
-	store64 += (int64_t)*(int16_t*)(mem_loads + 80); // i64.load16_s
-	store64 += (int64_t)*(uint16_t*)(mem_loads + 88); // i64.load16_s
-	store64 += (int64_t)*(int32_t*)(mem_loads + 96); // i64.load32_s
-	store64 += (int64_t)*(uint32_t*)(mem_loads + 104); // i64.load32_s
+	int64_t load64 = 0;
+	load64 += (int64_t)*(int8_t*)(mem_loads + 64); // i64.load8_s
+	load64 += (int64_t)*(uint8_t*)(mem_loads + 72); // i64.load8_u
+	load64 += (int64_t)*(int16_t*)(mem_loads + 80); // i64.load16_s
+	load64 += (int64_t)*(uint16_t*)(mem_loads + 88); // i64.load16_s
+	load64 += (int64_t)*(int32_t*)(mem_loads + 96); // i64.load32_s
+	load64 += (int64_t)*(uint32_t*)(mem_loads + 104); // i64.load32_s
 
 	// forces the compiler to not elide or condense the loads
-	*(int32_t*)(mem_stores + 0) = store32;
-	*(int64_t*)(mem_stores + 8) = store64;
+	*(int32_t*)(mem_stores + 0) = load32;
+	*(int64_t*)(mem_stores + 8) = load64;
 	
 	__builtin_memset(mem + KB, 0xFF, KB); // memory.fill
 	__builtin_memcpy(mem + KB * 4, mem + KB * 3, KB); // memory.copy
 
 	return 0;
 }
+
