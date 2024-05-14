@@ -215,7 +215,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                             else => {},
                         }
                     } else {
-                        os.madvise(addr, bytes_to_free, std.c.MADV.DONTNEED) catch unreachable;
+                        std.posix.madvise(addr, bytes_to_free, std.c.MADV.DONTNEED) catch unreachable;
                     }
                 }
 

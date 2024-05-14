@@ -7,12 +7,12 @@ const Limits = core.Limits;
 const MemoryInstance = core.MemoryInstance;
 
 test "StackVM.Integration" {
-    const wasm_filepath = "zig-out/lib/mandelbrot.wasm";
+    const wasm_filepath = "zig-out/bin/mandelbrot.wasm";
 
     var allocator = std.testing.allocator;
 
     var cwd = std.fs.cwd();
-    var wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
+    const wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
     defer allocator.free(wasm_data);
 
     const module_def_opts = core.ModuleDefinitionOpts{
@@ -36,7 +36,7 @@ test "MemoryInstance.init" {
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.limits.min, 0);
-        try expectEqual(memory.limits.max, MemoryInstance.k_max_pages);
+        try expectEqual(memory.limits.max.?, MemoryInstance.k_max_pages);
         try expectEqual(memory.size(), 0);
         try expectEqual(memory.mem.Internal.items.len, 0);
     }

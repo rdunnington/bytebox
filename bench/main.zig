@@ -3,6 +3,10 @@ const bytebox = @import("bytebox");
 const Val = bytebox.Val;
 const Timer = std.time.Timer;
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
 const Benchmark = struct {
     name: []const u8,
     filename: []const u8,
@@ -44,15 +48,15 @@ pub fn main() !void {
 
     const benchmarks = [_]Benchmark{ .{
         .name = "add-one",
-        .filename = "zig-out/lib/add-one.wasm",
+        .filename = "zig-out/bin/add-one.wasm",
         .param = 123456789,
     }, .{
         .name = "fibonacci",
-        .filename = "zig-out/lib/fibonacci.wasm",
+        .filename = "zig-out/bin/fibonacci.wasm",
         .param = 20,
     }, .{
         .name = "mandelbrot",
-        .filename = "zig-out/lib/mandelbrot.wasm",
+        .filename = "zig-out/bin/mandelbrot.wasm",
         .param = 20,
     } };
 

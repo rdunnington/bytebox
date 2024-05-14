@@ -19,9 +19,9 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    var bench_add_one_step: *CompileStep = buildWasmLib(b, "bench/samples/add-one.zig", optimize);
-    var bench_fibonacci_step: *CompileStep = buildWasmLib(b, "bench/samples/fibonacci.zig", optimize);
-    var bench_mandelbrot_step: *CompileStep = buildWasmLib(b, "bench/samples/mandelbrot.zig", optimize);
+    var bench_add_one_step: *CompileStep = buildWasmExe(b, "bench/samples/add-one.zig", optimize);
+    var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig", optimize);
+    var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig", optimize);
 
     const bytebox_module: *Build.Module = b.addModule(.{
         .root_source_file = b.path("src/core.zig"),
@@ -119,11 +119,11 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
     return step;
 }
 
-fn buildWasmLib(b: *Build, filepath: []const u8, optimize: std.builtin.Mode) *CompileStep {
+fn buildWasmExe(b: *Build, filepath: []const u8, optimize: std.builtin.Mode) *CompileStep {
     var filename: []const u8 = std.fs.path.basename(filepath);
     const filename_no_extension: []const u8 = filename[0 .. filename.len - 4];
 
-    const lib = b.addExecutable(.{
+    const exe = b.addExecutable(.{
         .name = filename_no_extension,
         .root_source_file = b.path(filepath),
         .target = b.resolveTargetQuery(.{
@@ -132,11 +132,12 @@ fn buildWasmLib(b: *Build, filepath: []const u8, optimize: std.builtin.Mode) *Co
         }),
         .optimize = optimize,
     });
-    lib.entry = .disabled;
+    exe.rdynamic = true;
+    exe.entry = .disabled;
 
     // const mode = b.standardOptimizeOption();
     // lib.setBuildMode(mode);
-    b.installArtifact(lib);
+    b.installArtifact(exe);
 
-    return lib;
+    return exe;
 }

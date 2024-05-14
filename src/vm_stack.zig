@@ -280,7 +280,7 @@ const Stack = struct {
 
             const returns_source: []const Val = stack.values[source_begin..source_end];
             const returns_dest: []Val = stack.values[dest_begin..dest_end];
-            @memcpy(returns_dest, returns_source);
+            std.mem.copyForwards(Val, returns_dest, returns_source);
 
             stack.num_values = @as(u32, @intCast(dest_end));
             stack.num_labels = label_index;
@@ -334,7 +334,7 @@ const Stack = struct {
 
         const returns_source: []const Val = stack.values[source_begin..source_end];
         const returns_dest: []Val = stack.values[dest_begin..dest_end];
-        @memcpy(returns_dest, returns_source);
+        std.mem.copyForwards(Val, returns_dest, returns_source);
 
         stack.num_values = @as(u32, @intCast(dest_end));
         stack.num_labels = frame.start_offset_labels;
@@ -1056,7 +1056,7 @@ const InstructionFuncs = struct {
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
 
-                        @memcpy(returns_dest, returns_temp);
+                        std.mem.copyForwards(Val, returns_dest, returns_temp);
 
                         return FuncCallData{
                             .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
@@ -2533,7 +2533,8 @@ const InstructionFuncs = struct {
         try debugPreamble("I32_Rem_S", pc, code, stack);
         const v2: i32 = stack.popI32();
         const v1: i32 = stack.popI32();
-        const value = std.math.rem(i32, v1, v2) catch |e| {
+        const denom: i32 = @intCast(@abs(v2));
+        const value = std.math.rem(i32, v1, denom) catch |e| {
             if (e == error.DivisionByZero) {
                 return error.TrapIntegerDivisionByZero;
             } else {
@@ -2725,7 +2726,8 @@ const InstructionFuncs = struct {
         try debugPreamble("I64_Rem_S", pc, code, stack);
         const v2: i64 = stack.popI64();
         const v1: i64 = stack.popI64();
-        const value = std.math.rem(i64, v1, v2) catch |e| {
+        const denom: i64 = @intCast(@abs(v2));
+        const value = std.math.rem(i64, v1, denom) catch |e| {
             if (e == error.DivisionByZero) {
                 return error.TrapIntegerDivisionByZero;
             } else {
@@ -3466,7 +3468,7 @@ const InstructionFuncs = struct {
         const destination = buffer[dest_offset_u32 .. dest_offset_u32 + length_u32];
 
         if (@intFromPtr(destination.ptr) < @intFromPtr(source.ptr)) {
-            @memcpy(destination, source);
+            std.mem.copyForwards(u8, destination, source);
         } else {
             std.mem.copyBackwards(u8, destination, source);
         }
@@ -3528,7 +3530,7 @@ const InstructionFuncs = struct {
 
         const dest: []Val = table.refs.items[table_begin .. table_begin + length];
         const src: []const Val = elem.refs.items[elem_begin .. elem_begin + length];
-        @memcpy(dest, src);
+        std.mem.copyForwards(Val, dest, src);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -3570,7 +3572,7 @@ const InstructionFuncs = struct {
         const dest: []Val = dest_table.refs.items[dest_begin .. dest_begin + length];
         const src: []const Val = src_table.refs.items[src_begin .. src_begin + length];
         if (dest_start_index <= src_start_index) {
-            @memcpy(dest, src);
+            std.mem.copyForwards(Val, dest, src);
         } else {
             std.mem.copyBackwards(Val, dest, src);
         }
