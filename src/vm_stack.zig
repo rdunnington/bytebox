@@ -280,7 +280,7 @@ const Stack = struct {
 
             const returns_source: []const Val = stack.values[source_begin..source_end];
             const returns_dest: []Val = stack.values[dest_begin..dest_end];
-            std.mem.copy(Val, returns_dest, returns_source);
+            @memcpy(returns_dest, returns_source);
 
             stack.num_values = @as(u32, @intCast(dest_end));
             stack.num_labels = label_index;
@@ -334,7 +334,7 @@ const Stack = struct {
 
         const returns_source: []const Val = stack.values[source_begin..source_end];
         const returns_dest: []Val = stack.values[dest_begin..dest_end];
-        std.mem.copy(Val, returns_dest, returns_source);
+        @memcpy(returns_dest, returns_source);
 
         stack.num_values = @as(u32, @intCast(dest_end));
         stack.num_labels = frame.start_offset_labels;
@@ -957,7 +957,8 @@ const InstructionFuncs = struct {
             }
 
             const mem = buffer[offset..end];
-            const value = std.mem.readIntSliceLittle(read_type, mem);
+            const byte_count = bit_count / 8;
+            const value = std.mem.readInt(read_type, mem[0..byte_count], .little);
             return @as(T, @bitCast(value));
         }
 
@@ -983,7 +984,7 @@ const InstructionFuncs = struct {
             while (i < array_len) : (i += 1) {
                 const value_start = i * byte_count;
                 const value_end = value_start + byte_count;
-                ret[i] = std.mem.readIntSliceLittle(read_type, mem[value_start..value_end]);
+                ret[i] = std.mem.readInt(read_type, mem[value_start..value_end][0..byte_count], .little);
             }
             return ret;
         }
@@ -1016,7 +1017,8 @@ const InstructionFuncs = struct {
             const write_value = @as(write_type, @bitCast(value));
 
             const mem = buffer[offset..end];
-            std.mem.writeIntSliceLittle(write_type, mem, write_value);
+            const byte_count = bit_count / 8;
+            std.mem.writeInt(write_type, mem[0..byte_count], write_value, .little);
         }
 
         fn call(pc: u32, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) !FuncCallData {
@@ -3424,16 +3426,16 @@ const InstructionFuncs = struct {
         const memory_offset_u32 = @as(u32, @intCast(memory_offset));
         const length_u32 = @as(u32, @intCast(length));
 
-        var source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
-        var destination = buffer[memory_offset_u32 .. memory_offset_u32 + length_u32];
-        std.mem.copy(u8, destination, source);
+        const source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
+        const destination = buffer[memory_offset_u32 .. memory_offset_u32 + length_u32];
+        std.mem.copyForwards(u8, destination, source);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_Data_Drop(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try debugPreamble("Data_Drop", pc, code, stack);
         const data_index: u32 = code[pc].immediate.Index;
-        var data: *DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
+        const data: *DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
         data.bytes.clearAndFree();
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }

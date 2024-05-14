@@ -599,16 +599,16 @@ comptime {
 
         // Default stack-probe functions emitted by LLVM
         if (is_mingw) {
-            @export(_chkstk, .{ .name = "_alloca", .linkage = .Weak });
-            @export(___chkstk_ms, .{ .name = "___chkstk_ms", .linkage = .Weak });
+            @export(_chkstk, .{ .name = "_alloca", .linkage = .weak });
+            @export(___chkstk_ms, .{ .name = "___chkstk_ms", .linkage = .weak });
 
             if (builtin.cpu.arch.isAARCH64()) {
-                @export(__chkstk, .{ .name = "__chkstk", .linkage = .Weak });
+                @export(__chkstk, .{ .name = "__chkstk", .linkage = .weak });
             }
         } else if (!builtin.link_libc) {
             // This symbols are otherwise exported by MSVCRT.lib
-            @export(_chkstk, .{ .name = "_chkstk", .linkage = .Weak });
-            @export(__chkstk, .{ .name = "__chkstk", .linkage = .Weak });
+            @export(_chkstk, .{ .name = "_chkstk", .linkage = .weak });
+            @export(__chkstk, .{ .name = "__chkstk", .linkage = .weak });
         }
     }
 
@@ -616,7 +616,7 @@ comptime {
         .x86,
         .x86_64,
         => {
-            @export(zig_probe_stack, .{ .name = "__zig_probe_stack", .linkage = .Weak });
+            @export(zig_probe_stack, .{ .name = "__zig_probe_stack", .linkage = .weak });
         },
         else => {},
     }

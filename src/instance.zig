@@ -1187,11 +1187,11 @@ pub const ModuleInstance = struct {
 
     pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
         var bytes: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
-        std.mem.writeIntLittle(T, &bytes, value);
+        std.mem.writeInt(T, &bytes, value, .little);
 
-        var destination = self.memorySlice(offset, bytes.len);
+        const destination = self.memorySlice(offset, bytes.len);
         if (destination.len == bytes.len) {
-            std.mem.copy(u8, destination, &bytes);
+            @memcpy(destination, &bytes);
             return true;
         }
 

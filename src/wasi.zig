@@ -1886,7 +1886,7 @@ fn fd_wasi_prestat_dir_name(userdata: ?*anyopaque, module: *ModuleInstance, para
         if (context.fdDirPath(fd_dir_wasi, &errno)) |path_source| {
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path_dest| {
                 if (path_source.len <= path_dest.len) {
-                    std.mem.copy(u8, path_dest, path_source);
+                    @memcpy(path_dest, path_source);
 
                     // add null terminator if there's room
                     if (path_dest.len > path_source.len) {

@@ -97,8 +97,8 @@ const k_block_type_void_sentinel_byte: u8 = 0x40;
 
 fn decodeFloat(comptime T: type, reader: anytype) !T {
     return switch (T) {
-        f32 => @as(f32, @bitCast(try reader.readIntLittle(u32))),
-        f64 => @as(f64, @bitCast(try reader.readIntLittle(u64))),
+        f32 => @as(f32, @bitCast(try reader.readInt(u32, .little))),
+        f64 => @as(f64, @bitCast(try reader.readInt(u64, .little))),
         else => unreachable,
     };
 }
