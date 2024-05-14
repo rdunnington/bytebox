@@ -32,6 +32,7 @@ test "MemoryInstance.init" {
         const limits = Limits{
             .min = 0,
             .max = null,
+            .limit_type = 0,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -45,6 +46,7 @@ test "MemoryInstance.init" {
         const limits = Limits{
             .min = 25,
             .max = 25,
+            .limit_type = 1,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -59,6 +61,7 @@ test "MemoryInstance.Internal.grow" {
         const limits = Limits{
             .min = 0,
             .max = null,
+            .limit_type = 0,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -75,6 +78,7 @@ test "MemoryInstance.Internal.grow" {
         const limits = Limits{
             .min = 0,
             .max = 25,
+            .limit_type = 1,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -90,6 +94,7 @@ test "MemoryInstance.Internal.growAbsolute" {
         const limits = Limits{
             .min = 0,
             .max = null,
+            .limit_type = 0,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -107,6 +112,7 @@ test "MemoryInstance.Internal.growAbsolute" {
         const limits = Limits{
             .min = 0,
             .max = 25,
+            .limit_type = 1,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
