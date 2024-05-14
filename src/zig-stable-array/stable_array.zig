@@ -268,7 +268,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                             .ANONYMOUS = true,
                             .TYPE = .PRIVATE,
                         };
-                        const fd: os.fd_t = -1;
+                        const fd: std.posix.fd_t = -1;
                         const offset: usize = 0;
                         const slice = try std.posix.mmap(null, self.max_virtual_alloc_bytes, prot, map, fd, offset);
                         self.items.ptr = @alignCast(@ptrCast(slice.ptr));
