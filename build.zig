@@ -25,7 +25,7 @@ pub fn build(b: *Build) void {
     var bench_fibonacci_step: *CompileStep = buildWasmLib(b, "bench/samples/fibonacci.zig", optimize);
     var bench_mandelbrot_step: *CompileStep = buildWasmLib(b, "bench/samples/mandelbrot.zig", optimize);
 
-    const bytebox_module: *Build.Module = b.createModule(.{
+    const bytebox_module: *Build.Module = b.addModule("bytebox", .{
         .source_file = Build.LazyPath.relative("src/core.zig"),
     });
 
