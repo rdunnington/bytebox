@@ -209,9 +209,9 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                     if (comptime builtin.target.isDarwin()) {
                         const MADV_DONTNEED = 4;
                         const err: c_int = darwin.madvise(addr, bytes_to_free, MADV_DONTNEED);
-                        switch (@as(os.darwin.E, @enumFromInt(err))) {
-                            os.E.INVAL => unreachable,
-                            os.E.NOMEM => unreachable,
+                        switch (@as(std.posix.E, @enumFromInt(err))) {
+                            std.posix.E.INVAL => unreachable,
+                            std.posix.E.NOMEM => unreachable,
                             else => {},
                         }
                     } else {

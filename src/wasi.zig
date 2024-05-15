@@ -1543,7 +1543,7 @@ const Helpers = struct {
 
         var dirent_buffer: [1024]u8 align(@alignOf(dirent_t)) = undefined;
         var unused_seek: i64 = 0;
-        const rc = std.c.darwin.__getdirentries64(fd_info.fd, &dirent_buffer, dirent_buffer.len, &unused_seek);
+        const rc = std.c.__getdirentries64(fd_info.fd, &dirent_buffer, dirent_buffer.len, &unused_seek);
         errno.* = switch (std.posix.errno(rc)) {
             .SUCCESS => .SUCCESS,
             .BADF => .BADF,
@@ -1568,7 +1568,7 @@ const Helpers = struct {
 
             // TODO length should be (d_reclen - 2 - offsetof(dirent64, d_name))
             // const filename: []u8 = std.mem.sliceTo(@ptrCast([*:0]u8, &dirent_entry.d_name), 0);
-            const filename: []u8 = @as([*]u8, @ptrCast(&dirent_entry.name))[0..dirent_entry.d_namlen];
+            const filename: []u8 = @as([*]u8, @ptrCast(&dirent_entry.name))[0..dirent_entry.namlen];
 
             const filetype: std.os.wasi.filetype_t = switch (dirent_entry.type) {
                 std.c.DT.UNKNOWN => .UNKNOWN,
@@ -1589,7 +1589,7 @@ const Helpers = struct {
             };
 
             fd_info.dir_entries.append(WasiDirEntry{
-                .inode = dirent_entry.d_ino,
+                .inode = dirent_entry.ino,
                 .filetype = filetype,
                 .filename = filename_duped,
             }) catch |err| {
