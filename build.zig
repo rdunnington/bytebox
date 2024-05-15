@@ -23,7 +23,7 @@ pub fn build(b: *Build) void {
     var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig", optimize);
     var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig", optimize);
 
-    const bytebox_module: *Build.Module = b.addModule(.{
+    const bytebox_module: *Build.Module = b.addModule("bytebox", .{
         .root_source_file = b.path("src/core.zig"),
     });
 
