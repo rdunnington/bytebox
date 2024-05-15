@@ -1,5 +1,16 @@
 .{
-  .name = "bytebox",
-  .version = "0.0.1",
-  .dependencies = .{},
+    .name = "bytebox",
+    .version = "0.0.1",
+    .minimum_zig_version = "0.12.0",
+    .paths = .{
+        "src",
+        "test/main.zig",
+        "bench",
+        "run",
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+    },
+    .dependencies = .{},
 }
