@@ -922,7 +922,7 @@ const Helpers = struct {
 
         var stat_wasi = std.os.wasi.fdstat_t{
             .fs_filetype = std.os.wasi.filetype_t.REGULAR_FILE,
-            .fs_flags = 0,
+            .fs_flags = .{},
             .fs_rights_base = WASI_RIGHTS_ALL,
             .fs_rights_inheriting = WASI_RIGHTS_ALL,
         };
@@ -1015,7 +1015,7 @@ const Helpers = struct {
 
         w.CloseHandle(fd_info.fd);
 
-        const pathspace_w: w.PathSpace = w.sliceToPrefixedFileW(fd_info.path_absolute) catch |err| {
+        const pathspace_w: w.PathSpace = w.sliceToPrefixedFileW(fd_info.fd, fd_info.path_absolute) catch |err| {
             errno.* = Errno.translateError(err);
             return null;
         };
@@ -1111,7 +1111,7 @@ const Helpers = struct {
 
         var access_time: std.os.windows.FILETIME = undefined;
         var access_time_was_set: bool = false;
-        const flags: std.os.wasi.fstflags_t = @bitCast(fstflags);
+        const flags: std.os.wasi.fstflags_t = @bitCast(@as(u16, @intCast(fstflags)));
         if (flags.ATIM) {
             access_time = std.os.windows.nanoSecondsToFileTime(timestamp_wasi_access);
             access_time_was_set = true;
@@ -1125,11 +1125,11 @@ const Helpers = struct {
 
         var modify_time: std.os.windows.FILETIME = undefined;
         var modify_time_was_set: bool = false;
-        if (fstflags & std.os.wasi.FILESTAT_SET_MTIM != 0) {
+        if (flags.MTIM) {
             modify_time = std.os.windows.nanoSecondsToFileTime(timestamp_wasi_modified);
             modify_time_was_set = true;
         }
-        if (fstflags & std.os.wasi.FILESTAT_SET_MTIM_NOW != 0) {
+        if (flags.MTIM_NOW) {
             if (filetime_now_needs_set) {
                 std.os.windows.kernel32.GetSystemTimeAsFileTime(&filetime_now);
             }
@@ -1259,7 +1259,7 @@ const Helpers = struct {
 
         const w = std.os.windows;
 
-        const pathspace_w: w.PathSpace = w.sliceToPrefixedFileW(path) catch |err| {
+        const pathspace_w: w.PathSpace = w.sliceToPrefixedFileW(null, path) catch |err| {
             errno.* = Errno.translateError(err);
             return null;
         };
@@ -1740,8 +1740,9 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const 
     if (errno == .SUCCESS) {
         var freqency_ns: u64 = 0;
         if (builtin.os.tag == .windows) {
+            const clockid: std.os.wasi.clockid_t = @enumFromInt(system_clockid);
             // Follow the mingw pattern since clock_getres() isn't linked in libc for windows
-            if (system_clockid == std.os.wasi.CLOCK.REALTIME or system_clockid == std.os.wasi.CLOCK.MONOTONIC) {
+            if (clockid == std.os.wasi.clockid_t.REALTIME or clockid == std.os.wasi.clockid_t.MONOTONIC) {
                 const ns_per_second: u64 = 1000000000;
                 const tick_frequency: u64 = std.os.windows.QueryPerformanceFrequency();
                 freqency_ns = (ns_per_second + (tick_frequency >> 1)) / tick_frequency;
@@ -1785,14 +1786,15 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
         var timestamp_ns: u64 = 0;
 
         if (builtin.os.tag == .windows) {
-            switch (system_clockid) {
-                std.os.wasi.CLOCK.REALTIME => {
+            const clockid: std.os.wasi.clockid_t = @enumFromInt(system_clockid);
+            switch (clockid) {
+                std.os.wasi.clockid_t.REALTIME => {
                     var ft: WindowsApi.FILETIME = undefined;
                     std.os.windows.kernel32.GetSystemTimeAsFileTime(&ft);
 
                     timestamp_ns = Helpers.windowsFiletimeToWasi(ft);
                 },
-                std.os.wasi.CLOCK.MONOTONIC => {
+                std.os.wasi.clockid_t.MONOTONIC => {
                     const ticks: u64 = std.os.windows.QueryPerformanceCounter();
                     const ticks_per_second: u64 = std.os.windows.QueryPerformanceFrequency();
 
@@ -1802,7 +1804,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
 
                     timestamp_ns = timestamp_secs_part + timestamp_ns_part;
                 },
-                std.os.wasi.CLOCK.PROCESS_CPUTIME_ID => {
+                std.os.wasi.clockid_t.PROCESS_CPUTIME_ID => {
                     var createTime: WindowsApi.FILETIME = undefined;
                     var exitTime: WindowsApi.FILETIME = undefined;
                     var kernelTime: WindowsApi.FILETIME = undefined;
@@ -1814,7 +1816,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
                         errno = Errno.INVAL;
                     }
                 },
-                std.os.wasi.CLOCK.THREAD_CPUTIME_ID => {
+                std.os.wasi.clockid_t.THREAD_CPUTIME_ID => {
                     var createTime: WindowsApi.FILETIME = undefined;
                     var exitTime: WindowsApi.FILETIME = undefined;
                     var kernelTime: WindowsApi.FILETIME = undefined;
@@ -1826,7 +1828,6 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
                         errno = Errno.INVAL;
                     }
                 },
-                else => unreachable,
             }
         } else {
             var ts: std.posix.timespec = undefined;
@@ -2373,8 +2374,7 @@ fn wasi_path_create_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    const S = std.posix.S;
-                    const mode: std.posix.mode_t = if (builtin.os.tag == .windows) undefined else S.IRWXU | S.IRWXG | S.IROTH;
+                    const mode: std.posix.mode_t = if (builtin.os.tag == .windows) undefined else std.posix.S.IRWXU | std.posix.S.IRWXG | std.posix.S.IROTH;
                     std.posix.mkdirat(fd_info.fd, path, mode) catch |err| {
                         errno = Errno.translateError(err);
                     };
@@ -2400,24 +2400,42 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    var flags: std.posix.O = .{
-                        .ACCMODE = .RDONLY,
-                    };
-                    if (lookup_flags.symlink_follow == false) {
-                        flags.NOFOLLOW = true;
-                    }
 
-                    const mode: std.posix.mode_t = if (builtin.os.tag != .windows) 644 else undefined;
+                    if (builtin.os.tag == .windows) {
+                        const dir = std.fs.Dir{
+                            .fd = fd_info.fd,
+                        };
+                        if (dir.openFile(path, .{})) |file| {
+                            defer file.close();
 
-                    if (std.posix.openat(fd_info.fd, path, flags, mode)) |fd_opened| {
-                        defer std.posix.close(fd_opened);
-
-                        const stat: std.os.wasi.filestat_t = if (builtin.os.tag == .windows) Helpers.filestatGetWindows(fd_opened, &errno) else Helpers.filestatGetPosix(fd_opened, &errno);
+                            const stat: std.os.wasi.filestat_t = Helpers.filestatGetWindows(file.handle, &errno);
                         if (errno == .SUCCESS) {
                             Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
                         }
-                    } else |err| {
-                        errno = Errno.translateError(err);
+                        } else |err| {
+                            errno = Errno.translateError(err);
+                        }
+                    } else {
+
+                        var flags: std.posix.O = .{
+                            .ACCMODE = .RDONLY,
+                        };
+                        if (lookup_flags.symlink_follow == false) {
+                            flags.NOFOLLOW = true;
+                        }
+
+                        const mode: std.posix.mode_t = 644;
+
+                        if (std.posix.openat(fd_info.fd, path, flags, mode)) |fd_opened| {
+                            defer std.posix.close(fd_opened);
+
+                            const stat: std.os.wasi.filestat_t = Helpers.filestatGetPosix(fd_opened, &errno);
+                            if (errno == .SUCCESS) {
+                                Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
+                            }
+                        } else |err| {
+                            errno = Errno.translateError(err);
+                        }
                     }
                 }
             }
@@ -2518,12 +2536,12 @@ fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]
                                 if (Helpers.resolvePath(fd_info, link_path, &static_path_buffer, &errno)) |resolved_link_path| {
                                     const w = std.os.windows;
 
-                                    const link_contents_w: w.PathSpace = w.sliceToPrefixedFileW(link_contents) catch |err| blk: {
+                                    const link_contents_w: w.PathSpace = w.sliceToPrefixedFileW(fd_info.fd, link_contents) catch |err| blk: {
                                         errno = Errno.translateError(err);
                                         break :blk undefined;
                                     };
 
-                                    const resolved_link_path_w: w.PathSpace = w.sliceToPrefixedFileW(resolved_link_path) catch |err| blk: {
+                                    const resolved_link_path_w: w.PathSpace = w.sliceToPrefixedFileW(fd_info.fd, resolved_link_path) catch |err| blk: {
                                         errno = Errno.translateError(err);
                                         break :blk undefined;
                                     };
