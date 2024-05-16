@@ -3347,6 +3347,10 @@ pub const ModuleDefinition = struct {
             item.elems_expr.deinit();
         }
 
+        for (self.datas.items) |*data| {
+            data.bytes.deinit();
+        }
+
         self.types.deinit();
         self.imports.functions.deinit();
         self.imports.tables.deinit();
