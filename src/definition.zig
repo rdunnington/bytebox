@@ -284,13 +284,13 @@ pub const Limits = struct {
     // 0x06 n:u64        ⇒ i64, {min n, max ?}, 1  ;; from threads proposal
     // 0x07 n:u64 m:u64  ⇒ i64, {min n, max m}, 1  ;; from threads proposal
 
-    const k_max_bytes_i32 = k_max_pages_i32 * MemoryDefinition.k_page_size;
-    const k_max_pages_i32 = std.math.powi(usize, 2, 16) catch unreachable;
+    pub const k_max_bytes_i32 = k_max_pages_i32 * MemoryDefinition.k_page_size;
+    pub const k_max_pages_i32 = std.math.powi(usize, 2, 16) catch unreachable;
 
     // Technically the max bytes should be maxInt(u64), but that is wayyy more memory than PCs have available and
     // is just a waste of virtual address space in the implementation. Instead we'll set the upper limit to 128GB.
-    const k_max_bytes_i64 = (1024 * 1024 * 1024 * 128);
-    const k_max_pages_i64 = k_max_bytes_i64 / MemoryDefinition.k_page_size;
+    pub const k_max_bytes_i64 = (1024 * 1024 * 1024 * 128);
+    pub const k_max_pages_i64 = k_max_bytes_i64 / MemoryDefinition.k_page_size;
 
     fn decode(reader: anytype) !Limits {
         const limit_type: u8 = try reader.readByte();
