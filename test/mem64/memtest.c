@@ -15,15 +15,15 @@
 
 __attribute__((visibility("default"))) int64_t memtest(int32_t val_i32, int64_t val_i64, float val_f32, double val_f64)
 {
-	int64_t start_page = __builtin_wasm_memory_grow(0, PAGES_PER_GB * 2); // memory.grow
+	int64_t start_page = __builtin_wasm_memory_grow(0, PAGES_PER_GB * 6); // memory.grow
 	assert(start_page != -1);
 
-	char* mem = (char*)(start_page);
+	char* mem = (char*)(start_page) + GB * 4;
 	volatile char* mem_stores = mem + MB * 1;
 	volatile char* mem_loads = mem + MB * 2;
 
 	int64_t num_pages = __builtin_wasm_memory_size(0); // memory.size
-	assert(num_pages >= (PAGES_PER_GB * 2));
+	assert(num_pages >= (PAGES_PER_GB * 6));
 
 	*(int32_t*)(mem_loads + 0) = val_i32; // i32.store
 	*(int64_t*)(mem_loads + 8) = val_i64; // i64.store

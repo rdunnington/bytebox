@@ -262,16 +262,16 @@ const Stack = struct {
         stack.num_labels -= 1;
     }
 
-    fn findLabel(stack: *const Stack, id: u32) *const Label {
+    fn findLabel(stack: Stack, id: u32) *const Label {
         const index: usize = (stack.num_labels - 1) - id;
         return &stack.labels[index];
     }
 
-    fn topLabel(stack: *const Stack) *const Label {
+    fn topLabel(stack: Stack) *const Label {
         return &stack.labels[stack.num_labels - 1];
     }
 
-    fn frameLabel(stack: *const Stack) *const Label {
+    fn frameLabel(stack: Stack) *const Label {
         var frame: *const CallFrame = stack.topFrame();
         var frame_label: *const Label = &stack.labels[frame.start_offset_labels];
         return frame_label;
@@ -359,7 +359,7 @@ const Stack = struct {
         return null;
     }
 
-    fn topFrame(stack: *const Stack) *CallFrame {
+    fn topFrame(stack: Stack) *CallFrame {
         return &stack.frames[stack.num_frames - 1];
     }
 
@@ -367,6 +367,14 @@ const Stack = struct {
         stack.num_values = 0;
         stack.num_labels = 0;
         stack.num_frames = 0;
+    }
+
+    fn debugDump(stack: Stack) void {
+        std.debug.print("===== stack dump =====\n", .{});
+        for (stack.values[0..stack.num_values]) |val| {
+            std.debug.print("I32: {}, I64: {}, F32: {}, F64: {}\n", .{ val.I32, val.I64, val.F32, val.F64 });
+        }
+        std.debug.print("======================\n", .{});
     }
 };
 

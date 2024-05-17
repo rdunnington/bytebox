@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install dependencies
+      - name: Install python dependencies
         working-directory: test/wasi/wasi-testsuite/test-runner
         run: python3 -m pip install -r requirements.txt
 
@@ -43,6 +43,10 @@ jobs:
       - name: Run wasm testsuite
         run: |
           zig build test-wasm -- --log-suite
+
+      - name: Run mem64 test
+        run: |
+          zig build test-mem64
 
       - name: Run wasi testsuite
         run: |

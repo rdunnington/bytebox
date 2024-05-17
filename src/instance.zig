@@ -240,16 +240,16 @@ pub const MemoryInstance = struct {
     };
 
     pub const k_page_size: usize = MemoryDefinition.k_page_size;
-    pub const k_max_pages: usize = MemoryDefinition.k_max_pages;
 
     limits: Limits,
     mem: BackingMemory,
 
     pub fn init(limits: Limits, params: ?WasmMemoryExternal) MemoryInstance {
-        const max_pages = if (limits.max) |max| @max(1, max) else k_max_pages;
+        const max_pages = limits.maxPages();
+        const max_bytes: u64 = max_pages * k_page_size;
 
         var mem = if (params == null) BackingMemory{
-            .Internal = StableArray(u8).init(max_pages * k_page_size),
+            .Internal = StableArray(u8).init(@intCast(max_bytes)),
         } else BackingMemory{ .External = .{
             .buffer = &[0]u8{},
             .params = params.?,
@@ -258,7 +258,7 @@ pub const MemoryInstance = struct {
         var instance = MemoryInstance{
             .limits = Limits{
                 .min = 0,
-                .max = @as(u32, @intCast(max_pages)),
+                .max = max_pages,
                 .limit_type = limits.limit_type,
             },
             .mem = mem,
@@ -287,7 +287,7 @@ pub const MemoryInstance = struct {
         }
 
         const total_pages = self.limits.min + num_pages;
-        const max_pages = if (self.limits.max) |max| max else k_max_pages;
+        const max_pages = self.limits.maxPages();
 
         if (total_pages > max_pages) {
             return false;
@@ -306,7 +306,7 @@ pub const MemoryInstance = struct {
             },
         }
 
-        self.limits.min = @as(u32, @intCast(total_pages));
+        self.limits.min = total_pages;
 
         return true;
     }

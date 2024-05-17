@@ -630,6 +630,7 @@ const TestOpts = struct {
     trace_mode: bytebox.DebugTrace.Mode = .None,
     force_wasm_regen_only: bool = false,
     log_suite: bool = false,
+    log: bytebox.Logger = bytebox.Logger.empty(),
 };
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackage {
@@ -872,7 +873,11 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
             module.filename = try allocator.dupe(u8, module_filename);
 
-            module.def = try bytebox.createModuleDefinition(allocator, .{ .debug_name = std.fs.path.basename(module_filename) });
+            const module_def_opts = bytebox.ModuleDefinitionOpts{
+                .debug_name = std.fs.path.basename(module_filename),
+                .log = opts.log,
+            };
+            module.def = try bytebox.createModuleDefinition(allocator, module_def_opts);
             (module.def.?).decode(module_data) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
@@ -935,7 +940,12 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
             }
 
             module.inst = try bytebox.createModuleInstance(opts.vm_type, module.def.?, allocator);
-            (module.inst.?).instantiate(.{ .imports = imports.items }) catch |e| {
+
+            const instantiate_opts = bytebox.ModuleInstantiateOpts{
+                .imports = imports.items,
+                .log = opts.log,
+            };
+            (module.inst.?).instantiate(instantiate_opts) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
                         logVerbose("\tSuccess!\n", .{});
@@ -1081,7 +1091,14 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                                         print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                                     }
 
-                                    print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected_value, r });
+                                    const format_str = "\tFail on return {}/{}. Expected: {}, Actual: {}\n";
+                                    switch (expected_value.type) {
+                                        .I32 => print(format_str, .{ i + 1, returns.len, expected_value.val.I32, r.I32 }),
+                                        .I64 => print(format_str, .{ i + 1, returns.len, expected_value.val.I64, r.I64 }),
+                                        .F32 => print(format_str, .{ i + 1, returns.len, expected_value.val.F32, r.F32 }),
+                                        .F64 => print(format_str, .{ i + 1, returns.len, expected_value.val.F64, r.F64 }),
+                                        else => unreachable,
+                                    }
                                     action_succeeded = false;
                                 }
                             } else {
@@ -1308,6 +1325,9 @@ pub fn main() !void {
                 \\    --log-suite
                 \\      Log the name of each suite and aggregate test result.
                 \\
+                \\    --module-logging
+                \\      Enables logging from inside the module when reporting errors.
+                \\
                 \\    --verbose
                 \\      Turn on verbose logging for each step of the test suite run.
                 \\
@@ -1347,6 +1367,8 @@ pub fn main() !void {
             print("Force-regenerating wasm files and driver .json, skipping test run\n", .{});
         } else if (strcmp("--log-suite", arg)) {
             opts.log_suite = true;
+        } else if (strcmp("--module-logging", arg)) {
+            opts.log = bytebox.Logger.default();
         } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
             g_verbose_logging = true;
             print("verbose logging: on\n", .{});

@@ -284,6 +284,14 @@ pub const Limits = struct {
     // 0x06 n:u64        ⇒ i64, {min n, max ?}, 1  ;; from threads proposal
     // 0x07 n:u64 m:u64  ⇒ i64, {min n, max m}, 1  ;; from threads proposal
 
+    const k_max_bytes_i32 = k_max_pages_i32 * MemoryDefinition.k_page_size;
+    const k_max_pages_i32 = std.math.powi(usize, 2, 16) catch unreachable;
+
+    // Technically the max bytes should be maxInt(u64), but that is wayyy more memory than PCs have available and
+    // is just a waste of virtual address space in the implementation. Instead we'll set the upper limit to 128GB.
+    const k_max_bytes_i64 = (1024 * 1024 * 1024 * 128);
+    const k_max_pages_i64 = k_max_bytes_i64 / MemoryDefinition.k_page_size;
+
     fn decode(reader: anytype) !Limits {
         const limit_type: u8 = try reader.readByte();
 
@@ -326,6 +334,18 @@ pub const Limits = struct {
 
     pub fn indexType(self: Limits) ValType {
         return if (self.limit_type < 4) .I32 else .I64;
+    }
+
+    pub fn maxPages(self: Limits) usize {
+        if (self.max) |max| {
+            return @max(1, max);
+        }
+
+        return self.indexTypeMaxPages();
+    }
+
+    pub fn indexTypeMaxPages(self: Limits) usize {
+        return if (self.limit_type < 4) k_max_pages_i32 else k_max_pages_i64;
     }
 };
 
@@ -652,7 +672,6 @@ pub const MemoryDefinition = struct {
     limits: Limits,
 
     pub const k_page_size: usize = 64 * 1024;
-    pub const k_max_pages: usize = std.math.powi(usize, 2, 16) catch unreachable;
 };
 
 pub const ElementMode = enum {
@@ -2942,7 +2961,11 @@ pub const ModuleDefinition = struct {
                     while (memory_index < num_memories) : (memory_index += 1) {
                         var limits = try Limits.decode(reader);
 
-                        if (limits.min > MemoryDefinition.k_max_pages) {
+                        if (limits.min > limits.maxPages()) {
+                            self.log.err(
+                                "Validation error: max memory pages exceeded. Got {} but max is {}",
+                                .{ limits.min, limits.indexTypeMaxPages() },
+                            );
                             return error.ValidationMemoryMaxPagesExceeded;
                         }
 
@@ -2950,7 +2973,11 @@ pub const ModuleDefinition = struct {
                             if (max < limits.min) {
                                 return error.ValidationMemoryInvalidMaxLimit;
                             }
-                            if (max > MemoryDefinition.k_max_pages) {
+                            if (max > limits.indexTypeMaxPages()) {
+                                self.log.err(
+                                    "Validation error: max memory pages exceeded. Got {} but max is {}",
+                                    .{ max, limits.indexTypeMaxPages() },
+                                );
                                 return error.ValidationMemoryMaxPagesExceeded;
                             }
                         }
