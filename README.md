@@ -4,7 +4,6 @@
 <a href=https://webassembly.org/><img src="https://avatars.githubusercontent.com/u/11578470?s=200&v=4" alt="Markdown Logo" width="150"/></a>
 
 Bytebox is a Webassembly VM.
-
 </div>
 
 ## Getting started
@@ -84,7 +83,7 @@ This project is still in the alpha stage.
 
 ### [WebAssembly](https://webassembly.github.io/spec/core/index.html) support:
 
-| Status | Feature|
+| Status | Feature |
 | --- | --- |
 |✅|WebAssembly 1.0|
 |✅|Sign extension instructions|
@@ -98,7 +97,7 @@ This project is still in the alpha stage.
 
 ### [WASI Preview 1](https://github.com/WebAssembly/WASI/tree/main) support:
 
-| Status | Feature|
+| Status | Feature |
 | --- | --- |
 |✅|args_get|
 |✅|args_sizes_get|
@@ -149,7 +148,6 @@ This project is still in the alpha stage.
 
 ### Roadmap
 These tasks must be completed to enter alpha:
-
 * API ergonomics pass
 * Documentation
 * General TODO/code cleanup
