@@ -3,25 +3,32 @@
 <div align="center">
 <a href=https://webassembly.org/><img src="https://avatars.githubusercontent.com/u/11578470?s=200&v=4" alt="Markdown Logo" width="150"/></a>
 
-Bytebox is a Webassembly VM.
+Bytebox is a WebAssembly VM.
 </div>
 
-## Getting started
+# Getting started
 
-### Requirements
+## Requirements
 Bytebox currently builds with [Zig 0.11.x](https://ziglang.org/download) to avoid churn on zig master.
 
-### Run
+To run the tests:
+* `wasm-tools` is required to run the wasm testsuite. You can install it via the rust toolchain `cargo install wasm-tools` or directly from the [release page](https://github.com/bytecodealliance/wasm-tools/releases).
+* `clang` v15.x is required to build the mem64 tests. However, if you don't have a compatible version of `clang` installed, you can pass `--noclang` to `zig build` to avoid the requirement.
+* `python3` is required to run the wasi testsuite. You may need to run `python3 -m pip install -r test/wasi/wasi-testsuite/test-runner/requirements.txt` to ensure the wasi test runner has all the necessary dependencies installed.
+
+## Run Tests
 
 ```sh
 git clone --recurse-submodules https://github.com/rdunnington/bytebox.git
 cd bytebox
-zig build test  # run the WebAssembly spec testsuite
-# run the wasi testsuite
-python3 test/wasi/wasi-testsuite/test-runner/wasi_test_runner.py -r test/wasi/bytebox_adapter.py -t ./test/wasi/wasi-testsuite/tests/assemblyscript/testsuite/ ./test/wasi/wasi-testsuite/tests/c/testsuite/ ./test/wasi/wasi-testsuite/tests/rust/testsuite/
+zig build test-unit # run builtin zig unit tests
+zig build test-wasm # run official wasm spec testsuite
+zig build test-wasi # run official wasi spec testsuite
+zig build test-mem64 # run memory64 compat test
+zig build test # run all of the above in parallel (output will not be pretty!)
 ```
 
-### Usage
+## Usage
 
 You can use the standalone runtime to load and execute WebAssembly programs:
 ```sh
@@ -71,7 +78,7 @@ pub fn main() !void {
 
 Inter-language FFI is also supported. See `src/bytebox.h` for an overview in C. To use bytebox as a static library, link with the built library in `zig-out/lib/`. Note that Zig assumes a default stack size of 8MB, so you'll need to ensure the same in your program.
 
-## Status
+# Status
 
 This project is still in the alpha stage.
 
@@ -81,7 +88,7 @@ This project is still in the alpha stage.
 |❌|TODO|
 |💀|Not planned/Removed from spec|
 
-### [WebAssembly](https://webassembly.github.io/spec/core/index.html) support:
+## [WebAssembly](https://webassembly.github.io/spec/core/index.html) support:
 
 | Status | Feature |
 | --- | --- |
@@ -95,7 +102,7 @@ This project is still in the alpha stage.
 |✅|Bulk memory and table instructions|
 |✅|Vector instructions|
 
-### [WASI Preview 1](https://github.com/WebAssembly/WASI/tree/main) support:
+## [WASI Preview 1](https://github.com/WebAssembly/WASI/tree/main) support:
 
 | Status | Feature |
 | --- | --- |

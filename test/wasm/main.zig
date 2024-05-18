@@ -363,12 +363,13 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.MalformedError.MalformedMagicSignature => strcmp(err_string, "magic header not detected"),
         bytebox.MalformedError.MalformedUnexpectedEnd => strcmp(err_string, "unexpected end") or
             strcmp(err_string, "unexpected end of section or function") or
-            strcmp(err_string, "length out of bounds"),
+            strcmp(err_string, "length out of bounds") or
+            strcmp(err_string, "malformed section id"),
         bytebox.MalformedError.MalformedUnsupportedWasmVersion => strcmp(err_string, "unknown binary version"),
         bytebox.MalformedError.MalformedSectionId => strcmp(err_string, "malformed section id"),
         bytebox.MalformedError.MalformedTypeSentinel => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         bytebox.MalformedError.MalformedLEB128 => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
-        bytebox.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero byte expected"),
+        bytebox.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero flag expected"),
         bytebox.MalformedError.MalformedTooManyLocals => strcmp(err_string, "too many locals"),
         bytebox.MalformedError.MalformedFunctionCodeSectionMismatch => strcmp(err_string, "function and code section have inconsistent lengths"),
         bytebox.MalformedError.MalformedMissingDataCountSection => strcmp(err_string, "data count section required") or strcmp(err_string, "unknown data segment"),
@@ -378,15 +379,15 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.MalformedError.MalformedReferenceType => strcmp(err_string, "malformed reference type"),
         bytebox.MalformedError.MalformedSectionSizeMismatch => strcmp(err_string, "section size mismatch") or
             strcmp(err_string, "malformed section id") or
-            strcmp(err_string, "function and code section have inconsistent lengths"), // this one is a bit of a hack to resolve custom.8.wasm
+            strcmp(err_string, "function and code section have inconsistent lengths") or // this one is a bit of a hack to resolve custom.8.wasm
+            strcmp(err_string, "zero flag expected"), // the memory64 binary tests don't seem to be up to date with the reference types spec
         bytebox.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
         bytebox.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long") or strcmp(err_string, "malformed limits flags"),
         bytebox.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or
-            strcmp(err_string, "unexpected content after last section"),
+            strcmp(err_string, "junk after last section"),
         bytebox.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         bytebox.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
         bytebox.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
-
         // ValidationTypeMismatch: result arity handles select.2.wasm which is the exact same binary as select.1.wasm but the test expects a different error :/
         bytebox.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "invalid result arity"),
         bytebox.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
@@ -394,7 +395,8 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.ValidationError.ValidationUnknownFunction => std.mem.startsWith(u8, err_string, "unknown function"),
         bytebox.ValidationError.ValidationUnknownGlobal => std.mem.startsWith(u8, err_string, "unknown global"),
         bytebox.ValidationError.ValidationUnknownLocal => std.mem.startsWith(u8, err_string, "unknown local"),
-        bytebox.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table"),
+        bytebox.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table") or
+            strcmp(err_string, "zero flag expected"), // the memory64 binary tests don't seem to be up to date with the reference types spec
         bytebox.ValidationError.ValidationUnknownMemory => std.mem.startsWith(u8, err_string, "unknown memory"),
         bytebox.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element") or std.mem.startsWith(u8, err_string, "unknown elem segment"),
         bytebox.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or std.mem.startsWith(u8, err_string, "unknown data segment"),
@@ -1575,6 +1577,9 @@ pub fn main() !void {
             var suite_wast_path_relative = try std.fs.path.join(allocator, &[_][]const u8{ "../../../../", suite_wast_path });
             defer allocator.free(suite_wast_path_relative);
 
+            const suite_json_filename: []const u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite, ".json" });
+            defer allocator.free(suite_json_filename);
+
             var suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite });
             defer allocator.free(suite_wasm_folder);
 
@@ -1590,7 +1595,7 @@ pub fn main() !void {
                 }
             };
 
-            var process = std.ChildProcess.init(&[_][]const u8{ "wast2json", "--enable-memory64", suite_wast_path_relative }, allocator);
+            var process = std.ChildProcess.init(&[_][]const u8{ "wasm-tools", "json-from-wast", "--pretty", "-o", suite_json_filename, suite_wast_path_relative }, allocator);
 
             process.cwd = suite_wasm_folder;
 
