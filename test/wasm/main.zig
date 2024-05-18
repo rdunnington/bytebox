@@ -1572,13 +1572,13 @@ pub fn main() !void {
             logVerbose("Regenerating wasm and json driver for suite {s}\n", .{suite});
 
             // need to navigate back to repo root because the wast2json process will be running in a subdir
-            var suite_wast_path_relative = try std.fs.path.join(allocator, &[_][]const u8{ "../../../", suite_wast_path });
+            var suite_wast_path_relative = try std.fs.path.join(allocator, &[_][]const u8{ "../../../../", suite_wast_path });
             defer allocator.free(suite_wast_path_relative);
 
-            var suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite });
+            var suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite });
             defer allocator.free(suite_wasm_folder);
 
-            std.fs.cwd().makeDir("test/wasm") catch |e| {
+            std.fs.cwd().makeDir("test/wasm/wasm-generated") catch |e| {
                 if (e != error.PathAlreadyExists) {
                     return e;
                 }
