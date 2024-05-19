@@ -4,6 +4,7 @@ const std = @import("std");
 const AllocError = std.mem.Allocator.Error;
 
 const common = @import("common.zig");
+const Logger = common.Logger;
 const StableArray = common.StableArray;
 
 const opcodes = @import("opcode.zig");
@@ -269,21 +270,50 @@ pub const TaggedVal = struct {
 };
 
 pub const Limits = struct {
-    min: u32,
-    max: ?u32,
+    min: u64,
+    max: ?u64,
+    limit_type: u8,
+
+    // limit_type table:
+    // 0x00 n:u32        ⇒ i32, {min n, max ?}, 0
+    // 0x01 n:u32 m:u32  ⇒ i32, {min n, max m}, 0
+    // 0x02 n:u32        ⇒ i32, {min n, max ?}, 1  ;; from threads proposal
+    // 0x03 n:u32 m:u32  ⇒ i32, {min n, max m}, 1  ;; from threads proposal
+    // 0x04 n:u64        ⇒ i64, {min n, max ?}, 0
+    // 0x05 n:u64 m:u64  ⇒ i64, {min n, max m}, 0
+    // 0x06 n:u64        ⇒ i64, {min n, max ?}, 1  ;; from threads proposal
+    // 0x07 n:u64 m:u64  ⇒ i64, {min n, max m}, 1  ;; from threads proposal
+
+    pub const k_max_bytes_i32 = k_max_pages_i32 * MemoryDefinition.k_page_size;
+    pub const k_max_pages_i32 = std.math.powi(usize, 2, 16) catch unreachable;
+
+    // Technically the max bytes should be maxInt(u64), but that is wayyy more memory than PCs have available and
+    // is just a waste of virtual address space in the implementation. Instead we'll set the upper limit to 128GB.
+    pub const k_max_bytes_i64 = (1024 * 1024 * 1024 * 128);
+    pub const k_max_pages_i64 = k_max_bytes_i64 / MemoryDefinition.k_page_size;
 
     fn decode(reader: anytype) !Limits {
-        const has_max = try reader.readByte();
-        if (has_max > 1) {
+        const limit_type: u8 = try reader.readByte();
+
+        if (limit_type > 7) {
             return error.MalformedLimits;
         }
-        const min = try common.decodeLEB128(u32, reader);
-        var max: ?u32 = null;
 
-        switch (has_max) {
+        const is_u32 = limit_type < 4;
+
+        const min = common.decodeLEB128(u64, reader) catch return error.MalformedLimits;
+        if (is_u32 and min > std.math.maxInt(u32)) {
+            return error.MalformedLimits;
+        }
+        var max: ?u64 = null;
+
+        switch (std.math.rem(u8, limit_type, 2) catch unreachable) {
             0 => {},
             1 => {
-                max = try common.decodeLEB128(u32, reader);
+                max = common.decodeLEB128(u64, reader) catch return error.MalformedLimits;
+                if (is_u32 and max.? > std.math.maxInt(u32)) {
+                    return error.MalformedLimits;
+                }
                 if (max.? < min) {
                     return error.ValidationLimitsMinMustNotBeLargerThanMax;
                 }
@@ -294,7 +324,28 @@ pub const Limits = struct {
         return Limits{
             .min = min,
             .max = max,
+            .limit_type = limit_type,
         };
+    }
+
+    pub fn isIndex32(self: Limits) bool {
+        return self.limit_type < 4;
+    }
+
+    pub fn indexType(self: Limits) ValType {
+        return if (self.limit_type < 4) .I32 else .I64;
+    }
+
+    pub fn maxPages(self: Limits) usize {
+        if (self.max) |max| {
+            return @max(1, max);
+        }
+
+        return self.indexTypeMaxPages();
+    }
+
+    pub fn indexTypeMaxPages(self: Limits) usize {
+        return if (self.limit_type < 4) k_max_pages_i32 else k_max_pages_i64;
     }
 };
 
@@ -433,12 +484,17 @@ pub const ConstantExpression = union(ConstantExpressionType) {
         return expr;
     }
 
-    pub fn resolve(self: *const ConstantExpression, store: *Store) Val {
+    pub fn resolve(self: *ConstantExpression, module_instance: *ModuleInstance) Val {
         switch (self.*) {
             .Value => |val| {
-                return val.val;
+                var inner_val: Val = val.val;
+                if (val.type == .FuncRef) {
+                    inner_val.FuncRef.module_instance = module_instance;
+                }
+                return inner_val;
             },
             .Global => |global_index| {
+                const store: *Store = &module_instance.store;
                 std.debug.assert(global_index < store.imports.globals.items.len + store.globals.items.len);
                 const global: *GlobalInstance = store.getGlobal(global_index);
                 return global.value;
@@ -446,8 +502,8 @@ pub const ConstantExpression = union(ConstantExpressionType) {
         }
     }
 
-    pub fn resolveTo(self: *const ConstantExpression, store: *Store, comptime T: type) T {
-        const val: Val = self.resolve(store);
+    pub fn resolveTo(self: *ConstantExpression, module_instance: *ModuleInstance, comptime T: type) T {
+        const val: Val = self.resolve(module_instance);
         switch (T) {
             i32 => return val.I32,
             u32 => return @as(u32, @bitCast(val.I32)),
@@ -621,7 +677,6 @@ pub const MemoryDefinition = struct {
     limits: Limits,
 
     pub const k_page_size: usize = 64 * 1024;
-    pub const k_max_pages: usize = std.math.powi(usize, 2, 16) catch unreachable;
 };
 
 pub const ElementMode = enum {
@@ -722,13 +777,13 @@ const GlobalImportDefinition = struct {
 
 const MemArg = struct {
     alignment: u32,
-    offset: u32,
+    offset: u64,
 
     fn decode(reader: anytype, comptime bitwidth: u32) !MemArg {
         std.debug.assert(bitwidth % 8 == 0);
         var memarg = MemArg{
             .alignment = try common.decodeLEB128(u32, reader),
-            .offset = try common.decodeLEB128(u32, reader),
+            .offset = try common.decodeLEB128(u64, reader),
         };
         const bit_alignment = std.math.powi(u32, 2, memarg.alignment) catch return error.ValidationBadAlignment;
         if (bit_alignment > bitwidth / 8) {
@@ -739,7 +794,7 @@ const MemArg = struct {
 };
 
 pub const MemoryOffsetAndLaneImmediates = struct {
-    offset: u32,
+    offset: u64,
     laneidx: u8,
 };
 
@@ -800,7 +855,7 @@ pub const InstructionImmediates = union(InstructionImmediatesTypes) {
     ValueVec: v128,
     Index: u32,
     LabelId: u32,
-    MemoryOffset: u32,
+    MemoryOffset: u64,
     MemoryOffsetAndLane: MemoryOffsetAndLaneImmediates,
     Block: BlockImmediates,
     CallIndirect: CallIndirectImmediates,
@@ -1393,12 +1448,14 @@ const ModuleValidator = struct {
     type_stack: std.ArrayList(?ValType),
     control_stack: std.ArrayList(ControlFrame),
     control_types: StableArray(ValType),
+    log: Logger,
 
-    fn init(allocator: std.mem.Allocator) ModuleValidator {
+    fn init(allocator: std.mem.Allocator, log: Logger) ModuleValidator {
         return ModuleValidator{
             .type_stack = std.ArrayList(?ValType).init(allocator),
             .control_stack = std.ArrayList(ControlFrame).init(allocator),
             .control_types = StableArray(ValType).init(1 * 1024 * 1024),
+            .log = log,
         };
     }
 
@@ -1449,6 +1506,18 @@ const ModuleValidator = struct {
         if (module.imports.memories.items.len + module.memories.items.len < 1) {
             return error.ValidationUnknownMemory;
         }
+    }
+
+    fn getMemoryLimits(module: *const ModuleDefinition) Limits {
+        if (module.imports.memories.items.len > 0) {
+            return module.imports.memories.items[0].limits;
+        }
+
+        if (module.memories.items.len > 0) {
+            return module.memories.items[0].limits;
+        }
+
+        unreachable;
     }
 
     fn validateElementIndex(index: u64, module: *const ModuleDefinition) !void {
@@ -1566,15 +1635,17 @@ const ModuleValidator = struct {
             }
 
             fn validateLoadOp(validator: *ModuleValidator, module_: *const ModuleDefinition, load_type: ValType) !void {
-                try validator.popType(.I32);
                 try validateMemoryIndex(module_);
+                const index_type: ValType = getMemoryLimits(module_).indexType();
+                try validator.popType(index_type);
                 try validator.pushType(load_type);
             }
 
             fn validateStoreOp(validator: *ModuleValidator, module_: *const ModuleDefinition, store_type: ValType) !void {
                 try validateMemoryIndex(module_);
+                const index_type: ValType = getMemoryLimits(module_).indexType();
                 try validator.popType(store_type);
-                try validator.popType(.I32);
+                try validator.popType(index_type);
             }
 
             fn validateVectorLane(comptime T: type, laneidx: u32) !void {
@@ -1837,12 +1908,14 @@ const ModuleValidator = struct {
             },
             .Memory_Size => {
                 try validateMemoryIndex(module);
-                try self.pushType(.I32);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.pushType(index_type);
             },
             .Memory_Grow => {
                 try validateMemoryIndex(module);
-                try self.popType(.I32);
-                try self.pushType(.I32);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
+                try self.pushType(index_type);
             },
             .I32_Const => {
                 try self.pushType(.I32);
@@ -2052,9 +2125,10 @@ const ModuleValidator = struct {
             .Memory_Init => {
                 try validateMemoryIndex(module);
                 try validateDataIndex(instruction.immediate.Index, module);
-                try self.popType(.I32);
-                try self.popType(.I32);
-                try self.popType(.I32);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
+                try self.popType(index_type);
+                try self.popType(index_type);
             },
             .Data_Drop => {
                 if (module.data_count != null) {
@@ -2063,11 +2137,19 @@ const ModuleValidator = struct {
                     return error.MalformedMissingDataCountSection;
                 }
             },
-            .Memory_Copy, .Memory_Fill => {
+            .Memory_Fill => {
                 try validateMemoryIndex(module);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
                 try self.popType(.I32);
-                try self.popType(.I32);
-                try self.popType(.I32);
+                try self.popType(index_type);
+            },
+            .Memory_Copy => {
+                try validateMemoryIndex(module);
+                const index_type: ValType = getMemoryLimits(module).indexType();
+                try self.popType(index_type);
+                try self.popType(index_type);
+                try self.popType(index_type);
             },
             .Table_Init => {
                 const pair: TablePairImmediates = instruction.immediate.TablePair;
@@ -2488,6 +2570,7 @@ const ModuleValidator = struct {
     fn popType(self: *ModuleValidator, expected_or_null: ?ValType) !void {
         const valtype_or_null = try self.popAnyType();
         if (valtype_or_null != expected_or_null and valtype_or_null != null and expected_or_null != null) {
+            self.log.err("Validation failed: Expected type {?} but got {?}", .{ expected_or_null, valtype_or_null });
             return error.ValidationTypeMismatch;
         }
     }
@@ -2545,6 +2628,7 @@ const ModuleValidator = struct {
 
 pub const ModuleDefinitionOpts = struct {
     debug_name: []const u8 = "",
+    log: ?Logger = null, // if null, uses default logger
 };
 
 pub const ModuleDefinition = struct {
@@ -2588,6 +2672,7 @@ pub const ModuleDefinition = struct {
 
     name_section: NameCustomSection,
 
+    log: Logger,
     debug_name: []const u8,
     start_func_index: ?u32 = null,
     data_count: ?u32 = null,
@@ -2624,6 +2709,7 @@ pub const ModuleDefinition = struct {
             .datas = std.ArrayList(DataDefinition).init(allocator),
             .custom_sections = std.ArrayList(CustomSection).init(allocator),
             .name_section = NameCustomSection.init(allocator),
+            .log = if (opts.log) |log| log else Logger.empty(),
             .debug_name = try allocator.dupe(u8, opts.debug_name),
         };
         return def;
@@ -2676,7 +2762,7 @@ pub const ModuleDefinition = struct {
         };
 
         var allocator = self.allocator;
-        var validator = ModuleValidator.init(allocator);
+        var validator = ModuleValidator.init(allocator, self.log);
         defer validator.deinit();
 
         var stream = std.io.fixedBufferStream(wasm);
@@ -2880,7 +2966,11 @@ pub const ModuleDefinition = struct {
                     while (memory_index < num_memories) : (memory_index += 1) {
                         var limits = try Limits.decode(reader);
 
-                        if (limits.min > MemoryDefinition.k_max_pages) {
+                        if (limits.min > limits.maxPages()) {
+                            self.log.err(
+                                "Validation error: max memory pages exceeded. Got {} but max is {}",
+                                .{ limits.min, limits.indexTypeMaxPages() },
+                            );
                             return error.ValidationMemoryMaxPagesExceeded;
                         }
 
@@ -2888,7 +2978,11 @@ pub const ModuleDefinition = struct {
                             if (max < limits.min) {
                                 return error.ValidationMemoryInvalidMaxLimit;
                             }
-                            if (max > MemoryDefinition.k_max_pages) {
+                            if (max > limits.indexTypeMaxPages()) {
+                                self.log.err(
+                                    "Validation error: max memory pages exceeded. Got {} but max is {}",
+                                    .{ max, limits.indexTypeMaxPages() },
+                                );
                                 return error.ValidationMemoryMaxPagesExceeded;
                             }
                         }

@@ -1,6 +1,6 @@
 import subprocess
 
-subprocess.run([
+completedProcess = subprocess.run([
 	"python3",
 	"test/wasi/wasi-testsuite/test-runner/wasi_test_runner.py",
 	"-r",
@@ -12,3 +12,7 @@ subprocess.run([
 
 # the wasi tests leave a bunch of untracked files around after a test run
 subprocess.run(["git", "clean", "-f"], cwd="test/wasi/wasi-testsuite")
+
+# propagate the test suite return code if there was an error
+if completedProcess.returncode != 0:
+	exit(completedProcess.returncode)

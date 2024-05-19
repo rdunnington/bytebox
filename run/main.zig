@@ -6,6 +6,8 @@ const Val = bytebox.Val;
 const ValType = bytebox.ValType;
 const TraceMode = bytebox.DebugTrace.Mode;
 
+const log = bytebox.Logger.default();
+
 const RunErrors = error{
     IoError,
     MissingFunction,
@@ -102,12 +104,8 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--trace")) {
             arg_index += 1;
             if (getArgSafe(arg_index, args)) |mode_str| {
-                if (std.ascii.eqlIgnoreCase(mode_str, "function") or std.ascii.eqlIgnoreCase(mode_str, "func")) {
-                    opts.trace = TraceMode.Function;
-                } else if (std.ascii.eqlIgnoreCase(mode_str, "instruction") or std.ascii.eqlIgnoreCase(mode_str, "instr")) {
-                    opts.trace = TraceMode.Instruction;
-                } else if (std.ascii.eqlIgnoreCase(mode_str, "none")) {
-                    opts.trace = TraceMode.None;
+                if (bytebox.DebugTrace.parseMode(mode_str)) |mode| {
+                    opts.trace = mode;
                 } else {
                     opts.invalid_arg = mode_str;
                 }
@@ -135,7 +133,7 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
 
 const version_string = "bytebox v0.0.1";
 
-fn printHelp(args: [][]const u8) !void {
+fn printHelp(args: [][]const u8) void {
     const usage_string: []const u8 =
         \\Usage: {s} <FILE> [WASM_ARGS]... [OPTION]...
         \\  
@@ -175,8 +173,7 @@ fn printHelp(args: [][]const u8) !void {
         \\
     ;
 
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print(usage_string, .{args[0]});
+    log.info(usage_string, .{args[0]});
 }
 
 pub fn main() !void {
@@ -196,33 +193,28 @@ pub fn main() !void {
 
     const opts: CmdOpts = parseCmdOpts(args, &env_buffer, &dir_buffer);
 
-    const stdout = std.io.getStdOut().writer();
-    const stderr = std.io.getStdErr().writer();
-
     if (opts.print_help) {
-        try printHelp(args);
+        printHelp(args);
         return;
     } else if (opts.print_version) {
-        try stdout.print("{s}", .{version_string});
+        log.info("{s}", .{version_string});
         return;
     } else if (opts.invalid_arg) |invalid_arg| {
-        try stderr.print("Invalid argument '{s}'.\n", .{invalid_arg});
-        try printHelp(args);
+        log.err("Invalid argument '{s}'.\n", .{invalid_arg});
+        printHelp(args);
         return;
     } else if (opts.missing_options) |missing_options| {
-        try stderr.print("Argument {s} is missing required options.\n", .{missing_options});
-        try printHelp(args);
+        log.err("Argument {s} is missing required options.\n", .{missing_options});
+        printHelp(args);
         return;
     } else if (opts.invoke != null and opts.filename == null) {
-        try stderr.print("Cannot invoke {s} without a file to load.", .{opts.invoke.?.funcname});
-        try printHelp(args);
+        log.err("Cannot invoke {s} without a file to load.", .{opts.invoke.?.funcname});
+        printHelp(args);
         return;
     }
 
     if (opts.trace != .None) {
-        if (bytebox.DebugTrace.setMode(opts.trace) == false) {
-            try stderr.print("Failed to set trace mode to {}. Option unavailable in non-debug builds.\n", .{opts.trace});
-        }
+        bytebox.DebugTrace.setMode(opts.trace);
     }
 
     std.debug.assert(opts.filename != null);
@@ -236,6 +228,7 @@ pub fn main() !void {
 
     const module_def_opts = bytebox.ModuleDefinitionOpts{
         .debug_name = std.fs.path.basename(opts.filename.?),
+        .log = log,
     };
     var module_def = try bytebox.createModuleDefinition(allocator, module_def_opts);
     defer module_def.destroy();
@@ -249,7 +242,7 @@ pub fn main() !void {
         var strbuf = std.ArrayList(u8).init(allocator);
         try strbuf.ensureTotalCapacity(1024 * 16);
         try module_def.dump(strbuf.writer());
-        try stdout.print("{s}", .{strbuf.items});
+        log.info("{s}", .{strbuf.items});
         return;
     }
 
@@ -265,10 +258,11 @@ pub fn main() !void {
 
     var instantiate_opts = bytebox.ModuleInstantiateOpts{
         .imports = &[_]bytebox.ModuleImportPackage{imports_wasi},
+        .log = log,
     };
 
     module_instance.instantiate(instantiate_opts) catch |e| {
-        std.log.err("Caught {} instantiating module.", .{e});
+        std.log.err("Caught error instantiating module {}.", .{e});
         return e;
     };
 
@@ -382,7 +376,7 @@ pub fn main() !void {
             try std.fmt.format(writer, "\n", .{});
         }
         if (strbuf.items.len > 0) {
-            try stdout.print("{s}\n", .{strbuf.items});
+            log.info("{s}\n", .{strbuf.items});
         }
     }
 }

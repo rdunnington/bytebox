@@ -2,7 +2,7 @@
 	path = zig-stable-array
 	url = https://github.com/rdunnington/zig-stable-array.git
 [submodule "test/testsuite"]
-	path = test/testsuite
+	path = test/wasm/wasm-testsuite
 	url = https://github.com/WebAssembly/testsuite.git
 [submodule "test/wasi/wasi-testsuite"]
 	path = test/wasi/wasi-testsuite

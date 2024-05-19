@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 
 const common = @import("common.zig");
 const StableArray = common.StableArray;
+const Logger = common.Logger;
 
 const opcodes = @import("opcode.zig");
 const Opcode = opcodes.Opcode;
@@ -65,21 +66,28 @@ pub const DebugTrace = struct {
         Instruction,
     };
 
-    pub fn setMode(new_mode: Mode) bool {
-        if (builtin.mode == .Debug) {
-            mode = new_mode;
-            return true;
-        }
+    pub fn setMode(new_mode: Mode) void {
+        mode = new_mode;
+    }
 
-        return false;
+    pub fn parseMode(mode_str: []const u8) ?Mode {
+        if (std.ascii.eqlIgnoreCase(mode_str, "function") or std.ascii.eqlIgnoreCase(mode_str, "func")) {
+            return .Function;
+        } else if (std.ascii.eqlIgnoreCase(mode_str, "instruction") or std.ascii.eqlIgnoreCase(mode_str, "instr")) {
+            return .Instruction;
+        } else if (std.ascii.eqlIgnoreCase(mode_str, "none")) {
+            return .None;
+        } else {
+            return null;
+        }
     }
 
     pub fn shouldTraceFunctions() bool {
-        return builtin.mode == .Debug and mode == .Function;
+        return mode == .Function;
     }
 
     pub fn shouldTraceInstructions() bool {
-        return builtin.mode == .Debug and mode == .Instruction;
+        return mode == .Instruction;
     }
 
     pub fn printIndent(indent: u32) void {
@@ -183,7 +191,7 @@ pub const TableInstance = struct {
         }
     }
 
-    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32, store: *Store) !void {
+    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
         if (start_table_index < 0 or table.refs.items.len < start_table_index + init_length) {
             return error.TrapOutOfBoundsTableAccess;
         }
@@ -197,10 +205,11 @@ pub const TableInstance = struct {
 
         var index: u32 = 0;
         while (index < elem_range.len) : (index += 1) {
-            var val: Val = elem_range[index].resolve(store);
+            var val: Val = elem_range[index].resolve(module);
 
             if (table.reftype == .FuncRef) {
-                val.FuncRef.module_instance = module;
+                // should be set in resolve() or global initialization
+                std.debug.assert(val.FuncRef.module_instance != null);
             }
 
             table_range[index] = val;
@@ -232,23 +241,27 @@ pub const MemoryInstance = struct {
     };
 
     pub const k_page_size: usize = MemoryDefinition.k_page_size;
-    pub const k_max_pages: usize = MemoryDefinition.k_max_pages;
 
     limits: Limits,
     mem: BackingMemory,
 
     pub fn init(limits: Limits, params: ?WasmMemoryExternal) MemoryInstance {
-        const max_pages = if (limits.max) |max| @max(1, max) else k_max_pages;
+        const max_pages = limits.maxPages();
+        const max_bytes: u64 = max_pages * k_page_size;
 
         var mem = if (params == null) BackingMemory{
-            .Internal = StableArray(u8).init(max_pages * k_page_size),
+            .Internal = StableArray(u8).init(@intCast(max_bytes)),
         } else BackingMemory{ .External = .{
             .buffer = &[0]u8{},
             .params = params.?,
         } };
 
         var instance = MemoryInstance{
-            .limits = Limits{ .min = 0, .max = @as(u32, @intCast(max_pages)) },
+            .limits = Limits{
+                .min = 0,
+                .max = max_pages,
+                .limit_type = limits.limit_type,
+            },
             .mem = mem,
         };
 
@@ -269,13 +282,13 @@ pub const MemoryInstance = struct {
         };
     }
 
-    pub fn grow(self: *MemoryInstance, num_pages: usize) bool {
+    pub fn grow(self: *MemoryInstance, num_pages: u64) bool {
         if (num_pages == 0) {
             return true;
         }
 
         const total_pages = self.limits.min + num_pages;
-        const max_pages = if (self.limits.max) |max| max else k_max_pages;
+        const max_pages = self.limits.maxPages();
 
         if (total_pages > max_pages) {
             return false;
@@ -294,7 +307,7 @@ pub const MemoryInstance = struct {
             },
         }
 
-        self.limits.min = @as(u32, @intCast(total_pages));
+        self.limits.min = total_pages;
 
         return true;
     }
@@ -598,6 +611,7 @@ pub const ModuleInstantiateOpts = struct {
     wasm_memory_external: ?WasmMemoryExternal = null,
     stack_size: usize = 0,
     enable_debug: bool = false,
+    log: ?Logger = null,
 };
 
 pub const InvokeOpts = struct {
@@ -713,6 +727,7 @@ pub const ModuleInstance = struct {
     userdata: ?*anyopaque = null, // any host data associated with this module
     is_instantiated: bool = false,
     vm: *VM,
+    log: Logger,
 
     pub fn create(module_def: *const ModuleDefinition, vm: *VM, allocator: std.mem.Allocator) AllocError!*ModuleInstance {
         var inst = try allocator.create(ModuleInstance);
@@ -721,6 +736,7 @@ pub const ModuleInstance = struct {
             .store = Store.init(allocator),
             .module_def = module_def,
             .vm = vm,
+            .log = Logger.empty(),
         };
         return inst;
     }
@@ -736,18 +752,21 @@ pub const ModuleInstance = struct {
     pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
         const Helpers = struct {
             fn areLimitsCompatible(def_limits: *const Limits, instance_limits: *const Limits) bool {
+                // if (def_limits.limit_type != instance_limits.limit_type) {
+                //     return false;
+                // }
                 if (def_limits.max != null and instance_limits.max == null) {
                     return false;
                 }
 
-                var def_max: u32 = if (def_limits.max) |max| max else std.math.maxInt(u32);
-                var instance_max: u32 = if (instance_limits.max) |max| max else 0;
+                var def_max: u64 = if (def_limits.max) |max| max else std.math.maxInt(u64);
+                var instance_max: u64 = if (instance_limits.max) |max| max else 0;
 
                 return def_limits.min <= instance_limits.min and def_max >= instance_max;
             }
 
             // TODO probably should change the imports search to a hashed lookup of module_name+item_name -> array of items to make this faster
-            fn findImportInMultiple(comptime T: type, names: *const ImportNames, imports_or_null: ?[]const ModuleImportPackage) UnlinkableError!*const T {
+            fn findImportInMultiple(comptime T: type, names: *const ImportNames, imports_or_null: ?[]const ModuleImportPackage, log: *Logger) UnlinkableError!*const T {
                 if (imports_or_null) |_imports| {
                     for (_imports) |*module_imports| {
                         const wildcard_name = std.mem.eql(u8, module_imports.name, "*");
@@ -816,6 +835,16 @@ pub const ModuleInstance = struct {
                     }
                 }
 
+                const import_type_str = switch (T) {
+                    FunctionImport => "function",
+                    TableImport => "table",
+                    MemoryImport => "memory",
+                    GlobalImport => "global",
+                    else => unreachable,
+                };
+
+                log.err("Unable to find {s} import '{s}.{s}'", .{ import_type_str, names.module_name, names.import_name });
+
                 return error.UnlinkableUnknownImport;
             }
 
@@ -840,17 +869,22 @@ pub const ModuleInstance = struct {
 
         std.debug.assert(self.is_instantiated == false);
 
+        if (opts.log) |log| {
+            self.log = log;
+        }
+
         var store: *Store = &self.store;
         var module_def: *const ModuleDefinition = self.module_def;
         var allocator = self.allocator;
 
         for (module_def.imports.functions.items) |*func_import_def| {
-            var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, opts.imports);
+            var import_func: *const FunctionImport = try Helpers.findImportInMultiple(FunctionImport, &func_import_def.names, opts.imports, &self.log);
 
             const type_def: *const FunctionTypeDefinition = &module_def.types.items[func_import_def.type_index];
             const is_type_signature_eql: bool = import_func.isTypeSignatureEql(type_def);
 
             if (is_type_signature_eql == false) {
+                self.log.err("Incompatible function import '{s}.{s}'", .{ func_import_def.names.module_name, func_import_def.names.import_name });
                 return error.UnlinkableIncompatibleImportType;
             }
 
@@ -858,7 +892,7 @@ pub const ModuleInstance = struct {
         }
 
         for (module_def.imports.tables.items) |*table_import_def| {
-            var import_table: *const TableImport = try Helpers.findImportInMultiple(TableImport, &table_import_def.names, opts.imports);
+            var import_table: *const TableImport = try Helpers.findImportInMultiple(TableImport, &table_import_def.names, opts.imports, &self.log);
 
             var is_eql: bool = undefined;
             switch (import_table.data) {
@@ -874,6 +908,7 @@ pub const ModuleInstance = struct {
             }
 
             if (is_eql == false) {
+                self.log.err("Incompatible table import '{s}.{s}'", .{ table_import_def.names.module_name, table_import_def.names.import_name });
                 return error.UnlinkableIncompatibleImportType;
             }
 
@@ -881,7 +916,7 @@ pub const ModuleInstance = struct {
         }
 
         for (module_def.imports.memories.items) |*memory_import_def| {
-            var import_memory: *const MemoryImport = try Helpers.findImportInMultiple(MemoryImport, &memory_import_def.names, opts.imports);
+            var import_memory: *const MemoryImport = try Helpers.findImportInMultiple(MemoryImport, &memory_import_def.names, opts.imports, &self.log);
 
             var is_eql: bool = undefined;
             switch (import_memory.data) {
@@ -895,6 +930,7 @@ pub const ModuleInstance = struct {
             }
 
             if (is_eql == false) {
+                self.log.err("Incompatible memory import '{s}.{s}'", .{ memory_import_def.names.module_name, memory_import_def.names.import_name });
                 return error.UnlinkableIncompatibleImportType;
             }
 
@@ -902,7 +938,7 @@ pub const ModuleInstance = struct {
         }
 
         for (module_def.imports.globals.items) |*global_import_def| {
-            var import_global: *const GlobalImport = try Helpers.findImportInMultiple(GlobalImport, &global_import_def.names, opts.imports);
+            var import_global: *const GlobalImport = try Helpers.findImportInMultiple(GlobalImport, &global_import_def.names, opts.imports, &self.log);
 
             var is_eql: bool = undefined;
             switch (import_global.data) {
@@ -918,6 +954,7 @@ pub const ModuleInstance = struct {
             }
 
             if (is_eql == false) {
+                self.log.err("Incompatible global import '{s}.{s}'", .{ global_import_def.names.module_name, global_import_def.names.import_name });
                 return error.UnlinkableIncompatibleImportType;
             }
 
@@ -949,7 +986,7 @@ pub const ModuleInstance = struct {
         for (module_def.globals.items) |*def_global| {
             var global = GlobalInstance{
                 .def = def_global,
-                .value = def_global.expr.resolve(store),
+                .value = def_global.expr.resolve(self),
             };
             if (def_global.valtype == .FuncRef) {
                 global.value.FuncRef.module_instance = self;
@@ -971,7 +1008,7 @@ pub const ModuleInstance = struct {
 
                 var table: *TableInstance = store.getTable(def_elem.table_index);
 
-                var start_table_index_i32: i32 = if (def_elem.offset) |offset| offset.resolveTo(store, i32) else 0;
+                var start_table_index_i32: i32 = if (def_elem.offset) |*offset| offset.resolveTo(self, i32) else 0;
                 if (start_table_index_i32 < 0) {
                     return error.UninstantiableOutOfBoundsTableAccess;
                 }
@@ -983,7 +1020,7 @@ pub const ModuleInstance = struct {
                     try table.init_range_val(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index);
                 } else {
                     var elems = def_elem.elems_expr.items;
-                    try table.init_range_expr(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index, store);
+                    try table.init_range_expr(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index);
                 }
             } else if (def_elem.mode == .Passive) {
                 if (def_elem.elems_value.items.len > 0) {
@@ -999,7 +1036,7 @@ pub const ModuleInstance = struct {
                     try elem.refs.resize(def_elem.elems_expr.items.len);
                     var index: usize = 0;
                     while (index < elem.refs.items.len) : (index += 1) {
-                        elem.refs.items[index] = def_elem.elems_expr.items[index].resolve(store);
+                        elem.refs.items[index] = def_elem.elems_expr.items[index].resolve(self);
                         if (elem.reftype == .FuncRef) {
                             elem.refs.items[index].FuncRef.module_instance = self;
                         }
@@ -1017,7 +1054,7 @@ pub const ModuleInstance = struct {
                 var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
-                const offset_begin: usize = (def_data.offset.?).resolveTo(store, u32);
+                const offset_begin: usize = (def_data.offset.?).resolveTo(self, u32);
                 const offset_end: usize = offset_begin + num_bytes;
 
                 const mem_buffer: []u8 = memory.buffer();
@@ -1118,6 +1155,8 @@ pub const ModuleInstance = struct {
             }
         }
 
+        self.log.err("Failed to find function {s}", .{func_name});
+
         return error.ExportUnknownFunction;
     }
 
@@ -1136,6 +1175,8 @@ pub const ModuleInstance = struct {
                 };
             }
         }
+
+        self.log.err("Failed to find global export {s}", .{global_name});
 
         return error.ExportUnknownGlobal;
     }
