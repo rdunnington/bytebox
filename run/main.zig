@@ -266,10 +266,6 @@ pub fn main() !void {
         return e;
     };
 
-    if (opts.invoke == null) {
-        log.info("No invoke function provided, falling back to _start...\n", .{});
-    }
-
     const invoke_funcname: []const u8 = if (opts.invoke) |invoke| invoke.funcname else "_start";
     const invoke_args: [][]const u8 = if (opts.invoke) |invoke| invoke.args else &[_][]u8{};
 
