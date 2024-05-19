@@ -191,7 +191,7 @@ pub const TableInstance = struct {
         }
     }
 
-    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []const ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32, store: *Store) !void {
+    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
         if (start_table_index < 0 or table.refs.items.len < start_table_index + init_length) {
             return error.TrapOutOfBoundsTableAccess;
         }
@@ -205,10 +205,11 @@ pub const TableInstance = struct {
 
         var index: u32 = 0;
         while (index < elem_range.len) : (index += 1) {
-            var val: Val = elem_range[index].resolve(store);
+            var val: Val = elem_range[index].resolve(module);
 
             if (table.reftype == .FuncRef) {
-                val.FuncRef.module_instance = module;
+                // should be set in resolve() or global initialization
+                std.debug.assert(val.FuncRef.module_instance != null);
             }
 
             table_range[index] = val;
@@ -985,7 +986,7 @@ pub const ModuleInstance = struct {
         for (module_def.globals.items) |*def_global| {
             var global = GlobalInstance{
                 .def = def_global,
-                .value = def_global.expr.resolve(store),
+                .value = def_global.expr.resolve(self),
             };
             if (def_global.valtype == .FuncRef) {
                 global.value.FuncRef.module_instance = self;
@@ -1007,7 +1008,7 @@ pub const ModuleInstance = struct {
 
                 var table: *TableInstance = store.getTable(def_elem.table_index);
 
-                var start_table_index_i32: i32 = if (def_elem.offset) |offset| offset.resolveTo(store, i32) else 0;
+                var start_table_index_i32: i32 = if (def_elem.offset) |*offset| offset.resolveTo(self, i32) else 0;
                 if (start_table_index_i32 < 0) {
                     return error.UninstantiableOutOfBoundsTableAccess;
                 }
@@ -1019,7 +1020,7 @@ pub const ModuleInstance = struct {
                     try table.init_range_val(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index);
                 } else {
                     var elems = def_elem.elems_expr.items;
-                    try table.init_range_expr(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index, store);
+                    try table.init_range_expr(self, elems, @as(u32, @intCast(elems.len)), 0, start_table_index);
                 }
             } else if (def_elem.mode == .Passive) {
                 if (def_elem.elems_value.items.len > 0) {
@@ -1035,7 +1036,7 @@ pub const ModuleInstance = struct {
                     try elem.refs.resize(def_elem.elems_expr.items.len);
                     var index: usize = 0;
                     while (index < elem.refs.items.len) : (index += 1) {
-                        elem.refs.items[index] = def_elem.elems_expr.items[index].resolve(store);
+                        elem.refs.items[index] = def_elem.elems_expr.items[index].resolve(self);
                         if (elem.reftype == .FuncRef) {
                             elem.refs.items[index].FuncRef.module_instance = self;
                         }
@@ -1053,7 +1054,7 @@ pub const ModuleInstance = struct {
                 var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
-                const offset_begin: usize = (def_data.offset.?).resolveTo(store, u32);
+                const offset_begin: usize = (def_data.offset.?).resolveTo(self, u32);
                 const offset_end: usize = offset_begin + num_bytes;
 
                 const mem_buffer: []u8 = memory.buffer();

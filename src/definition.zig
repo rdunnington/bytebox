@@ -484,12 +484,17 @@ pub const ConstantExpression = union(ConstantExpressionType) {
         return expr;
     }
 
-    pub fn resolve(self: *const ConstantExpression, store: *Store) Val {
+    pub fn resolve(self: *ConstantExpression, module_instance: *ModuleInstance) Val {
         switch (self.*) {
             .Value => |val| {
-                return val.val;
+                var inner_val: Val = val.val;
+                if (val.type == .FuncRef) {
+                    inner_val.FuncRef.module_instance = module_instance;
+                }
+                return inner_val;
             },
             .Global => |global_index| {
+                const store: *Store = &module_instance.store;
                 std.debug.assert(global_index < store.imports.globals.items.len + store.globals.items.len);
                 const global: *GlobalInstance = store.getGlobal(global_index);
                 return global.value;
@@ -497,8 +502,8 @@ pub const ConstantExpression = union(ConstantExpressionType) {
         }
     }
 
-    pub fn resolveTo(self: *const ConstantExpression, store: *Store, comptime T: type) T {
-        const val: Val = self.resolve(store);
+    pub fn resolveTo(self: *ConstantExpression, module_instance: *ModuleInstance, comptime T: type) T {
+        const val: Val = self.resolve(module_instance);
         switch (T) {
             i32 => return val.I32,
             u32 => return @as(u32, @bitCast(val.I32)),
