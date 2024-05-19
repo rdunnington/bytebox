@@ -1163,12 +1163,12 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             }
                         }
                     }
+                }
 
-                    if (action_succeeded) {
-                        logVerbose("\tSuccess!\n", .{});
-                    } else {
-                        did_fail_any_test = true;
-                    }
+                if (action_succeeded) {
+                    logVerbose("\tSuccess!\n", .{});
+                } else {
+                    did_fail_any_test = true;
                 }
             },
             .AssertTrap => |c| {
