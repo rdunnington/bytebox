@@ -13,7 +13,7 @@ Bytebox currently builds with [Zig 0.11.x](https://ziglang.org/download) to avoi
 
 To run the tests:
 * `wasm-tools` is required to run the wasm testsuite. You can install it via the rust toolchain `cargo install wasm-tools` or directly from the [release page](https://github.com/bytecodealliance/wasm-tools/releases).
-* `clang` v15.x is required to build the mem64 tests. However, if you don't have a compatible version of `clang` installed, you can pass `--noclang` to `zig build` to avoid the requirement.
+* `clang` v15.x+ is required to build the mem64 tests. However, if you don't have a compatible version of `clang` installed, you can pass `--noclang` to `zig build` to avoid the requirement.
 * `python3` is required to run the wasi testsuite. You may need to run `python3 -m pip install -r test/wasi/wasi-testsuite/test-runner/requirements.txt` to ensure the wasi test runner has all the necessary dependencies installed.
 
 ## Run Tests
