@@ -263,14 +263,17 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                         self.items.ptr = @alignCast(@ptrCast(addr));
                         self.items.len = 0;
                     } else {
-                        const prot: u32 = std.c.PROT.READ | std.c.PROT.WRITE;
+                        const prot: u32 = std.c.PROT.NONE;
                         const map: std.c.MAP = .{
                             .ANONYMOUS = true,
                             .TYPE = .PRIVATE,
                         };
                         const fd: std.posix.fd_t = -1;
                         const offset: usize = 0;
-                        const slice = try std.posix.mmap(null, self.max_virtual_alloc_bytes, prot, map, fd, offset);
+                        const slice = std.posix.mmap(null, self.max_virtual_alloc_bytes, prot, map, fd, offset) catch |e| {
+                            std.debug.print("caught initial sizing error {}, total bytes: {}\n", .{ e, self.max_virtual_alloc_bytes });
+                            return e;
+                        };
                         self.items.ptr = @alignCast(@ptrCast(slice.ptr));
                         self.items.len = 0;
                     }
@@ -282,6 +285,23 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                 if (builtin.os.tag == .windows) {
                     const w = std.os.windows;
                     _ = try w.VirtualAlloc(@as(w.PVOID, @ptrCast(self.items.ptr)), new_capacity_bytes, w.MEM_COMMIT, w.PAGE_READWRITE);
+                } else {
+                    const resize_capacity = new_capacity_bytes - current_capacity_bytes;
+                    const region_begin: [*]u8 = @ptrCast(self.items.ptr);
+                    const remap_region_begin: [*]u8 = region_begin + current_capacity_bytes;
+
+                    const prot: u32 = std.c.PROT.READ | std.c.PROT.WRITE;
+                    const map: std.c.MAP = .{
+                        .ANONYMOUS = true,
+                        .TYPE = .PRIVATE,
+                    };
+                    const fd: std.posix.fd_t = -1;
+                    const offset: usize = 0;
+
+                    _ = std.posix.mmap(@alignCast(remap_region_begin), resize_capacity, prot, map, fd, offset) catch |e| {
+                        std.debug.print("caught error {}\n", .{e});
+                        return e;
+                    };
                 }
             }
 
@@ -398,6 +418,7 @@ test "shrinkAndFree" {
 test "resize" {
     const max: usize = 1024 * 1024 * 1;
     var a = StableArray(u8).init(max);
+    defer a.deinit();
 
     var size: usize = 512;
     while (size <= max) {
@@ -408,6 +429,8 @@ test "resize" {
 
 test "out of memory" {
     var a = StableArrayAligned(u8, mem.page_size).init(TEST_VIRTUAL_ALLOC_SIZE);
+    defer a.deinit();
+
     const max_capacity: usize = TEST_VIRTUAL_ALLOC_SIZE / mem.page_size;
     try a.appendNTimes(0xFF, max_capacity);
     for (a.items) |v| {
@@ -423,5 +446,28 @@ test "out of memory" {
         assert(err == error.OutOfMemory);
     };
     assert(didCatchError == true);
-    a.deinit();
+}
+
+test "huge max size" {
+    const KB = 1024;
+    const MB = KB * 1024;
+    const GB = MB * 1024;
+
+    var a = StableArray(u8).init(GB * 128);
+    defer a.deinit();
+
+    try a.resize(MB * 4);
+    try a.resize(MB * 8);
+    try a.resize(MB * 16);
+    a.items[MB * 16 - 1] = 0xFF;
+}
+
+test "growing retains values" {
+    var a = StableArray(u8).init(TEST_VIRTUAL_ALLOC_SIZE);
+    defer a.deinit();
+
+    try a.resize(mem.page_size);
+    a.items[0] = 0xFF;
+    try a.resize(mem.page_size * 2);
+    assert(a.items[0] == 0xFF);
 }

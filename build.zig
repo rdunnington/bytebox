@@ -15,13 +15,14 @@ const ExeOpts = struct {
 
 pub fn build(b: *Build) void {
     const should_emit_asm = b.option(bool, "asm", "Emit asm for the bytebox binaries") orelse false;
+    const no_clang = b.option(bool, "noclang", "Pass this if clang isn't in the PATH") orelse false;
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    var bench_add_one_step: *CompileStep = buildWasmExe(b, "bench/samples/add-one.zig", optimize);
-    var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig", optimize);
-    var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig", optimize);
+    var bench_add_one_step: *CompileStep = buildWasmExe(b, "bench/samples/add-one.zig");
+    var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig");
+    var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig");
 
     const bytebox_module: *Build.Module = b.addModule("bytebox", .{
         .root_source_file = b.path("src/core.zig"),
@@ -41,7 +42,7 @@ pub fn build(b: *Build) void {
         &bench_mandelbrot_step.step,
     };
     _ = buildExeWithRunStep(b, target, optimize, bytebox_module, .{
-        .exe_name = "benchmark",
+        .exe_name = "bench",
         .root_src = "bench/main.zig",
         .step_name = "bench",
         .description = "Run the benchmark suite",
@@ -69,8 +70,8 @@ pub fn build(b: *Build) void {
 
     // wasm tests
     const wasm_testsuite_step = buildExeWithRunStep(b, target, optimize, bytebox_module, .{
-        .exe_name = "testsuite",
-        .root_src = "test/main.zig",
+        .exe_name = "test-wasm",
+        .root_src = "test/wasm/main.zig",
         .step_name = "test-wasm",
         .description = "Run the wasm testsuite",
     });
@@ -81,11 +82,43 @@ pub fn build(b: *Build) void {
     const wasi_testsuite_step = b.step("test-wasi", "Run wasi testsuite");
     wasi_testsuite_step.dependOn(&wasi_testsuite.step);
 
+    // mem64 step
+    var mem64_test_step: ?*Build.Step = null;
+    if (!no_clang) {
+        // need to use clang to compile the C test due to https://github.com/ziglang/zig/issues/19942
+        // eventually we will ziggify this test
+        // ideally this test would go away, but the existing spec tests don't provide very good coverage
+        // of the instructions
+        const compile_memtest = b.addSystemCommand(&.{"clang"});
+        compile_memtest.addArg("--target=wasm64-freestanding");
+        compile_memtest.addArg("-mbulk-memory");
+        compile_memtest.addArg("-nostdlib");
+        compile_memtest.addArg("-O2");
+        compile_memtest.addArg("-Wl,--no-entry");
+        compile_memtest.addArg("-Wl,--export-dynamic");
+        compile_memtest.addArg("-o");
+        compile_memtest.addArg("test/mem64/memtest.wasm");
+        compile_memtest.addFileArg(.{ .path = "test/mem64/memtest.c" });
+        compile_memtest.has_side_effects = true;
+
+        b.getInstallStep().dependOn(&compile_memtest.step);
+
+        mem64_test_step = buildExeWithRunStep(b, target, optimize, bytebox_module, .{
+            .exe_name = "test-mem64",
+            .root_src = "test/mem64/main.zig",
+            .step_name = "test-mem64",
+            .description = "Run the mem64 test",
+        });
+    }
+
     // All tests
     const all_tests_step = b.step("test", "Run unit, wasm, and wasi tests");
     all_tests_step.dependOn(unit_test_step);
     all_tests_step.dependOn(wasm_testsuite_step);
     all_tests_step.dependOn(wasi_testsuite_step);
+    if (mem64_test_step) |step| {
+        all_tests_step.dependOn(step);
+    }
 }
 
 fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, bytebox_module: *Build.Module, opts: ExeOpts) *Build.Step {
@@ -119,24 +152,22 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
     return step;
 }
 
-fn buildWasmExe(b: *Build, filepath: []const u8, optimize: std.builtin.Mode) *CompileStep {
+fn buildWasmExe(b: *Build, filepath: []const u8) *CompileStep {
     var filename: []const u8 = std.fs.path.basename(filepath);
     const filename_no_extension: []const u8 = filename[0 .. filename.len - 4];
 
-    const exe = b.addExecutable(.{
+    var exe = b.addExecutable(.{
         .name = filename_no_extension,
         .root_source_file = b.path(filepath),
         .target = b.resolveTargetQuery(.{
             .cpu_arch = .wasm32,
             .os_tag = .freestanding,
         }),
-        .optimize = optimize,
+        .optimize = .ReleaseSmall,
     });
     exe.rdynamic = true;
     exe.entry = .disabled;
 
-    // const mode = b.standardOptimizeOption();
-    // lib.setBuildMode(mode);
     b.installArtifact(exe);
 
     return exe;

@@ -32,11 +32,26 @@ test "MemoryInstance.init" {
         const limits = Limits{
             .min = 0,
             .max = null,
+            .limit_type = 0, // i32 index type
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.limits.min, 0);
-        try expectEqual(memory.limits.max.?, MemoryInstance.k_max_pages);
+        try expectEqual(memory.limits.max, Limits.k_max_pages_i32);
+        try expectEqual(memory.size(), 0);
+        try expectEqual(memory.mem.Internal.items.len, 0);
+    }
+
+    {
+        const limits = Limits{
+            .min = 0,
+            .max = null,
+            .limit_type = 4, // i64 index type
+        };
+        var memory = MemoryInstance.init(limits, null);
+        defer memory.deinit();
+        try expectEqual(memory.limits.min, 0);
+        try expectEqual(memory.limits.max, Limits.k_max_pages_i64);
         try expectEqual(memory.size(), 0);
         try expectEqual(memory.mem.Internal.items.len, 0);
     }
@@ -45,6 +60,7 @@ test "MemoryInstance.init" {
         const limits = Limits{
             .min = 25,
             .max = 25,
+            .limit_type = 1,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -59,6 +75,7 @@ test "MemoryInstance.Internal.grow" {
         const limits = Limits{
             .min = 0,
             .max = null,
+            .limit_type = 0,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -67,14 +84,15 @@ test "MemoryInstance.Internal.grow" {
         try expectEqual(memory.size(), 1);
         try expectEqual(memory.grow(1), true);
         try expectEqual(memory.size(), 2);
-        try expectEqual(memory.grow(MemoryInstance.k_max_pages - memory.size()), true);
-        try expectEqual(memory.size(), MemoryInstance.k_max_pages);
+        try expectEqual(memory.grow(Limits.k_max_pages_i32 - memory.size()), true);
+        try expectEqual(memory.size(), Limits.k_max_pages_i32);
     }
 
     {
         const limits = Limits{
             .min = 0,
             .max = 25,
+            .limit_type = 1,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -90,6 +108,7 @@ test "MemoryInstance.Internal.growAbsolute" {
         const limits = Limits{
             .min = 0,
             .max = null,
+            .limit_type = 0,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();
@@ -99,14 +118,15 @@ test "MemoryInstance.Internal.growAbsolute" {
         try expectEqual(memory.size(), 1);
         try expectEqual(memory.growAbsolute(5), true);
         try expectEqual(memory.size(), 5);
-        try expectEqual(memory.growAbsolute(MemoryInstance.k_max_pages), true);
-        try expectEqual(memory.size(), MemoryInstance.k_max_pages);
+        try expectEqual(memory.growAbsolute(Limits.k_max_pages_i32), true);
+        try expectEqual(memory.size(), Limits.k_max_pages_i32);
     }
 
     {
         const limits = Limits{
             .min = 0,
             .max = 25,
+            .limit_type = 1,
         };
         var memory = MemoryInstance.init(limits, null);
         defer memory.deinit();

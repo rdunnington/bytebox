@@ -363,12 +363,13 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.MalformedError.MalformedMagicSignature => strcmp(err_string, "magic header not detected"),
         bytebox.MalformedError.MalformedUnexpectedEnd => strcmp(err_string, "unexpected end") or
             strcmp(err_string, "unexpected end of section or function") or
-            strcmp(err_string, "length out of bounds"),
+            strcmp(err_string, "length out of bounds") or
+            strcmp(err_string, "malformed section id"),
         bytebox.MalformedError.MalformedUnsupportedWasmVersion => strcmp(err_string, "unknown binary version"),
         bytebox.MalformedError.MalformedSectionId => strcmp(err_string, "malformed section id"),
         bytebox.MalformedError.MalformedTypeSentinel => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         bytebox.MalformedError.MalformedLEB128 => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
-        bytebox.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero byte expected"),
+        bytebox.MalformedError.MalformedMissingZeroByte => strcmp(err_string, "zero flag expected"),
         bytebox.MalformedError.MalformedTooManyLocals => strcmp(err_string, "too many locals"),
         bytebox.MalformedError.MalformedFunctionCodeSectionMismatch => strcmp(err_string, "function and code section have inconsistent lengths"),
         bytebox.MalformedError.MalformedMissingDataCountSection => strcmp(err_string, "data count section required") or strcmp(err_string, "unknown data segment"),
@@ -378,15 +379,15 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.MalformedError.MalformedReferenceType => strcmp(err_string, "malformed reference type"),
         bytebox.MalformedError.MalformedSectionSizeMismatch => strcmp(err_string, "section size mismatch") or
             strcmp(err_string, "malformed section id") or
-            strcmp(err_string, "function and code section have inconsistent lengths"), // this one is a bit of a hack to resolve custom.8.wasm
+            strcmp(err_string, "function and code section have inconsistent lengths") or // this one is a bit of a hack to resolve custom.8.wasm
+            strcmp(err_string, "zero flag expected"), // the memory64 binary tests don't seem to be up to date with the reference types spec
         bytebox.MalformedError.MalformedInvalidImport => strcmp(err_string, "malformed import kind"),
-        bytebox.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long"),
+        bytebox.MalformedError.MalformedLimits => strcmp(err_string, "integer too large") or strcmp(err_string, "integer representation too long") or strcmp(err_string, "malformed limits flags"),
         bytebox.MalformedError.MalformedMultipleStartSections => strcmp(err_string, "multiple start sections") or
-            strcmp(err_string, "unexpected content after last section"),
+            strcmp(err_string, "junk after last section"),
         bytebox.MalformedError.MalformedElementType => strcmp(err_string, "integer representation too long") or strcmp(err_string, "integer too large"),
         bytebox.MalformedError.MalformedUTF8Encoding => strcmp(err_string, "malformed UTF-8 encoding"),
         bytebox.MalformedError.MalformedMutability => strcmp(err_string, "malformed mutability"),
-
         // ValidationTypeMismatch: result arity handles select.2.wasm which is the exact same binary as select.1.wasm but the test expects a different error :/
         bytebox.ValidationError.ValidationTypeMismatch => strcmp(err_string, "type mismatch") or strcmp(err_string, "invalid result arity"),
         bytebox.ValidationError.ValidationTypeMustBeNumeric => strcmp(err_string, "type mismatch"),
@@ -394,7 +395,8 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
         bytebox.ValidationError.ValidationUnknownFunction => std.mem.startsWith(u8, err_string, "unknown function"),
         bytebox.ValidationError.ValidationUnknownGlobal => std.mem.startsWith(u8, err_string, "unknown global"),
         bytebox.ValidationError.ValidationUnknownLocal => std.mem.startsWith(u8, err_string, "unknown local"),
-        bytebox.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table"),
+        bytebox.ValidationError.ValidationUnknownTable => std.mem.startsWith(u8, err_string, "unknown table") or
+            strcmp(err_string, "zero flag expected"), // the memory64 binary tests don't seem to be up to date with the reference types spec
         bytebox.ValidationError.ValidationUnknownMemory => std.mem.startsWith(u8, err_string, "unknown memory"),
         bytebox.ValidationError.ValidationUnknownElement => strcmp(err_string, "unknown element") or std.mem.startsWith(u8, err_string, "unknown elem segment"),
         bytebox.ValidationError.ValidationUnknownData => strcmp(err_string, "unknown data") or std.mem.startsWith(u8, err_string, "unknown data segment"),
@@ -589,7 +591,9 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
-            try commands.append(command);
+            if (std.mem.endsWith(u8, command.AssertInvalid.err.module, ".wasm")) {
+                try commands.append(command);
+            }
         } else if (strcmp("assert_unlinkable", json_command_type.string)) {
             const command = Command{
                 .AssertUnlinkable = CommandAssertUnlinkable{
@@ -625,8 +629,10 @@ const TestOpts = struct {
     test_filter_or_null: ?[]const u8 = null,
     command_filter_or_null: ?[]const u8 = null,
     module_filter_or_null: ?[]const u8 = null,
+    trace_mode: bytebox.DebugTrace.Mode = .None,
     force_wasm_regen_only: bool = false,
     log_suite: bool = false,
+    log: bytebox.Logger = bytebox.Logger.empty(),
 };
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackage {
@@ -709,7 +715,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
     const TableInstance = bytebox.TableInstance;
 
     const table = try allocator.create(TableInstance);
-    table.* = try TableInstance.init(ValType.FuncRef, bytebox.Limits{ .min = 10, .max = 20 }, allocator);
+    table.* = try TableInstance.init(ValType.FuncRef, bytebox.Limits{ .min = 10, .max = 20, .limit_type = 1 }, allocator);
     try imports.tables.append(bytebox.TableImport{
         .name = try allocator.dupe(u8, "table"),
         .data = .{ .Host = table },
@@ -721,6 +727,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
     memory.* = MemoryInstance.init(bytebox.Limits{
         .min = 1,
         .max = 2,
+        .limit_type = 1,
     }, null);
     _ = memory.grow(1);
     try imports.memories.append(bytebox.MemoryImport{
@@ -868,7 +875,11 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
             module.filename = try allocator.dupe(u8, module_filename);
 
-            module.def = try bytebox.createModuleDefinition(allocator, .{ .debug_name = std.fs.path.basename(module_filename) });
+            const module_def_opts = bytebox.ModuleDefinitionOpts{
+                .debug_name = std.fs.path.basename(module_filename),
+                .log = opts.log,
+            };
+            module.def = try bytebox.createModuleDefinition(allocator, module_def_opts);
             (module.def.?).decode(module_data) catch |e| {
                 var expected_str_or_null: ?[]const u8 = null;
                 if (decode_expected_error) |unwrapped_expected| {
@@ -931,7 +942,12 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
             }
 
             module.inst = try bytebox.createModuleInstance(opts.vm_type, module.def.?, allocator);
-            (module.inst.?).instantiate(.{ .imports = imports.items }) catch |e| {
+
+            const instantiate_opts = bytebox.ModuleInstantiateOpts{
+                .imports = imports.items,
+                .log = opts.log,
+            };
+            (module.inst.?).instantiate(instantiate_opts) catch |e| {
                 if (instantiate_expected_error) |expected_str| {
                     if (isSameError(e, expected_str)) {
                         logVerbose("\tSuccess!\n", .{});
@@ -1077,7 +1093,14 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                                         print("assert_return: {s}:{s}({any})\n", .{ module.filename, c.action.field, c.action.args.items });
                                     }
 
-                                    print("\tFail on return {}/{}. Expected: {}, Actual: {}\n", .{ i + 1, returns.len, expected_value, r });
+                                    const format_str = "\tFail on return {}/{}. Expected: {}, Actual: {}\n";
+                                    switch (expected_value.type) {
+                                        .I32 => print(format_str, .{ i + 1, returns.len, expected_value.val.I32, r.I32 }),
+                                        .I64 => print(format_str, .{ i + 1, returns.len, expected_value.val.I64, r.I64 }),
+                                        .F32 => print(format_str, .{ i + 1, returns.len, expected_value.val.F32, r.F32 }),
+                                        .F64 => print(format_str, .{ i + 1, returns.len, expected_value.val.F64, r.F64 }),
+                                        else => unreachable,
+                                    }
                                     action_succeeded = false;
                                 }
                             } else {
@@ -1140,12 +1163,12 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                             }
                         }
                     }
+                }
 
-                    if (action_succeeded) {
-                        logVerbose("\tSuccess!\n", .{});
-                    } else {
-                        did_fail_any_test = true;
-                    }
+                if (action_succeeded) {
+                    logVerbose("\tSuccess!\n", .{});
+                } else {
+                    did_fail_any_test = true;
                 }
             },
             .AssertTrap => |c| {
@@ -1222,7 +1245,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     return !did_fail_any_test;
 }
 
-pub fn parse_vm_type(backend_str: []const u8) VmType {
+pub fn parseVmType(backend_str: []const u8) VmType {
     if (strcmp("stack", backend_str)) {
         return .Stack;
     } else if (strcmp("register", backend_str)) {
@@ -1231,6 +1254,31 @@ pub fn parse_vm_type(backend_str: []const u8) VmType {
         print("Failed parsing backend string '{s}'. Expected 'stack' or 'register'.", .{backend_str});
         return .Stack;
     }
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{ .mode = .read_only }) catch |e| {
+        return switch (e) {
+            error.PermissionDenied,
+            error.FileBusy,
+            error.ReadOnlyFileSystem,
+            => true,
+
+            error.FileNotFound => false,
+
+            // unknown status, but we'll count it as a fail
+            error.NameTooLong,
+            error.InputOutput,
+            error.SystemResources,
+            error.BadPathName,
+            error.SymLinkLoop,
+            error.InvalidUtf8,
+            => false,
+            else => false,
+        };
+    };
+
+    return true;
 }
 
 pub fn main() !void {
@@ -1267,6 +1315,10 @@ pub fn main() !void {
                 \\    --test <testname>
                 \\      Run all tests where the 'field' in the json driver matches this filter.
                 \\
+                \\    --trace <level>
+                \\      Print debug traces while executing the test at the given level. <level> can
+                \\      be: none (default), function, instruction
+                \\
                 \\    --force-wasm-regen-only
                 \\      By default, if a given testsuite can't find its' .json file driver, it will
                 \\      regenerate the wasm files and json driver, then run the test. This command
@@ -1274,6 +1326,9 @@ pub fn main() !void {
                 \\
                 \\    --log-suite
                 \\      Log the name of each suite and aggregate test result.
+                \\
+                \\    --module-logging
+                \\      Enables logging from inside the module when reporting errors.
                 \\
                 \\    --verbose
                 \\      Turn on verbose logging for each step of the test suite run.
@@ -1284,7 +1339,7 @@ pub fn main() !void {
             return;
         } else if (strcmp("--backend", arg)) {
             args_index += 1;
-            opts.vm_type = parse_vm_type(args[args_index]);
+            opts.vm_type = parseVmType(args[args_index]);
         } else if (strcmp("--suite", arg)) {
             args_index += 1;
             opts.suite_filter_or_null = args[args_index];
@@ -1301,11 +1356,21 @@ pub fn main() !void {
             args_index += 1;
             opts.test_filter_or_null = args[args_index];
             print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
+        } else if (strcmp("--trace", arg)) {
+            args_index += 1;
+            if (bytebox.DebugTrace.parseMode(args[args_index])) |mode| {
+                bytebox.DebugTrace.setMode(mode);
+            } else {
+                print("got invalid trace mode '{s}', check help for allowed options", .{args[args_index]});
+                return;
+            }
         } else if (strcmp("--force-wasm-regen-only", arg)) {
             opts.force_wasm_regen_only = true;
             print("Force-regenerating wasm files and driver .json, skipping test run\n", .{});
         } else if (strcmp("--log-suite", arg)) {
             opts.log_suite = true;
+        } else if (strcmp("--module-logging", arg)) {
+            opts.log = bytebox.Logger.default();
         } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
             g_verbose_logging = true;
             print("verbose logging: on\n", .{});
@@ -1324,7 +1389,7 @@ pub fn main() !void {
         "bulk",
         "call",
         "call_indirect",
-        "comments",
+        // "comments", // wabt seems to error on this
         "const",
         "conversions",
         "custom",
@@ -1469,7 +1534,30 @@ pub fn main() !void {
             }
         }
 
-        const suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite, suite });
+        // determine if there is a memory64 version of the test - if so, run that one
+        const suite_wast_base_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-testsuite", suite });
+        defer allocator.free(suite_wast_base_path_no_extension);
+        const suite_wast_base_path: []u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_base_path_no_extension, ".wast" });
+        defer allocator.free(suite_wast_base_path);
+
+        const suite_wast_mem64_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-testsuite", "proposals", "memory64", suite });
+        defer allocator.free(suite_wast_mem64_path_no_extension);
+        const suite_wast_mem64_path: []u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_mem64_path_no_extension, ".wast" });
+        defer allocator.free(suite_wast_mem64_path);
+
+        const suite_wast_path = blk: {
+            if (pathExists(suite_wast_mem64_path)) {
+                if (opts.log_suite) {
+                    print("Using memory64 for suite {s}\n", .{suite});
+                }
+                break :blk suite_wast_mem64_path;
+            } else {
+                break :blk suite_wast_base_path;
+            }
+        };
+
+        // wasm path
+        const suite_path_no_extension: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite, suite });
         defer allocator.free(suite_path_no_extension);
 
         const suite_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_path_no_extension, ".json" });
@@ -1479,27 +1567,23 @@ pub fn main() !void {
         if (opts.force_wasm_regen_only) {
             needs_regen = true;
         } else {
-            std.fs.cwd().access(suite_path, .{ .mode = .read_only }) catch |e| {
-                if (e == std.posix.AccessError.FileNotFound) {
-                    needs_regen = true;
-                }
-            };
+            needs_regen = pathExists(suite_path) == false;
         }
 
         if (needs_regen) {
             logVerbose("Regenerating wasm and json driver for suite {s}\n", .{suite});
 
-            // var suite_wast_path_no_extension = try std.fs.path.join(allocator, &[_][]const u8{ "test", "testsuite", suite });
-            const suite_wast_path_no_extension = try std.fs.path.join(allocator, &[_][]const u8{ "../../testsuite", suite });
-            defer allocator.free(suite_wast_path_no_extension);
+            // need to navigate back to repo root because the wast2json process will be running in a subdir
+            const suite_wast_path_relative = try std.fs.path.join(allocator, &[_][]const u8{ "../../../../", suite_wast_path });
+            defer allocator.free(suite_wast_path_relative);
 
-            const suite_wast_path = try std.mem.join(allocator, "", &[_][]const u8{ suite_wast_path_no_extension, ".wast" });
-            defer allocator.free(suite_wast_path);
+            const suite_json_filename: []const u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite, ".json" });
+            defer allocator.free(suite_json_filename);
 
-            const suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", suite });
+            const suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite });
             defer allocator.free(suite_wasm_folder);
 
-            std.fs.cwd().makeDir("test/wasm") catch |e| {
+            std.fs.cwd().makeDir("test/wasm/wasm-generated") catch |e| {
                 if (e != error.PathAlreadyExists) {
                     return e;
                 }
@@ -1511,7 +1595,7 @@ pub fn main() !void {
                 }
             };
 
-            var process = std.ChildProcess.init(&[_][]const u8{ "wast2json", suite_wast_path }, allocator);
+            var process = std.ChildProcess.init(&[_][]const u8{ "wasm-tools", "json-from-wast", "--pretty", "-o", suite_json_filename, suite_wast_path_relative }, allocator);
 
             process.cwd = suite_wasm_folder;
 

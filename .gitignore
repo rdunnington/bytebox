@@ -1,6 +1,6 @@
 zig-cache
 zig-out
-test/wasm
+test/wasm/wasm-generated
 *.wasm
 *.wasm.o
 .vs
@@ -8,3 +8,4 @@ test/wasm
 *.sublime-workspace
 *.sln
 *.rdbg
+.DS_Store

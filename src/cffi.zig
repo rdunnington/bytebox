@@ -293,6 +293,7 @@ export fn bb_import_package_add_memory(package: ?*ModuleImportPackage, config: ?
         const limits = core.Limits{
             .min = min_pages,
             .max = max_pages,
+            .limit_type = 1,
         };
 
         var allocator: *std.mem.Allocator = &package.?.allocator;

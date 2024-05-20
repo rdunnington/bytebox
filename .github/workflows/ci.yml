@@ -1,6 +1,10 @@
 name: CI
 
-on: push
+on: 
+  push:
+    branches:
+      - main
+  pull_request:
 
 jobs:
   tests:
@@ -18,19 +22,31 @@ jobs:
         with:
           version: 0.12.0
 
+      # The current default version of clang on macos runners is 14, which doesn't support the wasm64-freestanding target.
+      - name: Install LLVM and Clang
+        if: matrix.os == 'macos-latest'
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "15.0"
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
           cache: pip
 
-      - name: Install dependencies
+      - name: Install python dependencies
         working-directory: test/wasi/wasi-testsuite/test-runner
         run: python3 -m pip install -r requirements.txt
 
-      - uses: mwilliamson/setup-wabt-action@v2
-        with:
-          wabt-version: "1.0.31"
+      # Ideally we would use this but it seems to be broken
+      # - name: Setup wasm-tools 
+      #   uses: jcbhmr/setup-wasm-tools@v2
+      #   with:
+      #     wasm-tools-version: 1.207
+
+      - name: Setup wasm-tools
+        run: cargo install wasm-tools
 
       - name: Build
         run: |
@@ -43,6 +59,10 @@ jobs:
       - name: Run wasm testsuite
         run: |
           zig build test-wasm -- --log-suite
+
+      - name: Run mem64 test
+        run: |
+          zig build test-mem64
 
       - name: Run wasi testsuite
         run: |
