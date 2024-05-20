@@ -294,6 +294,7 @@ pub fn StableArrayAligned(comptime T: type, comptime alignment: u29) type {
                     const map: std.c.MAP = .{
                         .ANONYMOUS = true,
                         .TYPE = .PRIVATE,
+                        .FIXED = true,
                     };
                     const fd: std.posix.fd_t = -1;
                     const offset: usize = 0;
