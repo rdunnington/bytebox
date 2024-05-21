@@ -854,6 +854,7 @@ const InstructionFuncs = struct {
     };
 
     fn run(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        std.debug.print("Running code {any}\n", .{code[pc]});
         try @call(.always_tail, InstructionFuncs.lookup(code[pc].opcode), .{ pc, code, stack });
     }
 
@@ -2100,6 +2101,8 @@ const InstructionFuncs = struct {
             .I64 => stack.popI64(),
             else => unreachable,
         };
+
+        std.debug.print("Growing from {} to {}", .{ old_num_pages, num_pages });
 
         if (num_pages >= 0 and memory_instance.grow(@as(usize, @intCast(num_pages)))) {
             stack.pushI32(old_num_pages);

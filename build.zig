@@ -98,7 +98,7 @@ pub fn build(b: *Build) void {
         compile_memtest.addArg("-Wl,--export-dynamic");
         compile_memtest.addArg("-o");
         compile_memtest.addArg("test/mem64/memtest.wasm");
-        compile_memtest.addFileArg(.{ .path = "test/mem64/memtest.c" });
+        compile_memtest.addFileArg(b.path("test/mem64/memtest.c"));
         compile_memtest.has_side_effects = true;
 
         b.getInstallStep().dependOn(&compile_memtest.step);
