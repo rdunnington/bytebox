@@ -1,6 +1,6 @@
 name: CI
 
-on: 
+on:
   push:
     branches:
       - main
@@ -40,7 +40,7 @@ jobs:
         run: python3 -m pip install -r requirements.txt
 
       # Ideally we would use this but it seems to be broken
-      # - name: Setup wasm-tools 
+      # - name: Setup wasm-tools
       #   uses: jcbhmr/setup-wasm-tools@v2
       #   with:
       #     wasm-tools-version: 1.207
@@ -62,7 +62,7 @@ jobs:
 
       - name: Run mem64 test
         run: |
-          zig build test-mem64
+          zig build -Doptimize=ReleaseSafe test-mem64
 
       - name: Run wasi testsuite
         run: |
