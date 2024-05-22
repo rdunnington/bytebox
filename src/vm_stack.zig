@@ -2102,7 +2102,11 @@ const InstructionFuncs = struct {
         };
 
         if (num_pages >= 0 and memory_instance.grow(@as(usize, @intCast(num_pages)))) {
-            stack.pushI32(old_num_pages);
+            switch (memory_instance.limits.indexType()) {
+                .I32 => stack.pushI32(old_num_pages),
+                .I64 => stack.pushI64(old_num_pages),
+                else => unreachable,
+            }
             try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
         } else {
             switch (memory_instance.limits.indexType()) {

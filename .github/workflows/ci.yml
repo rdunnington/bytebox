@@ -62,7 +62,7 @@ jobs:
 
       - name: Run mem64 test
         run: |
-          zig build -Doptimize=ReleaseSafe test-mem64
+          zig build test-mem64
 
       - name: Run wasi testsuite
         run: |
