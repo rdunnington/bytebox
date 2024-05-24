@@ -44,10 +44,10 @@ pub fn put(self: *StringPool, str: []const u8) ![]const u8 {
     try self.lookup.put(hash, str_offset_begin);
 
     var bytes: []u8 = self.buffer.items[str_offset_begin..str_offset_end];
-    var str_len: *StringLenType = @alignCast(@ptrCast(bytes.ptr));
+    const str_len: *StringLenType = @alignCast(@ptrCast(bytes.ptr));
     str_len.* = @as(StringLenType, @intCast(str.len));
-    var str_bytes: []u8 = bytes[@sizeOf(StringLenType)..];
-    std.mem.copy(u8, str_bytes, str);
+    const str_bytes: []u8 = bytes[@sizeOf(StringLenType)..];
+    @memcpy(str_bytes, str);
 
     return str_bytes;
 }
@@ -57,8 +57,8 @@ pub fn find(self: *StringPool, str: []const u8) ?[]const u8 {
 
     if (self.lookup.get(hash)) |string_bytes_begin| {
         var str_bytes: [*]u8 = self.buffer.items[string_bytes_begin..].ptr;
-        var str_len: *StringLenType = @alignCast(@ptrCast(str_bytes));
-        var pooled_str: []u8 = str_bytes[@sizeOf(StringLenType) .. @sizeOf(StringLenType) + str_len.*];
+        const str_len: *StringLenType = @alignCast(@ptrCast(str_bytes));
+        const pooled_str: []u8 = str_bytes[@sizeOf(StringLenType) .. @sizeOf(StringLenType) + str_len.*];
         return pooled_str;
     }
 
@@ -114,7 +114,7 @@ test "basic" {
     try std.testing.expect(std.mem.eql(u8, test2_str_found.?, test2_str));
     try std.testing.expect(std.mem.eql(u8, long_str_found.?, long_str));
 
-    var lazyadd_str1 = try pool.findOrPut("lazy put");
-    var lazyadd_str2 = try pool.findOrPut("lazy put");
+    const lazyadd_str1 = try pool.findOrPut("lazy put");
+    const lazyadd_str2 = try pool.findOrPut("lazy put");
     try std.testing.expect(lazyadd_str1.ptr == lazyadd_str2.ptr);
 }

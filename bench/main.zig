@@ -3,6 +3,10 @@ const bytebox = @import("bytebox");
 const Val = bytebox.Val;
 const Timer = std.time.Timer;
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
 const Benchmark = struct {
     name: []const u8,
     filename: []const u8,
@@ -10,14 +14,14 @@ const Benchmark = struct {
 };
 
 fn elapsedMilliseconds(timer: *std.time.Timer) f64 {
-    var ns_elapsed: f64 = @as(f64, @floatFromInt(timer.read()));
+    const ns_elapsed: f64 = @as(f64, @floatFromInt(timer.read()));
     const ms_elapsed = ns_elapsed / 1000000.0;
     return ms_elapsed;
 }
 
 fn run(allocator: std.mem.Allocator, benchmark: Benchmark) !void {
     var cwd = std.fs.cwd();
-    var wasm_data: []u8 = try cwd.readFileAlloc(allocator, benchmark.filename, 1024 * 64); // Our wasm programs aren't very large
+    const wasm_data: []u8 = try cwd.readFileAlloc(allocator, benchmark.filename, 1024 * 64); // Our wasm programs aren't very large
 
     var timer = try Timer.start();
 
@@ -40,19 +44,19 @@ fn run(allocator: std.mem.Allocator, benchmark: Benchmark) !void {
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var allocator: std.mem.Allocator = gpa.allocator();
+    const allocator: std.mem.Allocator = gpa.allocator();
 
     const benchmarks = [_]Benchmark{ .{
         .name = "add-one",
-        .filename = "zig-out/lib/add-one.wasm",
+        .filename = "zig-out/bin/add-one.wasm",
         .param = 123456789,
     }, .{
         .name = "fibonacci",
-        .filename = "zig-out/lib/fibonacci.wasm",
+        .filename = "zig-out/bin/fibonacci.wasm",
         .param = 20,
     }, .{
         .name = "mandelbrot",
-        .filename = "zig-out/lib/mandelbrot.wasm",
+        .filename = "zig-out/bin/mandelbrot.wasm",
         .param = 20,
     } };
 

@@ -68,7 +68,7 @@ pub const VmType = enum {
 };
 
 pub fn createModuleInstance(vm_type: VmType, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) AllocError!*ModuleInstance {
-    var vm: *inst.VM = switch (vm_type) {
+    const vm: *inst.VM = switch (vm_type) {
         .Stack => try inst.VM.create(vm_stack.StackVM, allocator),
         .Register => try inst.VM.create(vm_register.RegisterVM, allocator),
     };

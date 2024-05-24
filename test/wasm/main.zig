@@ -207,7 +207,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
 
         fn parseF32(str: []const u8) !f32 {
             if (std.mem.startsWith(u8, str, "nan:")) {
-                return std.math.nan_f32; // don't differentiate between arithmetic/canonical nan
+                return std.math.nan(f32); // don't differentiate between arithmetic/canonical nan
             } else {
                 const int = try std.fmt.parseInt(u32, str, 10);
                 return @as(f32, @bitCast(int));
@@ -216,7 +216,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
 
         fn parseF64(str: []const u8) !f64 {
             if (std.mem.startsWith(u8, str, "nan:")) {
-                return std.math.nan_f64; // don't differentiate between arithmetic/canonical nan
+                return std.math.nan(f64); // don't differentiate between arithmetic/canonical nan
             } else {
                 const int = try std.fmt.parseInt(u64, str, 10);
                 return @as(f64, @bitCast(int));
@@ -242,9 +242,9 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
                 v.* = try parse_func(json_strings[i].string);
             }
 
-            var parsed_bytes = std.mem.sliceAsBytes(&parsed_values);
+            const parsed_bytes = std.mem.sliceAsBytes(&parsed_values);
             var bytes: [16]u8 = undefined;
-            std.mem.copy(u8, &bytes, parsed_bytes);
+            @memcpy(&bytes, parsed_bytes);
             return std.mem.bytesToValue(v128, &bytes);
         }
     };
@@ -259,10 +259,10 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
         const int = try Helpers.parseI64(json_value.string);
         return TaggedVal{ .type = .I64, .val = Val{ .I64 = int } };
     } else if (strcmp("f32", json_type.string)) {
-        var float: f32 = try Helpers.parseF32(json_value.string);
+        const float: f32 = try Helpers.parseF32(json_value.string);
         return TaggedVal{ .type = .F32, .val = Val{ .F32 = float } };
     } else if (strcmp("f64", json_type.string)) {
-        var float: f64 = try Helpers.parseF64(json_value.string);
+        const float: f64 = try Helpers.parseF64(json_value.string);
         return TaggedVal{ .type = .F64, .val = Val{ .F64 = float } };
     } else if (strcmp("v128", json_type.string)) {
         const json_lane_type = obj.get("lane_type").?;
@@ -345,7 +345,7 @@ const LaneTypedVal = struct {
 };
 
 fn parseLaneTypedVal(obj: std.json.ObjectMap) !LaneTypedVal {
-    var v: TaggedVal = try parseVal(obj);
+    const v: TaggedVal = try parseVal(obj);
     var lane_type = V128LaneType.I8x16;
     if (v.type == .V128) {
         const json_lane_type = obj.get("lane_type").?;
@@ -462,7 +462,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             var args = std.ArrayList(LaneTypedVal).init(_allocator);
             if (json_args_or_null) |json_args| {
                 for (json_args.array.items) |item| {
-                    var val: LaneTypedVal = try parseLaneTypedVal(item.object);
+                    const val: LaneTypedVal = try parseLaneTypedVal(item.object);
                     try args.append(val);
                 }
             }
@@ -493,7 +493,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
     };
 
     // print("json_path: {s}\n", .{json_path});
-    var json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
+    const json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
 
     var fallback_module: []const u8 = "";
@@ -507,7 +507,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
         if (strcmp("module", json_command_type.string)) {
             const json_filename = json_command.object.getPtr("filename").?;
-            var filename: []const u8 = try allocator.dupe(u8, json_filename.string);
+            const filename: []const u8 = try allocator.dupe(u8, json_filename.string);
             fallback_module = filename;
 
             var name = try allocator.dupe(u8, filename);
@@ -515,7 +515,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 name = try allocator.dupe(u8, json_module_name.string);
             }
 
-            var command = Command{
+            const command = Command{
                 .DecodeModule = CommandDecodeModule{
                     .module_filename = try allocator.dupe(u8, filename),
                     .module_name = name,
@@ -524,7 +524,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             try commands.append(command);
         } else if (strcmp("register", json_command_type.string)) {
             const json_as = json_command.object.getPtr("as").?;
-            var json_import_name: []const u8 = json_as.string;
+            const json_import_name: []const u8 = json_as.string;
             var json_module_name: []const u8 = fallback_module;
             if (json_command.object.getPtr("name")) |json_name| {
                 json_module_name = json_name.string;
@@ -532,7 +532,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
             // print("json_module_name: {s}, json_import_name: {s}\n", .{ json_module_name, json_import_name });
 
-            var command = Command{
+            const command = Command{
                 .Register = CommandRegister{
                     .module_filename = try allocator.dupe(u8, fallback_module),
                     .module_name = try allocator.dupe(u8, json_module_name),
@@ -543,7 +543,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         } else if (strcmp("assert_return", json_command_type.string) or strcmp("action", json_command_type.string)) {
             const json_action = json_command.object.getPtr("action").?;
 
-            var action = try Helpers.parseAction(json_action, fallback_module, allocator);
+            const action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
             var expected_returns_or_null: ?std.ArrayList(LaneTypedVal) = null;
             const json_expected_or_null = json_command.object.getPtr("expected");
@@ -555,7 +555,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 expected_returns_or_null = expected_returns;
             }
 
-            var command = Command{
+            const command = Command{
                 .AssertReturn = CommandAssertReturn{
                     .action = action,
                     .expected_returns = expected_returns_or_null,
@@ -565,11 +565,11 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
         } else if (strcmp("assert_trap", json_command_type.string) or strcmp("assert_exhaustion", json_command_type.string)) {
             const json_action = json_command.object.getPtr("action").?;
 
-            var action = try Helpers.parseAction(json_action, fallback_module, allocator);
+            const action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
             const json_text = json_command.object.getPtr("text").?;
 
-            var command = Command{
+            const command = Command{
                 .AssertTrap = CommandAssertTrap{
                     .action = action,
                     .expected_error = try allocator.dupe(u8, json_text.string),
@@ -577,7 +577,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             };
             try commands.append(command);
         } else if (strcmp("assert_malformed", json_command_type.string)) {
-            var command = Command{
+            const command = Command{
                 .AssertMalformed = CommandAssertMalformed{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
@@ -586,7 +586,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 try commands.append(command);
             }
         } else if (strcmp("assert_invalid", json_command_type.string)) {
-            var command = Command{
+            const command = Command{
                 .AssertInvalid = CommandAssertInvalid{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
@@ -595,14 +595,14 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
                 try commands.append(command);
             }
         } else if (strcmp("assert_unlinkable", json_command_type.string)) {
-            var command = Command{
+            const command = Command{
                 .AssertUnlinkable = CommandAssertUnlinkable{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
             try commands.append(command);
         } else if (strcmp("assert_uninstantiable", json_command_type.string)) {
-            var command = Command{
+            const command = Command{
                 .AssertUninstantiable = CommandAssertUninstantiable{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
@@ -682,13 +682,13 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
                 f64 => Val{ .F64 = value },
                 else => unreachable,
             };
-            var global_definition = try _allocator.create(bytebox.GlobalDefinition);
+            const global_definition = try _allocator.create(bytebox.GlobalDefinition);
             global_definition.* = bytebox.GlobalDefinition{
                 .valtype = valtype,
                 .mut = mut,
                 .expr = undefined, // unused
             };
-            var global_instance = try _allocator.create(bytebox.GlobalInstance);
+            const global_instance = try _allocator.create(bytebox.GlobalInstance);
             global_instance.* = bytebox.GlobalInstance{
                 .def = global_definition,
                 .value = val,
@@ -714,7 +714,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
 
     const TableInstance = bytebox.TableInstance;
 
-    var table = try allocator.create(TableInstance);
+    const table = try allocator.create(TableInstance);
     table.* = try TableInstance.init(ValType.FuncRef, bytebox.Limits{ .min = 10, .max = 20, .limit_type = 1 }, allocator);
     try imports.tables.append(bytebox.TableImport{
         .name = try allocator.dupe(u8, "table"),
@@ -784,7 +784,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
     var imports = std.ArrayList(bytebox.ModuleImportPackage).init(allocator);
     defer {
-        var spectest_imports = imports.items[0];
+        const spectest_imports = imports.items[0];
         for (spectest_imports.tables.items) |*item| {
             allocator.free(item.name);
             item.data.Host.deinit();
@@ -819,7 +819,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         }
         // std.debug.print("looking for (name/filename) {s}:{s}\n", .{ module_name, module_filename });
 
-        var entry = name_to_module.getOrPutAssumeCapacity(module_name);
+        const entry = name_to_module.getOrPutAssumeCapacity(module_name);
         var module: *Module = entry.value_ptr;
         if (entry.found_existing == false) {
             module.* = Module{};
@@ -844,7 +844,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
                 logVerbose("\tSetting export module name to {s}\n", .{c.import_name});
 
-                var module_imports: bytebox.ModuleImportPackage = try (module.inst.?).exports(c.import_name);
+                const module_imports: bytebox.ModuleImportPackage = try (module.inst.?).exports(c.import_name);
                 try imports.append(module_imports);
                 continue;
             },
@@ -852,10 +852,10 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
         }
 
         if (module.inst == null) {
-            var module_path = try std.fs.path.join(allocator, &[_][]const u8{ suite_dir, module_filename });
+            const module_path = try std.fs.path.join(allocator, &[_][]const u8{ suite_dir, module_filename });
 
             var cwd = std.fs.cwd();
-            var module_data = try cwd.readFileAlloc(allocator, module_path, 1024 * 1024 * 8);
+            const module_data = try cwd.readFileAlloc(allocator, module_path, 1024 * 1024 * 8);
 
             var decode_expected_error: ?[]const u8 = null;
             switch (command.*) {
@@ -1285,14 +1285,14 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    var args = try std.process.argsAlloc(allocator);
+    const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
     var opts = TestOpts{};
 
     var args_index: u32 = 1; // skip program name
     while (args_index < args.len) : (args_index += 1) {
-        var arg = args[args_index];
+        const arg = args[args_index];
         if (strcmp("--help", arg) or strcmp("-h", arg) or strcmp("help", arg)) {
             const help_text =
                 \\
@@ -1574,13 +1574,13 @@ pub fn main() !void {
             logVerbose("Regenerating wasm and json driver for suite {s}\n", .{suite});
 
             // need to navigate back to repo root because the wast2json process will be running in a subdir
-            var suite_wast_path_relative = try std.fs.path.join(allocator, &[_][]const u8{ "../../../../", suite_wast_path });
+            const suite_wast_path_relative = try std.fs.path.join(allocator, &[_][]const u8{ "../../../../", suite_wast_path });
             defer allocator.free(suite_wast_path_relative);
 
             const suite_json_filename: []const u8 = try std.mem.join(allocator, "", &[_][]const u8{ suite, ".json" });
             defer allocator.free(suite_json_filename);
 
-            var suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite });
+            const suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite });
             defer allocator.free(suite_wasm_folder);
 
             std.fs.cwd().makeDir("test/wasm/wasm-generated") catch |e| {
@@ -1607,7 +1607,7 @@ pub fn main() !void {
                 print("Running test suite: {s}\n", .{suite});
             }
 
-            var success: bool = try run(allocator, suite_path, &opts);
+            const success: bool = try run(allocator, suite_path, &opts);
             did_all_succeed = did_all_succeed and success;
 
             if (success and opts.log_suite and !g_verbose_logging) {
@@ -1617,6 +1617,6 @@ pub fn main() !void {
     }
 
     if (did_all_succeed == false) {
-        std.os.exit(1);
+        std.process.exit(1);
     }
 }

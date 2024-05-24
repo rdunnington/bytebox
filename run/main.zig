@@ -53,13 +53,13 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
 
     var arg_index: usize = 1;
     while (arg_index < args.len) {
-        var arg = args[arg_index];
+        const arg = args[arg_index];
 
         if (arg_index == 1 and !isArgvOption(arg)) {
             opts.filename = arg;
             opts.wasm_argv = args[1..2];
         } else if (arg_index == 2 and !isArgvOption(arg)) {
-            var wasm_argv_begin: usize = arg_index - 1; // include wasm filename
+            const wasm_argv_begin: usize = arg_index - 1; // include wasm filename
             var wasm_argv_end: usize = arg_index;
             while (wasm_argv_end + 1 < args.len and !isArgvOption(args[wasm_argv_end + 1])) {
                 wasm_argv_end += 1;
@@ -136,7 +136,7 @@ const version_string = "bytebox v0.0.1";
 fn printHelp(args: [][]const u8) void {
     const usage_string: []const u8 =
         \\Usage: {s} <FILE> [WASM_ARGS]... [OPTION]...
-        \\  
+        \\
         \\  Options:
         \\
         \\    -h, --help
@@ -148,7 +148,7 @@ fn printHelp(args: [][]const u8) void {
         \\    --dump
         \\      Prints the given module definition's imports and exports. Imports are qualified
         \\      with the import module name.
-        \\    
+        \\
         \\    -i, --invoke <FUNCTION> [ARGS]...
         \\      Call an exported, named function with arguments. The arguments are automatically
         \\      translated from string inputs to the function's native types. If the conversion
@@ -180,7 +180,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    var args = try std.process.argsAlloc(allocator);
+    const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
     var env_buffer = std.ArrayList([]const u8).init(allocator);
@@ -220,7 +220,7 @@ pub fn main() !void {
     std.debug.assert(opts.filename != null);
 
     var cwd = std.fs.cwd();
-    var wasm_data: []u8 = cwd.readFileAlloc(allocator, opts.filename.?, 1024 * 1024 * 128) catch |e| {
+    const wasm_data: []u8 = cwd.readFileAlloc(allocator, opts.filename.?, 1024 * 1024 * 128) catch |e| {
         std.log.err("Failed to read file '{s}' into memory: {}", .{ opts.filename.?, e });
         return RunErrors.IoError;
     };
@@ -256,7 +256,7 @@ pub fn main() !void {
     }, allocator);
     defer wasi.deinitImports(&imports_wasi);
 
-    var instantiate_opts = bytebox.ModuleInstantiateOpts{
+    const instantiate_opts = bytebox.ModuleInstantiateOpts{
         .imports = &[_]bytebox.ModuleImportPackage{imports_wasi},
         .log = log,
     };
@@ -302,28 +302,28 @@ pub fn main() !void {
         const arg: []const u8 = invoke_args[i];
         switch (valtype) {
             .I32 => {
-                var parsed: i32 = std.fmt.parseInt(i32, arg, 0) catch |e| {
+                const parsed: i32 = std.fmt.parseInt(i32, arg, 0) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as an i32: {}", .{ i, arg, e });
                     return RunErrors.BadFunctionParam;
                 };
                 params.items[i] = Val{ .I32 = parsed };
             },
             .I64 => {
-                var parsed: i64 = std.fmt.parseInt(i64, arg, 0) catch |e| {
+                const parsed: i64 = std.fmt.parseInt(i64, arg, 0) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as an i64: {}", .{ i, arg, e });
                     return RunErrors.BadFunctionParam;
                 };
                 params.items[i] = Val{ .I64 = parsed };
             },
             .F32 => {
-                var parsed: f32 = std.fmt.parseFloat(f32, arg) catch |e| {
+                const parsed: f32 = std.fmt.parseFloat(f32, arg) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as a f32: {}", .{ i, arg, e });
                     return RunErrors.BadFunctionParam;
                 };
                 params.items[i] = Val{ .F32 = parsed };
             },
             .F64 => {
-                var parsed: f64 = std.fmt.parseFloat(f64, arg) catch |e| {
+                const parsed: f64 = std.fmt.parseFloat(f64, arg) catch |e| {
                     std.log.err("Failed to parse arg at index {} ('{s}') as a f64: {}", .{ i, arg, e });
                     return RunErrors.BadFunctionParam;
                 };
@@ -357,7 +357,7 @@ pub fn main() !void {
     {
         var strbuf = std.ArrayList(u8).init(allocator);
         defer strbuf.deinit();
-        var writer = strbuf.writer();
+        const writer = strbuf.writer();
 
         if (returns.items.len > 0) {
             const return_types = func_export.returns;
@@ -382,13 +382,13 @@ pub fn main() !void {
 }
 
 fn writeSignature(strbuf: *std.ArrayList(u8), info: *const bytebox.FunctionExport) !void {
-    var writer = strbuf.writer();
+    const writer = strbuf.writer();
     if (info.params.len == 0) {
         try std.fmt.format(writer, "  params: none\n", .{});
     } else {
         try std.fmt.format(writer, "  params:\n", .{});
         for (info.params) |valtype| {
-            var name: []const u8 = valtypeToString(valtype);
+            const name: []const u8 = valtypeToString(valtype);
             try std.fmt.format(writer, "    {s}\n", .{name});
         }
     }
@@ -398,7 +398,7 @@ fn writeSignature(strbuf: *std.ArrayList(u8), info: *const bytebox.FunctionExpor
     } else {
         try std.fmt.format(writer, "  returns:\n", .{});
         for (info.returns) |valtype| {
-            var name: []const u8 = valtypeToString(valtype);
+            const name: []const u8 = valtypeToString(valtype);
             try std.fmt.format(writer, "    {s}\n", .{name});
         }
     }
