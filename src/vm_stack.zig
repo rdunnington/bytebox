@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const assert = std.debug.assert;
 
 const common = @import("common.zig");
 const StableArray = common.StableArray;
@@ -289,7 +290,11 @@ const Stack = struct {
 
             const returns_source: []const Val = stack.values[source_begin..source_end];
             const returns_dest: []Val = stack.values[dest_begin..dest_end];
-            std.mem.copyForwards(Val, returns_dest, returns_source);
+            if (dest_begin <= source_begin) {
+                std.mem.copyForwards(Val, returns_dest, returns_source);
+            } else {
+                std.mem.copyBackwards(Val, returns_dest, returns_source);
+            }
 
             stack.num_values = @as(u32, @intCast(dest_end));
             stack.num_labels = label_index;
@@ -343,6 +348,7 @@ const Stack = struct {
 
         const returns_source: []const Val = stack.values[source_begin..source_end];
         const returns_dest: []Val = stack.values[dest_begin..dest_end];
+        assert(dest_begin <= source_begin);
         std.mem.copyForwards(Val, returns_dest, returns_source);
 
         stack.num_values = @as(u32, @intCast(dest_end));
@@ -1077,6 +1083,7 @@ const InstructionFuncs = struct {
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
 
+                        assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
                         std.mem.copyForwards(Val, returns_dest, returns_temp);
 
                         return FuncCallData{
@@ -3439,7 +3446,7 @@ const InstructionFuncs = struct {
 
         const source = data.bytes.items[data_offset_u32 .. data_offset_u32 + length_u32];
         const destination = buffer[memory_offset_u32 .. memory_offset_u32 + length_u32];
-        std.mem.copyForwards(u8, destination, source);
+        @memcpy(destination, source);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -3541,7 +3548,8 @@ const InstructionFuncs = struct {
 
         const dest: []Val = table.refs.items[table_begin .. table_begin + length];
         const src: []const Val = elem.refs.items[elem_begin .. elem_begin + length];
-        std.mem.copyForwards(Val, dest, src);
+
+        @memcpy(dest, src);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
