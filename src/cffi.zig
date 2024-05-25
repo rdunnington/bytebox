@@ -9,7 +9,7 @@ const ModuleDefinition = core.ModuleDefinition;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImportPackage = core.ModuleImportPackage;
 
-const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
+const StableArray = @import("stable-array").StableArray;
 
 // C interface
 const CSlice = extern struct {

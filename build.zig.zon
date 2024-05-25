@@ -15,5 +15,10 @@
         "LICENSE",
         "README.md",
     },
-    .dependencies = .{},
+    .dependencies = .{
+        .@"zig-stable-array" = .{
+            .url = "https://github.com/rdunnington/zig-stable-array/archive/bbb120cd0e4a8a83a21217e67ab6d7697a809756.tar.gz",
+            .hash = "12202fe89e68d38484a313816e571eca786b36775e3aa2831def7b20815fa81831f1",
+        },
+    },
 }
