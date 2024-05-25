@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
+pub const StableArray = @import("stable-array").StableArray;
 
 pub fn decodeLEB128(comptime T: type, reader: anytype) !T {
     if (@typeInfo(T).Int.signedness == .signed) {

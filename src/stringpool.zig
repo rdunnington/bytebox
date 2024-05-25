@@ -1,5 +1,5 @@
 const std = @import("std");
-const StableArray = @import("zig-stable-array/stable_array.zig").StableArray;
+const StableArray = @import("stable-array").StableArray;
 
 const hashString = std.hash_map.hashString;
 const StringHashLookupTable = std.hash_map.AutoHashMap(u64, usize);

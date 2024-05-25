@@ -1,6 +1,8 @@
 const std = @import("std");
 
 const Build = std.Build;
+const Module = Build.Module;
+const ModuleImport = Module.Import;
 const CrossTarget = std.zig.CrossTarget;
 const CompileStep = std.Build.Step.Compile;
 
@@ -20,15 +22,30 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const stable_array = b.dependency("zig-stable-array", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     var bench_add_one_step: *CompileStep = buildWasmExe(b, "bench/samples/add-one.zig");
     var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig");
     var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig");
 
+    const stable_array_import = ModuleImport{ .name = "stable-array", .module = stable_array.module("zig-stable-array") };
+
     const bytebox_module: *Build.Module = b.addModule("bytebox", .{
         .root_source_file = b.path("src/core.zig"),
+        .imports = &[_]ModuleImport{stable_array_import},
     });
 
-    _ = buildExeWithRunStep(b, target, optimize, bytebox_module, .{
+    // exe.root_module.addImport(import.name, import.module);
+
+    const imports = [_]ModuleImport{
+        .{ .name = "bytebox", .module = bytebox_module },
+        .{ .name = "stable-array", .module = stable_array.module("zig-stable-array") },
+    };
+
+    _ = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "bytebox",
         .root_src = "run/main.zig",
         .step_name = "run",
@@ -41,7 +58,7 @@ pub fn build(b: *Build) void {
         &bench_fibonacci_step.step,
         &bench_mandelbrot_step.step,
     };
-    _ = buildExeWithRunStep(b, target, optimize, bytebox_module, .{
+    _ = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "bench",
         .root_src = "bench/main.zig",
         .step_name = "bench",
@@ -49,27 +66,29 @@ pub fn build(b: *Build) void {
         .step_dependencies = &bench_steps,
     });
 
-    const lib_bytebox = b.addStaticLibrary(.{
+    const lib_bytebox: *Build.Step.Compile = b.addStaticLibrary(.{
         .name = "bytebox",
         .root_source_file = b.path("src/cffi.zig"),
         .target = target,
         .optimize = optimize,
     });
+    lib_bytebox.root_module.addImport(stable_array_import.name, stable_array_import.module);
     lib_bytebox.installHeader(b.path("src/bytebox.h"), "bytebox.h");
     b.installArtifact(lib_bytebox);
 
     // Unit tests
-    const unit_tests = b.addTest(.{
+    const unit_tests: *Build.Step.Compile = b.addTest(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });
+    unit_tests.root_module.addImport(stable_array_import.name, stable_array_import.module);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const unit_test_step = b.step("test-unit", "Run unit tests");
     unit_test_step.dependOn(&run_unit_tests.step);
 
     // wasm tests
-    const wasm_testsuite_step = buildExeWithRunStep(b, target, optimize, bytebox_module, .{
+    const wasm_testsuite_step = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "test-wasm",
         .root_src = "test/wasm/main.zig",
         .step_name = "test-wasm",
@@ -103,7 +122,7 @@ pub fn build(b: *Build) void {
 
         b.getInstallStep().dependOn(&compile_memtest.step);
 
-        mem64_test_step = buildExeWithRunStep(b, target, optimize, bytebox_module, .{
+        mem64_test_step = buildExeWithRunStep(b, target, optimize, &imports, .{
             .exe_name = "test-mem64",
             .root_src = "test/mem64/main.zig",
             .step_name = "test-mem64",
@@ -121,15 +140,17 @@ pub fn build(b: *Build) void {
     }
 }
 
-fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, bytebox_module: *Build.Module, opts: ExeOpts) *Build.Step {
-    const exe = b.addExecutable(.{
+fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, imports: []const ModuleImport, opts: ExeOpts) *Build.Step {
+    const exe: *Build.Step.Compile = b.addExecutable(.{
         .name = opts.exe_name,
         .root_source_file = b.path(opts.root_src),
         .target = target,
         .optimize = optimize,
     });
 
-    exe.root_module.addImport("bytebox", bytebox_module);
+    for (imports) |import| {
+        exe.root_module.addImport(import.name, import.module);
+    }
 
     // exe.emit_asm = if (opts.should_emit_asm) .emit else .default;
     b.installArtifact(exe);
