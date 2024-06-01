@@ -41,6 +41,7 @@ const GlobalMut = def.GlobalMut;
 const IfImmediates = def.IfImmediates;
 const ImportNames = def.ImportNames;
 const Instruction = def.Instruction;
+const InstructionImmediates = def.InstructionImmediates;
 const Limits = def.Limits;
 const MemoryDefinition = def.MemoryDefinition;
 const MemoryOffsetAndLaneImmediates = def.MemoryOffsetAndLaneImmediates;
@@ -51,8 +52,10 @@ const TablePairImmediates = def.TablePairImmediates;
 const Val = def.Val;
 const ValType = def.ValType;
 const TaggedVal = def.TaggedVal;
+const AlignedBytes = def.AlignedBytes;
 
 const inst = @import("instance.zig");
+const TrapError = inst.TrapError;
 const VM = inst.VM;
 const ModuleInstance = inst.ModuleInstance;
 const InvokeOpts = inst.InvokeOpts;
@@ -61,6 +64,8 @@ const DebugTrapInstructionMode = inst.DebugTrapInstructionMode;
 const ModuleInstantiateOpts = inst.ModuleInstantiateOpts;
 
 const INVALID_INSTRUCTION_INDEX: u32 = std.math.maxInt(u32);
+
+const endian_native = builtin.cpu.arch.endian();
 
 // High-level strategy:
 // 1. Transform the ModuleDefinition's bytecode into a sea-of-nodes type of IR.
@@ -78,10 +83,10 @@ const IRNode = struct {
     edges_out: ?[*]*IRNode,
     edges_out_count: u32,
 
-    fn createWithInstruction(mir: *ModuleIR, instruction_index: u32) AllocError!*IRNode {
-        const node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+    fn createWithInstruction(compiler: *FunctionCompiler, instruction_index: u32) AllocError!*IRNode {
+        const node: *IRNode = compiler.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
-            .opcode = mir.module_def.code.instructions.items[instruction_index].opcode,
+            .opcode = compiler.module_def.code.instructions.items[instruction_index].opcode,
             .is_phi = false,
             .instruction_index = instruction_index,
             .edges_in = null,
@@ -92,8 +97,8 @@ const IRNode = struct {
         return node;
     }
 
-    fn createStandalone(mir: *ModuleIR, opcode: Opcode) AllocError!*IRNode {
-        const node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+    fn createStandalone(compiler: *FunctionCompiler, opcode: Opcode) AllocError!*IRNode {
+        const node: *IRNode = compiler.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .opcode = opcode,
             .is_phi = false,
@@ -106,8 +111,8 @@ const IRNode = struct {
         return node;
     }
 
-    fn createPhi(mir: *ModuleIR) AllocError!*IRNode {
-        const node: *IRNode = mir.ir.addOne() catch return AllocError.OutOfMemory;
+    fn createPhi(compiler: *FunctionCompiler) AllocError!*IRNode {
+        const node: *IRNode = compiler.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
             .opcode = .Invalid,
             .is_phi = true,
@@ -303,37 +308,27 @@ const RegisterSlots = struct {
     }
 };
 
-const IRFunction = struct {
-    definition_index: usize,
-    ir_root: *IRNode,
+const FunctionIR = struct {
+    def_index: usize = 0,
+    type_def_index: usize = 0,
+    ir_root: ?*IRNode = null,
 
-    register_map: std.AutoHashMap(*const IRNode, u32),
+    // fn definition(func: FunctionIR, module_def: ModuleDefinition) *FunctionDefinition {
+    //     return &module_def.functions.items[func.def_index];
+    // }
 
-    fn init(definition_index: u32, ir_root: *IRNode, allocator: std.mem.Allocator) IRFunction {
-        return IRFunction{
-            .definition_index = definition_index,
-            .ir_root = ir_root,
-            .register_map = std.AutoHashMap(*const IRNode, u32).init(allocator),
-        };
-    }
+    fn regalloc(func: *FunctionIR, compile_data: *IntermediateCompileData, allocator: std.mem.Allocator) AllocError!void {
+        std.debug.assert(func.ir_root != null);
 
-    fn deinit(self: *IRFunction) void {
-        self.register_map.deinit();
-    }
-
-    fn definition(func: IRFunction, module_def: ModuleDefinition) *FunctionDefinition {
-        return &module_def.functions.items[func.definition_index];
-    }
-
-    fn regalloc(func: *IRFunction, allocator: std.mem.Allocator) AllocError!void {
-        std.debug.assert(func.ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
+        const ir_root = func.ir_root.?;
+        std.debug.assert(ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
 
         var slots = RegisterSlots.init(allocator);
         defer slots.deinit();
 
         var visit_queue = std.ArrayList(*IRNode).init(allocator);
         defer visit_queue.deinit();
-        try visit_queue.append(func.ir_root);
+        try visit_queue.append(ir_root);
 
         var visited = std.AutoHashMap(*IRNode, void).init(allocator);
         defer visited.deinit();
@@ -345,7 +340,7 @@ const IRFunction = struct {
             // mark output node slots as free - this is safe because the dataflow graph flows one way and the
             // output can't be reused higher up in the graph
             for (node.edgesOut()) |output_node| {
-                if (func.register_map.get(output_node)) |index| {
+                if (compile_data.register_map.get(output_node)) |index| {
                     slots.freeAt(output_node, index);
                 }
             }
@@ -354,7 +349,7 @@ const IRFunction = struct {
             // TODO handle multiple output slots (e.g. results of a function call)
             if (node.needsRegisterSlot()) {
                 const index: u32 = try slots.alloc(node);
-                try func.register_map.put(node, index);
+                try compile_data.register_map.put(node, index);
             }
 
             // add inputs to the FIFO visit queue
@@ -366,20 +361,27 @@ const IRFunction = struct {
         }
     }
 
-    fn codegen(func: *IRFunction, instructions: *std.ArrayList(RegInstruction), module_def: ModuleDefinition, allocator: std.mem.Allocator) AllocError!void {
-        // walk the graph in breadth-first order
+    // TODO call this from the compiler compile function, have the compile function take instructions and local_types arrays passed down from module instantiate
+    // TODO inline regalloc into this function
+    // TODO ensure callsites pass a scratch allocator
+    fn codegen(func: FunctionIR, store: *FunctionStore, compile_data: IntermediateCompileData, module_def: ModuleDefinition, scratch_allocator: std.mem.Allocator) AllocError!void {
+        std.debug.assert(func.ir_root != null);
 
+        // walk the graph in breadth-first order, starting from the last Return node
         // when a node is visited, emit its instruction
         // reverse the instructions array when finished (alternatively just emit in reverse order if we have the node count from regalloc)
 
-        const start_instruction_offset = instructions.items.len;
+        // const start_instruction_offset = store.instructions.byteOffset();
 
-        var visit_queue = std.ArrayList(*IRNode).init(allocator);
+        var visit_queue = std.ArrayList(*IRNode).init(scratch_allocator);
         defer visit_queue.deinit();
-        try visit_queue.append(func.ir_root);
+        try visit_queue.append(func.ir_root.?);
 
-        var visited = std.AutoHashMap(*IRNode, void).init(allocator);
+        var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
         defer visited.deinit();
+
+        var instructions = std.ArrayList(RegInstruction).init(scratch_allocator);
+        defer instructions.deinit();
 
         while (visit_queue.items.len > 0) {
             var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
@@ -397,8 +399,8 @@ const IRFunction = struct {
             if (all_out_edges_visited) {
                 try visited.put(node, {});
 
-                instructions.append(RegInstruction{
-                    .registerSlotOffset = if (func.register_map.get(node)) |slot_index| slot_index else 0,
+                try instructions.append(RegInstruction{
+                    .register_slot_offset = if (compile_data.register_map.get(node)) |slot_index| slot_index else 0,
                     .opcode = node.opcode,
                     .immediate = node.instruction(module_def).?.immediate,
                 });
@@ -411,13 +413,42 @@ const IRFunction = struct {
             }
         }
 
-        const end_instruction_offset = instructions.items.len;
-        const emitted_instructions = instructions.items[start_instruction_offset..end_instruction_offset];
+        // const end_instruction_offset = store.instructions.byteOffset();
+        // const emitted_instructions = store.instructions.items[start_instruction_offset..end_instruction_offset];
 
-        std.mem.reverse(RegInstruction, emitted_instructions);
+        // std.mem.reverse(RegInstruction, emitted_instructions);
+
+        const instruction_offset_begin = store.instructions.totalBytes();
+        for (0..instructions.items.len) |i_reverse| {
+            const i = (instructions.items.len - 1) - i_reverse;
+            const instruction: RegInstruction = instructions.items[i];
+            const registers = [_]u32{instruction.register_slot_offset}; // TODO will need to upgrade this to a real array at some point
+
+            try store.instructions.emit(instruction.opcode, instruction.immediate, &registers);
+        }
+        const instruction_offset_end = store.instructions.totalBytes();
+
+        const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
+        const func_type: *const FunctionTypeDefinition = &module_def.types.items[func.type_def_index];
+        const param_types: []const ValType = func_type.getParams();
+        try store.local_types.ensureTotalCapacity(store.local_types.items.len + param_types.len + func_def.locals.items.len);
+
+        const types_index_begin = store.local_types.items.len;
+        store.local_types.appendSliceAssumeCapacity(param_types);
+        store.local_types.appendSliceAssumeCapacity(func_def.locals.items);
+        const types_index_end = store.local_types.items.len;
+
+        try store.instances.append(FunctionInstance{
+            .type_def_index = func.type_def_index,
+            .def_index = func.def_index,
+            .instructions_begin = instruction_offset_begin,
+            .instructions_end = instruction_offset_end,
+            .local_types_begin = types_index_begin,
+            .local_types_end = types_index_end,
+        });
     }
 
-    fn dumpVizGraph(func: IRFunction, path: []u8, module_def: ModuleDefinition, allocator: std.mem.Allocator) !void {
+    fn dumpVizGraph(func: FunctionIR, path: []u8, module_def: ModuleDefinition, allocator: std.mem.Allocator) !void {
         var graph_txt = std.ArrayList(u8).init(allocator);
         defer graph_txt.deinit();
         try graph_txt.ensureTotalCapacity(1024 * 16);
@@ -484,11 +515,18 @@ const IRFunction = struct {
     }
 };
 
-const ModuleIR = struct {
+const IntermediateCompileData = struct {
+    const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
+
+    const PendingContinuationEdge = struct {
+        continuation: usize,
+        node: *IRNode,
+    };
+
     const BlockStack = struct {
         const Block = struct {
             node_start_index: u32,
-            continuation: u32, // in instruction index space
+            continuation: usize, // in instruction index space
             phi_nodes: []*IRNode,
         };
 
@@ -514,7 +552,7 @@ const ModuleIR = struct {
             self.blocks.deinit();
         }
 
-        fn pushBlock(self: *BlockStack, continuation: u32) AllocError!void {
+        fn pushBlock(self: *BlockStack, continuation: usize) AllocError!void {
             try self.blocks.append(Block{
                 .node_start_index = @intCast(self.nodes.items.len),
                 .continuation = continuation,
@@ -559,193 +597,189 @@ const ModuleIR = struct {
         }
     };
 
-    const IntermediateCompileData = struct {
-        const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
+    allocator: std.mem.Allocator,
 
-        const PendingContinuationEdge = struct {
-            continuation: u32,
-            node: *IRNode,
+    // all_nodes: std.ArrayList(*IRNode),
+
+    blocks: BlockStack,
+
+    // This stack is a record of the nodes to push values onto the stack. If an instruction would push
+    // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
+    // that we don't have to do any type checking here because the module has already been validated.
+    value_stack: std.ArrayList(*IRNode),
+
+    // records the current block continuation
+    // label_continuations: std.ArrayList(u32),
+
+    pending_continuation_edges: std.ArrayList(PendingContinuationEdge),
+
+    // when hitting an unconditional control transfer, we need to mark the rest of the stack values as unreachable just like in validation
+    is_unreachable: bool,
+
+    // This is a bit weird - since the Local_* instructions serve to just manipulate the locals into the stack,
+    // we need a way to represent what's in the locals slot as an SSA node. This array lets us do that. We also
+    // reuse the Local_Get instructions to indicate the "initial value" of the slot. Since our IRNode only stores
+    // indices to instructions, we'll just lazily set these when they're fetched for the first time.
+    locals: std.ArrayList(?*IRNode),
+
+    // Lets us collapse multiple const IR nodes with the same type/value into a single one
+    unique_constants: UniqueValueToIRNodeMap,
+
+    //
+    register_map: std.AutoHashMap(*const IRNode, u32),
+
+    scratch_node_list_1: std.ArrayList(*IRNode),
+    scratch_node_list_2: std.ArrayList(*IRNode),
+
+    fn init(allocator: std.mem.Allocator) IntermediateCompileData {
+        return IntermediateCompileData{
+            .allocator = allocator,
+            // .all_nodes = std.ArrayList(*IRNode).init(allocator),
+            .blocks = BlockStack.init(allocator),
+            .value_stack = std.ArrayList(*IRNode).init(allocator),
+            // .label_continuations = std.ArrayList(u32).init(allocator),
+            .pending_continuation_edges = std.ArrayList(PendingContinuationEdge).init(allocator),
+            .is_unreachable = false,
+            .locals = std.ArrayList(?*IRNode).init(allocator),
+            .unique_constants = UniqueValueToIRNodeMap.init(allocator),
+            .register_map = std.AutoHashMap(*const IRNode, u32).init(allocator),
+            .scratch_node_list_1 = std.ArrayList(*IRNode).init(allocator),
+            .scratch_node_list_2 = std.ArrayList(*IRNode).init(allocator),
+        };
+    }
+
+    fn warmup(self: *IntermediateCompileData, func_def: FunctionDefinition, module_def: ModuleDefinition) AllocError!void {
+        try self.locals.appendNTimes(null, func_def.numParamsAndLocals(module_def));
+        try self.scratch_node_list_1.ensureTotalCapacity(4096);
+        try self.scratch_node_list_2.ensureTotalCapacity(4096);
+        try self.register_map.ensureTotalCapacity(1024);
+        // try self.label_continuations.append(func_def.continuation);
+        self.is_unreachable = false;
+    }
+
+    fn reset(self: *IntermediateCompileData) void {
+        // self.all_nodes.clearRetainingCapacity();
+        self.blocks.reset();
+        self.value_stack.clearRetainingCapacity();
+        // self.label_continuations.clearRetainingCapacity();
+        self.pending_continuation_edges.clearRetainingCapacity();
+        self.locals.clearRetainingCapacity();
+        self.unique_constants.clearRetainingCapacity();
+        self.register_map.clearRetainingCapacity();
+        self.scratch_node_list_1.clearRetainingCapacity();
+        self.scratch_node_list_2.clearRetainingCapacity();
+    }
+
+    fn deinit(self: *IntermediateCompileData) void {
+        // self.all_nodes.deinit();
+        self.blocks.deinit();
+        self.value_stack.deinit();
+        // self.label_continuations.deinit();
+        self.pending_continuation_edges.deinit();
+        self.locals.deinit();
+        self.unique_constants.deinit();
+        self.register_map.deinit();
+        self.scratch_node_list_1.deinit();
+        self.scratch_node_list_2.deinit();
+    }
+
+    fn popPushValueStackNodes(self: *IntermediateCompileData, node: *IRNode, num_consumed: usize, num_pushed: usize) AllocError!void {
+        if (self.is_unreachable) {
+            return;
+        }
+
+        var edges_buffer: [8]*IRNode = undefined; // 8 should be more stack slots than any one instruction can pop
+        std.debug.assert(num_consumed <= edges_buffer.len);
+
+        const edges = edges_buffer[0..num_consumed];
+        for (edges) |*e| {
+            e.* = self.value_stack.pop();
+        }
+        try node.pushEdges(.In, edges, self.allocator);
+        for (edges) |e| {
+            var consumer_edges = [_]*IRNode{node};
+            try e.pushEdges(.Out, &consumer_edges, self.allocator);
+        }
+        try self.value_stack.appendNTimes(node, num_pushed);
+    }
+
+    fn foldConstant(self: *IntermediateCompileData, compiler: *FunctionCompiler, comptime valtype: ValType, instruction_index: u32, instruction: Instruction) AllocError!*IRNode {
+        var val: TaggedVal = undefined;
+        val.type = valtype;
+        val.val = switch (valtype) {
+            .I32 => Val{ .I32 = instruction.immediate.ValueI32 },
+            .I64 => Val{ .I64 = instruction.immediate.ValueI64 },
+            .F32 => Val{ .F32 = instruction.immediate.ValueF32 },
+            .F64 => Val{ .F64 = instruction.immediate.ValueF64 },
+            .V128 => Val{ .V128 = instruction.immediate.ValueVec },
+            else => @compileError("Unsupported const instruction"),
         };
 
-        allocator: std.mem.Allocator,
-
-        // all_nodes: std.ArrayList(*IRNode),
-
-        blocks: BlockStack,
-
-        // This stack is a record of the nodes to push values onto the stack. If an instruction would push
-        // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
-        // that we don't have to do any type checking here because the module has already been validated.
-        value_stack: std.ArrayList(*IRNode),
-
-        // records the current block continuation
-        // label_continuations: std.ArrayList(u32),
-
-        pending_continuation_edges: std.ArrayList(PendingContinuationEdge),
-
-        // when hitting an unconditional control transfer, we need to mark the rest of the stack values as unreachable just like in validation
-        is_unreachable: bool,
-
-        // This is a bit weird - since the Local_* instructions serve to just manipulate the locals into the stack,
-        // we need a way to represent what's in the locals slot as an SSA node. This array lets us do that. We also
-        // reuse the Local_Get instructions to indicate the "initial value" of the slot. Since our IRNode only stores
-        // indices to instructions, we'll just lazily set these when they're fetched for the first time.
-        locals: std.ArrayList(?*IRNode),
-
-        // Lets us collapse multiple const IR nodes with the same type/value into a single one
-        unique_constants: UniqueValueToIRNodeMap,
-
-        scratch_node_list_1: std.ArrayList(*IRNode),
-        scratch_node_list_2: std.ArrayList(*IRNode),
-
-        fn init(allocator: std.mem.Allocator) IntermediateCompileData {
-            return IntermediateCompileData{
-                .allocator = allocator,
-                // .all_nodes = std.ArrayList(*IRNode).init(allocator),
-                .blocks = BlockStack.init(allocator),
-                .value_stack = std.ArrayList(*IRNode).init(allocator),
-                // .label_continuations = std.ArrayList(u32).init(allocator),
-                .pending_continuation_edges = std.ArrayList(PendingContinuationEdge).init(allocator),
-                .is_unreachable = false,
-                .locals = std.ArrayList(?*IRNode).init(allocator),
-                .unique_constants = UniqueValueToIRNodeMap.init(allocator),
-                .scratch_node_list_1 = std.ArrayList(*IRNode).init(allocator),
-                .scratch_node_list_2 = std.ArrayList(*IRNode).init(allocator),
-            };
+        const res = try self.unique_constants.getOrPut(val);
+        if (res.found_existing == false) {
+            const node = try IRNode.createWithInstruction(compiler, instruction_index);
+            res.value_ptr.* = node;
         }
-
-        fn warmup(self: *IntermediateCompileData, func_def: FunctionDefinition, module_def: ModuleDefinition) AllocError!void {
-            try self.locals.appendNTimes(null, func_def.numParamsAndLocals(module_def));
-            try self.scratch_node_list_1.ensureTotalCapacity(4096);
-            try self.scratch_node_list_2.ensureTotalCapacity(4096);
-            // try self.label_continuations.append(func_def.continuation);
-            self.is_unreachable = false;
+        if (self.is_unreachable == false) {
+            try self.value_stack.append(res.value_ptr.*);
         }
+        return res.value_ptr.*;
+    }
 
-        fn reset(self: *IntermediateCompileData) void {
-            // self.all_nodes.clearRetainingCapacity();
-            self.blocks.reset();
-            self.value_stack.clearRetainingCapacity();
-            // self.label_continuations.clearRetainingCapacity();
-            self.pending_continuation_edges.clearRetainingCapacity();
-            self.locals.clearRetainingCapacity();
-            self.unique_constants.clearRetainingCapacity();
-            self.scratch_node_list_1.clearRetainingCapacity();
-            self.scratch_node_list_2.clearRetainingCapacity();
-        }
+    fn addPendingEdgeLabel(self: *IntermediateCompileData, node: *IRNode, label_id: u32) !void {
+        const last_block_index = self.blocks.blocks.items.len - 1;
+        const continuation: usize = self.blocks.blocks.items[last_block_index - label_id].continuation;
+        try self.pending_continuation_edges.append(PendingContinuationEdge{
+            .node = node,
+            .continuation = continuation,
+        });
+    }
 
-        fn deinit(self: *IntermediateCompileData) void {
-            // self.all_nodes.deinit();
-            self.blocks.deinit();
-            self.value_stack.deinit();
-            // self.label_continuations.deinit();
-            self.pending_continuation_edges.deinit();
-            self.locals.deinit();
-            self.unique_constants.deinit();
-            self.scratch_node_list_1.deinit();
-            self.scratch_node_list_2.deinit();
-        }
+    fn addPendingEdgeContinuation(self: *IntermediateCompileData, node: *IRNode, continuation: u32) !void {
+        try self.pending_continuation_edges.append(PendingContinuationEdge{
+            .node = node,
+            .continuation = continuation,
+        });
+    }
+};
 
-        fn popPushValueStackNodes(self: *IntermediateCompileData, node: *IRNode, num_consumed: usize, num_pushed: usize) AllocError!void {
-            if (self.is_unreachable) {
-                return;
-            }
-
-            var edges_buffer: [8]*IRNode = undefined; // 8 should be more stack slots than any one instruction can pop
-            std.debug.assert(num_consumed <= edges_buffer.len);
-
-            const edges = edges_buffer[0..num_consumed];
-            for (edges) |*e| {
-                e.* = self.value_stack.pop();
-            }
-            try node.pushEdges(.In, edges, self.allocator);
-            for (edges) |e| {
-                var consumer_edges = [_]*IRNode{node};
-                try e.pushEdges(.Out, &consumer_edges, self.allocator);
-            }
-            try self.value_stack.appendNTimes(node, num_pushed);
-        }
-
-        fn foldConstant(self: *IntermediateCompileData, mir: *ModuleIR, comptime valtype: ValType, instruction_index: u32, instruction: Instruction) AllocError!*IRNode {
-            var val: TaggedVal = undefined;
-            val.type = valtype;
-            val.val = switch (valtype) {
-                .I32 => Val{ .I32 = instruction.immediate.ValueI32 },
-                .I64 => Val{ .I64 = instruction.immediate.ValueI64 },
-                .F32 => Val{ .F32 = instruction.immediate.ValueF32 },
-                .F64 => Val{ .F64 = instruction.immediate.ValueF64 },
-                .V128 => Val{ .V128 = instruction.immediate.ValueVec },
-                else => @compileError("Unsupported const instruction"),
-            };
-
-            const res = try self.unique_constants.getOrPut(val);
-            if (res.found_existing == false) {
-                const node = try IRNode.createWithInstruction(mir, instruction_index);
-                res.value_ptr.* = node;
-            }
-            if (self.is_unreachable == false) {
-                try self.value_stack.append(res.value_ptr.*);
-            }
-            return res.value_ptr.*;
-        }
-
-        fn addPendingEdgeLabel(self: *IntermediateCompileData, node: *IRNode, label_id: u32) !void {
-            const last_block_index = self.blocks.blocks.items.len - 1;
-            const continuation: u32 = self.blocks.blocks.items[last_block_index - label_id].continuation;
-            try self.pending_continuation_edges.append(PendingContinuationEdge{
-                .node = node,
-                .continuation = continuation,
-            });
-        }
-
-        fn addPendingEdgeContinuation(self: *IntermediateCompileData, node: *IRNode, continuation: u32) !void {
-            try self.pending_continuation_edges.append(PendingContinuationEdge{
-                .node = node,
-                .continuation = continuation,
-            });
-        }
-    };
-
+const FunctionCompiler = struct {
     allocator: std.mem.Allocator,
     module_def: *const ModuleDefinition,
-    functions: std.ArrayList(IRFunction),
     ir: StableArray(IRNode),
 
-    // instructions: std.ArrayList(RegInstruction),
-
-    fn init(allocator: std.mem.Allocator, module_def: *const ModuleDefinition) ModuleIR {
-        return ModuleIR{
+    fn init(allocator: std.mem.Allocator, module_def: *const ModuleDefinition) FunctionCompiler {
+        return FunctionCompiler{
             .allocator = allocator,
             .module_def = module_def,
-            .functions = std.ArrayList(IRFunction).init(allocator),
             .ir = StableArray(IRNode).init(1024 * 1024 * 8),
         };
     }
 
-    fn deinit(mir: *ModuleIR) void {
-        for (mir.functions.items) |*func| {
-            func.deinit();
+    fn deinit(compiler: *FunctionCompiler) void {
+        for (compiler.ir.items) |node| {
+            node.deinit(compiler.allocator);
         }
-        mir.functions.deinit();
-        for (mir.ir.items) |node| {
-            node.deinit(mir.allocator);
-        }
-        mir.ir.deinit();
+        compiler.ir.deinit();
     }
 
-    fn compile(mir: *ModuleIR) AllocError!void {
-        var compile_data = IntermediateCompileData.init(mir.allocator);
+    fn compile(compiler: *FunctionCompiler, store: *FunctionStore) AllocError!void {
+        var compile_data = IntermediateCompileData.init(compiler.allocator);
         defer compile_data.deinit();
 
-        for (0..mir.module_def.functions.items.len) |i| {
-            std.debug.print("mir.module_def.functions.items.len: {}, i: {}\n\n", .{ mir.module_def.functions.items.len, i });
-            try mir.compileFunc(i, &compile_data);
+        for (0..compiler.module_def.functions.items.len) |i| {
+            std.debug.print("compiler.module_def.functions.items.len: {}, i: {}\n\n", .{ compiler.module_def.functions.items.len, i });
+            var function_ir = try compiler.compileFunc(i, &compile_data);
+            if (function_ir.ir_root != null) {
+                try function_ir.regalloc(&compile_data, compiler.allocator);
+                try function_ir.codegen(store, compile_data, compiler.module_def.*, compiler.allocator);
+            }
 
             compile_data.reset();
         }
     }
 
-    fn compileFunc(mir: *ModuleIR, index: usize, compile_data: *IntermediateCompileData) AllocError!void {
+    fn compileFunc(compiler: *FunctionCompiler, index: usize, compile_data: *IntermediateCompileData) AllocError!FunctionIR {
         const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
 
         const Helpers = struct {
@@ -769,25 +803,25 @@ const ModuleIR = struct {
             }
         };
 
-        const func: *const FunctionDefinition = &mir.module_def.functions.items[index];
-        const func_type: *const FunctionTypeDefinition = func.typeDefinition(mir.module_def.*);
+        const func: *const FunctionDefinition = &compiler.module_def.functions.items[index];
+        const func_type: *const FunctionTypeDefinition = func.typeDefinition(compiler.module_def.*);
 
         std.debug.print("compiling func index {}\n", .{index});
 
-        try compile_data.warmup(func.*, mir.module_def.*);
+        try compile_data.warmup(func.*, compiler.module_def.*);
 
         try compile_data.blocks.pushBlock(func.continuation);
 
         var locals = compile_data.locals.items; // for convenience later
 
         // Lets us collapse multiple const IR nodes with the same type/value into a single one
-        var unique_constants = UniqueValueToIRNodeMap.init(mir.allocator);
+        var unique_constants = UniqueValueToIRNodeMap.init(compiler.allocator);
         defer unique_constants.deinit();
 
-        const instructions: []Instruction = func.instructions(mir.module_def.*);
+        const instructions: []Instruction = func.instructions(compiler.module_def.*);
         if (instructions.len == 0) {
             std.log.warn("Skipping function with no instructions (index {}).", .{index});
-            return;
+            return FunctionIR{};
         }
 
         var ir_root: ?*IRNode = null;
@@ -797,7 +831,7 @@ const ModuleIR = struct {
 
             var node: ?*IRNode = null;
             if (Helpers.opcodeHasDefaultIRMapping(instruction.opcode)) {
-                node = try IRNode.createWithInstruction(mir, instruction_index);
+                node = try IRNode.createWithInstruction(compiler, instruction_index);
             }
 
             std.debug.print("opcode: {}\n", .{instruction.opcode});
@@ -827,7 +861,7 @@ const ModuleIR = struct {
                     std.debug.assert(phi_nodes.items.len == 0);
 
                     for (0..instruction.immediate.If.num_returns) |_| {
-                        try phi_nodes.append(try IRNode.createPhi(mir));
+                        try phi_nodes.append(try IRNode.createPhi(compiler));
                     }
 
                     try compile_data.blocks.pushBlockWithPhi(instruction.immediate.If.end_continuation, phi_nodes.items[0..]);
@@ -860,7 +894,7 @@ const ModuleIR = struct {
                     // the last End opcode returns the values on the stack
                     // if (compile_data.label_continuations.items.len == 1) {
                     if (compile_data.blocks.blocks.items.len == 1) {
-                        node = try IRNode.createStandalone(mir, .Return);
+                        node = try IRNode.createStandalone(compiler, .Return);
                         try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0);
                         // _ = compile_data.label_continuations.pop();
                     }
@@ -914,10 +948,11 @@ const ModuleIR = struct {
                     // var continuation_edges: std.ArrayList(*IRNode).init(allocator);
                     // defer continuation_edges.deinit();
 
-                    const immediates: *const BranchTableImmediates = &mir.module_def.code.branch_table.items[instruction.immediate.Index];
+                    const immediates: *const BranchTableImmediates = &compiler.module_def.code.branch_table.items[instruction.immediate.Index];
 
                     try compile_data.addPendingEdgeLabel(node.?, immediates.fallback_id);
-                    for (immediates.label_ids.items) |continuation| {
+                    const label_ids: []const u32 = immediates.getLabelIds(compiler.module_def.*);
+                    for (label_ids) |continuation| {
                         try compile_data.addPendingEdgeLabel(node.?, continuation);
                     }
 
@@ -934,8 +969,8 @@ const ModuleIR = struct {
                     compile_data.is_unreachable = true;
                 },
                 .Call => {
-                    const calling_func_def: *const FunctionDefinition = &mir.module_def.functions.items[index];
-                    const calling_func_type: *const FunctionTypeDefinition = calling_func_def.typeDefinition(mir.module_def.*);
+                    const calling_func_def: *const FunctionDefinition = &compiler.module_def.functions.items[index];
+                    const calling_func_type: *const FunctionTypeDefinition = calling_func_def.typeDefinition(compiler.module_def.*);
                     const num_returns: usize = calling_func_type.getReturns().len;
                     const num_params: usize = calling_func_type.getParams().len;
 
@@ -949,19 +984,19 @@ const ModuleIR = struct {
                 },
                 .I32_Const => {
                     assert(node == null);
-                    node = try compile_data.foldConstant(mir, .I32, instruction_index, instruction);
+                    node = try compile_data.foldConstant(compiler, .I32, instruction_index, instruction);
                 },
                 .I64_Const => {
                     assert(node == null);
-                    node = try compile_data.foldConstant(mir, .I64, instruction_index, instruction);
+                    node = try compile_data.foldConstant(compiler, .I64, instruction_index, instruction);
                 },
                 .F32_Const => {
                     assert(node == null);
-                    node = try compile_data.foldConstant(mir, .F32, instruction_index, instruction);
+                    node = try compile_data.foldConstant(compiler, .F32, instruction_index, instruction);
                 },
                 .F64_Const => {
                     assert(node == null);
-                    node = try compile_data.foldConstant(mir, .F64, instruction_index, instruction);
+                    node = try compile_data.foldConstant(compiler, .F64, instruction_index, instruction);
                 },
                 .I32_Eq,
                 .I32_NE,
@@ -1012,7 +1047,7 @@ const ModuleIR = struct {
                     if (compile_data.is_unreachable == false) {
                         const local: *?*IRNode = &locals[instruction.immediate.Index];
                         if (local.* == null) {
-                            local.* = try IRNode.createWithInstruction(mir, instruction_index);
+                            local.* = try IRNode.createWithInstruction(compiler, instruction_index);
                         }
                         node = local.*;
                         try compile_data.value_stack.append(node.?);
@@ -1087,29 +1122,435 @@ const ModuleIR = struct {
         //     }
         // }
 
-        try mir.functions.append(IRFunction.init(
-            @intCast(index),
-            ir_root.?,
-            mir.allocator,
-        ));
+        return FunctionIR{
+            .def_index = index,
+            .type_def_index = func.type_index,
+            .ir_root = ir_root,
+        };
 
-        try mir.functions.items[mir.functions.items.len - 1].regalloc(mir.allocator);
+        // return FunctionIR.init(
+        //     index,
+        //     func.type_index,
+        //     ir_root.?,
+        //     compiler.allocator,
+        // );
+
+        // try compiler.functions.append(FunctionIR.init(
+        //     index,
+        //     func.type_index,
+        //     ir_root.?,
+        //     compiler.allocator,
+        // ));
+
+        // try compiler.functions.items[compiler.functions.items.len - 1].regalloc(compiler.allocator);
+    }
+};
+
+const FunctionInstance = struct {
+    type_def_index: usize,
+    def_index: usize,
+    instructions_begin: usize,
+    instructions_end: usize,
+    local_types_begin: usize,
+    local_types_end: usize,
+
+    fn instructions(func: FunctionInstance, store: FunctionStore) []RegInstruction {
+        return store.instructions.items[func.instructions_begin..func.instructions_end];
+    }
+
+    fn localTypes(func: FunctionInstance, store: FunctionStore) []ValType {
+        return store.local_types.items[func.local_types_begin..func.local_types_end];
+    }
+
+    fn typeDefinition(func: FunctionInstance, module_def: ModuleDefinition) *const FunctionTypeDefinition {
+        return &module_def.types.items[func.type_def_index];
+    }
+
+    fn definition(func: FunctionInstance, module_def: ModuleDefinition) *const FunctionDefinition {
+        return &module_def.functions.items[func.def_index];
+    }
+};
+
+const Label = struct {
+    // TODO figure out what this struct should be
+    // num_returns: u32,
+    continuation: u32,
+    // start_offset_values: u32,
+};
+
+const CallFrame = struct {
+    func: *const FunctionInstance,
+    module_instance: *ModuleInstance,
+    num_returns: u32,
+    registers_begin: u32, // offset into registers
+    labels_begin: u32, // offset into labels
+};
+
+const MachineState = struct {
+    const AllocOpts = struct {
+        max_registers: usize,
+        max_labels: usize,
+        max_frames: usize,
+    };
+
+    registers: []Val,
+    labels: []Label,
+    frames: []CallFrame,
+    num_registers: u32,
+    num_labels: u16,
+    num_frames: u16,
+    mem: []u8,
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) MachineState {
+        return MachineState{
+            .registers = &[_]Val{},
+            .labels = &[_]Label{},
+            .frames = &[_]CallFrame{},
+            .num_registers = 0,
+            .num_labels = 0,
+            .num_frames = 0,
+            .mem = &[_]u8{},
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(ms: *MachineState) void {
+        if (ms.mem.len > 0) {
+            ms.allocator.free(ms.mem);
+        }
+    }
+
+    fn allocMemory(ms: *MachineState, opts: AllocOpts) AllocError!void {
+        const alignment = @max(@alignOf(Val), @alignOf(Label), @alignOf(CallFrame));
+        const values_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_registers)) * @sizeOf(Val), alignment);
+        const labels_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_labels)) * @sizeOf(Label), alignment);
+        const frames_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_frames)) * @sizeOf(CallFrame), alignment);
+        const total_alloc_size: usize = values_alloc_size + labels_alloc_size + frames_alloc_size;
+
+        const begin_labels = values_alloc_size;
+        const begin_frames = values_alloc_size + labels_alloc_size;
+
+        ms.mem = try ms.allocator.alloc(u8, total_alloc_size);
+        ms.registers.ptr = @as([*]Val, @alignCast(@ptrCast(ms.mem.ptr)));
+        ms.registers.len = opts.max_registers;
+        ms.labels.ptr = @as([*]Label, @alignCast(@ptrCast(ms.mem[begin_labels..].ptr)));
+        ms.labels.len = opts.max_labels;
+        ms.frames.ptr = @as([*]CallFrame, @alignCast(@ptrCast(ms.mem[begin_frames..].ptr)));
+        ms.frames.len = opts.max_frames;
+    }
+
+    fn checkExhausted(ms: MachineState, extra_registers: u32) TrapError!void {
+        if (ms.num_registers + extra_registers >= ms.registers.len) {
+            return error.TrapStackExhausted;
+        }
+    }
+
+    fn reset(ms: *MachineState) void {
+        ms.num_registers = 0;
+        ms.num_labels = 0;
+        ms.num_frames = 0;
+    }
+
+    fn get(ms: MachineState, register_local: u32) Val {
+        const frame: *CallFrame = topFrame();
+        const slot = frame.registers_begin + register_local;
+        return ms.registers[slot];
+    }
+
+    fn getI32(ms: MachineState, register_local: u32) i32 {
+        return ms.get(register_local).I32;
+    }
+
+    fn getI64(ms: MachineState, register_local: u32) i64 {
+        return ms.get(register_local).I64;
+    }
+
+    fn getF32(ms: MachineState, register_local: u32) f32 {
+        return ms.get(register_local).F32;
+    }
+
+    fn getF64(ms: MachineState, register_local: u32) f64 {
+        return ms.get(register_local).F64;
+    }
+
+    fn set(ms: *MachineState, register_local: u32, val: Val) void {
+        const frame: *CallFrame = topFrame();
+        const slot = frame.registers_begin + register_local;
+        ms.registers[slot] = val;
+    }
+
+    fn setI32(ms: *MachineState, register_local: u32, val: i32) void {
+        const frame: *CallFrame = topFrame();
+        const slot = frame.registers_begin + register_local;
+        ms.registers[slot].I32 = val;
+    }
+
+    fn setI64(ms: *MachineState, register_local: u32, val: i64) void {
+        const frame: *CallFrame = topFrame();
+        const slot = frame.registers_begin + register_local;
+        ms.registers[slot].I64 = val;
+    }
+
+    fn setF32(ms: *MachineState, register_local: u32, val: f32) void {
+        const frame: *CallFrame = topFrame();
+        const slot = frame.registers_begin + register_local;
+        ms.registers[slot].F32 = val;
+    }
+
+    fn setF64(ms: *MachineState, register_local: u32, val: f64) void {
+        const frame: *CallFrame = topFrame();
+        const slot = frame.registers_begin + register_local;
+        ms.registers[slot].F64 = val;
+    }
+
+    fn topFrame(ms: MachineState) *CallFrame {
+        return &ms.frames[ms.num_frames - 1];
+    }
+};
+
+// "stream" of instructions where the format is:
+// * opcode
+// * immediates
+// * register slots
+const InstructionStream = struct {
+    data: std.ArrayList(u8),
+
+    const InnerReaderType = std.io.FixedBufferStream([]u8).Reader;
+
+    fn init(allocator: std.mem.Allocator) InstructionStream {
+        return .{ .data = std.ArrayList(u8).init(allocator) };
+    }
+
+    fn deinit(stream: *InstructionStream) void {
+        stream.data.deinit();
+    }
+
+    fn totalBytes(stream: InstructionStream) usize {
+        return stream.data.items.len;
+    }
+
+    fn emit(stream: *InstructionStream, opcode: Opcode, maybe_immediates: ?InstructionImmediates, registers: []const u32) AllocError!void {
+        const Helpers = struct {
+            // writer has writeByteNTimes but it works best in chunks of 256, and most of our immediates are 4-16 bytes
+            fn pad(writer: anytype, num_bytes: usize) AllocError!void {
+                for (0..num_bytes) |_| {
+                    writer.writeByte(0xAD) catch return AllocError.OutOfMemory;
+                }
+            }
+        };
+
+        var writer = stream.data.writer();
+
+        const offset_to_opcode = std.mem.alignForward(usize, stream.data.items.len, @alignOf(Opcode));
+        try Helpers.pad(writer, offset_to_opcode);
+
+        _ = writer.writeAll(std.mem.asBytes(&opcode)) catch return AllocError.OutOfMemory;
+
+        if (maybe_immediates) |immediates| {
+            const aligned_bytes: AlignedBytes = immediates.asAlignedBytes(opcode);
+
+            // const immediates_type_info: std.builtin.Type.Union = @typeInfo(InstructionImmediates);
+
+            // const active_field: std.builtin.Type.UnionField = immediates_type_info.fields[@enumFromInt(active_immediates_tag)];
+
+            const alignment = aligned_bytes.alignment;
+            const offset_to_immediates = std.mem.alignForward(usize, stream.data.items.len, alignment) - stream.data.items.len;
+
+            try Helpers.pad(writer, offset_to_immediates);
+
+            // const size = @sizeOf(active_field.type);
+            // const immediates_bytes: u8 = std.mem.asBytes(&immediates)[0..size]; // TODO verify this works
+
+            writer.writeAll(aligned_bytes.bytes) catch return AllocError.OutOfMemory;
+        }
+
+        const offset_to_registers = std.mem.alignForward(usize, stream.data.items.len, @alignOf(u32));
+        try Helpers.pad(writer, offset_to_registers);
+
+        writer.writeInt(u32, @intCast(registers.len), endian_native) catch return AllocError.OutOfMemory;
+        writer.writeAll(std.mem.sliceAsBytes(registers)) catch return AllocError.OutOfMemory;
+    }
+
+    fn reader(stream: InstructionStream, begin_pos: usize) InstructionStreamReader {
+        var fbo_reader = std.io.fixedBufferStream(stream.data.items);
+        fbo_reader.context.pos = begin_pos;
+
+        return .{
+            .reader = fbo_reader,
+        };
+    }
+
+    fn readerFromFunc(stream: InstructionStream, func: FunctionInstance) InstructionStreamReader {
+        return stream.reader(func.instructions_begin, func.instructions_end);
+    }
+};
+
+const InstructionStreamReader = struct {
+    reader: InstructionStream.InnerReaderType,
+
+    fn alignReadPos(self: *InstructionStreamReader, alignment: usize) void {
+        self.reader.context.pos = std.mem.alignForward(usize, self.reader.context.pos, alignment);
+    }
+
+    fn readOpcode(self: *InstructionStreamReader) Opcode {
+        self.alignReadPos(@alignOf(Opcode));
+        return self.reader.readEnum(Opcode, .Little) catch unreachable;
+    }
+
+    fn readImmediates(self: *InstructionStreamReader, opcode: Opcode) ?InstructionImmediates {
+        const maybe_type: ?type = switch (opcode) {
+            else => return null,
+        };
+
+        if (maybe_type) |immediate_type| {
+            self.alignReadPos(@alignOf(immediate_type));
+
+            const size = @sizeOf(immediate_type);
+            const immediates: InstructionImmediates = undefined;
+            const immediates_bytes: []u8 = std.mem.asBytes(&immediates)[0..size];
+            self.reader.read(immediates_bytes) catch unreachable;
+
+            return immediates;
+        } else {
+            return null;
+        }
+    }
+
+    fn readRegisters(self: *InstructionStreamReader) []u32 {
+        self.alignReadPos(@alignOf(u32));
+
+        const num_registers = self.reader.readIntNative(u32) catch unreachable;
+
+        const begin = self.reader.context.pos;
+        const end = begin + num_registers * @sizeOf(u32);
+        const registers_bytes: []u8 = self.reader.context.buffer[begin..end];
+        const registers = std.mem.bytesAsSlice(u32, registers_bytes);
+        return registers;
+    }
+};
+
+// test "register instruction stream" {
+//     const allocator = std.testing.allocator;
+
+//     const TestData = struct {
+//         opcode: Opcode,
+//         immediates: ?InstructionImmediates,
+//         registers: []const u32,
+//     };
+
+//     const test_data = [_]TestData{
+//         .{
+//             .opcode = .I32_Const,
+//             .immediates = InstructionImmediates{ .ValueI32 = 0x1337 },
+//             .registers = &[_]u32{0},
+//         },
+//         .{
+//             .opcode = .Noop,
+//             .immediates = null,
+//             .registers = &[_]u32{},
+//         },
+//         .{
+//             .opcode = .Call,
+//             .immediates = InstructionImmediates{ .Index = 12 },
+//             .registers = &[_]u32{ 1, 2, 3 },
+//         },
+//         .{
+//             .opcode = .Call,
+//             .immediates = InstructionImmediates{ .Index = 12 },
+//             .registers = &[_]u32{ 1, 2, 3 },
+//         },
+//     };
+
+//     var stream = InstructionStream{
+//         .data = std.ArrayList(u8).init(allocator),
+//     };
+//     defer stream.data.deinit();
+
+//     for (test_data) |data| {
+//         try stream.emit(data.opcode, data.immediates, data.registers);
+//     }
+
+//     var reader = stream.reader(0);
+//     for (test_data) |expected| {
+//         const opcode = reader.readOpcode();
+//         std.testing.expectEqual(expected.opcode, opcode);
+
+//         const immediates: ?InstructionImmediates = reader.readImmediates(opcode);
+//         std.testing.expectEqual(expected.immediates, immediates);
+
+//         const registers = reader.readRegisters();
+//         std.testing.expectEqual(expected.registers, registers);
+//     }
+// }
+
+const FunctionStore = struct {
+    local_types: std.ArrayList(ValType),
+    instructions: InstructionStream,
+    instances: std.ArrayList(FunctionInstance),
+
+    fn init(allocator: std.mem.Allocator) FunctionStore {
+        return .{
+            .local_types = std.ArrayList(ValType).init(allocator),
+            .instructions = std.ArrayList(RegInstruction).init(allocator),
+            .instances = std.ArrayList(FunctionInstance).init(allocator),
+        };
+    }
+
+    fn deinit(store: *FunctionStore) void {
+        store.local_types.deinit();
+        store.instructions.deinit();
+        store.instances.deinit();
     }
 };
 
 pub const RegisterVM = struct {
+    functions: FunctionStore,
+    ms: MachineState,
+
+    fn fromVM(vm: *VM) *RegisterVM {
+        return @as(*RegisterVM, @alignCast(@ptrCast(vm.impl)));
+    }
+
     pub fn init(vm: *VM) void {
-        _ = vm;
+        var self: *RegisterVM = fromVM(vm);
+
+        self.functions.local_types = std.ArrayList(ValType).init(vm.allocator);
+        self.functions.instructions = InstructionStream.init(vm.allocator);
+        self.functions.instances = std.ArrayList(FunctionInstance).init(vm.allocator);
+        self.ms = MachineState.init(vm.allocator);
     }
 
     pub fn deinit(vm: *VM) void {
-        _ = vm;
+        var self: *RegisterVM = fromVM(vm);
+
+        self.functions.local_types.deinit();
+        self.functions.instructions.deinit();
+        self.functions.instances.deinit();
+        self.ms.deinit();
     }
 
     pub fn instantiate(vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void {
-        _ = vm;
-        _ = module;
-        _ = opts;
+        var self: *RegisterVM = fromVM(vm);
+
+        const stack_size = if (opts.stack_size > 0) opts.stack_size else 1024 * 128;
+        const stack_size_f = @as(f64, @floatFromInt(stack_size));
+
+        try self.ms.allocMemory(.{
+            .max_registers = @as(usize, @intFromFloat(stack_size_f * 0.85)),
+            .max_labels = @as(usize, @intFromFloat(stack_size_f * 0.14)),
+            .max_frames = @as(usize, @intFromFloat(stack_size_f * 0.01)),
+        });
+
+        var compiler = FunctionCompiler.init(vm.allocator, module.module_def);
+        defer compiler.deinit();
+
+        try compiler.compile(&self.functions);
+
+        // wasm bytecode -> IR graph -> register-assigned IR graph ->
+
+        // TODO create functions?
+
         return error.Unimplemented;
     }
 
@@ -1163,32 +1604,16 @@ pub const RegisterVM = struct {
     }
 
     pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition {
-        _ = vm;
-        _ = module;
-        _ = local_func_index;
-        return &dummy_func_type_def;
+        var self: *RegisterVM = fromVM(vm);
+        return self.functions.instances.items[local_func_index].typeDefinition(module.module_def.*);
     }
-
-    pub fn compile(vm: *RegisterVM, module_def: ModuleDefinition) AllocError!void {
-        var mir = ModuleIR.init(vm.allocator, module_def);
-        defer mir.deinit();
-
-        try mir.compile();
-
-        // wasm bytecode -> IR graph -> register-assigned IR graph ->
-    }
-};
-
-const dummy_func_type_def = FunctionTypeDefinition{
-    .types = undefined,
-    .num_params = 0,
 };
 
 // register instructions get a slice of the overall set of register slots, which are pointers to actual
 // registers (?)
 
 const RegInstruction = struct {
-    registerSlotOffset: u32, // offset within the function register slot space to start
+    register_slot_offset: u32, // offset within the function register slot space to start
     opcode: Opcode,
     immediate: def.InstructionImmediates,
 
@@ -1216,10 +1641,14 @@ fn runTestWithViz(wasm_filepath: []const u8, viz_dir: []const u8) !void {
 
     try module_def.decode(wasm_data);
 
-    var mir = ModuleIR.init(allocator, module_def);
-    defer mir.deinit();
-    try mir.compile();
-    for (mir.functions.items, 0..) |func, i| {
+    var compiler = FunctionCompiler.init(allocator, module_def);
+    defer compiler.deinit();
+
+    var store = FunctionStore.init(allocator);
+    defer store.deinit();
+
+    try compiler.compile(&store);
+    for (compiler.functions.items, 0..) |func, i| {
         var viz_path_buffer: [256]u8 = undefined;
         const viz_path = std.fmt.bufPrint(&viz_path_buffer, "{s}\\viz_{}.txt", .{ viz_dir, i }) catch unreachable;
         std.debug.print("gen graph for func {}\n", .{i});
@@ -1253,10 +1682,10 @@ fn runTestWithViz(wasm_filepath: []const u8, viz_dir: []const u8) !void {
 
 //     // try module_def.decode(wasm_data);
 
-//     // var mir = ModuleIR.init(allocator, &module_def);
-//     // defer mir.deinit();
-//     // try mir.compile();
-//     // for (mir.functions.items, 0..) |func, i| {
+//     // var compiler = FunctionCompiler.init(allocator, &module_def);
+//     // defer compiler.deinit();
+//     // try compiler.compile();
+//     // for (compiler.functions.items, 0..) |func, i| {
 //     //     var viz_path_buffer: [256]u8 = undefined;
 //     //     const path_format =
 //     //         \\E:\Dev\zig_projects\bytebox\viz\viz_{}.txt
