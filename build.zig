@@ -13,10 +13,16 @@ const ExeOpts = struct {
     description: []const u8,
     step_dependencies: ?[]*Build.Step = null,
     should_emit_asm: bool = false,
+    options: *Build.Step.Options,
 };
 
 pub fn build(b: *Build) void {
     const should_emit_asm = b.option(bool, "asm", "Emit asm for the bytebox binaries") orelse false;
+
+    const enable_metering = b.option(bool, "meter", "Enable metering") orelse false;
+
+    const options = b.addOptions();
+    options.addOption(bool, "enable_metering", enable_metering);
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -37,6 +43,8 @@ pub fn build(b: *Build) void {
         .imports = &[_]ModuleImport{stable_array_import},
     });
 
+    bytebox_module.addOptions("config", options);
+
     // exe.root_module.addImport(import.name, import.module);
 
     const imports = [_]ModuleImport{
@@ -50,6 +58,7 @@ pub fn build(b: *Build) void {
         .step_name = "run",
         .description = "Run a wasm program",
         .should_emit_asm = should_emit_asm,
+        .options = options,
     });
 
     var bench_steps = [_]*Build.Step{
@@ -63,6 +72,7 @@ pub fn build(b: *Build) void {
         .step_name = "bench",
         .description = "Run the benchmark suite",
         .step_dependencies = &bench_steps,
+        .options = options,
     });
 
     const lib_bytebox: *Build.Step.Compile = b.addStaticLibrary(.{
@@ -72,6 +82,7 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
     lib_bytebox.root_module.addImport(stable_array_import.name, stable_array_import.module);
+    lib_bytebox.root_module.addOptions("config", options);
     lib_bytebox.installHeader(b.path("src/bytebox.h"), "bytebox.h");
     b.installArtifact(lib_bytebox);
 
@@ -82,6 +93,7 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
     unit_tests.root_module.addImport(stable_array_import.name, stable_array_import.module);
+    unit_tests.root_module.addOptions("config", options);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const unit_test_step = b.step("test-unit", "Run unit tests");
     unit_test_step.dependOn(&run_unit_tests.step);
@@ -92,6 +104,7 @@ pub fn build(b: *Build) void {
         .root_src = "test/wasm/main.zig",
         .step_name = "test-wasm",
         .description = "Run the wasm testsuite",
+        .options = options,
     });
 
     // wasi tests
@@ -109,6 +122,7 @@ pub fn build(b: *Build) void {
         .root_src = "test/mem64/main.zig",
         .step_name = "test-mem64",
         .description = "Run the mem64 test",
+        .options = options,
     });
 
     // All tests
@@ -130,6 +144,7 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
     for (imports) |import| {
         exe.root_module.addImport(import.name, import.module);
     }
+    exe.root_module.addOptions("config", opts.options);
 
     // exe.emit_asm = if (opts.should_emit_asm) .emit else .default;
     b.installArtifact(exe);

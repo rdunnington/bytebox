@@ -56,6 +56,7 @@ const inst = @import("instance.zig");
 const VM = inst.VM;
 const ModuleInstance = inst.ModuleInstance;
 const InvokeOpts = inst.InvokeOpts;
+const ResumeInvokeOpts = inst.ResumeInvokeOpts;
 const DebugTrapInstructionMode = inst.DebugTrapInstructionMode;
 const ModuleInstantiateOpts = inst.ModuleInstantiateOpts;
 
@@ -1131,10 +1132,11 @@ pub const RegisterVM = struct {
         return error.Unimplemented;
     }
 
-    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
+    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
         _ = vm;
         _ = module;
         _ = returns;
+        _ = opts;
         return error.Unimplemented;
     }
 

@@ -3,6 +3,8 @@ const AllocError = std.mem.Allocator.Error;
 
 const builtin = @import("builtin");
 
+const metering = @import("metering.zig");
+
 const common = @import("common.zig");
 const StableArray = common.StableArray;
 const Logger = common.Logger;
@@ -57,7 +59,7 @@ pub const TrapError = error{
     TrapOutOfBoundsTableAccess,
     TrapStackExhausted,
     TrapUnknown,
-};
+} || metering.MeteringTrapError;
 
 pub const DebugTrace = struct {
     pub const Mode = enum {
@@ -616,6 +618,10 @@ pub const ModuleInstantiateOpts = struct {
 
 pub const InvokeOpts = struct {
     trap_on_start: bool = false,
+    meter: metering.Meter = metering.initial_meter,
+};
+pub const ResumeInvokeOpts = struct {
+    meter: metering.Meter = metering.initial_meter,
 };
 
 pub const DebugTrapInstructionMode = enum {
@@ -629,7 +635,7 @@ pub const VM = struct {
     const InstantiateFn = *const fn (vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void;
     const InvokeFn = *const fn (vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void;
     const InvokeWithIndexFn = *const fn (vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void;
-    const ResumeInvokeFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void;
+    const ResumeInvokeFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void;
     const StepFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void;
     const SetDebugTrapFn = *const fn (vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) anyerror!bool;
     const FormatBacktraceFn = *const fn (vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8);
@@ -699,8 +705,8 @@ pub const VM = struct {
         try vm.invoke_with_index_fn(vm, module, func_index, params, returns);
     }
 
-    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
-        try vm.resume_invoke_fn(vm, module, returns);
+    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
+        try vm.resume_invoke_fn(vm, module, returns, opts);
     }
 
     pub fn step(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
@@ -1186,8 +1192,8 @@ pub const ModuleInstance = struct {
     }
 
     /// Use to resume an invoked function after it returned error.DebugTrap
-    pub fn resumeInvoke(self: *ModuleInstance, returns: []Val) anyerror!void {
-        try self.vm.resumeInvoke(self, returns);
+    pub fn resumeInvoke(self: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
+        try self.vm.resumeInvoke(self, returns, opts);
     }
 
     pub fn step(self: *ModuleInstance, returns: []Val) anyerror!void {
