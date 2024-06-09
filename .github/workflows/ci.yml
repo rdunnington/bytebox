@@ -20,7 +20,7 @@ jobs:
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.12.0
+          version: 0.13.0
 
       # The current default version of clang on macos runners is 14, which doesn't support the wasm64-freestanding target.
       - name: Install LLVM and Clang
