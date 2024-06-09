@@ -52,7 +52,6 @@ const TablePairImmediates = def.TablePairImmediates;
 const Val = def.Val;
 const ValType = def.ValType;
 const TaggedVal = def.TaggedVal;
-const AlignedBytes = def.AlignedBytes;
 
 const inst = @import("instance.zig");
 const TrapError = inst.TrapError;
@@ -418,7 +417,7 @@ const FunctionIR = struct {
 
         // std.mem.reverse(RegInstruction, emitted_instructions);
 
-        const instruction_offset_begin = store.instructions.totalBytes();
+        const instruction_offset_begin = store.instructions.items.len;
         for (0..instructions.items.len) |i_reverse| {
             const i = (instructions.items.len - 1) - i_reverse;
             const instruction: RegInstruction = instructions.items[i];
@@ -1309,184 +1308,9 @@ const MachineState = struct {
     }
 };
 
-// "stream" of instructions where the format is:
-// * opcode
-// * immediates
-// * register slots
-const InstructionStream = struct {
-    data: std.ArrayList(u8),
-
-    const InnerReaderType = std.io.FixedBufferStream([]u8).Reader;
-
-    fn init(allocator: std.mem.Allocator) InstructionStream {
-        return .{ .data = std.ArrayList(u8).init(allocator) };
-    }
-
-    fn deinit(stream: *InstructionStream) void {
-        stream.data.deinit();
-    }
-
-    fn totalBytes(stream: InstructionStream) usize {
-        return stream.data.items.len;
-    }
-
-    fn emit(stream: *InstructionStream, opcode: Opcode, maybe_immediates: ?InstructionImmediates, registers: []const u32) AllocError!void {
-        const Helpers = struct {
-            // writer has writeByteNTimes but it works best in chunks of 256, and most of our immediates are 4-16 bytes
-            fn pad(writer: anytype, num_bytes: usize) AllocError!void {
-                for (0..num_bytes) |_| {
-                    writer.writeByte(0xAD) catch return AllocError.OutOfMemory;
-                }
-            }
-        };
-
-        var writer = stream.data.writer();
-
-        const offset_to_opcode = std.mem.alignForward(usize, stream.data.items.len, @alignOf(Opcode));
-        try Helpers.pad(writer, offset_to_opcode);
-
-        _ = writer.writeAll(std.mem.asBytes(&opcode)) catch return AllocError.OutOfMemory;
-
-        if (maybe_immediates) |immediates| {
-            const aligned_bytes: AlignedBytes = immediates.asAlignedBytes(opcode);
-
-            // const immediates_type_info: std.builtin.Type.Union = @typeInfo(InstructionImmediates);
-
-            // const active_field: std.builtin.Type.UnionField = immediates_type_info.fields[@enumFromInt(active_immediates_tag)];
-
-            const alignment = aligned_bytes.alignment;
-            const offset_to_immediates = std.mem.alignForward(usize, stream.data.items.len, alignment) - stream.data.items.len;
-
-            try Helpers.pad(writer, offset_to_immediates);
-
-            // const size = @sizeOf(active_field.type);
-            // const immediates_bytes: u8 = std.mem.asBytes(&immediates)[0..size]; // TODO verify this works
-
-            writer.writeAll(aligned_bytes.bytes) catch return AllocError.OutOfMemory;
-        }
-
-        const offset_to_registers = std.mem.alignForward(usize, stream.data.items.len, @alignOf(u32));
-        try Helpers.pad(writer, offset_to_registers);
-
-        writer.writeInt(u32, @intCast(registers.len), endian_native) catch return AllocError.OutOfMemory;
-        writer.writeAll(std.mem.sliceAsBytes(registers)) catch return AllocError.OutOfMemory;
-    }
-
-    fn reader(stream: InstructionStream, begin_pos: usize) InstructionStreamReader {
-        var fbo_reader = std.io.fixedBufferStream(stream.data.items);
-        fbo_reader.context.pos = begin_pos;
-
-        return .{
-            .reader = fbo_reader,
-        };
-    }
-
-    fn readerFromFunc(stream: InstructionStream, func: FunctionInstance) InstructionStreamReader {
-        return stream.reader(func.instructions_begin, func.instructions_end);
-    }
-};
-
-const InstructionStreamReader = struct {
-    reader: InstructionStream.InnerReaderType,
-
-    fn alignReadPos(self: *InstructionStreamReader, alignment: usize) void {
-        self.reader.context.pos = std.mem.alignForward(usize, self.reader.context.pos, alignment);
-    }
-
-    fn readOpcode(self: *InstructionStreamReader) Opcode {
-        self.alignReadPos(@alignOf(Opcode));
-        return self.reader.readEnum(Opcode, .Little) catch unreachable;
-    }
-
-    fn readImmediates(self: *InstructionStreamReader, opcode: Opcode) ?InstructionImmediates {
-        const maybe_type: ?type = switch (opcode) {
-            else => return null,
-        };
-
-        if (maybe_type) |immediate_type| {
-            self.alignReadPos(@alignOf(immediate_type));
-
-            const size = @sizeOf(immediate_type);
-            const immediates: InstructionImmediates = undefined;
-            const immediates_bytes: []u8 = std.mem.asBytes(&immediates)[0..size];
-            self.reader.read(immediates_bytes) catch unreachable;
-
-            return immediates;
-        } else {
-            return null;
-        }
-    }
-
-    fn readRegisters(self: *InstructionStreamReader) []u32 {
-        self.alignReadPos(@alignOf(u32));
-
-        const num_registers = self.reader.readIntNative(u32) catch unreachable;
-
-        const begin = self.reader.context.pos;
-        const end = begin + num_registers * @sizeOf(u32);
-        const registers_bytes: []u8 = self.reader.context.buffer[begin..end];
-        const registers = std.mem.bytesAsSlice(u32, registers_bytes);
-        return registers;
-    }
-};
-
-// test "register instruction stream" {
-//     const allocator = std.testing.allocator;
-
-//     const TestData = struct {
-//         opcode: Opcode,
-//         immediates: ?InstructionImmediates,
-//         registers: []const u32,
-//     };
-
-//     const test_data = [_]TestData{
-//         .{
-//             .opcode = .I32_Const,
-//             .immediates = InstructionImmediates{ .ValueI32 = 0x1337 },
-//             .registers = &[_]u32{0},
-//         },
-//         .{
-//             .opcode = .Noop,
-//             .immediates = null,
-//             .registers = &[_]u32{},
-//         },
-//         .{
-//             .opcode = .Call,
-//             .immediates = InstructionImmediates{ .Index = 12 },
-//             .registers = &[_]u32{ 1, 2, 3 },
-//         },
-//         .{
-//             .opcode = .Call,
-//             .immediates = InstructionImmediates{ .Index = 12 },
-//             .registers = &[_]u32{ 1, 2, 3 },
-//         },
-//     };
-
-//     var stream = InstructionStream{
-//         .data = std.ArrayList(u8).init(allocator),
-//     };
-//     defer stream.data.deinit();
-
-//     for (test_data) |data| {
-//         try stream.emit(data.opcode, data.immediates, data.registers);
-//     }
-
-//     var reader = stream.reader(0);
-//     for (test_data) |expected| {
-//         const opcode = reader.readOpcode();
-//         std.testing.expectEqual(expected.opcode, opcode);
-
-//         const immediates: ?InstructionImmediates = reader.readImmediates(opcode);
-//         std.testing.expectEqual(expected.immediates, immediates);
-
-//         const registers = reader.readRegisters();
-//         std.testing.expectEqual(expected.registers, registers);
-//     }
-// }
-
 const FunctionStore = struct {
     local_types: std.ArrayList(ValType),
-    instructions: InstructionStream,
+    instructions: std.ArrayList(RegInstruction),
     instances: std.ArrayList(FunctionInstance),
 
     fn init(allocator: std.mem.Allocator) FunctionStore {
@@ -1516,7 +1340,7 @@ pub const RegisterVM = struct {
         var self: *RegisterVM = fromVM(vm);
 
         self.functions.local_types = std.ArrayList(ValType).init(vm.allocator);
-        self.functions.instructions = InstructionStream.init(vm.allocator);
+        self.functions.instructions = std.ArrayList(RegInstruction).init(vm.allocator);
         self.functions.instances = std.ArrayList(FunctionInstance).init(vm.allocator);
         self.ms = MachineState.init(vm.allocator);
     }
