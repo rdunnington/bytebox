@@ -1595,7 +1595,7 @@ pub fn main() !void {
                 }
             };
 
-            var process = std.ChildProcess.init(&[_][]const u8{ "wasm-tools", "json-from-wast", "--pretty", "-o", suite_json_filename, suite_wast_path_relative }, allocator);
+            var process = std.process.Child.init(&[_][]const u8{ "wasm-tools", "json-from-wast", "--pretty", "-o", suite_json_filename, suite_wast_path_relative }, allocator);
 
             process.cwd = suite_wasm_folder;
 

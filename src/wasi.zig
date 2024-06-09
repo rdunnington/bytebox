@@ -1685,8 +1685,8 @@ const Helpers = struct {
                     };
 
                     if (getMemorySlice(module, iov_base, iov_len, errno)) |mem| {
-                        iovec.iov_base = mem.ptr;
-                        iovec.iov_len = mem.len;
+                        iovec.base = mem.ptr;
+                        iovec.len = mem.len;
                     }
                 }
 
