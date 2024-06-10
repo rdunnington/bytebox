@@ -17,7 +17,6 @@ const ExeOpts = struct {
 
 pub fn build(b: *Build) void {
     const should_emit_asm = b.option(bool, "asm", "Emit asm for the bytebox binaries") orelse false;
-    const no_clang = b.option(bool, "noclang", "Pass this if clang isn't in the PATH") orelse false;
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -27,9 +26,9 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
 
-    var bench_add_one_step: *CompileStep = buildWasmExe(b, "bench/samples/add-one.zig");
-    var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig");
-    var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig");
+    var bench_add_one_step: *CompileStep = buildWasmExe(b, "bench/samples/add-one.zig", .Wasm32);
+    var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig", .Wasm32);
+    var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig", .Wasm32);
 
     const stable_array_import = ModuleImport{ .name = "stable-array", .module = stable_array.module("zig-stable-array") };
 
@@ -101,43 +100,23 @@ pub fn build(b: *Build) void {
     const wasi_testsuite_step = b.step("test-wasi", "Run wasi testsuite");
     wasi_testsuite_step.dependOn(&wasi_testsuite.step);
 
-    // mem64 step
-    var mem64_test_step: ?*Build.Step = null;
-    if (!no_clang) {
-        // need to use clang to compile the C test due to https://github.com/ziglang/zig/issues/19942
-        // eventually we will ziggify this test
-        // ideally this test would go away, but the existing spec tests don't provide very good coverage
-        // of the instructions
-        const compile_memtest = b.addSystemCommand(&.{"clang"});
-        compile_memtest.addArg("--target=wasm64-freestanding");
-        compile_memtest.addArg("-mbulk-memory");
-        compile_memtest.addArg("-nostdlib");
-        compile_memtest.addArg("-O2");
-        compile_memtest.addArg("-Wl,--no-entry");
-        compile_memtest.addArg("-Wl,--export-dynamic");
-        compile_memtest.addArg("-o");
-        compile_memtest.addArg("test/mem64/memtest.wasm");
-        compile_memtest.addFileArg(b.path("test/mem64/memtest.c"));
-        compile_memtest.has_side_effects = true;
+    // mem64 test
+    const compile_mem64_test = buildWasmExe(b, "test/mem64/memtest.zig", .Wasm64);
+    b.getInstallStep().dependOn(&compile_mem64_test.step);
 
-        b.getInstallStep().dependOn(&compile_memtest.step);
-
-        mem64_test_step = buildExeWithRunStep(b, target, optimize, &imports, .{
-            .exe_name = "test-mem64",
-            .root_src = "test/mem64/main.zig",
-            .step_name = "test-mem64",
-            .description = "Run the mem64 test",
-        });
-    }
+    const mem64_test_step: *Build.Step = buildExeWithRunStep(b, target, optimize, &imports, .{
+        .exe_name = "test-mem64",
+        .root_src = "test/mem64/main.zig",
+        .step_name = "test-mem64",
+        .description = "Run the mem64 test",
+    });
 
     // All tests
     const all_tests_step = b.step("test", "Run unit, wasm, and wasi tests");
     all_tests_step.dependOn(unit_test_step);
     all_tests_step.dependOn(wasm_testsuite_step);
     all_tests_step.dependOn(wasi_testsuite_step);
-    if (mem64_test_step) |step| {
-        all_tests_step.dependOn(step);
-    }
+    all_tests_step.dependOn(mem64_test_step);
 }
 
 fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, imports: []const ModuleImport, opts: ExeOpts) *Build.Step {
@@ -173,17 +152,33 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
     return step;
 }
 
-fn buildWasmExe(b: *Build, filepath: []const u8) *CompileStep {
+const WasmArch = enum {
+    Wasm32,
+    Wasm64,
+};
+
+fn buildWasmExe(b: *Build, filepath: []const u8, arch: WasmArch) *CompileStep {
     var filename: []const u8 = std.fs.path.basename(filepath);
     const filename_no_extension: []const u8 = filename[0 .. filename.len - 4];
+
+    const cpu_arch: std.Target.Cpu.Arch = if (arch == .Wasm32) .wasm32 else .wasm64;
+
+    var target_query: std.Target.Query = .{
+        .cpu_arch = cpu_arch,
+        .os_tag = .freestanding,
+    };
+    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.bulk_memory));
+    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.nontrapping_fptoint));
+    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.multivalue));
+    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.mutable_globals));
+    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.reference_types));
+    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.sign_ext));
+    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.simd128));
 
     var exe = b.addExecutable(.{
         .name = filename_no_extension,
         .root_source_file = b.path(filepath),
-        .target = b.resolveTargetQuery(.{
-            .cpu_arch = .wasm32,
-            .os_tag = .freestanding,
-        }),
+        .target = b.resolveTargetQuery(target_query),
         .optimize = .ReleaseSmall,
     });
     exe.rdynamic = true;

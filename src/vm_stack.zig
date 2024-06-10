@@ -3466,28 +3466,28 @@ const InstructionFuncs = struct {
         try debugPreamble("Memory_Copy", pc, code, stack);
         const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
 
-        const length = stack.popI32();
-        const source_offset = stack.popI32();
-        const dest_offset = stack.popI32();
+        const length_s = stack.popIndexType();
+        const source_offset_s = stack.popIndexType();
+        const dest_offset_s = stack.popIndexType();
 
-        if (length < 0) {
+        if (length_s < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
         const buffer = memory.buffer();
-        if (buffer.len < source_offset + length or source_offset < 0) {
+        if (buffer.len < source_offset_s + length_s or source_offset_s < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
-        if (buffer.len < dest_offset + length or dest_offset < 0) {
+        if (buffer.len < dest_offset_s + length_s or dest_offset_s < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
-        const source_offset_u32 = @as(u32, @intCast(source_offset));
-        const dest_offset_u32 = @as(u32, @intCast(dest_offset));
-        const length_u32 = @as(u32, @intCast(length));
+        const source_offset = @as(u64, @intCast(source_offset_s));
+        const dest_offset = @as(u64, @intCast(dest_offset_s));
+        const length = @as(u64, @intCast(length_s));
 
-        const source = buffer[source_offset_u32 .. source_offset_u32 + length_u32];
-        const destination = buffer[dest_offset_u32 .. dest_offset_u32 + length_u32];
+        const source = buffer[source_offset .. source_offset + length];
+        const destination = buffer[dest_offset .. dest_offset + length];
 
         if (@intFromPtr(destination.ptr) < @intFromPtr(source.ptr)) {
             std.mem.copyForwards(u8, destination, source);
@@ -3501,25 +3501,25 @@ const InstructionFuncs = struct {
         try debugPreamble("Memory_Fill", pc, code, stack);
         const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
 
-        const length = stack.popI32();
+        const length_s: i64 = stack.popIndexType();
         const value: u8 = @as(u8, @truncate(@as(u32, @bitCast(stack.popI32()))));
-        const offset = stack.popI32();
+        const offset_s: i64 = stack.popIndexType();
 
-        if (length < 0) {
+        if (length_s < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
         const buffer = memory.buffer();
-        if (buffer.len < offset + length or offset < 0) {
+        if (buffer.len < offset_s + length_s or offset_s < 0) {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
-        const offset_u32 = @as(u32, @intCast(offset));
-        const length_u32 = @as(u32, @intCast(length));
+        const offset = @as(u64, @intCast(offset_s));
+        const length = @as(u64, @intCast(length_s));
 
-        const destination = buffer[offset_u32 .. offset_u32 + length_u32];
-
+        const destination = buffer[offset .. offset + length];
         @memset(destination, value);
+
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
