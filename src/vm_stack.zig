@@ -1581,13 +1581,12 @@ const InstructionFuncs = struct {
         const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
 
         if (metering.enabled) {
-            var state = root_stackvm.meter_state;
             if (root_stackvm.meter_state.enabled) {
-                const meter = metering.reduce(state.meter, code[pc]);
-                state.meter = meter;
+                const meter = metering.reduce(root_stackvm.meter_state.meter, code[pc]);
+                root_stackvm.meter_state.meter = meter;
                 if (meter == 0) {
-                    state.pc = pc;
-                    state.opcode = code[pc].opcode;
+                    root_stackvm.meter_state.pc = pc;
+                    root_stackvm.meter_state.opcode = code[pc].opcode;
                     return metering.MeteringTrapError.TrapMeterExceeded;
                 }
             }
@@ -5227,7 +5226,7 @@ pub const StackVM = struct {
 
     const MeterState = if (metering.enabled) struct {
         pc: u32 = 0,
-        opcode: Opcode,
+        opcode: Opcode = Opcode.Invalid,
         meter: metering.Meter,
         enabled: bool = false,
 
@@ -5313,8 +5312,11 @@ pub const StackVM = struct {
         }
         if (metering.enabled) {
             if (opts.meter != metering.initial_meter) {
-                self.meter_state.enabled = true;
-                self.meter_state.meter = opts.meter;
+                self.meter_state = .{
+                    .enabled = true,
+                    .meter = opts.meter,
+                    .opcode = Opcode.Invalid,
+                };
             }
         }
 
@@ -5340,27 +5342,28 @@ pub const StackVM = struct {
         var self: *StackVM = fromVM(vm);
 
         var pc: u32 = 0;
-        const opcode: Opcode = if (self.debug_state) |debug_state| blk: {
+        var opcode = Opcode.Invalid;
+        if (self.debug_state) |debug_state| {
             std.debug.assert(debug_state.is_invoking);
             pc = debug_state.pc;
             for (debug_state.trapped_opcodes.items) |op| {
                 if (op.address == debug_state.pc) {
-                    break :blk op.opcode;
+                    opcode = op.opcode;
+                    break;
                 }
             }
             unreachable; // Should never get into a state where a trapped opcode doesn't have an associated record
 
-        } else blk: {
+        } else {
             if (metering.enabled) {
                 std.debug.assert(self.meter_state.enabled);
                 pc = self.meter_state.pc;
                 if (opts.meter != metering.initial_meter) {
                     self.meter_state.meter = opts.meter;
                 }
-                break :blk self.meter_state.opcode;
+                opcode = self.meter_state.opcode;
             }
-            unreachable;
-        };
+        }
 
         const op_func = InstructionFuncs.lookup(opcode);
         try op_func(pc, module.module_def.code.instructions.items.ptr, &self.stack);
