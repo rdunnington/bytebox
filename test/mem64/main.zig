@@ -8,7 +8,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    const wasm_data: []u8 = try std.fs.cwd().readFileAlloc(allocator, "zig-out/bin/memtest.wasm", 1024 * 128);
+    const wasm_data: []u8 = try std.fs.cwd().readFileAlloc(allocator, "zig-out/bin/memtest.wasm", 1024 * 512);
     defer allocator.free(wasm_data);
 
     const module_def = try bytebox.createModuleDefinition(allocator, .{});

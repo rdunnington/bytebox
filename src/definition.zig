@@ -698,17 +698,26 @@ pub const DataDefinition = struct {
         }
 
         var memory_index: ?u32 = null;
+        var index_type: ValType = .I32;
         if (data_type == 0x00) {
             memory_index = 0;
         } else if (data_type == 0x02) {
             memory_index = try common.decodeLEB128(u32, reader);
         }
 
+        if (memory_index) |index| {
+            if (module_def.imports.memories.items.len + module_def.memories.items.len <= index) {
+                return error.ValidationUnknownMemory;
+            }
+            const limits = module_def.getMemoryLimits();
+            index_type = limits.indexType();
+        }
+
         var mode = DataMode.Passive;
         var offset: ?ConstantExpression = null;
         if (data_type == 0x00 or data_type == 0x02) {
             mode = DataMode.Active;
-            offset = try ConstantExpression.decode(reader, module_def, .Immutable, .I32);
+            offset = try ConstantExpression.decode(reader, module_def, .Immutable, index_type);
         }
 
         const num_bytes = try common.decodeLEB128(u32, reader);
@@ -717,12 +726,6 @@ pub const DataDefinition = struct {
         const num_read = try reader.read(bytes.items);
         if (num_read != num_bytes) {
             return error.MalformedUnexpectedEnd;
-        }
-
-        if (memory_index) |index| {
-            if (module_def.imports.memories.items.len + module_def.memories.items.len <= index) {
-                return error.ValidationUnknownMemory;
-            }
         }
 
         return DataDefinition{
@@ -1520,18 +1523,6 @@ const ModuleValidator = struct {
         }
     }
 
-    fn getMemoryLimits(module: *const ModuleDefinition) Limits {
-        if (module.imports.memories.items.len > 0) {
-            return module.imports.memories.items[0].limits;
-        }
-
-        if (module.memories.items.len > 0) {
-            return module.memories.items[0].limits;
-        }
-
-        unreachable;
-    }
-
     fn validateElementIndex(index: u64, module: *const ModuleDefinition) !void {
         if (module.elements.items.len <= index) {
             return error.ValidationUnknownElement;
@@ -1653,14 +1644,14 @@ const ModuleValidator = struct {
 
             fn validateLoadOp(validator: *ModuleValidator, module_: *const ModuleDefinition, load_type: ValType) !void {
                 try validateMemoryIndex(module_);
-                const index_type: ValType = getMemoryLimits(module_).indexType();
+                const index_type: ValType = module_.getMemoryLimits().indexType();
                 try validator.popType(index_type);
                 try validator.pushType(load_type);
             }
 
             fn validateStoreOp(validator: *ModuleValidator, module_: *const ModuleDefinition, store_type: ValType) !void {
                 try validateMemoryIndex(module_);
-                const index_type: ValType = getMemoryLimits(module_).indexType();
+                const index_type: ValType = module_.getMemoryLimits().indexType();
                 try validator.popType(store_type);
                 try validator.popType(index_type);
             }
@@ -1926,12 +1917,12 @@ const ModuleValidator = struct {
             },
             .Memory_Size => {
                 try validateMemoryIndex(module);
-                const index_type: ValType = getMemoryLimits(module).indexType();
+                const index_type: ValType = module.getMemoryLimits().indexType();
                 try self.pushType(index_type);
             },
             .Memory_Grow => {
                 try validateMemoryIndex(module);
-                const index_type: ValType = getMemoryLimits(module).indexType();
+                const index_type: ValType = module.getMemoryLimits().indexType();
                 try self.popType(index_type);
                 try self.pushType(index_type);
             },
@@ -2143,7 +2134,7 @@ const ModuleValidator = struct {
             .Memory_Init => {
                 try validateMemoryIndex(module);
                 try validateDataIndex(instruction.immediate.Index, module);
-                const index_type: ValType = getMemoryLimits(module).indexType();
+                const index_type: ValType = module.getMemoryLimits().indexType();
                 try self.popType(index_type);
                 try self.popType(index_type);
                 try self.popType(index_type);
@@ -2157,14 +2148,14 @@ const ModuleValidator = struct {
             },
             .Memory_Fill => {
                 try validateMemoryIndex(module);
-                const index_type: ValType = getMemoryLimits(module).indexType();
+                const index_type: ValType = module.getMemoryLimits().indexType();
                 try self.popType(index_type);
                 try self.popType(.I32);
                 try self.popType(index_type);
             },
             .Memory_Copy => {
                 try validateMemoryIndex(module);
-                const index_type: ValType = getMemoryLimits(module).indexType();
+                const index_type: ValType = module.getMemoryLimits().indexType();
                 try self.popType(index_type);
                 try self.popType(index_type);
                 try self.popType(index_type);
@@ -3668,5 +3659,17 @@ pub const ModuleDefinition = struct {
             const func_def: *const FunctionDefinition = &self.functions.items[module_func_index];
             return func_def.type_index;
         }
+    }
+
+    fn getMemoryLimits(module: *const ModuleDefinition) Limits {
+        if (module.imports.memories.items.len > 0) {
+            return module.imports.memories.items[0].limits;
+        }
+
+        if (module.memories.items.len > 0) {
+            return module.memories.items[0].limits;
+        }
+
+        unreachable;
     }
 };
