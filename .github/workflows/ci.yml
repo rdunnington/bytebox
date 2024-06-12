@@ -22,13 +22,6 @@ jobs:
         with:
           version: 0.13.0
 
-      # The current default version of clang on macos runners is 14, which doesn't support the wasm64-freestanding target.
-      - name: Install LLVM and Clang
-        if: matrix.os == 'macos-latest'
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "15.0"
-
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
