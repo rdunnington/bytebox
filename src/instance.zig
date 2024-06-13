@@ -48,6 +48,7 @@ pub const ExportError = error{
 
 pub const TrapError = error{
     TrapDebug,
+    TrapInvalidResume,
     TrapUnreachable,
     TrapIntegerDivisionByZero,
     TrapIntegerOverflow,

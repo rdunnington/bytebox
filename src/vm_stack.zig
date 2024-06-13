@@ -91,6 +91,10 @@ const FunctionInstance = struct {
     def_index: usize,
     instructions_begin: usize,
     local_types: std.ArrayList(ValType),
+
+    fn deinit(func: *FunctionInstance) void {
+        func.local_types.deinit();
+    }
 };
 
 const Label = struct {
@@ -5253,7 +5257,13 @@ pub const StackVM = struct {
 
     pub fn deinit(vm: *VM) void {
         var self: *StackVM = fromVM(vm);
+
+        for (self.functions.items) |*func| {
+            func.deinit();
+        }
+
         self.functions.deinit();
+
         self.stack.deinit();
         if (self.debug_state) |*debug_state| {
             debug_state.trapped_opcodes.deinit();
