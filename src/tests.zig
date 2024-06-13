@@ -30,6 +30,9 @@ test "StackVM.Integration" {
 }
 
 test "StackVM.Metering" {
+    if (!metering.enabled) {
+        return;
+    }
     const wasm_filepath = "zig-out/bin/fibonacci.wasm";
 
     var allocator = std.testing.allocator;
