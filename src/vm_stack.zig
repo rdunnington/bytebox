@@ -5354,15 +5354,16 @@ pub const StackVM = struct {
             }
             unreachable; // Should never get into a state where a trapped opcode doesn't have an associated record
 
-        } else {
-            if (metering.enabled) {
-                std.debug.assert(self.meter_state.enabled);
-                pc = self.meter_state.pc;
-                if (opts.meter != metering.initial_meter) {
-                    self.meter_state.meter = opts.meter;
-                }
-                opcode = self.meter_state.opcode;
+        } else if (metering.enabled) {
+            std.debug.assert(self.meter_state.enabled);
+            pc = self.meter_state.pc;
+            if (opts.meter != metering.initial_meter) {
+                self.meter_state.meter = opts.meter;
             }
+            opcode = self.meter_state.opcode;
+        } else {
+            // There was no debug or meter information, so nothing to resume.
+            return error.TrapInvalidResume;
         }
 
         const op_func = InstructionFuncs.lookup(opcode);
@@ -5507,6 +5508,10 @@ pub const StackVM = struct {
 
         if (self.debug_state) |*debug_state| {
             debug_state.onInvokeFinished();
+        }
+
+        if (metering.enabled and self.meter_state.enabled) {
+            self.meter_state.onInvokeFinished();
         }
     }
 
