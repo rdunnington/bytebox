@@ -62,6 +62,12 @@ test "StackVM.Metering" {
         .meter = 2,
     });
     try std.testing.expectError(metering.MeteringTrapError.TrapMeterExceeded, res);
+    try std.testing.expectEqual(5555, returns[0].I32);
+
+    const res2 = module_inst.resumeInvoke(&returns, .{ .meter = 5 });
+    try std.testing.expectError(metering.MeteringTrapError.TrapMeterExceeded, res2);
+    try std.testing.expectEqual(5555, returns[0].I32);
+
     try module_inst.resumeInvoke(&returns, .{ .meter = 10000 });
     try std.testing.expectEqual(89, returns[0].I32);
 }
