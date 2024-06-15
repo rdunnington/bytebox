@@ -6,6 +6,8 @@ const core = @import("core.zig");
 const Limits = core.Limits;
 const MemoryInstance = core.MemoryInstance;
 
+const metering = @import("metering.zig");
+
 test "StackVM.Integration" {
     const wasm_filepath = "zig-out/bin/mandelbrot.wasm";
 
@@ -25,6 +27,49 @@ test "StackVM.Integration" {
 
     var module_inst = try core.createModuleInstance(.Stack, module_def, allocator);
     defer module_inst.destroy();
+}
+
+test "StackVM.Metering" {
+    if (!metering.enabled) {
+        return;
+    }
+    const wasm_filepath = "zig-out/bin/fibonacci.wasm";
+
+    var allocator = std.testing.allocator;
+
+    var cwd = std.fs.cwd();
+    const wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
+    defer allocator.free(wasm_data);
+
+    const module_def_opts = core.ModuleDefinitionOpts{
+        .debug_name = std.fs.path.basename(wasm_filepath),
+    };
+    var module_def = try core.createModuleDefinition(allocator, module_def_opts);
+    defer module_def.destroy();
+
+    try module_def.decode(wasm_data);
+
+    var module_inst = try core.createModuleInstance(.Stack, module_def, allocator);
+    defer module_inst.destroy();
+
+    try module_inst.instantiate(.{});
+
+    var returns = [1]core.Val{.{ .I64 = 5555 }};
+    var params = [1]core.Val{.{ .I32 = 10 }};
+
+    const handle = try module_inst.getFunctionHandle("run");
+    const res = module_inst.invoke(handle, &params, &returns, .{
+        .meter = 2,
+    });
+    try std.testing.expectError(metering.MeteringTrapError.TrapMeterExceeded, res);
+    try std.testing.expectEqual(5555, returns[0].I32);
+
+    const res2 = module_inst.resumeInvoke(&returns, .{ .meter = 5 });
+    try std.testing.expectError(metering.MeteringTrapError.TrapMeterExceeded, res2);
+    try std.testing.expectEqual(5555, returns[0].I32);
+
+    try module_inst.resumeInvoke(&returns, .{ .meter = 10000 });
+    try std.testing.expectEqual(89, returns[0].I32);
 }
 
 test "MemoryInstance.init" {

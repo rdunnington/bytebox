@@ -48,6 +48,7 @@ jobs:
       - name: Run unit tests
         run: |
           zig build test-unit
+          zig build -Dmeter=true test-unit
 
       - name: Run wasm testsuite
         run: |
