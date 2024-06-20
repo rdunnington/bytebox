@@ -1077,7 +1077,7 @@ const InstructionFuncs = struct {
 
                         DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
 
-                        data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
+                        try data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
 
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
@@ -5515,7 +5515,7 @@ pub const StackVM = struct {
             .Host => |data| {
                 DebugTrace.traceHostFunction(module, 1, func_import.name);
 
-                data.callback(data.userdata, module, params, returns);
+                try data.callback(data.userdata, module, params, returns);
             },
             .Wasm => |data| {
                 var import_instance: *ModuleInstance = data.module_instance;
