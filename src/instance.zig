@@ -394,6 +394,17 @@ pub const FunctionImport = struct {
         return copy;
     }
 
+    fn deinit(import: *FunctionImport, allocator: std.mem.Allocator) void {
+        allocator.free(import.name);
+
+        switch (import.data) {
+            .Host => |*data| {
+                data.func_def.types.deinit();
+            },
+            .Wasm => {},
+        }
+    }
+
     pub fn isTypeSignatureEql(import: *const FunctionImport, type_signature: *const FunctionTypeDefinition) bool {
         var type_comparer = FunctionTypeDefinition.SortContext{};
         switch (import.data) {
@@ -420,6 +431,10 @@ pub const TableImport = struct {
         copy.name = try allocator.dupe(u8, copy.name);
         return copy;
     }
+
+    fn deinit(import: *TableImport, allocator: std.mem.Allocator) void {
+        allocator.free(import.name);
+    }
 };
 
 pub const MemoryImport = struct {
@@ -434,6 +449,10 @@ pub const MemoryImport = struct {
         copy.name = try allocator.dupe(u8, copy.name);
         return copy;
     }
+
+    fn deinit(import: *MemoryImport, allocator: std.mem.Allocator) void {
+        allocator.free(import.name);
+    }
 };
 
 pub const GlobalImport = struct {
@@ -447,6 +466,10 @@ pub const GlobalImport = struct {
         var copy = import.*;
         copy.name = try allocator.dupe(u8, copy.name);
         return copy;
+    }
+
+    fn deinit(import: *GlobalImport, allocator: std.mem.Allocator) void {
+        allocator.free(import.name);
     }
 };
 
@@ -535,6 +558,7 @@ pub const Store = struct {
         memories: std.ArrayList(MemoryImport),
         globals: std.ArrayList(GlobalImport),
     },
+    allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator) Store {
         const store = Store{
@@ -548,6 +572,7 @@ pub const Store = struct {
             .memories = std.ArrayList(MemoryInstance).init(allocator),
             .globals = std.ArrayList(GlobalInstance).init(allocator),
             .elements = std.ArrayList(ElementInstance).init(allocator),
+            .allocator = allocator,
         };
 
         return store;
@@ -566,6 +591,23 @@ pub const Store = struct {
 
         self.globals.deinit();
         self.elements.deinit();
+
+        for (self.imports.functions.items) |*item| {
+            item.deinit(self.allocator);
+        }
+        self.imports.functions.deinit();
+        for (self.imports.tables.items) |*item| {
+            item.deinit(self.allocator);
+        }
+        self.imports.tables.deinit();
+        for (self.imports.memories.items) |*item| {
+            item.deinit(self.allocator);
+        }
+        self.imports.memories.deinit();
+        for (self.imports.globals.items) |*item| {
+            item.deinit(self.allocator);
+        }
+        self.imports.globals.deinit();
     }
 
     pub fn getTable(self: *Store, index: usize) *TableInstance {
