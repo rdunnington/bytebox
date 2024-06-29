@@ -1,5 +1,6 @@
 const std = @import("std");
 const bytebox = @import("bytebox");
+const config = bytebox.config;
 const wasi = bytebox.wasi;
 
 const Val = bytebox.Val;
@@ -105,7 +106,12 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
             arg_index += 1;
             if (getArgSafe(arg_index, args)) |mode_str| {
                 if (bytebox.DebugTrace.parseMode(mode_str)) |mode| {
-                    opts.trace = mode;
+                    if (config.enable_debug_trace == false) {
+                        log.err("Bytebox was not compiled with -Ddebug_trace=true. Enable this compile time flag if you want to enable tracing at runtime.", .{});
+                        opts.invalid_arg = mode_str;
+                    } else {
+                        opts.trace = mode;
+                    }
                 } else {
                     opts.invalid_arg = mode_str;
                 }
@@ -169,6 +175,8 @@ fn printHelp(args: [][]const u8) void {
         \\       * none (default)
         \\       * function
         \\       * instruction
+        \\     Note that this requires bytebox to be compiled with the flag -Ddebug_trace=true,
+        \\     which is off by default for performance reasons.
         \\
         \\
     ;

@@ -3,6 +3,7 @@ const AllocError = std.mem.Allocator.Error;
 
 const builtin = @import("builtin");
 
+const config = @import("config");
 const metering = @import("metering.zig");
 
 const common = @import("common.zig");
@@ -70,6 +71,7 @@ pub const DebugTrace = struct {
     };
 
     pub fn setMode(new_mode: Mode) void {
+        std.debug.assert(config.enable_debug_trace == true);
         mode = new_mode;
     }
 
@@ -86,11 +88,11 @@ pub const DebugTrace = struct {
     }
 
     pub fn shouldTraceFunctions() bool {
-        return mode == .Function;
+        return config.enable_debug_trace and mode == .Function;
     }
 
     pub fn shouldTraceInstructions() bool {
-        return mode == .Instruction;
+        return config.enable_debug_trace and mode == .Instruction;
     }
 
     pub fn printIndent(indent: u32) void {

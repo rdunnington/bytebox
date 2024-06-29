@@ -3,6 +3,8 @@
 const std = @import("std");
 const AllocError = std.mem.Allocator.Error;
 
+const builtin = @import("builtin");
+
 const common = @import("common.zig");
 const Logger = common.Logger;
 const StableArray = common.StableArray;
@@ -90,6 +92,8 @@ pub const u64x2 = @Vector(2, u64);
 pub const f32x4 = @Vector(4, f32);
 pub const f64x2 = @Vector(2, f64);
 pub const v128 = f32x4;
+
+const endian_native = builtin.cpu.arch.endian();
 
 const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory, Global, Export, Start, Element, Code, Data, DataCount };
 
@@ -822,31 +826,12 @@ pub const IfImmediates = extern struct {
     end_continuation: u32,
 };
 
-// const InstructionImmediatesTypes = enum(u8) {
-//     Void,
-//     ValType,
-//     ValueI32,
-//     ValueF32,
-//     ValueI64,
-//     ValueF64,
-//     ValueVec,
-//     Index,
-//     LabelId,
-//     MemoryOffset,
-//     MemoryOffsetAndLane,
-//     Block,
-//     CallIndirect,
-//     TablePair,
-//     If,
-//     VecShuffle16,
-// };
-
-pub const AlignedBytes = struct {
-    bytes: []align(1) const u8,
-    alignment: usize,
-};
-
 pub const InstructionImmediates = extern union {
+    pub const OpcodeInfo = struct {
+        size: u8,
+        alignment: u8,
+    };
+
     Void: void,
     ValType: ValType,
     ValueI32: i32,
@@ -863,6 +848,143 @@ pub const InstructionImmediates = extern union {
     TablePair: TablePairImmediates,
     If: IfImmediates,
     VecShuffle16: [16]u8,
+
+    pub fn opcodeInfo(opcode: Opcode) ?OpcodeInfo {
+        const Helpers = struct {
+            fn info(comptime T: type) OpcodeInfo {
+                return .{
+                    .size = @sizeOf(T),
+                    .alignment = @alignOf(T),
+                };
+            }
+        };
+
+        return switch (opcode) {
+            // NOTE Select_T technically has a ValType immediate, but we only use it in validation - it's not used in the VM.
+            .Ref_Null => Helpers.info(ValType),
+            .Local_Get,
+            .Local_Set,
+            .Local_Tee,
+            .Global_Get,
+            .Global_Set,
+            .Table_Get,
+            .Table_Set,
+            .Branch_Table,
+            .Call,
+            .Memory_Init,
+            .Ref_Func,
+            .Data_Drop,
+            .Elem_Drop,
+            .Table_Grow,
+            .Table_Size,
+            .Table_Fill,
+            .I8x16_Extract_Lane_S,
+            .I8x16_Extract_Lane_U,
+            .I8x16_Replace_Lane,
+            .I16x8_Extract_Lane_S,
+            .I16x8_Extract_Lane_U,
+            .I16x8_Replace_Lane,
+            .I32x4_Extract_Lane,
+            .I32x4_Replace_Lane,
+            .I64x2_Extract_Lane,
+            .I64x2_Replace_Lane,
+            .F32x4_Extract_Lane,
+            .F32x4_Replace_Lane,
+            .F64x2_Extract_Lane,
+            .F64x2_Replace_Lane,
+            .Branch,
+            .Branch_If,
+            => Helpers.info(u32),
+            .I32_Const,
+            => Helpers.info(i32),
+            .I64_Const,
+            => Helpers.info(i64),
+            .F32_Const,
+            => Helpers.info(f32),
+            .F64_Const,
+            => Helpers.info(f64),
+            .Block,
+            .Loop,
+            => Helpers.info(BlockImmediates),
+            .If,
+            .IfNoElse,
+            .Else,
+            => Helpers.info(IfImmediates),
+            .Call_Indirect,
+            => Helpers.info(CallIndirectImmediates),
+            .I32_Load,
+            .I64_Load,
+            .F32_Load,
+            .F64_Load,
+            .I32_Load8_S,
+            .I32_Load8_U,
+            .I32_Load16_S,
+            .I32_Load16_U,
+            .I64_Load8_S,
+            .I64_Load8_U,
+            .I64_Load16_S,
+            .I64_Load16_U,
+            .I64_Load32_S,
+            .I64_Load32_U,
+            .I32_Store,
+            .I64_Store,
+            .F32_Store,
+            .F64_Store,
+            .I32_Store8,
+            .I32_Store16,
+            .I64_Store8,
+            .I64_Store16,
+            .I64_Store32,
+            .V128_Load,
+            .V128_Load8x8_S,
+            .V128_Load8x8_U,
+            .V128_Load16x4_S,
+            .V128_Load16x4_U,
+            .V128_Load32x2_S,
+            .V128_Load32x2_U,
+            .V128_Load8_Splat,
+            .V128_Load16_Splat,
+            .V128_Load32_Splat,
+            .V128_Load64_Splat,
+            .V128_Store,
+            .V128_Load32_Zero,
+            .V128_Load64_Zero,
+            => Helpers.info(u64),
+            .Table_Init,
+            .Table_Copy,
+            => Helpers.info(TablePairImmediates),
+            .V128_Const,
+            => Helpers.info(v128),
+            .I8x16_Shuffle,
+            => Helpers.info([16]u8),
+            .V128_Load8_Lane,
+            .V128_Load16_Lane,
+            .V128_Load32_Lane,
+            .V128_Load64_Lane,
+            .V128_Store8_Lane,
+            .V128_Store16_Lane,
+            .V128_Store32_Lane,
+            .V128_Store64_Lane,
+            => Helpers.info(MemoryOffsetAndLaneImmediates),
+            else => null,
+        };
+    }
+
+    fn recordContinuationFixups(opcode: Opcode, stream_base_ptr: [*]const u8, stream_immediates: [*]u8, continuations_to_fixup_offset: *std.ArrayList(usize)) AllocError!void {
+        const stream_base: usize = @intFromPtr(stream_base_ptr);
+        switch (opcode) {
+            .Block, .Loop => {
+                const immediates: *BlockImmediates = @ptrCast(@alignCast(stream_immediates));
+                try continuations_to_fixup_offset.append(@intFromPtr(&immediates.continuation) - stream_base);
+            },
+            .If, .IfNoElse, .Else => {
+                const immediates: *IfImmediates = @ptrCast(@alignCast(stream_immediates));
+                try continuations_to_fixup_offset.append(@intFromPtr(&immediates.else_continuation) - stream_base);
+                try continuations_to_fixup_offset.append(@intFromPtr(&immediates.end_continuation) - stream_base);
+            },
+            else => {},
+        }
+    }
 };
 
 pub const Instruction = struct {
@@ -1315,6 +1437,128 @@ pub const Instruction = struct {
     }
 };
 
+// NEW PLAN
+// put InstructionStream into definition.zig. We can use it for the stack vm as well.
+// will need to emit all instructions, perform fixups on the structs for continuations,
+// then transform that into the instruction stream. each opcode will directly read the
+// type of immediate it needs from the stream, decode the next opcode, and dispatch.
+// the stack VM will just never emit registers, and the opcodes won't bother with it either
+
+// "stream" of instructions where the format for each instruction is:
+// * opcode (u32)
+// * immediates (variable size, only present if opcode needs it)
+// * register slots (unused by stack VM, otherwise u32 len + u32 registers ids)
+pub const InstructionStream = struct {
+    data: std.ArrayList(u8),
+
+    const FixedBufferType = std.io.FixedBufferStream([]u8);
+
+    pub fn init(allocator: std.mem.Allocator) InstructionStream {
+        return .{ .data = std.ArrayList(u8).init(allocator) };
+    }
+
+    pub fn deinit(stream: *InstructionStream) void {
+        stream.data.deinit();
+    }
+
+    pub fn length(stream: InstructionStream) u32 {
+        return @intCast(stream.data.items.len);
+    }
+
+    pub fn emit(
+        stream: *InstructionStream,
+        opcode: Opcode,
+        immediates: InstructionImmediates,
+        maybe_registers: ?[]const u32,
+        continuations_to_fixup_offset: *std.ArrayList(usize),
+    ) AllocError!void {
+        var writer = stream.data.writer();
+
+        _ = writer.writeAll(std.mem.asBytes(&opcode)) catch return AllocError.OutOfMemory;
+
+        if (InstructionImmediates.opcodeInfo(opcode)) |info| {
+            const offset_to_immediates = std.mem.alignForward(usize, stream.data.items.len, info.alignment);
+            try stream.padToOffset(writer, offset_to_immediates);
+
+            const immediates_bytes = std.mem.asBytes(&immediates);
+            const immediates_bytes_sized = immediates_bytes[0..info.size];
+            writer.writeAll(immediates_bytes_sized) catch return AllocError.OutOfMemory;
+
+            const stream_immediates: [*]u8 = stream.data.items.ptr + offset_to_immediates;
+            try InstructionImmediates.recordContinuationFixups(opcode, stream.data.items.ptr, stream_immediates, continuations_to_fixup_offset);
+        }
+
+        if (maybe_registers) |registers| {
+            const offset_to_registers = std.mem.alignForward(usize, stream.data.items.len, @alignOf(u32));
+            try stream.padToOffset(writer, offset_to_registers);
+
+            writer.writeInt(u32, @intCast(registers.len), endian_native) catch return AllocError.OutOfMemory;
+            if (registers.len > 0) {
+                writer.writeAll(std.mem.sliceAsBytes(registers)) catch return AllocError.OutOfMemory;
+            }
+        }
+
+        const offset_to_opcode = std.mem.alignForward(usize, stream.data.items.len, @alignOf(Opcode));
+        try stream.padToOffset(writer, offset_to_opcode);
+    }
+
+    pub fn reader(stream: InstructionStream, begin_pos: u32) InstructionStreamReader {
+        return .{
+            .stream = stream.data.items,
+            .pc = begin_pos,
+        };
+    }
+
+    fn padToOffset(stream: *InstructionStream, writer: anytype, offset: usize) AllocError!void {
+        // writer has writeByteNTimes but it works best in chunks of 256, and most of our immediates are 4-16 bytes
+        const begin = stream.data.items.len;
+        for (begin..offset) |_| {
+            writer.writeByte(0xAD) catch return AllocError.OutOfMemory;
+        }
+    }
+};
+
+pub const InstructionStreamReader = struct {
+    stream: []const u8,
+    pc: u32, // program counter - offset from the beginning of the stream to the start of the current opcode
+
+    pub fn programCounter(self: InstructionStreamReader) u32 {
+        return self.pc;
+    }
+
+    pub fn jump(self: *InstructionStreamReader, pos: u32) void {
+        self.pc = pos;
+        std.debug.assert(self.pc == std.mem.alignForward(u32, self.pc, @alignOf(Opcode)));
+    }
+
+    pub fn opcode(self: *InstructionStreamReader) Opcode {
+        // advance() should always put the stream back into alignment with Opcodes so we don't have to waste
+        // time doing it here
+        std.debug.assert(self.pc == std.mem.alignForward(u32, self.pc, @alignOf(Opcode)));
+
+        const opcode_ptr: *const Opcode = @ptrCast(@alignCast(&self.stream[self.pc]));
+        return opcode_ptr.*;
+    }
+
+    pub fn immediates(self: *InstructionStreamReader, comptime T: type) *const T {
+        const immediates_offset = std.mem.alignForward(u32, self.pc + @sizeOf(Opcode), @alignOf(T));
+        const immediates_ptr: *const T = @ptrCast(@alignCast(&self.stream[immediates_offset]));
+        return immediates_ptr;
+    }
+
+    pub fn advance(self: *InstructionStreamReader, comptime ImmediatesType: type) void {
+        switch (ImmediatesType) {
+            void => {
+                self.pc = self.pc + @sizeOf(Opcode);
+            },
+            else => {
+                self.pc = std.mem.alignForward(u32, self.pc + @sizeOf(Opcode), @alignOf(ImmediatesType)) + @sizeOf(ImmediatesType);
+                std.debug.assert(self.pc == std.mem.alignForward(u32, self.pc, @alignOf(Opcode))); // no immediates should be of alignment less than Opcode's alignment
+            },
+        }
+    }
+};
+
 const CustomSection = struct {
     name: []const u8,
     data: std.ArrayList(u8),
@@ -1360,7 +1604,7 @@ pub const NameCustomSection = struct {
 
     fn decode(self: *NameCustomSection, module_definition: *const ModuleDefinition, bytes: []const u8) MalformedError!void {
         self.decodeInternal(module_definition, bytes) catch |err| {
-            std.debug.print("NameCustomSection.decode: caught error from internal: {}", .{err});
+            module_definition.log.err("NameCustomSection.decode: caught error from internal: {}", .{err});
             return MalformedError.MalformedCustomSection;
         };
     }
