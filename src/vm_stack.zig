@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
+const config = @import("config");
+
 const common = @import("common.zig");
 const StableArray = common.StableArray;
 
@@ -75,7 +77,7 @@ const metering = @import("metering.zig");
 
 const DebugTraceStackVM = struct {
     fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Stack) void {
-        if (DebugTrace.shouldTraceInstructions()) {
+        if (config.enable_debug_trace and DebugTrace.shouldTraceInstructions()) {
             const frame: *const CallFrame = stack.topFrame();
             const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
             const module_name = name_section.getModuleName();
@@ -1596,12 +1598,14 @@ const InstructionFuncs = struct {
             }
         }
 
-        if (root_stackvm.debug_state) |*debug_state| {
-            if (debug_state.trap_counter > 0) {
-                debug_state.trap_counter -= 1;
-                if (debug_state.trap_counter == 0) {
-                    debug_state.pc = pc;
-                    return error.TrapDebug;
+        if (config.enable_debug_trap) {
+            if (root_stackvm.debug_state) |*debug_state| {
+                if (debug_state.trap_counter > 0) {
+                    debug_state.trap_counter -= 1;
+                    if (debug_state.trap_counter == 0) {
+                        debug_state.pc = pc;
+                        return error.TrapDebug;
+                    }
                 }
             }
         }

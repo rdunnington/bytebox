@@ -1,5 +1,6 @@
 const std = @import("std");
 const bytebox = @import("bytebox");
+const config = bytebox.config;
 const ValType = bytebox.ValType;
 const Val = bytebox.Val;
 const TaggedVal = bytebox.TaggedVal;
@@ -1358,7 +1359,9 @@ pub fn main() !void {
             print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
         } else if (strcmp("--trace", arg)) {
             args_index += 1;
-            if (bytebox.DebugTrace.parseMode(args[args_index])) |mode| {
+            if (config.enable_debug_trace == false) {
+                print("Debug tracing must be enabled at compile time -Ddebug_trace=true\n", .{});
+            } else if (bytebox.DebugTrace.parseMode(args[args_index])) |mode| {
                 bytebox.DebugTrace.setMode(mode);
             } else {
                 print("got invalid trace mode '{s}', check help for allowed options", .{args[args_index]});

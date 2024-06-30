@@ -18,9 +18,13 @@ const ExeOpts = struct {
 
 pub fn build(b: *Build) void {
     const enable_metering = b.option(bool, "meter", "Enable metering") orelse false;
+    const enable_debug_trace = b.option(bool, "debug_trace", "Enable debug tracing feature") orelse false;
+    const enable_debug_trap = b.option(bool, "debug_trap", "Enable debug trap features") orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "enable_metering", enable_metering);
+    options.addOption(bool, "enable_debug_trace", enable_debug_trace);
+    options.addOption(bool, "enable_debug_trap", enable_debug_trap);
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
