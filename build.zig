@@ -12,13 +12,11 @@ const ExeOpts = struct {
     step_name: []const u8,
     description: []const u8,
     step_dependencies: ?[]*Build.Step = null,
-    should_emit_asm: bool = false,
+    emit_asm_step: ?*Build.Step = null,
     options: *Build.Step.Options,
 };
 
 pub fn build(b: *Build) void {
-    const should_emit_asm = b.option(bool, "asm", "Emit asm for the bytebox binaries") orelse false;
-
     const enable_metering = b.option(bool, "meter", "Enable metering") orelse false;
 
     const options = b.addOptions();
@@ -45,7 +43,7 @@ pub fn build(b: *Build) void {
 
     bytebox_module.addOptions("config", options);
 
-    // exe.root_module.addImport(import.name, import.module);
+    const emit_asm_step: *Build.Step = b.step("asm", "Emit assembly");
 
     const imports = [_]ModuleImport{
         .{ .name = "bytebox", .module = bytebox_module },
@@ -57,7 +55,7 @@ pub fn build(b: *Build) void {
         .root_src = "run/main.zig",
         .step_name = "run",
         .description = "Run a wasm program",
-        .should_emit_asm = should_emit_asm,
+        .emit_asm_step = emit_asm_step,
         .options = options,
     });
 
@@ -146,7 +144,11 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
     }
     exe.root_module.addOptions("config", opts.options);
 
-    // exe.emit_asm = if (opts.should_emit_asm) .emit else .default;
+    if (opts.emit_asm_step) |asm_step| {
+        const asm_filename = std.fmt.allocPrint(b.allocator, "{s}.asm", .{opts.exe_name}) catch unreachable;
+        asm_step.dependOn(&b.addInstallFile(exe.getEmittedAsm(), asm_filename).step);
+    }
+
     b.installArtifact(exe);
 
     if (opts.step_dependencies) |steps| {
