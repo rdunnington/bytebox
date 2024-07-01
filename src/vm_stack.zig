@@ -311,11 +311,11 @@ const Stack = struct {
         }
     }
 
-    fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: *ModuleInstance, num_locals: u32, num_params: u16, num_returns: u16) TrapError!void {
+    fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: *ModuleInstance) TrapError!void {
         // the stack should already be populated with the params to the function, so all that's
         // left to do is initialize the locals to their default values
-        const values_index_begin: u32 = stack.num_values - num_params;
-        const values_index_end: u32 = stack.num_values + num_locals;
+        const values_index_begin: u32 = stack.num_values - func.num_params;
+        const values_index_end: u32 = stack.num_values + func.num_locals;
 
         if (stack.num_frames < stack.frames.len and values_index_end < stack.values.len) {
             const locals_and_params: []Val = stack.values[values_index_begin..values_index_end];
@@ -329,7 +329,7 @@ const Stack = struct {
                 .func = func,
                 .module_instance = module_instance,
                 .locals = locals_and_params,
-                .num_returns = num_returns,
+                .num_returns = func.num_returns,
                 .start_offset_values = values_index_begin,
                 .start_offset_labels = stack.num_labels,
             };
@@ -1053,7 +1053,7 @@ const InstructionFuncs = struct {
 
         fn call(pc: u32, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) TrapError!FuncCallData {
             const continuation: u32 = pc + 1;
-            try stack.pushFrame(func, module_instance, func.num_locals, func.num_params, func.num_returns);
+            try stack.pushFrame(func, module_instance);
             try stack.pushLabel(func.num_returns, continuation);
 
             DebugTrace.traceFunction(module_instance, stack.num_frames, func.def_index);
@@ -5485,7 +5485,7 @@ pub const StackVM = struct {
             self.stack.pushValue(v);
         }
 
-        try self.stack.pushFrame(&func, module, func.num_locals, func.num_params, func.num_returns);
+        try self.stack.pushFrame(&func, module);
         try self.stack.pushLabel(func.num_returns, @intCast(func_def.continuation));
 
         DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
