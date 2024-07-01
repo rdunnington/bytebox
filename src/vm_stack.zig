@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
+const config = @import("config");
+
 const common = @import("common.zig");
 const StableArray = common.StableArray;
 
@@ -75,7 +77,7 @@ const metering = @import("metering.zig");
 
 const DebugTraceStackVM = struct {
     fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Stack) void {
-        if (DebugTrace.shouldTraceInstructions()) {
+        if (config.enable_debug_trace and DebugTrace.shouldTraceInstructions()) {
             const frame: *const CallFrame = stack.topFrame();
             const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
             const module_name = name_section.getModuleName();
@@ -90,11 +92,9 @@ const FunctionInstance = struct {
     type_def_index: usize,
     def_index: usize,
     instructions_begin: usize,
-    local_types: std.ArrayList(ValType),
-
-    fn deinit(func: *FunctionInstance) void {
-        func.local_types.deinit();
-    }
+    num_locals: u32,
+    num_params: u16,
+    num_returns: u16,
 };
 
 const Label = struct {
@@ -107,7 +107,7 @@ const CallFrame = struct {
     func: *const FunctionInstance,
     module_instance: *ModuleInstance,
     locals: []Val,
-    num_returns: u32,
+    num_returns: u16,
     start_offset_values: u32,
     start_offset_labels: u16,
 };
@@ -173,7 +173,7 @@ const Stack = struct {
         stack.frames.len = opts.max_frames;
     }
 
-    fn checkExhausted(stack: *Stack, extra_values: u32) !void {
+    fn checkExhausted(stack: *Stack, comptime extra_values: u32) !void {
         if (stack.num_values + extra_values >= stack.values.len) {
             return error.TrapStackExhausted;
         }
@@ -311,29 +311,25 @@ const Stack = struct {
         }
     }
 
-    fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: *ModuleInstance, param_types: []const ValType, all_local_types: []const ValType, num_returns: u32) !void {
-        const non_param_types: []const ValType = all_local_types[param_types.len..];
-
+    fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: *ModuleInstance) TrapError!void {
         // the stack should already be populated with the params to the function, so all that's
         // left to do is initialize the locals to their default values
-        const values_index_begin: u32 = stack.num_values - @as(u32, @intCast(param_types.len));
-        const values_index_end: u32 = stack.num_values + @as(u32, @intCast(non_param_types.len));
+        const values_index_begin: u32 = stack.num_values - func.num_params;
+        const values_index_end: u32 = stack.num_values + func.num_locals;
 
         if (stack.num_frames < stack.frames.len and values_index_end < stack.values.len) {
             const locals_and_params: []Val = stack.values[values_index_begin..values_index_end];
-            var locals = stack.values[stack.num_values..values_index_end];
+            const locals = stack.values[stack.num_values..values_index_end];
 
             stack.num_values = values_index_end;
 
-            for (non_param_types, 0..) |valtype, i| {
-                locals[i] = Val.default(valtype);
-            }
+            @memset(std.mem.sliceAsBytes(locals), 0);
 
             stack.frames[stack.num_frames] = CallFrame{
                 .func = func,
                 .module_instance = module_instance,
                 .locals = locals_and_params,
-                .num_returns = num_returns,
+                .num_returns = func.num_returns,
                 .start_offset_values = values_index_begin,
                 .start_offset_labels = stack.num_labels,
             };
@@ -893,7 +889,7 @@ const InstructionFuncs = struct {
             }
         }
 
-        fn truncateTo(comptime T: type, value: anytype) !T {
+        fn truncateTo(comptime T: type, value: anytype) TrapError!T {
             switch (T) {
                 i32 => {},
                 u32 => {},
@@ -994,7 +990,7 @@ const InstructionFuncs = struct {
             return @as(T, @bitCast(value));
         }
 
-        fn loadArrayFromMem(comptime read_type: type, comptime out_type: type, comptime array_len: usize, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) ![array_len]out_type {
+        fn loadArrayFromMem(comptime read_type: type, comptime out_type: type, comptime array_len: usize, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) TrapError![array_len]out_type {
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
@@ -1021,7 +1017,7 @@ const InstructionFuncs = struct {
             return ret;
         }
 
-        fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: usize) !void {
+        fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: usize) TrapError!void {
             const offset_from_stack: i64 = stack.popIndexType();
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
@@ -1055,14 +1051,10 @@ const InstructionFuncs = struct {
             std.mem.writeInt(write_type, mem[0..byte_count], write_value, .little);
         }
 
-        fn call(pc: u32, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) !FuncCallData {
-            const functype: *const FunctionTypeDefinition = &module_instance.module_def.types.items[func.type_def_index];
-            const param_types: []const ValType = functype.getParams();
-            const return_types: []const ValType = functype.getReturns();
+        fn call(pc: u32, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) TrapError!FuncCallData {
             const continuation: u32 = pc + 1;
-
-            try stack.pushFrame(func, module_instance, param_types, func.local_types.items, functype.calcNumReturns());
-            try stack.pushLabel(@as(u32, @intCast(return_types.len)), continuation);
+            try stack.pushFrame(func, module_instance);
+            try stack.pushLabel(func.num_returns, continuation);
 
             DebugTrace.traceFunction(module_instance, stack.num_frames, func.def_index);
 
@@ -1072,7 +1064,7 @@ const InstructionFuncs = struct {
             };
         }
 
-        fn callImport(pc: u32, stack: *Stack, func: *const FunctionImport) !FuncCallData {
+        fn callImport(pc: u32, stack: *Stack, func: *const FunctionImport) TrapError!FuncCallData {
             switch (func.data) {
                 .Host => |data| {
                     const params_len: u32 = @as(u32, @intCast(data.func_def.getParams().len));
@@ -1596,12 +1588,14 @@ const InstructionFuncs = struct {
             }
         }
 
-        if (root_stackvm.debug_state) |*debug_state| {
-            if (debug_state.trap_counter > 0) {
-                debug_state.trap_counter -= 1;
-                if (debug_state.trap_counter == 0) {
-                    debug_state.pc = pc;
-                    return error.TrapDebug;
+        if (config.enable_debug_trap) {
+            if (root_stackvm.debug_state) |*debug_state| {
+                if (debug_state.trap_counter > 0) {
+                    debug_state.trap_counter -= 1;
+                    if (debug_state.trap_counter == 0) {
+                        debug_state.pc = pc;
+                        return error.TrapDebug;
+                    }
                 }
             }
         }
@@ -5258,10 +5252,6 @@ pub const StackVM = struct {
     pub fn deinit(vm: *VM) void {
         var self: *StackVM = fromVM(vm);
 
-        for (self.functions.items) |*func| {
-            func.deinit();
-        }
-
         self.functions.deinit();
 
         self.stack.deinit();
@@ -5294,16 +5284,13 @@ pub const StackVM = struct {
             const func_type: *const FunctionTypeDefinition = &module.module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
 
-            var local_types = std.ArrayList(ValType).init(vm.allocator);
-            try local_types.ensureTotalCapacity(param_types.len + def_func.locals.items.len);
-            local_types.appendSliceAssumeCapacity(param_types);
-            local_types.appendSliceAssumeCapacity(def_func.locals.items);
-
             const f = FunctionInstance{
                 .type_def_index = def_func.type_index,
                 .def_index = @as(u32, @intCast(i)),
                 .instructions_begin = def_func.instructions_begin,
-                .local_types = local_types,
+                .num_locals = @intCast(def_func.locals.items.len),
+                .num_params = @intCast(param_types.len),
+                .num_returns = @intCast(func_type.getReturns().len),
             };
             try self.functions.append(f);
         }
@@ -5485,12 +5472,9 @@ pub const StackVM = struct {
     fn invokeInternal(self: *StackVM, module: *ModuleInstance, func_instance_index: usize, params: [*]const Val, returns: [*]Val) !void {
         const func: FunctionInstance = self.functions.items[func_instance_index];
         const func_def: FunctionDefinition = module.module_def.functions.items[func.def_index];
-        const func_type: *const FunctionTypeDefinition = &module.module_def.types.items[func.type_def_index];
-        const param_types: []const ValType = func_type.getParams();
-        const return_types: []const ValType = func_type.getReturns();
 
-        const params_slice = params[0..param_types.len];
-        var returns_slice = returns[0..return_types.len];
+        const params_slice = params[0..func.num_params];
+        var returns_slice = returns[0..func.num_returns];
 
         // Ensure any leftover stack state doesn't pollute this invoke. Can happen if the previous invoke returned an error.
         self.stack.popAll();
@@ -5501,8 +5485,8 @@ pub const StackVM = struct {
             self.stack.pushValue(v);
         }
 
-        try self.stack.pushFrame(&func, module, param_types, func.local_types.items, func_type.calcNumReturns());
-        try self.stack.pushLabel(@as(u32, @intCast(return_types.len)), @intCast(func_def.continuation));
+        try self.stack.pushFrame(&func, module);
+        try self.stack.pushLabel(func.num_returns, @intCast(func_def.continuation));
 
         DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
 

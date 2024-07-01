@@ -809,41 +809,17 @@ pub const TablePairImmediates = extern struct {
 
 pub const BlockImmediates = extern struct {
     block_type: BlockType,
+    num_returns: u16,
     block_value: BlockTypeValue,
-    num_returns: u32,
     continuation: u32,
 };
 
 pub const IfImmediates = extern struct {
     block_type: BlockType,
+    num_returns: u16,
     block_value: BlockTypeValue,
-    num_returns: u32,
     else_continuation: u32,
     end_continuation: u32,
-};
-
-// const InstructionImmediatesTypes = enum(u8) {
-//     Void,
-//     ValType,
-//     ValueI32,
-//     ValueF32,
-//     ValueI64,
-//     ValueF64,
-//     ValueVec,
-//     Index,
-//     LabelId,
-//     MemoryOffset,
-//     MemoryOffsetAndLane,
-//     Block,
-//     CallIndirect,
-//     TablePair,
-//     If,
-//     VecShuffle16,
-// };
-
-pub const AlignedBytes = struct {
-    bytes: []align(1) const u8,
-    alignment: usize,
 };
 
 pub const InstructionImmediates = extern union {
@@ -864,6 +840,10 @@ pub const InstructionImmediates = extern union {
     If: IfImmediates,
     VecShuffle16: [16]u8,
 };
+
+comptime {
+    std.debug.assert(@sizeOf(InstructionImmediates) == 16);
+}
 
 pub const Instruction = struct {
     opcode: Opcode,
@@ -901,7 +881,7 @@ pub const Instruction = struct {
                     block_value = BlockTypeValue{ .ValType = valtype };
                 }
 
-                const num_returns: u32 = @as(u32, @intCast(block_value.getBlocktypeReturnTypes(block_type, _module).len));
+                const num_returns: u16 = @intCast(block_value.getBlocktypeReturnTypes(block_type, _module).len);
 
                 return InstructionImmediates{
                     .Block = BlockImmediates{
