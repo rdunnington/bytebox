@@ -2400,7 +2400,6 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
         if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
             if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-
                     if (builtin.os.tag == .windows) {
                         const dir = std.fs.Dir{
                             .fd = fd_info.fd,
@@ -2409,14 +2408,13 @@ fn wasi_path_filestat_get(userdata: ?*anyopaque, module: *ModuleInstance, params
                             defer file.close();
 
                             const stat: std.os.wasi.filestat_t = Helpers.filestatGetWindows(file.handle, &errno);
-                        if (errno == .SUCCESS) {
-                            Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
-                        }
+                            if (errno == .SUCCESS) {
+                                Helpers.writeFilestatToMemory(&stat, filestat_out_mem_offset, module, &errno);
+                            }
                         } else |err| {
                             errno = Errno.translateError(err);
                         }
                     } else {
-
                         var flags: std.posix.O = .{
                             .ACCMODE = .RDONLY,
                         };
