@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const builtin = @import("builtin");
+const config = @import("config");
 
 const AllocError = std.mem.Allocator.Error;
 
@@ -61,6 +62,7 @@ const InvokeOpts = inst.InvokeOpts;
 const ResumeInvokeOpts = inst.ResumeInvokeOpts;
 const DebugTrapInstructionMode = inst.DebugTrapInstructionMode;
 const ModuleInstantiateOpts = inst.ModuleInstantiateOpts;
+const DebugTrace = inst.DebugTrace;
 
 const INVALID_INSTRUCTION_INDEX: u32 = std.math.maxInt(u32);
 
@@ -260,11 +262,13 @@ const RegisterSlots = struct {
     };
 
     slots: std.ArrayList(Slot),
+    total_unique: u32,
     last_free: ?u32,
 
     fn init(allocator: std.mem.Allocator) RegisterSlots {
         return RegisterSlots{
             .slots = std.ArrayList(Slot).init(allocator),
+            .total_unique = 0,
             .last_free = null,
         };
     }
@@ -275,11 +279,17 @@ const RegisterSlots = struct {
 
     fn alloc(self: *RegisterSlots, node: *IRNode) AllocError!u32 {
         if (self.last_free == null) {
+            std.debug.assert(self.slots.items.len < std.math.maxInt(u32));
+
             self.last_free = @intCast(self.slots.items.len);
             try self.slots.append(Slot{
                 .node = null,
                 .prev = null,
             });
+
+            if (self.total_unique < self.last_free.?) {
+                self.total_unique = self.last_free.?;
+            }
         }
 
         const index = self.last_free.?;
@@ -305,6 +315,16 @@ const RegisterSlots = struct {
 
         std.debug.print("attempting to free node {*} with opcode {} at index {}: {}\n", .{ node, node.opcode, index, succes });
     }
+
+    fn getAssignedSlot(self: RegisterSlots, node: *IRNode) u32 {
+        // TODO swap out with hashmap lookup
+        for (self.slots.items, 0..) |slot, index| {
+            if (slot.node == node) {
+                return @intCast(index);
+            }
+        }
+        unreachable;
+    }
 };
 
 const FunctionIR = struct {
@@ -316,61 +336,103 @@ const FunctionIR = struct {
     //     return &module_def.functions.items[func.def_index];
     // }
 
-    fn regalloc(func: *FunctionIR, compile_data: *IntermediateCompileData, allocator: std.mem.Allocator) AllocError!void {
+    // fn regalloc(func: *FunctionIR, compile_data: *IntermediateCompileData, allocator: std.mem.Allocator) AllocError!void {
+    //     std.debug.assert(func.ir_root != null);
+
+    //     const ir_root = func.ir_root.?;
+    //     std.debug.assert(ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
+
+    //     var slots = RegisterSlots.init(allocator);
+    //     defer slots.deinit();
+
+    //     var visit_queue = std.ArrayList(*IRNode).init(allocator);
+    //     defer visit_queue.deinit();
+    //     try visit_queue.append(ir_root);
+
+    //     var visited = std.AutoHashMap(*IRNode, void).init(allocator);
+    //     defer visited.deinit();
+
+    //     while (visit_queue.items.len > 0) {
+    //         var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+    //         try visited.put(node, {});
+
+    //         // mark output node slots as free - this is safe because the dataflow graph flows one way and the
+    //         // output can't be reused higher up in the graph
+    //         for (node.edgesOut()) |output_node| {
+    //             if (compile_data.register_map.get(output_node)) |index| {
+    //                 slots.freeAt(output_node, index);
+    //             }
+    //         }
+
+    //         // allocate slots for this instruction
+    //         // TODO handle multiple output slots (e.g. results of a function call)
+    //         if (node.needsRegisterSlot()) {
+    //             const index: u32 = try slots.alloc(node);
+    //             try compile_data.register_map.put(node, index);
+    //         }
+
+    //         // add inputs to the FIFO visit queue
+    //         for (node.edgesIn()) |input_node| {
+    //             if (visited.contains(input_node) == false) {
+    //                 try visit_queue.append(input_node);
+    //             }
+    //         }
+    //     }
+    // }
+
+    // TODO call this from the compiler compile function, have the compile function take instructions and local_types arrays passed down from module instantiate
+    // TODO ensure callsites pass a scratch allocator
+    fn codegen(func: FunctionIR, store: *FunctionStore, compile_data: *IntermediateCompileData, module_def: ModuleDefinition, scratch_allocator: std.mem.Allocator) AllocError!void {
         std.debug.assert(func.ir_root != null);
 
-        const ir_root = func.ir_root.?;
-        std.debug.assert(ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
+        // allocate register slots for each node.
+        var register_slots = RegisterSlots.init(scratch_allocator);
+        defer register_slots.deinit();
+        {
+            std.debug.assert(func.ir_root != null);
 
-        var slots = RegisterSlots.init(allocator);
-        defer slots.deinit();
+            const ir_root = func.ir_root.?;
+            std.debug.assert(ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
 
-        var visit_queue = std.ArrayList(*IRNode).init(allocator);
-        defer visit_queue.deinit();
-        try visit_queue.append(ir_root);
+            var visit_queue = std.ArrayList(*IRNode).init(scratch_allocator);
+            defer visit_queue.deinit();
+            try visit_queue.append(ir_root);
 
-        var visited = std.AutoHashMap(*IRNode, void).init(allocator);
-        defer visited.deinit();
+            var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
+            defer visited.deinit();
 
-        while (visit_queue.items.len > 0) {
-            var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
-            try visited.put(node, {});
+            while (visit_queue.items.len > 0) {
+                var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+                try visited.put(node, {});
 
-            // mark output node slots as free - this is safe because the dataflow graph flows one way and the
-            // output can't be reused higher up in the graph
-            for (node.edgesOut()) |output_node| {
-                if (compile_data.register_map.get(output_node)) |index| {
-                    slots.freeAt(output_node, index);
+                // mark output node slots as free - this is safe because the dataflow graph flows one way and the
+                // output can't be reused higher up in the graph
+                for (node.edgesOut()) |output_node| {
+                    if (compile_data.register_map.get(output_node)) |index| {
+                        register_slots.freeAt(output_node, index);
+                    }
                 }
-            }
 
-            // allocate slots for this instruction
-            // TODO handle multiple output slots (e.g. results of a function call)
-            if (node.needsRegisterSlot()) {
-                const index: u32 = try slots.alloc(node);
-                try compile_data.register_map.put(node, index);
-            }
+                // allocate slots for this instruction
+                // TODO handle multiple output slots (e.g. results of a function call or Memory.Grow)
+                if (node.needsRegisterSlot()) {
+                    const index: u32 = try register_slots.alloc(node);
+                    try compile_data.register_map.put(node, index);
+                }
 
-            // add inputs to the FIFO visit queue
-            for (node.edgesIn()) |input_node| {
-                if (visited.contains(input_node) == false) {
-                    try visit_queue.append(input_node);
+                // add inputs to the FIFO visit queue
+                for (node.edgesIn()) |input_node| {
+                    if (visited.contains(input_node) == false) {
+                        try visit_queue.append(input_node);
+                    }
                 }
             }
         }
-    }
-
-    // TODO call this from the compiler compile function, have the compile function take instructions and local_types arrays passed down from module instantiate
-    // TODO inline regalloc into this function
-    // TODO ensure callsites pass a scratch allocator
-    fn codegen(func: FunctionIR, store: *FunctionStore, compile_data: IntermediateCompileData, module_def: ModuleDefinition, scratch_allocator: std.mem.Allocator) AllocError!void {
-        std.debug.assert(func.ir_root != null);
 
         // walk the graph in breadth-first order, starting from the last Return node
-        // when a node is visited, emit its instruction
         // reverse the instructions array when finished (alternatively just emit in reverse order if we have the node count from regalloc)
 
-        // const start_instruction_offset = store.instructions.byteOffset();
+        const instructions_begin = store.instructions.items.len;
 
         var visit_queue = std.ArrayList(*IRNode).init(scratch_allocator);
         defer visit_queue.deinit();
@@ -379,8 +441,9 @@ const FunctionIR = struct {
         var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
         defer visited.deinit();
 
-        var instructions = std.ArrayList(RegInstruction).init(scratch_allocator);
-        defer instructions.deinit();
+        var instructions = &store.instructions;
+        // var instructions = std.ArrayList(RegInstruction).init(scratch_allocator);
+        // defer instructions.deinit();
 
         while (visit_queue.items.len > 0) {
             var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
@@ -398,52 +461,57 @@ const FunctionIR = struct {
             if (all_out_edges_visited) {
                 try visited.put(node, {});
 
+                const registers_begin = store.registers.items.len;
+                for (node.edgesOut()) |output_node| {
+                    const slot: u32 = register_slots.getAssignedSlot(output_node);
+                    try store.registers.append(slot);
+                }
+                const registers_end = store.registers.items.len;
+                const registers = store.registers.items[registers_begin..registers_end];
+
                 try instructions.append(RegInstruction{
-                    .register_slot_offset = if (compile_data.register_map.get(node)) |slot_index| slot_index else 0,
+                    // .register_slot_offset = if (compile_data.register_map.get(node)) |slot_index| slot_index else 0,
                     .opcode = node.opcode,
                     .immediate = node.instruction(module_def).?.immediate,
+                    .registers = registers,
                 });
+            } else {
+                // try again later
+                try visit_queue.append(node);
             }
 
             for (node.edgesIn()) |input_node| {
-                if (!visited.contains(input_node)) { // TODO do we need this?
+                if (!visited.contains(input_node)) {
                     try visit_queue.append(input_node);
                 }
             }
         }
 
-        // const end_instruction_offset = store.instructions.byteOffset();
-        // const emitted_instructions = store.instructions.items[start_instruction_offset..end_instruction_offset];
+        const instructions_end = store.instructions.items.len;
+        const emitted_instructions = store.instructions.items[instructions_begin..instructions_end];
 
-        // std.mem.reverse(RegInstruction, emitted_instructions);
+        std.mem.reverse(RegInstruction, emitted_instructions);
 
-        const instruction_offset_begin = store.instructions.items.len;
-        for (0..instructions.items.len) |i_reverse| {
-            const i = (instructions.items.len - 1) - i_reverse;
-            const instruction: RegInstruction = instructions.items[i];
-            const registers = [_]u32{instruction.register_slot_offset}; // TODO will need to upgrade this to a real array at some point
-
-            try store.instructions.emit(instruction.opcode, instruction.immediate, &registers);
-        }
-        const instruction_offset_end = store.instructions.totalBytes();
-
-        const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
+        // const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
         const func_type: *const FunctionTypeDefinition = &module_def.types.items[func.type_def_index];
-        const param_types: []const ValType = func_type.getParams();
-        try store.local_types.ensureTotalCapacity(store.local_types.items.len + param_types.len + func_def.locals.items.len);
+        // const param_types: []const ValType = func_type.getParams();
+        // try store.local_types.ensureTotalCapacity(store.local_types.items.len + param_types.len + func_def.locals.items.len);
 
-        const types_index_begin = store.local_types.items.len;
-        store.local_types.appendSliceAssumeCapacity(param_types);
-        store.local_types.appendSliceAssumeCapacity(func_def.locals.items);
-        const types_index_end = store.local_types.items.len;
+        // const types_index_begin = store.local_types.items.len;
+        // store.local_types.appendSliceAssumeCapacity(param_types);
+        // store.local_types.appendSliceAssumeCapacity(func_def.locals.items);
+        // const types_index_end = store.local_types.items.len;
 
         try store.instances.append(FunctionInstance{
             .type_def_index = func.type_def_index,
             .def_index = func.def_index,
-            .instructions_begin = instruction_offset_begin,
-            .instructions_end = instruction_offset_end,
-            .local_types_begin = types_index_begin,
-            .local_types_end = types_index_end,
+            .instructions_begin = instructions_begin,
+            .num_params = @intCast(func_type.getParams().len),
+            .num_returns = @intCast(func_type.getReturns().len),
+            .total_register_slots = register_slots.total_unique,
+            // .instructions_end = instructions_end,
+            // .local_types_begin = types_index_begin,
+            // .local_types_end = types_index_end,
         });
     }
 
@@ -742,6 +810,23 @@ const IntermediateCompileData = struct {
     }
 };
 
+// register instructions get a slice of the overall set of register slots, which are pointers to actual
+// registers (?)
+
+const RegInstruction = struct {
+    opcode: Opcode,
+    immediate: def.InstructionImmediates,
+    registers: []u32,
+
+    // fn numRegisters(self: RegInstruction) u4 {
+    //     switch (self.opcode) {}
+    // }
+
+    // fn registers(self: RegInstruction, register_slice: []Val) []Val {
+    //     return register_slice[self.registerOffset .. self.registerOffset + self.numRegisters()];
+    // }
+};
+
 const FunctionCompiler = struct {
     allocator: std.mem.Allocator,
     module_def: *const ModuleDefinition,
@@ -770,8 +855,8 @@ const FunctionCompiler = struct {
             std.debug.print("compiler.module_def.functions.items.len: {}, i: {}\n\n", .{ compiler.module_def.functions.items.len, i });
             var function_ir = try compiler.compileFunc(i, &compile_data);
             if (function_ir.ir_root != null) {
-                try function_ir.regalloc(&compile_data, compiler.allocator);
-                try function_ir.codegen(store, compile_data, compiler.module_def.*, compiler.allocator);
+                // try function_ir.regalloc(&compile_data, compiler.allocator);
+                try function_ir.codegen(store, &compile_data, compiler.module_def.*, compiler.allocator);
             }
 
             compile_data.reset();
@@ -1149,9 +1234,12 @@ const FunctionInstance = struct {
     type_def_index: usize,
     def_index: usize,
     instructions_begin: usize,
-    instructions_end: usize,
-    local_types_begin: usize,
-    local_types_end: usize,
+    num_params: u32,
+    num_returns: u32,
+    total_register_slots: u32,
+    // instructions_end: usize,
+    // local_types_begin: usize,
+    // local_types_end: usize,
 
     fn instructions(func: FunctionInstance, store: FunctionStore) []RegInstruction {
         return store.instructions.items[func.instructions_begin..func.instructions_end];
@@ -1171,10 +1259,9 @@ const FunctionInstance = struct {
 };
 
 const Label = struct {
-    // TODO figure out what this struct should be
-    // num_returns: u32,
     continuation: u32,
-    // start_offset_values: u32,
+    // num_returns: u32,
+    // registers_begin: u32,
 };
 
 const CallFrame = struct {
@@ -1251,54 +1338,54 @@ const MachineState = struct {
         ms.num_frames = 0;
     }
 
-    fn get(ms: MachineState, register_local: u32) Val {
-        const frame: *CallFrame = topFrame();
+    fn getVal(ms: MachineState, register_local: u32) Val {
+        const frame: *CallFrame = ms.topFrame();
         const slot = frame.registers_begin + register_local;
         return ms.registers[slot];
     }
 
     fn getI32(ms: MachineState, register_local: u32) i32 {
-        return ms.get(register_local).I32;
+        return ms.getVal(register_local).I32;
     }
 
     fn getI64(ms: MachineState, register_local: u32) i64 {
-        return ms.get(register_local).I64;
+        return ms.getVal(register_local).I64;
     }
 
     fn getF32(ms: MachineState, register_local: u32) f32 {
-        return ms.get(register_local).F32;
+        return ms.getVal(register_local).F32;
     }
 
     fn getF64(ms: MachineState, register_local: u32) f64 {
-        return ms.get(register_local).F64;
+        return ms.getVal(register_local).F64;
     }
 
-    fn set(ms: *MachineState, register_local: u32, val: Val) void {
-        const frame: *CallFrame = topFrame();
+    fn setVal(ms: *MachineState, register_local: u32, val: Val) void {
+        const frame: *CallFrame = ms.topFrame();
         const slot = frame.registers_begin + register_local;
         ms.registers[slot] = val;
     }
 
     fn setI32(ms: *MachineState, register_local: u32, val: i32) void {
-        const frame: *CallFrame = topFrame();
+        const frame: *CallFrame = ms.topFrame();
         const slot = frame.registers_begin + register_local;
         ms.registers[slot].I32 = val;
     }
 
     fn setI64(ms: *MachineState, register_local: u32, val: i64) void {
-        const frame: *CallFrame = topFrame();
+        const frame: *CallFrame = ms.topFrame();
         const slot = frame.registers_begin + register_local;
         ms.registers[slot].I64 = val;
     }
 
     fn setF32(ms: *MachineState, register_local: u32, val: f32) void {
-        const frame: *CallFrame = topFrame();
+        const frame: *CallFrame = ms.topFrame();
         const slot = frame.registers_begin + register_local;
         ms.registers[slot].F32 = val;
     }
 
     fn setF64(ms: *MachineState, register_local: u32, val: f64) void {
-        const frame: *CallFrame = topFrame();
+        const frame: *CallFrame = ms.topFrame();
         const slot = frame.registers_begin + register_local;
         ms.registers[slot].F64 = val;
     }
@@ -1306,18 +1393,595 @@ const MachineState = struct {
     fn topFrame(ms: MachineState) *CallFrame {
         return &ms.frames[ms.num_frames - 1];
     }
+
+    fn pushFrame(ms: *MachineState, func: FunctionInstance, module_instance: *ModuleInstance) TrapError!void {
+        if (ms.num_frames + 1 < ms.frames.len) {
+            ms.frames[ms.num_frames] = CallFrame{
+                .func = &func,
+                .module_instance = module_instance,
+                .num_returns = func.num_returns,
+                .registers_begin = ms.num_registers,
+                .labels_begin = ms.num_labels,
+            };
+            ms.num_frames += 1;
+            ms.num_registers += func.total_register_slots;
+        } else {
+            return error.TrapStackExhausted;
+        }
+    }
+
+    fn pushLabel(ms: *MachineState, num_returns: u32, continuation: u32) !void {
+        _ = num_returns;
+
+        if (ms.num_labels < ms.labels.len) {
+            ms.labels[ms.num_labels] = Label{
+                // .num_returns = num_returns,
+                .continuation = continuation,
+                // .start_offset_values = ms.num_values,
+            };
+            ms.num_labels += 1;
+        } else {
+            return error.TrapStackExhausted;
+        }
+    }
+
+    fn popLabel(ms: *MachineState) void {
+        ms.num_labels -= 1;
+    }
+
+    fn findLabel(ms: MachineState, id: u32) *const Label {
+        const index: usize = (ms.num_labels - 1) - id;
+        return &ms.labels[index];
+    }
+
+    fn topLabel(ms: MachineState) *const Label {
+        return &ms.labels[ms.num_labels - 1];
+    }
+
+    fn frameLabel(ms: MachineState) *const Label {
+        const frame: *const CallFrame = ms.topFrame();
+        const frame_label: *const Label = &ms.labels[frame.start_offset_labels];
+        return frame_label;
+    }
+
+    fn traceInstruction(state: MachineState, instruction_name: []const u8, pc: u32) void {
+        if (config.enable_debug_trace and DebugTrace.shouldTraceInstructions()) {
+            const frame: *const CallFrame = state.topFrame();
+            const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
+            const module_name = name_section.getModuleName();
+            const function_name = name_section.findFunctionName(frame.func.def_index);
+
+            std.debug.print("\t0x{x} - {s}!{s}: {s}\n", .{ pc, module_name, function_name, instruction_name });
+        }
+    }
+};
+
+// pc is the "program counter", which points to the next instruction to execute
+const InstructionFunc = *const fn (pc: u32, code: [*]const RegInstruction, state: *MachineState) TrapError!void;
+
+// Maps all instructions to an execution function, to map opcodes directly to function pointers
+// which avoids a giant switch statement. Because the switch-style has a single conditional
+// branch for every opcode, the branch predictor cannot reliably predict the next opcode. However,
+// giving each instruction its own branch allows the branch predictor to cache heuristics for each
+// instruction, instead of a single branch. This approach is combined with tail calls to ensure the
+// stack doesn't overflow and help optimize the generated asm.
+// In the past, this style of opcode dispatch has been called the poorly-named "threaded code" approach.
+// See the "continuation-passing style" section of this article:
+// http://www.complang.tuwien.ac.at/forth/threaded-code.html
+const InstructionFuncs = struct {
+    const opcodeToFuncTable = [_]InstructionFunc{
+        &op_Invalid,
+        &op_Unreachable,
+        &op_Noop, // &op_DebugTrap,
+        &op_Noop,
+        &op_Noop, // &op_Block,
+        &op_Noop, // &op_Loop,
+        &op_Noop, // &op_If,
+        &op_Noop, // &op_IfNoElse,
+        &op_Noop, // &op_Else,
+        &op_Noop, // &op_End,
+        &op_Noop, // &op_Branch,
+        &op_Noop, // &op_Branch_If,
+        &op_Noop, // &op_Branch_Table,
+        &op_Noop, // &op_Return,
+        &op_Noop, // &op_Call,
+        &op_Noop, // &op_Call_Indirect,
+        &op_Noop, // &op_Drop,
+        &op_Noop, // &op_Select,
+        &op_Noop, // &op_Select_T,
+        &op_Unreachable, // &op_Local_Get,
+        &op_Noop, // &op_Local_Set,
+        &op_Noop, // &op_Local_Tee,
+        &op_Noop, // &op_Global_Get,
+        &op_Noop, // &op_Global_Set,
+        &op_Noop, // &op_Table_Get,
+        &op_Noop, // &op_Table_Set,
+        &op_Noop, // &op_I32_Load,
+        &op_Noop, // &op_I64_Load,
+        &op_Noop, // &op_F32_Load,
+        &op_Noop, // &op_F64_Load,
+        &op_Noop, // &op_I32_Load8_S,
+        &op_Noop, // &op_I32_Load8_U,
+        &op_Noop, // &op_I32_Load16_S,
+        &op_Noop, // &op_I32_Load16_U,
+        &op_Noop, // &op_I64_Load8_S,
+        &op_Noop, // &op_I64_Load8_U,
+        &op_Noop, // &op_I64_Load16_S,
+        &op_Noop, // &op_I64_Load16_U,
+        &op_Noop, // &op_I64_Load32_S,
+        &op_Noop, // &op_I64_Load32_U,
+        &op_Noop, // &op_I32_Store,
+        &op_Noop, // &op_I64_Store,
+        &op_Noop, // &op_F32_Store,
+        &op_Noop, // &op_F64_Store,
+        &op_Noop, // &op_I32_Store8,
+        &op_Noop, // &op_I32_Store16,
+        &op_Noop, // &op_I64_Store8,
+        &op_Noop, // &op_I64_Store16,
+        &op_Noop, // &op_I64_Store32,
+        &op_Noop, // &op_Memory_Size,
+        &op_Noop, // &op_Memory_Grow,
+        &op_I32_Const,
+        &op_Noop, // &op_I64_Const,
+        &op_Noop, // &op_F32_Const,
+        &op_Noop, // &op_F64_Const,
+        &op_Noop, // &op_I32_Eqz,
+        &op_Noop, // &op_I32_Eq,
+        &op_Noop, // &op_I32_NE,
+        &op_Noop, // &op_I32_LT_S,
+        &op_Noop, // &op_I32_LT_U,
+        &op_Noop, // &op_I32_GT_S,
+        &op_Noop, // &op_I32_GT_U,
+        &op_Noop, // &op_I32_LE_S,
+        &op_Noop, // &op_I32_LE_U,
+        &op_Noop, // &op_I32_GE_S,
+        &op_Noop, // &op_I32_GE_U,
+        &op_Noop, // &op_I64_Eqz,
+        &op_Noop, // &op_I64_Eq,
+        &op_Noop, // &op_I64_NE,
+        &op_Noop, // &op_I64_LT_S,
+        &op_Noop, // &op_I64_LT_U,
+        &op_Noop, // &op_I64_GT_S,
+        &op_Noop, // &op_I64_GT_U,
+        &op_Noop, // &op_I64_LE_S,
+        &op_Noop, // &op_I64_LE_U,
+        &op_Noop, // &op_I64_GE_S,
+        &op_Noop, // &op_I64_GE_U,
+        &op_Noop, // &op_F32_EQ,
+        &op_Noop, // &op_F32_NE,
+        &op_Noop, // &op_F32_LT,
+        &op_Noop, // &op_F32_GT,
+        &op_Noop, // &op_F32_LE,
+        &op_Noop, // &op_F32_GE,
+        &op_Noop, // &op_F64_EQ,
+        &op_Noop, // &op_F64_NE,
+        &op_Noop, // &op_F64_LT,
+        &op_Noop, // &op_F64_GT,
+        &op_Noop, // &op_F64_LE,
+        &op_Noop, // &op_F64_GE,
+        &op_Noop, // &op_I32_Clz,
+        &op_Noop, // &op_I32_Ctz,
+        &op_Noop, // &op_I32_Popcnt,
+        &op_I32_Add,
+        &op_Noop, // &op_I32_Sub,
+        &op_Noop, // &op_I32_Mul,
+        &op_Noop, // &op_I32_Div_S,
+        &op_Noop, // &op_I32_Div_U,
+        &op_Noop, // &op_I32_Rem_S,
+        &op_Noop, // &op_I32_Rem_U,
+        &op_Noop, // &op_I32_And,
+        &op_Noop, // &op_I32_Or,
+        &op_Noop, // &op_I32_Xor,
+        &op_Noop, // &op_I32_Shl,
+        &op_Noop, // &op_I32_Shr_S,
+        &op_Noop, // &op_I32_Shr_U,
+        &op_Noop, // &op_I32_Rotl,
+        &op_Noop, // &op_I32_Rotr,
+        &op_Noop, // &op_I64_Clz,
+        &op_Noop, // &op_I64_Ctz,
+        &op_Noop, // &op_I64_Popcnt,
+        &op_Noop, // &op_I64_Add,
+        &op_Noop, // &op_I64_Sub,
+        &op_Noop, // &op_I64_Mul,
+        &op_Noop, // &op_I64_Div_S,
+        &op_Noop, // &op_I64_Div_U,
+        &op_Noop, // &op_I64_Rem_S,
+        &op_Noop, // &op_I64_Rem_U,
+        &op_Noop, // &op_I64_And,
+        &op_Noop, // &op_I64_Or,
+        &op_Noop, // &op_I64_Xor,
+        &op_Noop, // &op_I64_Shl,
+        &op_Noop, // &op_I64_Shr_S,
+        &op_Noop, // &op_I64_Shr_U,
+        &op_Noop, // &op_I64_Rotl,
+        &op_Noop, // &op_I64_Rotr,
+        &op_Noop, // &op_F32_Abs,
+        &op_Noop, // &op_F32_Neg,
+        &op_Noop, // &op_F32_Ceil,
+        &op_Noop, // &op_F32_Floor,
+        &op_Noop, // &op_F32_Trunc,
+        &op_Noop, // &op_F32_Nearest,
+        &op_Noop, // &op_F32_Sqrt,
+        &op_Noop, // &op_F32_Add,
+        &op_Noop, // &op_F32_Sub,
+        &op_Noop, // &op_F32_Mul,
+        &op_Noop, // &op_F32_Div,
+        &op_Noop, // &op_F32_Min,
+        &op_Noop, // &op_F32_Max,
+        &op_Noop, // &op_F32_Copysign,
+        &op_Noop, // &op_F64_Abs,
+        &op_Noop, // &op_F64_Neg,
+        &op_Noop, // &op_F64_Ceil,
+        &op_Noop, // &op_F64_Floor,
+        &op_Noop, // &op_F64_Trunc,
+        &op_Noop, // &op_F64_Nearest,
+        &op_Noop, // &op_F64_Sqrt,
+        &op_Noop, // &op_F64_Add,
+        &op_Noop, // &op_F64_Sub,
+        &op_Noop, // &op_F64_Mul,
+        &op_Noop, // &op_F64_Div,
+        &op_Noop, // &op_F64_Min,
+        &op_Noop, // &op_F64_Max,
+        &op_Noop, // &op_F64_Copysign,
+        &op_Noop, // &op_I32_Wrap_I64,
+        &op_Noop, // &op_I32_Trunc_F32_S,
+        &op_Noop, // &op_I32_Trunc_F32_U,
+        &op_Noop, // &op_I32_Trunc_F64_S,
+        &op_Noop, // &op_I32_Trunc_F64_U,
+        &op_Noop, // &op_I64_Extend_I32_S,
+        &op_Noop, // &op_I64_Extend_I32_U,
+        &op_Noop, // &op_I64_Trunc_F32_S,
+        &op_Noop, // &op_I64_Trunc_F32_U,
+        &op_Noop, // &op_I64_Trunc_F64_S,
+        &op_Noop, // &op_I64_Trunc_F64_U,
+        &op_Noop, // &op_F32_Convert_I32_S,
+        &op_Noop, // &op_F32_Convert_I32_U,
+        &op_Noop, // &op_F32_Convert_I64_S,
+        &op_Noop, // &op_F32_Convert_I64_U,
+        &op_Noop, // &op_F32_Demote_F64,
+        &op_Noop, // &op_F64_Convert_I32_S,
+        &op_Noop, // &op_F64_Convert_I32_U,
+        &op_Noop, // &op_F64_Convert_I64_S,
+        &op_Noop, // &op_F64_Convert_I64_U,
+        &op_Noop, // &op_F64_Promote_F32,
+        &op_Noop, // &op_I32_Reinterpret_F32,
+        &op_Noop, // &op_I64_Reinterpret_F64,
+        &op_Noop, // &op_F32_Reinterpret_I32,
+        &op_Noop, // &op_F64_Reinterpret_I64,
+        &op_Noop, // &op_I32_Extend8_S,
+        &op_Noop, // &op_I32_Extend16_S,
+        &op_Noop, // &op_I64_Extend8_S,
+        &op_Noop, // &op_I64_Extend16_S,
+        &op_Noop, // &op_I64_Extend32_S,
+        &op_Noop, // &op_Ref_Null,
+        &op_Noop, // &op_Ref_Is_Null,
+        &op_Noop, // &op_Ref_Func,
+        &op_Noop, // &op_I32_Trunc_Sat_F32_S,
+        &op_Noop, // &op_I32_Trunc_Sat_F32_U,
+        &op_Noop, // &op_I32_Trunc_Sat_F64_S,
+        &op_Noop, // &op_I32_Trunc_Sat_F64_U,
+        &op_Noop, // &op_I64_Trunc_Sat_F32_S,
+        &op_Noop, // &op_I64_Trunc_Sat_F32_U,
+        &op_Noop, // &op_I64_Trunc_Sat_F64_S,
+        &op_Noop, // &op_I64_Trunc_Sat_F64_U,
+        &op_Noop, // &op_Memory_Init,
+        &op_Noop, // &op_Data_Drop,
+        &op_Noop, // &op_Memory_Copy,
+        &op_Noop, // &op_Memory_Fill,
+        &op_Noop, // &op_Table_Init,
+        &op_Noop, // &op_Elem_Drop,
+        &op_Noop, // &op_Table_Copy,
+        &op_Noop, // &op_Table_Grow,
+        &op_Noop, // &op_Table_Size,
+        &op_Noop, // &op_Table_Fill,
+        &op_Noop, // &op_V128_Load,
+        &op_Noop, // &op_V128_Load8x8_S,
+        &op_Noop, // &op_V128_Load8x8_U,
+        &op_Noop, // &op_V128_Load16x4_S,
+        &op_Noop, // &op_V128_Load16x4_U,
+        &op_Noop, // &op_V128_Load32x2_S,
+        &op_Noop, // &op_V128_Load32x2_U,
+        &op_Noop, // &op_V128_Load8_Splat,
+        &op_Noop, // &op_V128_Load16_Splat,
+        &op_Noop, // &op_V128_Load32_Splat,
+        &op_Noop, // &op_V128_Load64_Splat,
+        &op_Noop, // &op_V128_Store,
+        &op_Noop, // &op_V128_Const,
+        &op_Noop, // &op_I8x16_Shuffle,
+        &op_Noop, // &op_I8x16_Swizzle,
+        &op_Noop, // &op_I8x16_Splat,
+        &op_Noop, // &op_I16x8_Splat,
+        &op_Noop, // &op_I32x4_Splat,
+        &op_Noop, // &op_I64x2_Splat,
+        &op_Noop, // &op_F32x4_Splat,
+        &op_Noop, // &op_F64x2_Splat,
+        &op_Noop, // &op_I8x16_Extract_Lane_S,
+        &op_Noop, // &op_I8x16_Extract_Lane_U,
+        &op_Noop, // &op_I8x16_Replace_Lane,
+        &op_Noop, // &op_I16x8_Extract_Lane_S,
+        &op_Noop, // &op_I16x8_Extract_Lane_U,
+        &op_Noop, // &op_I16x8_Replace_Lane,
+        &op_Noop, // &op_I32x4_Extract_Lane,
+        &op_Noop, // &op_I32x4_Replace_Lane,
+        &op_Noop, // &op_I64x2_Extract_Lane,
+        &op_Noop, // &op_I64x2_Replace_Lane,
+        &op_Noop, // &op_F32x4_Extract_Lane,
+        &op_Noop, // &op_F32x4_Replace_Lane,
+        &op_Noop, // &op_F64x2_Extract_Lane,
+        &op_Noop, // &op_F64x2_Replace_Lane,
+        &op_Noop, // &op_I8x16_EQ,
+        &op_Noop, // &op_I8x16_NE,
+        &op_Noop, // &op_I8x16_LT_S,
+        &op_Noop, // &op_I8x16_LT_U,
+        &op_Noop, // &op_I8x16_GT_S,
+        &op_Noop, // &op_I8x16_GT_U,
+        &op_Noop, // &op_I8x16_LE_S,
+        &op_Noop, // &op_I8x16_LE_U,
+        &op_Noop, // &op_I8x16_GE_S,
+        &op_Noop, // &op_I8x16_GE_U,
+        &op_Noop, // &op_I16x8_EQ,
+        &op_Noop, // &op_I16x8_NE,
+        &op_Noop, // &op_I16x8_LT_S,
+        &op_Noop, // &op_I16x8_LT_U,
+        &op_Noop, // &op_I16x8_GT_S,
+        &op_Noop, // &op_I16x8_GT_U,
+        &op_Noop, // &op_I16x8_LE_S,
+        &op_Noop, // &op_I16x8_LE_U,
+        &op_Noop, // &op_I16x8_GE_S,
+        &op_Noop, // &op_I16x8_GE_U,
+        &op_Noop, // &op_I32x4_EQ,
+        &op_Noop, // &op_I32x4_NE,
+        &op_Noop, // &op_I32x4_LT_S,
+        &op_Noop, // &op_I32x4_LT_U,
+        &op_Noop, // &op_I32x4_GT_S,
+        &op_Noop, // &op_I32x4_GT_U,
+        &op_Noop, // &op_I32x4_LE_S,
+        &op_Noop, // &op_I32x4_LE_U,
+        &op_Noop, // &op_I32x4_GE_S,
+        &op_Noop, // &op_I32x4_GE_U,
+        &op_Noop, // &op_F32x4_EQ,
+        &op_Noop, // &op_F32x4_NE,
+        &op_Noop, // &op_F32x4_LT,
+        &op_Noop, // &op_F32x4_GT,
+        &op_Noop, // &op_F32x4_LE,
+        &op_Noop, // &op_F32x4_GE,
+        &op_Noop, // &op_F64x2_EQ,
+        &op_Noop, // &op_F64x2_NE,
+        &op_Noop, // &op_F64x2_LT,
+        &op_Noop, // &op_F64x2_GT,
+        &op_Noop, // &op_F64x2_LE,
+        &op_Noop, // &op_F64x2_GE,
+        &op_Noop, // &op_V128_Not,
+        &op_Noop, // &op_V128_And,
+        &op_Noop, // &op_V128_AndNot,
+        &op_Noop, // &op_V128_Or,
+        &op_Noop, // &op_V128_Xor,
+        &op_Noop, // &op_V128_Bitselect,
+        &op_Noop, // &op_V128_AnyTrue,
+        &op_Noop, // &op_V128_Load8_Lane,
+        &op_Noop, // &op_V128_Load16_Lane,
+        &op_Noop, // &op_V128_Load32_Lane,
+        &op_Noop, // &op_V128_Load64_Lane,
+        &op_Noop, // &op_V128_Store8_Lane,
+        &op_Noop, // &op_V128_Store16_Lane,
+        &op_Noop, // &op_V128_Store32_Lane,
+        &op_Noop, // &op_V128_Store64_Lane,
+        &op_Noop, // &op_V128_Load32_Zero,
+        &op_Noop, // &op_V128_Load64_Zero,
+        &op_Noop, // &op_F32x4_Demote_F64x2_Zero,
+        &op_Noop, // &op_F64x2_Promote_Low_F32x4,
+        &op_Noop, // &op_I8x16_Abs,
+        &op_Noop, // &op_I8x16_Neg,
+        &op_Noop, // &op_I8x16_Popcnt,
+        &op_Noop, // &op_I8x16_AllTrue,
+        &op_Noop, // &op_I8x16_Bitmask,
+        &op_Noop, // &op_I8x16_Narrow_I16x8_S,
+        &op_Noop, // &op_I8x16_Narrow_I16x8_U,
+        &op_Noop, // &op_F32x4_Ceil,
+        &op_Noop, // &op_F32x4_Floor,
+        &op_Noop, // &op_F32x4_Trunc,
+        &op_Noop, // &op_F32x4_Nearest,
+        &op_Noop, // &op_I8x16_Shl,
+        &op_Noop, // &op_I8x16_Shr_S,
+        &op_Noop, // &op_I8x16_Shr_U,
+        &op_Noop, // &op_I8x16_Add,
+        &op_Noop, // &op_I8x16_Add_Sat_S,
+        &op_Noop, // &op_I8x16_Add_Sat_U,
+        &op_Noop, // &op_I8x16_Sub,
+        &op_Noop, // &op_I8x16_Sub_Sat_S,
+        &op_Noop, // &op_I8x16_Sub_Sat_U,
+        &op_Noop, // &op_F64x2_Ceil,
+        &op_Noop, // &op_F64x2_Floor,
+        &op_Noop, // &op_I8x16_Min_S,
+        &op_Noop, // &op_I8x16_Min_U,
+        &op_Noop, // &op_I8x16_Max_S,
+        &op_Noop, // &op_I8x16_Max_U,
+        &op_Noop, // &op_F64x2_Trunc,
+        &op_Noop, // &op_I8x16_Avgr_U,
+        &op_Noop, // &op_I16x8_Extadd_Pairwise_I8x16_S,
+        &op_Noop, // &op_I16x8_Extadd_Pairwise_I8x16_U,
+        &op_Noop, // &op_I32x4_Extadd_Pairwise_I16x8_S,
+        &op_Noop, // &op_I32x4_Extadd_Pairwise_I16x8_U,
+        &op_Noop, // &op_I16x8_Abs,
+        &op_Noop, // &op_I16x8_Neg,
+        &op_Noop, // &op_I16x8_Q15mulr_Sat_S,
+        &op_Noop, // &op_I16x8_AllTrue,
+        &op_Noop, // &op_I16x8_Bitmask,
+        &op_Noop, // &op_I16x8_Narrow_I32x4_S,
+        &op_Noop, // &op_I16x8_Narrow_I32x4_U,
+        &op_Noop, // &op_I16x8_Extend_Low_I8x16_S,
+        &op_Noop, // &op_I16x8_Extend_High_I8x16_S,
+        &op_Noop, // &op_I16x8_Extend_Low_I8x16_U,
+        &op_Noop, // &op_I16x8_Extend_High_I8x16_U,
+        &op_Noop, // &op_I16x8_Shl,
+        &op_Noop, // &op_I16x8_Shr_S,
+        &op_Noop, // &op_I16x8_Shr_U,
+        &op_Noop, // &op_I16x8_Add,
+        &op_Noop, // &op_I16x8_Add_Sat_S,
+        &op_Noop, // &op_I16x8_Add_Sat_U,
+        &op_Noop, // &op_I16x8_Sub,
+        &op_Noop, // &op_I16x8_Sub_Sat_S,
+        &op_Noop, // &op_I16x8_Sub_Sat_U,
+        &op_Noop, // &op_F64x2_Nearest,
+        &op_Noop, // &op_I16x8_Mul,
+        &op_Noop, // &op_I16x8_Min_S,
+        &op_Noop, // &op_I16x8_Min_U,
+        &op_Noop, // &op_I16x8_Max_S,
+        &op_Noop, // &op_I16x8_Max_U,
+        &op_Noop, // &op_I16x8_Avgr_U,
+        &op_Noop, // &op_I16x8_Extmul_Low_I8x16_S,
+        &op_Noop, // &op_I16x8_Extmul_High_I8x16_S,
+        &op_Noop, // &op_I16x8_Extmul_Low_I8x16_U,
+        &op_Noop, // &op_I16x8_Extmul_High_I8x16_U,
+        &op_Noop, // &op_I32x4_Abs,
+        &op_Noop, // &op_I32x4_Neg,
+        &op_Noop, // &op_I32x4_AllTrue,
+        &op_Noop, // &op_I32x4_Bitmask,
+        &op_Noop, // &op_I32x4_Extend_Low_I16x8_S,
+        &op_Noop, // &op_I32x4_Extend_High_I16x8_S,
+        &op_Noop, // &op_I32x4_Extend_Low_I16x8_U,
+        &op_Noop, // &op_I32x4_Extend_High_I16x8_U,
+        &op_Noop, // &op_I32x4_Shl,
+        &op_Noop, // &op_I32x4_Shr_S,
+        &op_Noop, // &op_I32x4_Shr_U,
+        &op_Noop, // &op_I32x4_Add,
+        &op_Noop, // &op_I32x4_Sub,
+        &op_Noop, // &op_I32x4_Mul,
+        &op_Noop, // &op_I32x4_Min_S,
+        &op_Noop, // &op_I32x4_Min_U,
+        &op_Noop, // &op_I32x4_Max_S,
+        &op_Noop, // &op_I32x4_Max_U,
+        &op_Noop, // &op_I32x4_Dot_I16x8_S,
+        &op_Noop, // &op_I32x4_Extmul_Low_I16x8_S,
+        &op_Noop, // &op_I32x4_Extmul_High_I16x8_S,
+        &op_Noop, // &op_I32x4_Extmul_Low_I16x8_U,
+        &op_Noop, // &op_I32x4_Extmul_High_I16x8_U,
+        &op_Noop, // &op_I64x2_Abs,
+        &op_Noop, // &op_I64x2_Neg,
+        &op_Noop, // &op_I64x2_AllTrue,
+        &op_Noop, // &op_I64x2_Bitmask,
+        &op_Noop, // &op_I64x2_Extend_Low_I32x4_S,
+        &op_Noop, // &op_I64x2_Extend_High_I32x4_S,
+        &op_Noop, // &op_I64x2_Extend_Low_I32x4_U,
+        &op_Noop, // &op_I64x2_Extend_High_I32x4_U,
+        &op_Noop, // &op_I64x2_Shl,
+        &op_Noop, // &op_I64x2_Shr_S,
+        &op_Noop, // &op_I64x2_Shr_U,
+        &op_Noop, // &op_I64x2_Add,
+        &op_Noop, // &op_I64x2_Sub,
+        &op_Noop, // &op_I64x2_Mul,
+        &op_Noop, // &op_I64x2_EQ,
+        &op_Noop, // &op_I64x2_NE,
+        &op_Noop, // &op_I64x2_LT_S,
+        &op_Noop, // &op_I64x2_GT_S,
+        &op_Noop, // &op_I64x2_LE_S,
+        &op_Noop, // &op_I64x2_GE_S,
+        &op_Noop, // &op_I64x2_Extmul_Low_I32x4_S,
+        &op_Noop, // &op_I64x2_Extmul_High_I32x4_S,
+        &op_Noop, // &op_I64x2_Extmul_Low_I32x4_U,
+        &op_Noop, // &op_I64x2_Extmul_High_I32x4_U,
+        &op_Noop, // &op_F32x4_Abs,
+        &op_Noop, // &op_F32x4_Neg,
+        &op_Noop, // &op_F32x4_Sqrt,
+        &op_Noop, // &op_F32x4_Add,
+        &op_Noop, // &op_F32x4_Sub,
+        &op_Noop, // &op_F32x4_Mul,
+        &op_Noop, // &op_F32x4_Div,
+        &op_Noop, // &op_F32x4_Min,
+        &op_Noop, // &op_F32x4_Max,
+        &op_Noop, // &op_F32x4_PMin,
+        &op_Noop, // &op_F32x4_PMax,
+        &op_Noop, // &op_F64x2_Abs,
+        &op_Noop, // &op_F64x2_Neg,
+        &op_Noop, // &op_F64x2_Sqrt,
+        &op_Noop, // &op_F64x2_Add,
+        &op_Noop, // &op_F64x2_Sub,
+        &op_Noop, // &op_F64x2_Mul,
+        &op_Noop, // &op_F64x2_Div,
+        &op_Noop, // &op_F64x2_Min,
+        &op_Noop, // &op_F64x2_Max,
+        &op_Noop, // &op_F64x2_PMin,
+        &op_Noop, // &op_F64x2_PMax,
+        &op_Noop, // &op_F32x4_Trunc_Sat_F32x4_S,
+        &op_Noop, // &op_F32x4_Trunc_Sat_F32x4_U,
+        &op_Noop, // &op_F32x4_Convert_I32x4_S,
+        &op_Noop, // &op_F32x4_Convert_I32x4_U,
+        &op_Noop, // &op_I32x4_Trunc_Sat_F64x2_S_Zero,
+        &op_Noop, // &op_I32x4_Trunc_Sat_F64x2_U_Zero,
+        &op_Noop, // &op_F64x2_Convert_Low_I32x4_S,
+        &op_Noop, // &op_F64x2_Convert_Low_I32x4_U,
+    };
+
+    fn preamble(name: []const u8, pc: u32, ms: *const MachineState) TrapError!void {
+        ms.traceInstruction(name, pc);
+    }
+
+    fn run(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try @call(.always_tail, lookup(code[pc].opcode), .{ pc, code, ms });
+    }
+
+    fn lookup(opcode: Opcode) InstructionFunc {
+        return opcodeToFuncTable[@intFromEnum(opcode)];
+    }
+
+    fn op_Invalid(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("Invalid", pc, ms);
+        _ = code;
+        unreachable;
+    }
+
+    fn op_Unreachable(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("Unreachable", pc, ms);
+        _ = code;
+        return error.TrapUnreachable;
+    }
+
+    // fn op_DebugTrap(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+    // unreachable;
+    // }
+
+    fn op_Noop(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("Noop", pc, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Const(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Const", pc, ms);
+        const v: i32 = code[pc].immediate.ValueI32;
+        const r0 = code[pc].registers[0];
+        ms.setI32(r0, v);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Add(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Add", pc, ms);
+        const r0 = code[pc].registers[0];
+        const r1 = code[pc].registers[1];
+
+        const v0 = ms.getI32(r0);
+        const v1 = ms.getI32(r1);
+
+        // const v2: i32 = stack.popI32();
+        // const v1: i32 = stack.popI32();
+        const result = v0 +% v1;
+        ms.setI32(r0, result);
+        // stack.pushI32(result);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
 };
 
 const FunctionStore = struct {
     local_types: std.ArrayList(ValType),
     instructions: std.ArrayList(RegInstruction),
     instances: std.ArrayList(FunctionInstance),
+    registers: StableArray(u32),
 
     fn init(allocator: std.mem.Allocator) FunctionStore {
         return .{
             .local_types = std.ArrayList(ValType).init(allocator),
             .instructions = std.ArrayList(RegInstruction).init(allocator),
             .instances = std.ArrayList(FunctionInstance).init(allocator),
+            .registers = StableArray(u32).init(1024 * 1024 * 1), // 1 MB
         };
     }
 
@@ -1371,7 +2035,7 @@ pub const RegisterVM = struct {
 
         try compiler.compile(&self.functions);
 
-        // wasm bytecode -> IR graph -> register-assigned IR graph ->
+        // wasm bytecode -> IR graph -> register-assigned IR graph -> []RegInstruction
 
         // TODO create functions?
 
@@ -1379,13 +2043,71 @@ pub const RegisterVM = struct {
     }
 
     pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void {
-        _ = vm;
-        _ = module;
-        _ = handle;
-        _ = params;
-        _ = returns;
+        var self: *RegisterVM = fromVM(vm);
+
+        std.debug.assert(handle.type == .Export);
+
+        const num_imports = module.module_def.imports.functions.items.len;
+        const func_instance_index = handle.index - num_imports;
+
+        // if (func_index >= num_imports) {
+        //     try self.invokeInternal(module, instance_index, params, returns);
+        // } else {
+        //     unreachable; // TODO
+        //     // try invokeImportInternal(module, func_index, params, returns, .{});
+        // }
+
+        // const num_imports = module.module_def.imports.functions.items.len;
+        // if (func_index >= num_imports) {
+        //     const instance_index = func_index - num_imports;
+        //     try self.invokeInternal(module, instance_index, params, returns);
+        // } else {
+        //     unreachable; // TODO
+        //     // try invokeImportInternal(module, func_index, params, returns, .{});
+        // }
+
+        const func: FunctionInstance = self.functions.instances.items[func_instance_index];
+        const func_def: FunctionDefinition = module.module_def.functions.items[func.def_index];
+
+        const params_slice = params[0..func.num_params];
+        const returns_slice = returns[0..func.num_returns];
+
+        // Ensure any leftover state doesn't pollute this invoke. Can happen if the previous invoke returned an error.
+        self.ms.reset();
+
+        // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
+        // on the value stack
+        for (params_slice, 0..) |v, i| {
+            self.ms.setVal(@intCast(i), v);
+        }
+
+        try self.ms.pushFrame(func, module);
+        try self.ms.pushLabel(func.num_returns, @intCast(func_def.continuation));
+
+        DebugTrace.traceFunction(module, self.ms.num_frames, func.def_index);
+
+        try InstructionFuncs.run(@intCast(func.instructions_begin), self.functions.instructions.items.ptr, &self.ms);
+
+        // const total = returns_slice.len;
+        const return_registers = self.ms.registers[0..func.num_returns];
+        for (returns_slice, return_registers) |*ret, v| {
+            ret.* = v;
+        }
+
+        // if (returns_slice.len > 0) {
+        //     var index: i32 = @as(i32, @intCast(returns_slice.len - 1));
+        //     while (index >= 0) {
+        //         returns_slice[@as(usize, @intCast(index))] = self.ms.registers[index];
+        //         index -= 1;
+        //     }
+        // }
+
+        // _ = module;
+        // _ = handle;
+        // _ = params;
+        // _ = returns;
         _ = opts;
-        return error.Unimplemented;
+        // return error.Unimplemented;
     }
 
     pub fn invokeWithIndex(vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void {
@@ -1430,23 +2152,6 @@ pub const RegisterVM = struct {
     pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition {
         var self: *RegisterVM = fromVM(vm);
         return self.functions.instances.items[local_func_index].typeDefinition(module.module_def.*);
-    }
-};
-
-// register instructions get a slice of the overall set of register slots, which are pointers to actual
-// registers (?)
-
-const RegInstruction = struct {
-    register_slot_offset: u32, // offset within the function register slot space to start
-    opcode: Opcode,
-    immediate: def.InstructionImmediates,
-
-    fn numRegisters(self: RegInstruction) u4 {
-        switch (self.opcode) {}
-    }
-
-    fn registers(self: RegInstruction, register_slice: []Val) []Val {
-        return register_slice[self.registerOffset .. self.registerOffset + self.numRegisters()];
     }
 };
 

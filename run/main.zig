@@ -6,6 +6,7 @@ const wasi = bytebox.wasi;
 const Val = bytebox.Val;
 const ValType = bytebox.ValType;
 const TraceMode = bytebox.DebugTrace.Mode;
+const VmType = bytebox.VmType;
 
 const log = bytebox.Logger.default();
 
@@ -30,6 +31,8 @@ const CmdOpts = struct {
     wasm_argv: ?[][]const u8 = null,
     wasm_env: ?[][]const u8 = null,
     wasm_dirs: ?[][]const u8 = null,
+
+    vm_type: VmType = .Stack,
 };
 
 const InvokeArgs = struct {
@@ -118,6 +121,17 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
             } else {
                 opts.missing_options = arg;
             }
+        } else if (std.mem.eql(u8, arg, "--backend")) {
+            arg_index += 1;
+            if (getArgSafe(arg_index, args)) |type_str| {
+                if (std.mem.eql(u8, type_str, "reg") or std.mem.eql(u8, type_str, "register")) {
+                    opts.vm_type = .Register;
+                } else if (std.mem.eql(u8, type_str, "stack")) {
+                    opts.vm_type = .Stack;
+                } else {
+                    opts.invalid_arg = type_str;
+                }
+            }
         } else {
             opts.invalid_arg = arg;
             break;
@@ -178,6 +192,10 @@ fn printHelp(args: [][]const u8) void {
         \\     Note that this requires bytebox to be compiled with the flag -Ddebug_trace=true,
         \\     which is off by default for performance reasons.
         \\
+        \\  --backend <TYPE>
+        \\     Specify the vm backend type. TYPE can be:
+        \\       * stack (default)
+        \\       * register (experimental, unstable)
         \\
     ;
 
@@ -254,7 +272,7 @@ pub fn main() !void {
         return;
     }
 
-    var module_instance = try bytebox.createModuleInstance(.Stack, module_def, allocator);
+    var module_instance = try bytebox.createModuleInstance(opts.vm_type, module_def, allocator);
     defer module_instance.destroy();
 
     var imports_wasi: bytebox.ModuleImportPackage = try wasi.initImports(.{
