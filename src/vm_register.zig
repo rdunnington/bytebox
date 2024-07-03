@@ -272,14 +272,14 @@ const RegisterSlots = struct {
     };
 
     slots: std.ArrayList(Slot),
-    num_locals: u32,
+    num_reserved: u32,
     num_unique: u32,
     last_free: ?u32,
 
     fn init(allocator: std.mem.Allocator) RegisterSlots {
         return RegisterSlots{
             .slots = std.ArrayList(Slot).init(allocator),
-            .num_locals = 0,
+            .num_reserved = 0,
             .num_unique = 0,
             .last_free = null,
         };
@@ -289,9 +289,11 @@ const RegisterSlots = struct {
         self.slots.deinit();
     }
 
-    fn reserveLocals(self: *RegisterSlots, count: u32) AllocError!void {
+    fn reserve(self: *RegisterSlots, count: u32) AllocError!void {
         std.debug.assert(self.slots.items.len == 0);
-        self.num_locals = count;
+        std.debug.assert(self.num_reserved == 0);
+
+        self.num_reserved = count;
         // TODO don't actually allocate memory, just simulate it
         try self.slots.appendNTimes(Slot{ .node = null, .prev = null }, count);
     }
@@ -416,6 +418,12 @@ const FunctionIR = struct {
         var register_slots = RegisterSlots.init(scratch_allocator); // TODO move this into IntermediateCompileData?
         defer register_slots.deinit();
 
+        const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
+        const func_type: *const FunctionTypeDefinition = &module_def.types.items[func.type_def_index];
+        const num_locals: u32 = @intCast(func_def.locals.items.len);
+        const num_params: u32 = @intCast(func_type.getParams().len);
+        const num_returns: u32 = @intCast(func_type.getReturns().len);
+
         {
             std.debug.assert(func.ir_root != null);
 
@@ -437,11 +445,10 @@ const FunctionIR = struct {
             //   * Allocate registers for each consumed input
             //   * push input nodes onto the visit queue
 
-            // First
-            const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
-            const params_and_locals_count = func_def.numParamsAndLocals(module_def);
-
-            try register_slots.reserveLocals(params_and_locals_count);
+            // First reserve space for params, locals, and return values. Return values use the same
+            // slots that params do.
+            const num_reserved_registers: u32 = @max(num_returns, num_params + num_locals);
+            try register_slots.reserve(num_reserved_registers);
 
             while (visit_queue.items.len > 0) {
                 var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
@@ -571,6 +578,11 @@ const FunctionIR = struct {
                         // Local_Get doesn't have node inputs, it gets its input from its immediate index
                         try store.registers.append(immediates.Index);
                     },
+                    // .I32_Const => {
+                    //     const input_register: ?u32 = compile_data.register_map.get(node);
+                    //     std.debug.assert(input_register != null);
+                    //     try store.registers.append(input_register.?);
+                    // },
                     else => {
                         for (node.edgesIn()) |input_node| {
                             const input_register: ?u32 = compile_data.register_map.get(input_node);
@@ -611,19 +623,13 @@ const FunctionIR = struct {
 
         std.mem.reverse(RegInstruction, emitted_instructions);
 
-        const func_type: *const FunctionTypeDefinition = &module_def.types.items[func.type_def_index];
-        const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
-        const num_params: u32 = @intCast(func_type.getParams().len);
-        const num_returns: u32 = @intCast(func_type.getReturns().len);
-        const params_and_locals_count: u32 = func_def.numParamsAndLocals(module_def);
-
         try store.instances.append(FunctionInstance{
             .type_def_index = func.type_def_index,
             .def_index = func.def_index,
             .instructions_begin = instructions_begin,
             .num_params = num_params,
             .num_returns = num_returns,
-            .num_locals = params_and_locals_count,
+            .num_locals = num_params + num_locals,
             .total_register_slots = register_slots.num_unique,
             // .instructions_end = instructions_end,
             // .local_types_begin = types_index_begin,
@@ -1668,7 +1674,7 @@ const InstructionFuncs = struct {
         &op_Return,
         &op_Noop, // &op_Call,
         &op_Noop, // &op_Call_Indirect,
-        &op_Noop, // &op_Drop,
+        &op_Invalid, // Drop is not needed in a register-based VM
         &op_Noop, // &op_Select,
         &op_Noop, // &op_Select_T,
         &op_Invalid, // Local_Get turns into a direct register reference
@@ -1704,9 +1710,9 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_Memory_Size,
         &op_Noop, // &op_Memory_Grow,
         &op_I32_Const,
-        &op_Noop, // &op_I64_Const,
-        &op_Noop, // &op_F32_Const,
-        &op_Noop, // &op_F64_Const,
+        &op_I64_Const,
+        &op_F32_Const,
+        &op_F64_Const,
         &op_I32_Eqz,
         &op_I32_Eq,
         &op_I32_NE,
@@ -2284,9 +2290,23 @@ const InstructionFuncs = struct {
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
-    // op_I64_Const
-    // op_F32_Const
-    // op_F64_Const
+    fn op_I64_Const(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Const", pc, ms);
+        ms.setI64(code[pc].registers[0], code[pc].immediate.ValueI64);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_F32_Const(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("F32_Const", pc, ms);
+        ms.setF32(code[pc].registers[0], code[pc].immediate.ValueF32);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_F64_Const(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("F64_Const", pc, ms);
+        ms.setF64(code[pc].registers[0], code[pc].immediate.ValueF64);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
 
     fn op_I32_Eqz(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Eqz", pc, ms);
