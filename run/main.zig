@@ -233,6 +233,10 @@ pub fn main() !void {
         log.err("Argument {s} is missing required options.\n", .{missing_options});
         printHelp(args);
         return;
+    } else if (opts.filename == null) {
+        log.err("Filename missing.\n", .{});
+        printHelp(args);
+        return;
     } else if (opts.invoke != null and opts.filename == null) {
         log.err("Cannot invoke {s} without a file to load.", .{opts.invoke.?.funcname});
         printHelp(args);
@@ -243,17 +247,17 @@ pub fn main() !void {
         bytebox.DebugTrace.setMode(opts.trace);
     }
 
-    std.debug.assert(opts.filename != null);
+    const filename: []const u8 = opts.filename.?;
 
     var cwd = std.fs.cwd();
-    const wasm_data: []u8 = cwd.readFileAlloc(allocator, opts.filename.?, 1024 * 1024 * 128) catch |e| {
-        std.log.err("Failed to read file '{s}' into memory: {}", .{ opts.filename.?, e });
+    const wasm_data: []u8 = cwd.readFileAlloc(allocator, filename, 1024 * 1024 * 128) catch |e| {
+        std.log.err("Failed to read file '{s}' into memory: {}", .{ filename, e });
         return RunErrors.IoError;
     };
     defer allocator.free(wasm_data);
 
     const module_def_opts = bytebox.ModuleDefinitionOpts{
-        .debug_name = std.fs.path.basename(opts.filename.?),
+        .debug_name = std.fs.path.basename(filename),
         .log = log,
     };
     var module_def = try bytebox.createModuleDefinition(allocator, module_def_opts);
