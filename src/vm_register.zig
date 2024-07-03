@@ -2103,7 +2103,7 @@ const InstructionFuncs = struct {
                             if (v1 == 0) {
                                 return TrapError.TrapIntegerDivisionByZero;
                             }
-                            if (v0 == std.math.minInt(T) and v0 == -1) {
+                            if (v0 == std.math.minInt(T) and v1 == -1) {
                                 return TrapError.TrapIntegerOverflow;
                             }
                             break :blk @divTrunc(v0, v1);
@@ -2437,7 +2437,8 @@ pub const RegisterVM = struct {
         try self.ms.pushFrame(func, module);
         try self.ms.pushLabel(func.num_returns, @intCast(func_def.continuation));
         for (params_slice, 0..) |v, i| {
-            self.ms.setVal(@intCast(i), v);
+            // need to set in reverse order to follow the stack convention
+            self.ms.setVal(@intCast(params_slice.len - 1 - i), v);
         }
 
         DebugTrace.traceFunction(module, self.ms.num_frames, func.def_index);
