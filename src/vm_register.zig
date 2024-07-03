@@ -343,12 +343,16 @@ const RegisterSlots = struct {
     }
 
     fn freeAt(self: *RegisterSlots, index: u32) void {
-        var slot: *Slot = &self.slots.items[index];
-        // std.debug.assert(slot.node == node);
+        // Reserved registers are not allowed to be used by general-purpose instructions. They're only for
+        // use by Local_* and Return.
+        if (index >= self.num_reserved) {
+            var slot: *Slot = &self.slots.items[index];
+            // std.debug.assert(slot.node == node);
 
-        slot.node = null;
-        slot.prev = self.last_free;
-        self.last_free = index;
+            slot.node = null;
+            slot.prev = self.last_free;
+            self.last_free = index;
+        }
 
         // std.debug.print("attempting to free node {*} with opcode {} at index {}: {}\n", .{ node, node.opcode, index, succes });
     }
@@ -498,8 +502,8 @@ const FunctionIR = struct {
                             var register: u32 = 0;
                             if (input_node.opcode == .Local_Get) {
                                 const instruction = input_node.instruction(module_def);
-                                std.debug.assert(instruction != null);
                                 register = instruction.?.immediate.Index;
+                                std.debug.assert(register < register_slots.num_reserved); // ensure this register is actually reserved
                             } else {
                                 register = try register_slots.alloc(input_node);
                             }
