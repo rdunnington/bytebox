@@ -537,7 +537,7 @@ const FunctionIR = struct {
 
             switch (node.opcode) {
                 .Local_Get => {
-                    std.debug.print("\t\tskipped emit - flattened into register\n", .{});
+                    std.debug.print("\t\tskipped emit - flattened into register {}\n", .{node.instruction(module_def).?.immediate.Index});
                     continue;
                 },
                 else => {},
@@ -1652,7 +1652,7 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_I64_Const,
         &op_Noop, // &op_F32_Const,
         &op_Noop, // &op_F64_Const,
-        &op_Noop, // &op_I32_Eqz,
+        &op_I32_Eqz,
         &op_I32_Eq,
         &op_I32_NE,
         &op_I32_LT_S,
@@ -1686,9 +1686,9 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_F64_GT,
         &op_Noop, // &op_F64_LE,
         &op_Noop, // &op_F64_GE,
-        &op_Noop, // &op_I32_Clz,
-        &op_Noop, // &op_I32_Ctz,
-        &op_Noop, // &op_I32_Popcnt,
+        &op_I32_Clz,
+        &op_I32_Ctz,
+        &op_I32_Popcnt,
         &op_I32_Add,
         &op_I32_Sub,
         &op_I32_Mul,
@@ -1699,11 +1699,11 @@ const InstructionFuncs = struct {
         &op_I32_And,
         &op_I32_Or,
         &op_I32_Xor,
-        &op_Noop, // &op_I32_Shl,
-        &op_Noop, // &op_I32_Shr_S,
-        &op_Noop, // &op_I32_Shr_U,
-        &op_Noop, // &op_I32_Rotl,
-        &op_Noop, // &op_I32_Rotr,
+        &op_I32_Shl,
+        &op_I32_Shr_S,
+        &op_I32_Shr_U,
+        &op_I32_Rotl,
+        &op_I32_Rotr,
         &op_Noop, // &op_I64_Clz,
         &op_Noop, // &op_I64_Ctz,
         &op_Noop, // &op_I64_Popcnt,
@@ -1775,8 +1775,8 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_I64_Reinterpret_F64,
         &op_Noop, // &op_F32_Reinterpret_I32,
         &op_Noop, // &op_F64_Reinterpret_I64,
-        &op_Noop, // &op_I32_Extend8_S,
-        &op_Noop, // &op_I32_Extend16_S,
+        &op_I32_Extend8_S,
+        &op_I32_Extend16_S,
         &op_Noop, // &op_I64_Extend8_S,
         &op_Noop, // &op_I64_Extend16_S,
         &op_Noop, // &op_I64_Extend32_S,
@@ -2051,6 +2051,7 @@ const InstructionFuncs = struct {
         return opcodeToFuncTable[@intFromEnum(opcode)];
     }
 
+    // TODO move these to a common file so we can share implementations with the stack VM
     const OpHelpers = struct {
         fn bitCastUnsignedType(comptime T: type) type {
             return switch (T) {
@@ -2074,6 +2075,28 @@ const InstructionFuncs = struct {
 
         fn bitCastSigned(v: anytype) bitCastSignedType(@TypeOf(v)) {
             return @as(bitCastSignedType(@TypeOf(v)), @bitCast(v));
+        }
+
+        fn unaryOp(comptime T: type, comptime opcode: Opcode, registers: []const u32, ms: *MachineState) TrapError!void {
+            const r0 = registers[0];
+            const r1 = registers[1];
+
+            switch (T) {
+                i32 => {
+                    const v = ms.getI32(r0);
+                    const out: T = switch (opcode) {
+                        .I32_Eqz => if (v == 0) 1 else 0,
+                        .I32_Clz => @clz(v),
+                        .I32_Ctz => @ctz(v),
+                        .I32_Popcnt => @popCount(v),
+                        .I32_Extend8_S => @as(i8, @truncate(v)),
+                        .I32_Extend16_S => @as(i16, @truncate(v)),
+                        else => unreachable,
+                    };
+                    ms.setI32(r1, out);
+                },
+                else => unreachable,
+            }
         }
 
         fn binaryOp(comptime T: type, comptime opcode: Opcode, registers: []const u32, ms: *MachineState) TrapError!void {
@@ -2135,6 +2158,32 @@ const InstructionFuncs = struct {
                         .I32_And => bitCastSigned(bitCastUnsigned(v0) & bitCastUnsigned(v1)),
                         .I32_Or => bitCastSigned(bitCastUnsigned(v0) | bitCastUnsigned(v1)),
                         .I32_Xor => bitCastSigned(bitCastUnsigned(v0) ^ bitCastUnsigned(v1)),
+                        .I32_Shl => blk: {
+                            const shift_unsafe: i32 = v1;
+                            const shift: i32 = @mod(shift_unsafe, 32);
+                            break :blk std.math.shl(i32, v0, shift);
+                        },
+                        .I32_Shr_S => blk: {
+                            const shift_unsafe: i32 = v1;
+                            const shift = @mod(shift_unsafe, 32);
+                            break :blk std.math.shr(i32, v0, shift);
+                        },
+                        .I32_Shr_U => blk: {
+                            const shift_unsafe: u32 = @as(u32, @bitCast(v1));
+                            const int: u32 = @as(u32, @bitCast(v0));
+                            const shift = @mod(shift_unsafe, 32);
+                            break :blk @as(i32, @bitCast(std.math.shr(u32, int, shift)));
+                        },
+                        .I32_Rotl => blk: {
+                            const rot: u32 = @as(u32, @bitCast(v1));
+                            const int: u32 = @as(u32, @bitCast(v0));
+                            break :blk @as(i32, @bitCast(std.math.rotl(u32, int, rot)));
+                        },
+                        .I32_Rotr => blk: {
+                            const rot: u32 = @as(u32, @bitCast(v1));
+                            const int: u32 = @as(u32, @bitCast(v0));
+                            break :blk @as(i32, @bitCast(std.math.rotr(u32, int, rot)));
+                        },
                         else => unreachable,
                     };
                     ms.setI32(r2, out);
@@ -2179,7 +2228,12 @@ const InstructionFuncs = struct {
     // op_I64_Const
     // op_F32_Const
     // op_F64_Const
-    // op_I32_Eqz
+
+    fn op_I32_Eqz(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Eqz", pc, ms);
+        try OpHelpers.unaryOp(i32, Opcode.I32_Eqz, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
 
     fn op_I32_Eq(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Eq", pc, ms);
@@ -2264,9 +2318,24 @@ const InstructionFuncs = struct {
     // &op_F64_GT,
     // &op_F64_LE,
     // &op_F64_GE,
-    // &op_I32_Clz,
-    // &op_I32_Ctz,
-    // &op_I32_Popcnt,
+
+    fn op_I32_Clz(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Clz", pc, ms);
+        try OpHelpers.unaryOp(i32, Opcode.I32_Clz, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Ctz(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Ctz", pc, ms);
+        try OpHelpers.unaryOp(i32, Opcode.I32_Ctz, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Popcnt(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Popcnt", pc, ms);
+        try OpHelpers.unaryOp(i32, Opcode.I32_Popcnt, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
 
     fn op_I32_Add(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Add", pc, ms);
@@ -2294,7 +2363,7 @@ const InstructionFuncs = struct {
 
     fn op_I32_Div_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Div_U", pc, ms);
-        try OpHelpers.binaryOp(i32, Opcode.I32_Div_S, code[pc].registers, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Div_U, code[pc].registers, ms);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
@@ -2325,6 +2394,120 @@ const InstructionFuncs = struct {
     fn op_I32_Xor(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Xor", pc, ms);
         try OpHelpers.binaryOp(i32, Opcode.I32_Xor, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Shl(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Shl", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Shl, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Shr_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Shr_S", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Shr_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Shr_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Shr_U", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Shr_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Rotl(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Rotl", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Rotl, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Rotr(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Rotr", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Rotr, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    // &op_I64_Clz,
+    // &op_I64_Ctz,
+    // &op_I64_Popcnt,
+    // &op_I64_Add,
+    // &op_I64_Sub,
+    // &op_I64_Mul,
+    // &op_I64_Div_S,
+    // &op_I64_Div_U,
+    // &op_I64_Rem_S,
+    // &op_I64_Rem_U,
+    // &op_I64_And,
+    // &op_I64_Or,
+    // &op_I64_Xor,
+    // &op_I64_Shl,
+    // &op_I64_Shr_S,
+    // &op_I64_Shr_U,
+    // &op_I64_Rotl,
+    // &op_I64_Rotr,
+    // &op_F32_Abs,
+    // &op_F32_Neg,
+    // &op_F32_Ceil,
+    // &op_F32_Floor,
+    // &op_F32_Trunc,
+    // &op_F32_Nearest,
+    // &op_F32_Sqrt,
+    // &op_F32_Add,
+    // &op_F32_Sub,
+    // &op_F32_Mul,
+    // &op_F32_Div,
+    // &op_F32_Min,
+    // &op_F32_Max,
+    // &op_F32_Copysign,
+    // &op_F64_Abs,
+    // &op_F64_Neg,
+    // &op_F64_Ceil,
+    // &op_F64_Floor,
+    // &op_F64_Trunc,
+    // &op_F64_Nearest,
+    // &op_F64_Sqrt,
+    // &op_F64_Add,
+    // &op_F64_Sub,
+    // &op_F64_Mul,
+    // &op_F64_Div,
+    // &op_F64_Min,
+    // &op_F64_Max,
+    // &op_F64_Copysign,
+    // &op_I32_Wrap_I64,
+    // &op_I32_Trunc_F32_S,
+    // &op_I32_Trunc_F32_U,
+    // &op_I32_Trunc_F64_S,
+    // &op_I32_Trunc_F64_U,
+    // &op_I64_Extend_I32_S,
+    // &op_I64_Extend_I32_U,
+    // &op_I64_Trunc_F32_S,
+    // &op_I64_Trunc_F32_U,
+    // &op_I64_Trunc_F64_S,
+    // &op_I64_Trunc_F64_U,
+    // &op_F32_Convert_I32_S,
+    // &op_F32_Convert_I32_U,
+    // &op_F32_Convert_I64_S,
+    // &op_F32_Convert_I64_U,
+    // &op_F32_Demote_F64,
+    // &op_F64_Convert_I32_S,
+    // &op_F64_Convert_I32_U,
+    // &op_F64_Convert_I64_S,
+    // &op_F64_Convert_I64_U,
+    // &op_F64_Promote_F32,
+    // &op_I32_Reinterpret_F32,
+    // &op_I64_Reinterpret_F64,
+    // &op_F32_Reinterpret_I32,
+    // &op_F64_Reinterpret_I64,
+
+    fn op_I32_Extend8_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Extend8_S", pc, ms);
+        try OpHelpers.unaryOp(i32, Opcode.I32_Extend8_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Extend16_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Extend16_S", pc, ms);
+        try OpHelpers.unaryOp(i32, Opcode.I32_Extend16_S, code[pc].registers, ms);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 };
