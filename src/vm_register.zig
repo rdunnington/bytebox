@@ -481,14 +481,21 @@ const FunctionIR = struct {
                             std.debug.print("\t\tallocated slot {}\n", .{register});
                         }
                     },
-                    .Local_Get => { // Local_Tee? Local_Set?
-                        const local_index = node.instruction(module_def).?.immediate.Index;
-                        try compile_data.register_map.put(node, local_index);
-                        std.debug.print("\t\tallocated slot {}\n", .{local_index});
-                    },
+                    // .Local_Get => { // Local_Tee? Local_Set?
+                    //     // const local_index = node.instruction(module_def).?.immediate.Index;
+                    //     // try compile_data.register_map.putNoClobber(node, local_index);
+                    //     // std.debug.print("\t\tallocated slot {}\n", .{local_index});
+                    // },
                     else => {
                         for (input_edges) |input_node| {
-                            const register: u32 = try register_slots.alloc(input_node);
+                            var register: u32 = 0;
+                            if (input_node.opcode == .Local_Get) {
+                                const instruction = input_node.instruction(module_def);
+                                std.debug.assert(instruction != null);
+                                register = instruction.?.immediate.Index;
+                            } else {
+                                register = try register_slots.alloc(input_node);
+                            }
                             try compile_data.register_map.put(input_node, register);
                             std.debug.print("\t\tallocated slot {}\n", .{register});
                         }
@@ -528,6 +535,18 @@ const FunctionIR = struct {
 
             std.debug.print("\tvisit node 0x{x} ({}) - {} outs, {} ins\n", .{ @intFromPtr(node), node.opcode, node.edgesOut().len, node.edgesIn().len });
 
+            switch (node.opcode) {
+                .Local_Get => {
+                    std.debug.print("\t\tskipped emit - flattened into register\n", .{});
+                    continue;
+                },
+                else => {},
+            }
+
+            // if (node.edgesIn().len == 0) {
+            //     std.debug.print("\t\tskipped due to no inputs - must be a source node");
+            // }
+
             // only emit an instruction once all its out edges have been visited - this ensures all dependent instructions
             // will be executed after this one
             var did_visit_all_outputs: bool = true;
@@ -547,10 +566,18 @@ const FunctionIR = struct {
                 const immediates = if (node.instruction(module_def)) |instr| instr.immediate else InstructionImmediates{ .Void = {} };
 
                 const registers_begin = store.registers.items.len;
-                for (node.edgesIn()) |input_node| {
-                    const input_register: ?u32 = compile_data.register_map.get(input_node);
-                    std.debug.assert(input_register != null);
-                    try store.registers.append(input_register.?);
+                switch (node.opcode) {
+                    .Local_Get => {
+                        // Local_Get doesn't have node inputs, it gets its input from its immediate index
+                        try store.registers.append(immediates.Index);
+                    },
+                    else => {
+                        for (node.edgesIn()) |input_node| {
+                            const input_register: ?u32 = compile_data.register_map.get(input_node);
+                            std.debug.assert(input_register != null);
+                            try store.registers.append(input_register.?);
+                        }
+                    },
                 }
 
                 if (compile_data.register_map.get(node)) |output_register| {
@@ -1582,13 +1609,13 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_Branch,
         &op_Noop, // &op_Branch_If,
         &op_Noop, // &op_Branch_Table,
-        &op_Noop, // &op_Return,
+        &op_Return,
         &op_Noop, // &op_Call,
         &op_Noop, // &op_Call_Indirect,
         &op_Noop, // &op_Drop,
         &op_Noop, // &op_Select,
         &op_Noop, // &op_Select_T,
-        &op_Local_Get, // &op_Local_Get,
+        &op_Invalid, // Local_Get turns into a direct register reference
         &op_Noop, // &op_Local_Set,
         &op_Noop, // &op_Local_Tee,
         &op_Noop, // &op_Global_Get,
@@ -2127,16 +2154,9 @@ const InstructionFuncs = struct {
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
-    fn op_Local_Get(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
-        try preamble("Local_Get", pc, ms);
-
+    fn op_Return(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("Return", pc, ms);
         _ = code;
-
-        unreachable;
-        // const locals_index: u32 = code[pc].immediate.Index;
-
-        // ms.setI32(code[pc].registers[0], ms code[pc].immediate.ValueI32);
-        // try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
     fn op_I32_Const(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
