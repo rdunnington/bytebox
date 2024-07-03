@@ -198,18 +198,28 @@ const IRNode = struct {
         };
     }
 
-    fn needsRegisterSlot(node: *IRNode) bool {
+    fn numConsumedRegisters(node: *IRNode) u32 {
         // TODO fill this out
         return switch (node.opcode) {
+            .I32_Add,
+            .I32_Sub,
+            .I32_Mul,
+            .I32_Div_S,
+            .I32_Div_U,
+            .I32_Rem_S,
+            .I32_Rem_U,
+            .I32_And,
+            .I32_Or,
+            .I32_Xor,
+            => 2,
+
             .If,
             .IfNoElse,
-            .Else,
-            .Return,
-            .Branch,
             .Branch_If,
-            .Branch_Table,
-            => false,
-            else => true,
+            .Return, // NOTE - this will change depending on the function signature
+            => 1,
+
+            else => 0,
         };
     }
 
@@ -262,13 +272,15 @@ const RegisterSlots = struct {
     };
 
     slots: std.ArrayList(Slot),
-    total_unique: u32,
+    num_locals: u32,
+    num_unique: u32,
     last_free: ?u32,
 
     fn init(allocator: std.mem.Allocator) RegisterSlots {
         return RegisterSlots{
             .slots = std.ArrayList(Slot).init(allocator),
-            .total_unique = 0,
+            .num_locals = 0,
+            .num_unique = 0,
             .last_free = null,
         };
     }
@@ -276,6 +288,31 @@ const RegisterSlots = struct {
     fn deinit(self: *RegisterSlots) void {
         self.slots.deinit();
     }
+
+    fn reserveLocals(self: *RegisterSlots, count: u32) AllocError!void {
+        std.debug.assert(self.slots.items.len == 0);
+        self.num_locals = count;
+        // TODO don't actually allocate memory, just simulate it
+        try self.slots.appendNTimes(Slot{ .node = null, .prev = null }, count);
+    }
+
+    // fn getOrAlloc(self: *RegisterSlots, node: *IRNode) AllocError!u32 {
+    //     return switch (node.opcode) {
+    //             .Local_Get => {
+    //                 const local_index = node.immediate.Index;
+    //                 std.debug.assert(local_index < self.num_locals);
+    //                 return local_index;
+    //             }
+    //             .Local_Tee => unreachable,
+    //             else => self.alloc(node),
+    //         },
+    //     }
+    //     // for (self.slots.items, 0..) |slot, i| { // TODO make this lookup better
+    //     //     if (slot.node == node) {
+    //     //         return @intCast(i);
+    //     //     }
+    //     // }
+    // }
 
     fn alloc(self: *RegisterSlots, node: *IRNode) AllocError!u32 {
         if (self.last_free == null) {
@@ -287,8 +324,8 @@ const RegisterSlots = struct {
                 .prev = null,
             });
 
-            if (self.total_unique < self.last_free.?) {
-                self.total_unique = self.last_free.?;
+            if (self.num_unique < self.last_free.?) {
+                self.num_unique = self.last_free.?;
             }
         }
 
@@ -298,32 +335,20 @@ const RegisterSlots = struct {
         slot.node = node;
         slot.prev = null;
 
-        std.debug.print("pushed node {*} with opcode {} to index {}\n", .{ node, node.opcode, index });
+        // std.debug.print("pushed node {*} with opcode {} to index {}\n", .{ node, node.opcode, index });
 
         return index;
     }
 
-    fn freeAt(self: *RegisterSlots, node: *IRNode, index: u32) void {
-        var succes: bool = false;
+    fn freeAt(self: *RegisterSlots, index: u32) void {
         var slot: *Slot = &self.slots.items[index];
-        if (slot.node == node) {
-            slot.node = null;
-            slot.prev = self.last_free;
-            self.last_free = index;
-            succes = true;
-        }
+        // std.debug.assert(slot.node == node);
 
-        std.debug.print("attempting to free node {*} with opcode {} at index {}: {}\n", .{ node, node.opcode, index, succes });
-    }
+        slot.node = null;
+        slot.prev = self.last_free;
+        self.last_free = index;
 
-    fn getAssignedSlot(self: RegisterSlots, node: *IRNode) u32 {
-        // TODO swap out with hashmap lookup
-        for (self.slots.items, 0..) |slot, index| {
-            if (slot.node == node) {
-                return @intCast(index);
-            }
-        }
-        unreachable;
+        // std.debug.print("attempting to free node {*} with opcode {} at index {}: {}\n", .{ node, node.opcode, index, succes });
     }
 };
 
@@ -385,9 +410,12 @@ const FunctionIR = struct {
     fn codegen(func: FunctionIR, store: *FunctionStore, compile_data: *IntermediateCompileData, module_def: ModuleDefinition, scratch_allocator: std.mem.Allocator) AllocError!void {
         std.debug.assert(func.ir_root != null);
 
+        std.debug.print("==== CODEGEN: regalloc ====\n", .{});
+
         // allocate register slots for each node.
-        var register_slots = RegisterSlots.init(scratch_allocator);
+        var register_slots = RegisterSlots.init(scratch_allocator); // TODO move this into IntermediateCompileData?
         defer register_slots.deinit();
+
         {
             std.debug.assert(func.ir_root != null);
 
@@ -401,28 +429,76 @@ const FunctionIR = struct {
             var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
             defer visited.deinit();
 
+            // general regalloc algorithm: (DOES NOT HANDLE multiple return points yet)
+            // * Reserve registers for function locals (params + local variables)
+            // * Run a breadth-first traversal of the graph. Push root node (return) goes on first.
+            // * Pop a node off the visit queue
+            //   * Free output registers
+            //   * Allocate registers for each consumed input
+            //   * push input nodes onto the visit queue
+
+            // First
+            const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
+            const params_and_locals_count = func_def.numParamsAndLocals(module_def);
+
+            try register_slots.reserveLocals(params_and_locals_count);
+
             while (visit_queue.items.len > 0) {
                 var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
                 try visited.put(node, {});
 
-                // mark output node slots as free - this is safe because the dataflow graph flows one way and the
+                std.debug.print("\tnode 0x{x}: {}\n", .{ @intFromPtr(node), node.opcode });
+
+                const output_edges: []*IRNode = node.edgesOut();
+
+                // mark output node slots as free if they've all been visited. This is safe because the dataflow graph flows one way and the
                 // output can't be reused higher up in the graph
-                for (node.edgesOut()) |output_node| {
-                    if (compile_data.register_map.get(output_node)) |index| {
-                        register_slots.freeAt(output_node, index);
+                var did_visit_all_outputs: bool = true;
+                for (output_edges) |output_node| {
+                    if (!visited.contains(output_node)) {
+                        did_visit_all_outputs = false;
+                        break;
                     }
                 }
 
-                // allocate slots for this instruction
-                // TODO handle multiple output slots (e.g. results of a function call or Memory.Grow)
-                if (node.needsRegisterSlot()) {
-                    const index: u32 = try register_slots.alloc(node);
-                    try compile_data.register_map.put(node, index);
+                if (did_visit_all_outputs) {
+                    // free this node's register slot so they can be used by another instruction
+                    // TODO handle multiple outputs
+                    if (compile_data.register_map.get(node)) |index| {
+                        std.debug.print("\t\tfreeing output slot at: {}\n", .{index});
+                        register_slots.freeAt(index);
+                    }
+                }
+
+                const input_edges: []*IRNode = node.edgesIn();
+
+                // allocate registers for this instruction
+                switch (node.opcode) {
+                    .Return => {
+                        // return values always go in the first set of registers
+                        for (input_edges, 0..) |input_node, register| {
+                            try compile_data.register_map.put(input_node, @intCast(register));
+                            std.debug.print("\t\tallocated slot {}\n", .{register});
+                        }
+                    },
+                    .Local_Get => { // Local_Tee? Local_Set?
+                        const local_index = node.instruction(module_def).?.immediate.Index;
+                        try compile_data.register_map.put(node, local_index);
+                        std.debug.print("\t\tallocated slot {}\n", .{local_index});
+                    },
+                    else => {
+                        for (input_edges) |input_node| {
+                            const register: u32 = try register_slots.alloc(input_node);
+                            try compile_data.register_map.put(input_node, register);
+                            std.debug.print("\t\tallocated slot {}\n", .{register});
+                        }
+                    },
                 }
 
                 // add inputs to the FIFO visit queue
                 for (node.edgesIn()) |input_node| {
                     if (visited.contains(input_node) == false) {
+                        std.debug.print("\t\tqueued up node 0x{x}: {}\n", .{ @intFromPtr(input_node), input_node.opcode });
                         try visit_queue.append(input_node);
                     }
                 }
@@ -445,34 +521,50 @@ const FunctionIR = struct {
         // var instructions = std.ArrayList(RegInstruction).init(scratch_allocator);
         // defer instructions.deinit();
 
+        std.debug.print("==== CODEGEN: emit instructions ====\n", .{});
+
         while (visit_queue.items.len > 0) {
             var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
 
+            std.debug.print("\tvisit node 0x{x} ({}) - {} outs, {} ins\n", .{ @intFromPtr(node), node.opcode, node.edgesOut().len, node.edgesIn().len });
+
             // only emit an instruction once all its out edges have been visited - this ensures all dependent instructions
             // will be executed after this one
-            var all_out_edges_visited: bool = true;
+            var did_visit_all_outputs: bool = true;
             for (node.edgesOut()) |output_node| {
                 if (visited.contains(output_node) == false) {
-                    all_out_edges_visited = false;
+                    did_visit_all_outputs = false;
                     break;
                 }
             }
 
-            if (all_out_edges_visited) {
+            // TODO ideally dedupe the register slices to save cache space - since they don't change,
+            // instructions can share their register slices if the values are the same. Could be as
+            // simple as a hashmap([]u32, u32), where a slice hashes to an offset in the registers array.
+            if (did_visit_all_outputs) {
                 try visited.put(node, {});
 
+                const immediates = if (node.instruction(module_def)) |instr| instr.immediate else InstructionImmediates{ .Void = {} };
+
                 const registers_begin = store.registers.items.len;
-                for (node.edgesOut()) |output_node| {
-                    const slot: u32 = register_slots.getAssignedSlot(output_node);
-                    try store.registers.append(slot);
+                for (node.edgesIn()) |input_node| {
+                    const input_register: ?u32 = compile_data.register_map.get(input_node);
+                    std.debug.assert(input_register != null);
+                    try store.registers.append(input_register.?);
                 }
+
+                if (compile_data.register_map.get(node)) |output_register| {
+                    try store.registers.append(output_register);
+                }
+
                 const registers_end = store.registers.items.len;
                 const registers = store.registers.items[registers_begin..registers_end];
 
+                std.debug.print("\t{}: registers: {any}\n", .{ node.opcode, registers });
+
                 try instructions.append(RegInstruction{
-                    // .register_slot_offset = if (compile_data.register_map.get(node)) |slot_index| slot_index else 0,
                     .opcode = node.opcode,
-                    .immediate = node.instruction(module_def).?.immediate,
+                    .immediate = immediates,
                     .registers = registers,
                 });
             } else {
@@ -492,23 +584,20 @@ const FunctionIR = struct {
 
         std.mem.reverse(RegInstruction, emitted_instructions);
 
-        // const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
         const func_type: *const FunctionTypeDefinition = &module_def.types.items[func.type_def_index];
-        // const param_types: []const ValType = func_type.getParams();
-        // try store.local_types.ensureTotalCapacity(store.local_types.items.len + param_types.len + func_def.locals.items.len);
-
-        // const types_index_begin = store.local_types.items.len;
-        // store.local_types.appendSliceAssumeCapacity(param_types);
-        // store.local_types.appendSliceAssumeCapacity(func_def.locals.items);
-        // const types_index_end = store.local_types.items.len;
+        const func_def: *const FunctionDefinition = &module_def.functions.items[func.def_index];
+        const num_params: u32 = @intCast(func_type.getParams().len);
+        const num_returns: u32 = @intCast(func_type.getReturns().len);
+        const params_and_locals_count: u32 = func_def.numParamsAndLocals(module_def);
 
         try store.instances.append(FunctionInstance{
             .type_def_index = func.type_def_index,
             .def_index = func.def_index,
             .instructions_begin = instructions_begin,
-            .num_params = @intCast(func_type.getParams().len),
-            .num_returns = @intCast(func_type.getReturns().len),
-            .total_register_slots = register_slots.total_unique,
+            .num_params = num_params,
+            .num_returns = num_returns,
+            .num_locals = params_and_locals_count,
+            .total_register_slots = register_slots.num_unique,
             // .instructions_end = instructions_end,
             // .local_types_begin = types_index_begin,
             // .local_types_end = types_index_end,
@@ -1234,6 +1323,7 @@ const FunctionInstance = struct {
     type_def_index: usize,
     def_index: usize,
     instructions_begin: usize,
+    num_locals: u32,
     num_params: u32,
     num_returns: u32,
     total_register_slots: u32,
@@ -1268,8 +1358,8 @@ const CallFrame = struct {
     func: *const FunctionInstance,
     module_instance: *ModuleInstance,
     num_returns: u32,
-    registers_begin: u32, // offset into registers
-    labels_begin: u32, // offset into labels
+    registers_begin: u32,
+    labels_begin: u32,
 };
 
 const MachineState = struct {
@@ -1338,55 +1428,55 @@ const MachineState = struct {
         ms.num_frames = 0;
     }
 
-    fn getVal(ms: MachineState, register_local: u32) Val {
+    fn getVal(ms: MachineState, register: u32) Val {
         const frame: *CallFrame = ms.topFrame();
-        const slot = frame.registers_begin + register_local;
+        const slot = frame.registers_begin + register;
         return ms.registers[slot];
     }
 
-    fn getI32(ms: MachineState, register_local: u32) i32 {
-        return ms.getVal(register_local).I32;
+    fn getI32(ms: MachineState, register: u32) i32 {
+        return ms.getVal(register).I32;
     }
 
-    fn getI64(ms: MachineState, register_local: u32) i64 {
-        return ms.getVal(register_local).I64;
+    fn getI64(ms: MachineState, register: u32) i64 {
+        return ms.getVal(register).I64;
     }
 
-    fn getF32(ms: MachineState, register_local: u32) f32 {
-        return ms.getVal(register_local).F32;
+    fn getF32(ms: MachineState, register: u32) f32 {
+        return ms.getVal(register).F32;
     }
 
-    fn getF64(ms: MachineState, register_local: u32) f64 {
-        return ms.getVal(register_local).F64;
+    fn getF64(ms: MachineState, register: u32) f64 {
+        return ms.getVal(register).F64;
     }
 
-    fn setVal(ms: *MachineState, register_local: u32, val: Val) void {
+    fn setVal(ms: *MachineState, register: u32, val: Val) void {
         const frame: *CallFrame = ms.topFrame();
-        const slot = frame.registers_begin + register_local;
+        const slot = frame.registers_begin + register;
         ms.registers[slot] = val;
     }
 
-    fn setI32(ms: *MachineState, register_local: u32, val: i32) void {
+    fn setI32(ms: *MachineState, register: u32, val: i32) void {
         const frame: *CallFrame = ms.topFrame();
-        const slot = frame.registers_begin + register_local;
+        const slot = frame.registers_begin + register;
         ms.registers[slot].I32 = val;
     }
 
-    fn setI64(ms: *MachineState, register_local: u32, val: i64) void {
+    fn setI64(ms: *MachineState, register: u32, val: i64) void {
         const frame: *CallFrame = ms.topFrame();
-        const slot = frame.registers_begin + register_local;
+        const slot = frame.registers_begin + register;
         ms.registers[slot].I64 = val;
     }
 
-    fn setF32(ms: *MachineState, register_local: u32, val: f32) void {
+    fn setF32(ms: *MachineState, register: u32, val: f32) void {
         const frame: *CallFrame = ms.topFrame();
-        const slot = frame.registers_begin + register_local;
+        const slot = frame.registers_begin + register;
         ms.registers[slot].F32 = val;
     }
 
-    fn setF64(ms: *MachineState, register_local: u32, val: f64) void {
+    fn setF64(ms: *MachineState, register: u32, val: f64) void {
         const frame: *CallFrame = ms.topFrame();
-        const slot = frame.registers_begin + register_local;
+        const slot = frame.registers_begin + register;
         ms.registers[slot].F64 = val;
     }
 
@@ -1406,11 +1496,20 @@ const MachineState = struct {
             ms.num_frames += 1;
             ms.num_registers += func.total_register_slots;
         } else {
-            return error.TrapStackExhausted;
+            return TrapError.TrapStackExhausted;
         }
     }
 
-    fn pushLabel(ms: *MachineState, num_returns: u32, continuation: u32) !void {
+    fn popFrame(ms: *MachineState) void {
+        const frame: *CallFrame = ms.topFrame();
+        ms.num_registers = frame.registers_begin;
+        ms.num_labels = frame.labels_begin;
+        ms.num_frames -= 1;
+
+        // TODO return continuation data
+    }
+
+    fn pushLabel(ms: *MachineState, num_returns: u32, continuation: u32) TrapError!void {
         _ = num_returns;
 
         if (ms.num_labels < ms.labels.len) {
@@ -1421,7 +1520,7 @@ const MachineState = struct {
             };
             ms.num_labels += 1;
         } else {
-            return error.TrapStackExhausted;
+            return TrapError.TrapStackExhausted;
         }
     }
 
@@ -1489,7 +1588,7 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_Drop,
         &op_Noop, // &op_Select,
         &op_Noop, // &op_Select_T,
-        &op_Unreachable, // &op_Local_Get,
+        &op_Local_Get, // &op_Local_Get,
         &op_Noop, // &op_Local_Set,
         &op_Noop, // &op_Local_Tee,
         &op_Noop, // &op_Global_Get,
@@ -1563,15 +1662,15 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_I32_Ctz,
         &op_Noop, // &op_I32_Popcnt,
         &op_I32_Add,
-        &op_Noop, // &op_I32_Sub,
-        &op_Noop, // &op_I32_Mul,
-        &op_Noop, // &op_I32_Div_S,
-        &op_Noop, // &op_I32_Div_U,
-        &op_Noop, // &op_I32_Rem_S,
-        &op_Noop, // &op_I32_Rem_U,
-        &op_Noop, // &op_I32_And,
-        &op_Noop, // &op_I32_Or,
-        &op_Noop, // &op_I32_Xor,
+        &op_I32_Sub,
+        &op_I32_Mul,
+        &op_I32_Div_S,
+        &op_I32_Div_U,
+        &op_I32_Rem_S,
+        &op_I32_Rem_U,
+        &op_I32_And,
+        &op_I32_Or,
+        &op_I32_Xor,
         &op_Noop, // &op_I32_Shl,
         &op_Noop, // &op_I32_Shr_S,
         &op_Noop, // &op_I32_Shr_U,
@@ -1924,6 +2023,89 @@ const InstructionFuncs = struct {
         return opcodeToFuncTable[@intFromEnum(opcode)];
     }
 
+    const OpHelpers = struct {
+        fn bitCastUnsignedType(comptime T: type) type {
+            return switch (T) {
+                i32 => u32,
+                i64 => u64,
+                else => unreachable,
+            };
+        }
+
+        fn bitCastUnsigned(v: anytype) bitCastUnsignedType(@TypeOf(v)) {
+            return @as(bitCastUnsignedType(@TypeOf(v)), @bitCast(v));
+        }
+
+        fn bitCastSignedType(comptime T: type) type {
+            return switch (T) {
+                u32 => i32,
+                u64 => i64,
+                else => unreachable,
+            };
+        }
+
+        fn bitCastSigned(v: anytype) bitCastSignedType(@TypeOf(v)) {
+            return @as(bitCastSignedType(@TypeOf(v)), @bitCast(v));
+        }
+
+        fn binaryOp(comptime T: type, comptime opcode: Opcode, registers: []const u32, ms: *MachineState) TrapError!void {
+            const r0 = registers[0];
+            const r1 = registers[1];
+            const r2 = registers[2];
+
+            switch (T) {
+                i32 => {
+                    const v0 = ms.getI32(r0);
+                    const v1 = ms.getI32(r1);
+                    const out: T = switch (opcode) {
+                        .I32_Add => v0 +% v1,
+                        .I32_Sub => v0 -% v1,
+                        .I32_Mul => v0 *% v1,
+                        .I32_Div_S => blk: {
+                            if (v1 == 0) {
+                                return TrapError.TrapIntegerDivisionByZero;
+                            }
+                            if (v0 == std.math.minInt(T) and v0 == -1) {
+                                return TrapError.TrapIntegerOverflow;
+                            }
+                            break :blk @divTrunc(v0, v1);
+                        },
+                        .I32_Div_U => blk: {
+                            if (v1 == 0) {
+                                return TrapError.TrapIntegerDivisionByZero;
+                            }
+                            const v0_unsigned: u32 = bitCastUnsigned(v0);
+                            const v1_unsigned: u32 = bitCastUnsigned(v1);
+                            const unsigned = @divFloor(v0_unsigned, v1_unsigned);
+                            break :blk bitCastSigned(unsigned);
+                        },
+                        .I32_Rem_S => blk: {
+                            if (v1 == 0) {
+                                return TrapError.TrapIntegerDivisionByZero;
+                            }
+                            break :blk @rem(v0, @as(i32, @intCast(@abs(v1))));
+                        },
+                        .I32_Rem_U => blk: {
+                            if (v1 == 0) {
+                                return TrapError.TrapIntegerDivisionByZero;
+                            }
+                            const v0_unsigned: u32 = bitCastUnsigned(v0);
+                            const v1_unsigned: u32 = bitCastUnsigned(v1);
+                            const unsigned = @rem(v0_unsigned, v1_unsigned);
+                            break :blk bitCastSigned(unsigned);
+                        },
+                        .I32_And => bitCastSigned(bitCastUnsigned(v0) & bitCastUnsigned(v1)),
+                        .I32_Or => bitCastSigned(bitCastUnsigned(v0) | bitCastUnsigned(v1)),
+                        .I32_Xor => bitCastSigned(bitCastUnsigned(v0) ^ bitCastUnsigned(v1)),
+                        else => unreachable,
+                    };
+                    ms.setI32(r2, out);
+                },
+                else => unreachable,
+            }
+        }
+    };
+
     fn op_Invalid(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("Invalid", pc, ms);
         _ = code;
@@ -1945,27 +2127,81 @@ const InstructionFuncs = struct {
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
+    fn op_Local_Get(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("Local_Get", pc, ms);
+
+        _ = code;
+
+        unreachable;
+        // const locals_index: u32 = code[pc].immediate.Index;
+
+        // ms.setI32(code[pc].registers[0], ms code[pc].immediate.ValueI32);
+        // try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
     fn op_I32_Const(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Const", pc, ms);
-        const v: i32 = code[pc].immediate.ValueI32;
-        const r0 = code[pc].registers[0];
-        ms.setI32(r0, v);
+        ms.setI32(code[pc].registers[0], code[pc].immediate.ValueI32);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
     fn op_I32_Add(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Add", pc, ms);
-        const r0 = code[pc].registers[0];
-        const r1 = code[pc].registers[1];
+        try OpHelpers.binaryOp(i32, Opcode.I32_Add, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
 
-        const v0 = ms.getI32(r0);
-        const v1 = ms.getI32(r1);
+    fn op_I32_Sub(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Add", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Add, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
 
-        // const v2: i32 = stack.popI32();
-        // const v1: i32 = stack.popI32();
-        const result = v0 +% v1;
-        ms.setI32(r0, result);
-        // stack.pushI32(result);
+    fn op_I32_Mul(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Add", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Add, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Div_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Div_S", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Div_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Div_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Div_U", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Div_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Rem_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Rem_S", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Rem_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Rem_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Rem_U", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Rem_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_And(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_And", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_And, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Or(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Or", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Or, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I32_Xor(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I32_Xor", pc, ms);
+        try OpHelpers.binaryOp(i32, Opcode.I32_Xor, code[pc].registers, ms);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 };
@@ -2003,9 +2239,7 @@ pub const RegisterVM = struct {
     pub fn init(vm: *VM) void {
         var self: *RegisterVM = fromVM(vm);
 
-        self.functions.local_types = std.ArrayList(ValType).init(vm.allocator);
-        self.functions.instructions = std.ArrayList(RegInstruction).init(vm.allocator);
-        self.functions.instances = std.ArrayList(FunctionInstance).init(vm.allocator);
+        self.functions = FunctionStore.init(vm.allocator);
         self.ms = MachineState.init(vm.allocator);
     }
 
@@ -2039,13 +2273,15 @@ pub const RegisterVM = struct {
 
         // TODO create functions?
 
-        return error.Unimplemented;
+        // return error.Unimplemented;
     }
 
     pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void {
         var self: *RegisterVM = fromVM(vm);
 
         std.debug.assert(handle.type == .Export);
+
+        std.debug.print("========== INVOKE ===========\n", .{});
 
         const num_imports = module.module_def.imports.functions.items.len;
         const func_instance_index = handle.index - num_imports;
@@ -2075,14 +2311,11 @@ pub const RegisterVM = struct {
         // Ensure any leftover state doesn't pollute this invoke. Can happen if the previous invoke returned an error.
         self.ms.reset();
 
-        // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
-        // on the value stack
+        try self.ms.pushFrame(func, module);
+        try self.ms.pushLabel(func.num_returns, @intCast(func_def.continuation));
         for (params_slice, 0..) |v, i| {
             self.ms.setVal(@intCast(i), v);
         }
-
-        try self.ms.pushFrame(func, module);
-        try self.ms.pushLabel(func.num_returns, @intCast(func_def.continuation));
 
         DebugTrace.traceFunction(module, self.ms.num_frames, func.def_index);
 

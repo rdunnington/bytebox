@@ -591,10 +591,10 @@ pub const FunctionDefinition = struct {
         return module_def.code.instructions.items[func.instructions_begin..func.instructions_end];
     }
 
-    pub fn numParamsAndLocals(func: FunctionDefinition, module_def: ModuleDefinition) usize {
+    pub fn numParamsAndLocals(func: FunctionDefinition, module_def: ModuleDefinition) u32 {
         const func_type: *const FunctionTypeDefinition = func.typeDefinition(module_def);
         const param_types: []const ValType = func_type.getParams();
-        return param_types.len + func.locals.items.len;
+        return @intCast(param_types.len + func.locals.items.len);
     }
 
     pub fn typeDefinition(func: FunctionDefinition, module_def: ModuleDefinition) *const FunctionTypeDefinition {
