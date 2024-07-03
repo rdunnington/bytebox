@@ -419,6 +419,10 @@ const InstructionFunc = *const fn (pc: u32, code: [*]const Instruction, stack: *
 // See the "continuation-passing style" section of this article:
 // http://www.complang.tuwien.ac.at/forth/threaded-code.html
 const InstructionFuncs = struct {
+    comptime {
+        std.debug.assert(opcodeToFuncTable.len == @typeInfo(Opcode).Enum.fields.len);
+    }
+
     const opcodeToFuncTable = [_]InstructionFunc{
         &op_Invalid,
         &op_Unreachable,

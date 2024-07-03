@@ -1224,6 +1224,32 @@ const FunctionCompiler = struct {
                 .I32_Shr_U,
                 .I32_Rotl,
                 .I32_Rotr,
+                .I64_Eq,
+                .I64_NE,
+                .I64_LT_S,
+                .I64_LT_U,
+                .I64_GT_S,
+                .I64_GT_U,
+                .I64_LE_S,
+                .I64_LE_U,
+                .I64_GE_S,
+                .I64_GE_U,
+                .I64_Add,
+                .I64_Sub,
+                .I64_Mul,
+                .I64_Div_S,
+                .I64_Div_U,
+                .I64_Rem_S,
+                .I64_Rem_U,
+                .I64_And,
+                .I64_Or,
+                .I64_Xor,
+                .I64_Shl,
+                .I64_Shr_S,
+                .I64_Shr_U,
+                .I64_Rotl,
+                .I64_Rotr,
+
                 // TODO add a lot more of these simpler opcodes
                 => {
                     try compile_data.popPushValueStackNodes(node.?, 2, 1);
@@ -1234,9 +1260,13 @@ const FunctionCompiler = struct {
                 .I32_Popcnt,
                 .I32_Extend8_S,
                 .I32_Extend16_S,
+                .I64_Eqz,
                 .I64_Clz,
                 .I64_Ctz,
                 .I64_Popcnt,
+                .I64_Extend8_S,
+                .I64_Extend16_S,
+                .I64_Extend32_S,
                 .F32_Neg,
                 .F64_Neg,
                 => {
@@ -1270,7 +1300,8 @@ const FunctionCompiler = struct {
                     }
                 },
                 else => {
-                    std.log.warn("skipping node {}", .{instruction.opcode});
+                    std.log.err("skipping node {}", .{instruction.opcode});
+                    unreachable;
                 },
             }
 
@@ -1462,6 +1493,16 @@ const MachineState = struct {
         return ms.registers[slot];
     }
 
+    fn getType(ms: MachineState, comptime T: type, register: u32) T {
+        return switch (T) {
+            i32 => ms.getI32(register),
+            i64 => ms.getI64(register),
+            f32 => ms.getF32(register),
+            f64 => ms.getF64(register),
+            else => unreachable,
+        };
+    }
+
     fn getI32(ms: MachineState, register: u32) i32 {
         return ms.getVal(register).I32;
     }
@@ -1482,6 +1523,16 @@ const MachineState = struct {
         const frame: *CallFrame = ms.topFrame();
         const slot = frame.registers_begin + register;
         ms.registers[slot] = val;
+    }
+
+    fn setType(ms: *MachineState, comptime T: type, register: u32, val: T) void {
+        switch (T) {
+            i32 => ms.setI32(register, val),
+            i64 => ms.setI64(register, val),
+            f32 => ms.setF32(register, val),
+            f64 => ms.setF64(register, val),
+            else => unreachable,
+        }
     }
 
     fn setI32(ms: *MachineState, register: u32, val: i32) void {
@@ -1596,6 +1647,10 @@ const InstructionFunc = *const fn (pc: u32, code: [*]const RegInstruction, state
 // See the "continuation-passing style" section of this article:
 // http://www.complang.tuwien.ac.at/forth/threaded-code.html
 const InstructionFuncs = struct {
+    comptime {
+        std.debug.assert(opcodeToFuncTable.len == @typeInfo(Opcode).Enum.fields.len);
+    }
+
     const opcodeToFuncTable = [_]InstructionFunc{
         &op_Invalid,
         &op_Unreachable,
@@ -1663,17 +1718,17 @@ const InstructionFuncs = struct {
         &op_I32_LE_U,
         &op_I32_GE_S,
         &op_I32_GE_U,
-        &op_Noop, // &op_I64_Eqz,
-        &op_Noop, // &op_I64_Eq,
-        &op_Noop, // &op_I64_NE,
-        &op_Noop, // &op_I64_LT_S,
-        &op_Noop, // &op_I64_LT_U,
-        &op_Noop, // &op_I64_GT_S,
-        &op_Noop, // &op_I64_GT_U,
-        &op_Noop, // &op_I64_LE_S,
-        &op_Noop, // &op_I64_LE_U,
-        &op_Noop, // &op_I64_GE_S,
-        &op_Noop, // &op_I64_GE_U,
+        &op_I64_Eqz,
+        &op_I64_Eq,
+        &op_I64_NE,
+        &op_I64_LT_S,
+        &op_I64_LT_U,
+        &op_I64_GT_S,
+        &op_I64_GT_U,
+        &op_I64_LE_S,
+        &op_I64_LE_U,
+        &op_I64_GE_S,
+        &op_I64_GE_U,
         &op_Noop, // &op_F32_EQ,
         &op_Noop, // &op_F32_NE,
         &op_Noop, // &op_F32_LT,
@@ -1704,24 +1759,24 @@ const InstructionFuncs = struct {
         &op_I32_Shr_U,
         &op_I32_Rotl,
         &op_I32_Rotr,
-        &op_Noop, // &op_I64_Clz,
-        &op_Noop, // &op_I64_Ctz,
-        &op_Noop, // &op_I64_Popcnt,
-        &op_Noop, // &op_I64_Add,
-        &op_Noop, // &op_I64_Sub,
-        &op_Noop, // &op_I64_Mul,
-        &op_Noop, // &op_I64_Div_S,
-        &op_Noop, // &op_I64_Div_U,
-        &op_Noop, // &op_I64_Rem_S,
-        &op_Noop, // &op_I64_Rem_U,
-        &op_Noop, // &op_I64_And,
-        &op_Noop, // &op_I64_Or,
-        &op_Noop, // &op_I64_Xor,
-        &op_Noop, // &op_I64_Shl,
-        &op_Noop, // &op_I64_Shr_S,
-        &op_Noop, // &op_I64_Shr_U,
-        &op_Noop, // &op_I64_Rotl,
-        &op_Noop, // &op_I64_Rotr,
+        &op_I64_Clz,
+        &op_I64_Ctz,
+        &op_I64_Popcnt,
+        &op_I64_Add,
+        &op_I64_Sub,
+        &op_I64_Mul,
+        &op_I64_Div_S,
+        &op_I64_Div_U,
+        &op_I64_Rem_S,
+        &op_I64_Rem_U,
+        &op_I64_And,
+        &op_I64_Or,
+        &op_I64_Xor,
+        &op_I64_Shl,
+        &op_I64_Shr_S,
+        &op_I64_Shr_U,
+        &op_I64_Rotl,
+        &op_I64_Rotr,
         &op_Noop, // &op_F32_Abs,
         &op_Noop, // &op_F32_Neg,
         &op_Noop, // &op_F32_Ceil,
@@ -1777,9 +1832,9 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_F64_Reinterpret_I64,
         &op_I32_Extend8_S,
         &op_I32_Extend16_S,
-        &op_Noop, // &op_I64_Extend8_S,
-        &op_Noop, // &op_I64_Extend16_S,
-        &op_Noop, // &op_I64_Extend32_S,
+        &op_I64_Extend8_S,
+        &op_I64_Extend16_S,
+        &op_I64_Extend32_S,
         &op_Noop, // &op_Ref_Null,
         &op_Noop, // &op_Ref_Is_Null,
         &op_Noop, // &op_Ref_Func,
@@ -2082,18 +2137,19 @@ const InstructionFuncs = struct {
             const r1 = registers[1];
 
             switch (T) {
-                i32 => {
-                    const v = ms.getI32(r0);
+                i32, i64 => {
+                    const v = ms.getType(T, r0);
                     const out: T = switch (opcode) {
-                        .I32_Eqz => if (v == 0) 1 else 0,
-                        .I32_Clz => @clz(v),
-                        .I32_Ctz => @ctz(v),
-                        .I32_Popcnt => @popCount(v),
-                        .I32_Extend8_S => @as(i8, @truncate(v)),
-                        .I32_Extend16_S => @as(i16, @truncate(v)),
+                        .I32_Eqz, .I64_Eqz => if (v == 0) 1 else 0,
+                        .I32_Clz, .I64_Clz => @clz(v),
+                        .I32_Ctz, .I64_Ctz => @ctz(v),
+                        .I32_Popcnt, .I64_Popcnt => @popCount(v),
+                        .I32_Extend8_S, .I64_Extend8_S => @as(i8, @truncate(v)),
+                        .I32_Extend16_S, .I64_Extend16_S => @as(i16, @truncate(v)),
+                        .I64_Extend32_S => @as(i32, @truncate(v)),
                         else => unreachable,
                     };
-                    ms.setI32(r1, out);
+                    ms.setType(T, r1, out);
                 },
                 else => unreachable,
             }
@@ -2105,27 +2161,27 @@ const InstructionFuncs = struct {
             const r2 = registers[2];
 
             switch (T) {
-                i32 => {
+                i32, i64 => {
                     const utype = bitCastUnsignedType(T);
                     const type_bitcount = @typeInfo(T).Int.bits;
 
-                    const v0 = ms.getI32(r0);
-                    const v1 = ms.getI32(r1);
+                    const v0 = ms.getType(T, r0);
+                    const v1 = ms.getType(T, r1);
                     const out: T = switch (opcode) {
-                        .I32_Eq => if (v0 == v1) 1 else 0,
-                        .I32_NE => if (v0 != v1) 1 else 0,
-                        .I32_LT_S => if (v0 < v1) 1 else 0,
-                        .I32_LT_U => if (bitCastUnsigned(v0) < bitCastUnsigned(v1)) 1 else 0,
-                        .I32_GT_S => if (v0 > v1) 1 else 0,
-                        .I32_GT_U => if (bitCastUnsigned(v0) > bitCastUnsigned(v1)) 1 else 0,
-                        .I32_LE_S => if (v0 <= v1) 1 else 0,
-                        .I32_LE_U => if (bitCastUnsigned(v0) <= bitCastUnsigned(v1)) 1 else 0,
-                        .I32_GE_S => if (v0 >= v1) 1 else 0,
-                        .I32_GE_U => if (bitCastUnsigned(v0) >= bitCastUnsigned(v1)) 1 else 0,
-                        .I32_Add => v0 +% v1,
-                        .I32_Sub => v0 -% v1,
-                        .I32_Mul => v0 *% v1,
-                        .I32_Div_S => blk: {
+                        .I32_Eq, .I64_Eq => if (v0 == v1) 1 else 0,
+                        .I32_NE, .I64_NE => if (v0 != v1) 1 else 0,
+                        .I32_LT_S, .I64_LT_S => if (v0 < v1) 1 else 0,
+                        .I32_LT_U, .I64_LT_U => if (bitCastUnsigned(v0) < bitCastUnsigned(v1)) 1 else 0,
+                        .I32_GT_S, .I64_GT_S => if (v0 > v1) 1 else 0,
+                        .I32_GT_U, .I64_GT_U => if (bitCastUnsigned(v0) > bitCastUnsigned(v1)) 1 else 0,
+                        .I32_LE_S, .I64_LE_S => if (v0 <= v1) 1 else 0,
+                        .I32_LE_U, .I64_LE_U => if (bitCastUnsigned(v0) <= bitCastUnsigned(v1)) 1 else 0,
+                        .I32_GE_S, .I64_GE_S => if (v0 >= v1) 1 else 0,
+                        .I32_GE_U, .I64_GE_U => if (bitCastUnsigned(v0) >= bitCastUnsigned(v1)) 1 else 0,
+                        .I32_Add, .I64_Add => v0 +% v1,
+                        .I32_Sub, .I64_Sub => v0 -% v1,
+                        .I32_Mul, .I64_Mul => v0 *% v1,
+                        .I32_Div_S, .I64_Div_S => blk: {
                             if (v1 == 0) {
                                 return TrapError.TrapIntegerDivisionByZero;
                             }
@@ -2134,7 +2190,7 @@ const InstructionFuncs = struct {
                             }
                             break :blk @divTrunc(v0, v1);
                         },
-                        .I32_Div_U => blk: {
+                        .I32_Div_U, .I64_Div_U => blk: {
                             if (v1 == 0) {
                                 return TrapError.TrapIntegerDivisionByZero;
                             }
@@ -2143,13 +2199,13 @@ const InstructionFuncs = struct {
                             const unsigned = @divFloor(v0_unsigned, v1_unsigned);
                             break :blk bitCastSigned(unsigned);
                         },
-                        .I32_Rem_S => blk: {
+                        .I32_Rem_S, .I64_Rem_S => blk: {
                             if (v1 == 0) {
                                 return TrapError.TrapIntegerDivisionByZero;
                             }
                             break :blk @rem(v0, @as(i32, @intCast(@abs(v1))));
                         },
-                        .I32_Rem_U => blk: {
+                        .I32_Rem_U, .I64_Rem_U => blk: {
                             if (v1 == 0) {
                                 return TrapError.TrapIntegerDivisionByZero;
                             }
@@ -2158,38 +2214,38 @@ const InstructionFuncs = struct {
                             const unsigned = @rem(v0_unsigned, v1_unsigned);
                             break :blk bitCastSigned(unsigned);
                         },
-                        .I32_And => bitCastSigned(bitCastUnsigned(v0) & bitCastUnsigned(v1)),
-                        .I32_Or => bitCastSigned(bitCastUnsigned(v0) | bitCastUnsigned(v1)),
-                        .I32_Xor => bitCastSigned(bitCastUnsigned(v0) ^ bitCastUnsigned(v1)),
-                        .I32_Shl => blk: {
+                        .I32_And, .I64_And => bitCastSigned(bitCastUnsigned(v0) & bitCastUnsigned(v1)),
+                        .I32_Or, .I64_Or => bitCastSigned(bitCastUnsigned(v0) | bitCastUnsigned(v1)),
+                        .I32_Xor, .I64_Xor => bitCastSigned(bitCastUnsigned(v0) ^ bitCastUnsigned(v1)),
+                        .I32_Shl, .I64_Shl => blk: {
                             const shift_unsafe = v1;
                             const shift = @mod(shift_unsafe, type_bitcount);
                             break :blk std.math.shl(T, v0, shift);
                         },
-                        .I32_Shr_S => blk: {
+                        .I32_Shr_S, .I64_Shr_S => blk: {
                             const shift_unsafe = v1;
                             const shift = @mod(shift_unsafe, type_bitcount);
                             break :blk std.math.shr(T, v0, shift);
                         },
-                        .I32_Shr_U => blk: {
+                        .I32_Shr_U, .I64_Shr_U => blk: {
                             const shift_unsafe = bitCastUnsigned(v1);
                             const int = bitCastUnsigned(v0);
                             const shift = @mod(shift_unsafe, type_bitcount);
                             break :blk bitCastSigned(std.math.shr(utype, int, shift));
                         },
-                        .I32_Rotl => blk: {
+                        .I32_Rotl, .I64_Rotl => blk: {
                             const rot = bitCastUnsigned(v1);
                             const int = bitCastUnsigned(v0);
                             break :blk bitCastSigned(std.math.rotl(utype, int, rot));
                         },
-                        .I32_Rotr => blk: {
+                        .I32_Rotr, .I64_Rotr => blk: {
                             const rot = bitCastUnsigned(v1);
                             const int = bitCastUnsigned(v0);
                             break :blk bitCastSigned(std.math.rotr(utype, int, rot));
                         },
                         else => unreachable,
                     };
-                    ms.setI32(r2, out);
+                    ms.setType(T, r2, out);
                 },
                 else => unreachable,
             }
@@ -2298,17 +2354,72 @@ const InstructionFuncs = struct {
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
-    // &op_I64_Eqz,
-    // &op_I64_Eq,
-    // &op_I64_NE,
-    // &op_I64_LT_S,
-    // &op_I64_LT_U,
-    // &op_I64_GT_S,
-    // &op_I64_GT_U,
-    // &op_I64_LE_S,
-    // &op_I64_LE_U,
-    // &op_I64_GE_S,
-    // &op_I64_GE_U,
+    fn op_I64_Eqz(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Eqz", pc, ms);
+        try OpHelpers.unaryOp(i64, Opcode.I64_Eqz, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Eq(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Eq", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Eq, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_NE(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_NE", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_NE, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_LT_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_LT_S", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_LT_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_LT_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_LT_U", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_LT_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_GT_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_GT_S", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_GT_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_GT_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_GT_U", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_GT_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_LE_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_LE_S", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_LE_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_LE_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_LE_U", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_LE_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_GE_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_GE_S", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_GE_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_GE_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_GE_U", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_GE_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
     // &op_F32_EQ,
     // &op_F32_NE,
     // &op_F32_LT,
@@ -2430,24 +2541,114 @@ const InstructionFuncs = struct {
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 
-    // &op_I64_Clz,
-    // &op_I64_Ctz,
-    // &op_I64_Popcnt,
-    // &op_I64_Add,
-    // &op_I64_Sub,
-    // &op_I64_Mul,
-    // &op_I64_Div_S,
-    // &op_I64_Div_U,
-    // &op_I64_Rem_S,
-    // &op_I64_Rem_U,
-    // &op_I64_And,
-    // &op_I64_Or,
-    // &op_I64_Xor,
-    // &op_I64_Shl,
-    // &op_I64_Shr_S,
-    // &op_I64_Shr_U,
-    // &op_I64_Rotl,
-    // &op_I64_Rotr,
+    fn op_I64_Clz(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Clz", pc, ms);
+        try OpHelpers.unaryOp(i64, Opcode.I64_Clz, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Ctz(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Ctz", pc, ms);
+        try OpHelpers.unaryOp(i64, Opcode.I64_Ctz, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Popcnt(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Popcnt", pc, ms);
+        try OpHelpers.unaryOp(i64, Opcode.I64_Popcnt, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Add(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Add", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Add, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Sub(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Sub", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Sub, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Mul(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Mul", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Mul, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Div_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Div_S", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Div_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Div_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Div_U", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Div_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Rem_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Rem_S", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Rem_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Rem_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Rem_U", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Rem_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_And(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_And", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_And, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Or(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Or", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Or, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Xor(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Xor", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Xor, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Shl(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Shl", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Shl, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Shr_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Shr_S", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Shr_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Shr_U(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Shr_U", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Shr_U, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Rotl(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Rotl", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Rotl, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Rotr(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Rotr", pc, ms);
+        try OpHelpers.binaryOp(i64, Opcode.I64_Rotr, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
     // &op_F32_Abs,
     // &op_F32_Neg,
     // &op_F32_Ceil,
@@ -2511,6 +2712,24 @@ const InstructionFuncs = struct {
     fn op_I32_Extend16_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("I32_Extend16_S", pc, ms);
         try OpHelpers.unaryOp(i32, Opcode.I32_Extend16_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Extend8_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Extend8_S", pc, ms);
+        try OpHelpers.unaryOp(i64, Opcode.I64_Extend8_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Extend16_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Extend16_S", pc, ms);
+        try OpHelpers.unaryOp(i64, Opcode.I64_Extend16_S, code[pc].registers, ms);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_I64_Extend32_S(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("I64_Extend32_S", pc, ms);
+        try OpHelpers.unaryOp(i64, Opcode.I64_Extend32_S, code[pc].registers, ms);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
     }
 };
