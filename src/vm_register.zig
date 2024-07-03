@@ -2106,6 +2106,9 @@ const InstructionFuncs = struct {
 
             switch (T) {
                 i32 => {
+                    const utype = bitCastUnsignedType(T);
+                    const type_bitcount = @typeInfo(T).Int.bits;
+
                     const v0 = ms.getI32(r0);
                     const v1 = ms.getI32(r1);
                     const out: T = switch (opcode) {
@@ -2135,8 +2138,8 @@ const InstructionFuncs = struct {
                             if (v1 == 0) {
                                 return TrapError.TrapIntegerDivisionByZero;
                             }
-                            const v0_unsigned: u32 = bitCastUnsigned(v0);
-                            const v1_unsigned: u32 = bitCastUnsigned(v1);
+                            const v0_unsigned: utype = bitCastUnsigned(v0);
+                            const v1_unsigned: utype = bitCastUnsigned(v1);
                             const unsigned = @divFloor(v0_unsigned, v1_unsigned);
                             break :blk bitCastSigned(unsigned);
                         },
@@ -2150,8 +2153,8 @@ const InstructionFuncs = struct {
                             if (v1 == 0) {
                                 return TrapError.TrapIntegerDivisionByZero;
                             }
-                            const v0_unsigned: u32 = bitCastUnsigned(v0);
-                            const v1_unsigned: u32 = bitCastUnsigned(v1);
+                            const v0_unsigned: utype = bitCastUnsigned(v0);
+                            const v1_unsigned: utype = bitCastUnsigned(v1);
                             const unsigned = @rem(v0_unsigned, v1_unsigned);
                             break :blk bitCastSigned(unsigned);
                         },
@@ -2159,30 +2162,30 @@ const InstructionFuncs = struct {
                         .I32_Or => bitCastSigned(bitCastUnsigned(v0) | bitCastUnsigned(v1)),
                         .I32_Xor => bitCastSigned(bitCastUnsigned(v0) ^ bitCastUnsigned(v1)),
                         .I32_Shl => blk: {
-                            const shift_unsafe: i32 = v1;
-                            const shift: i32 = @mod(shift_unsafe, 32);
-                            break :blk std.math.shl(i32, v0, shift);
+                            const shift_unsafe = v1;
+                            const shift = @mod(shift_unsafe, type_bitcount);
+                            break :blk std.math.shl(T, v0, shift);
                         },
                         .I32_Shr_S => blk: {
-                            const shift_unsafe: i32 = v1;
-                            const shift = @mod(shift_unsafe, 32);
-                            break :blk std.math.shr(i32, v0, shift);
+                            const shift_unsafe = v1;
+                            const shift = @mod(shift_unsafe, type_bitcount);
+                            break :blk std.math.shr(T, v0, shift);
                         },
                         .I32_Shr_U => blk: {
-                            const shift_unsafe: u32 = @as(u32, @bitCast(v1));
-                            const int: u32 = @as(u32, @bitCast(v0));
-                            const shift = @mod(shift_unsafe, 32);
-                            break :blk @as(i32, @bitCast(std.math.shr(u32, int, shift)));
+                            const shift_unsafe = bitCastUnsigned(v1);
+                            const int = bitCastUnsigned(v0);
+                            const shift = @mod(shift_unsafe, type_bitcount);
+                            break :blk bitCastSigned(std.math.shr(utype, int, shift));
                         },
                         .I32_Rotl => blk: {
-                            const rot: u32 = @as(u32, @bitCast(v1));
-                            const int: u32 = @as(u32, @bitCast(v0));
-                            break :blk @as(i32, @bitCast(std.math.rotl(u32, int, rot)));
+                            const rot = bitCastUnsigned(v1);
+                            const int = bitCastUnsigned(v0);
+                            break :blk bitCastSigned(std.math.rotl(utype, int, rot));
                         },
                         .I32_Rotr => blk: {
-                            const rot: u32 = @as(u32, @bitCast(v1));
-                            const int: u32 = @as(u32, @bitCast(v0));
-                            break :blk @as(i32, @bitCast(std.math.rotr(u32, int, rot)));
+                            const rot = bitCastUnsigned(v1);
+                            const int = bitCastUnsigned(v0);
+                            break :blk bitCastSigned(std.math.rotr(utype, int, rot));
                         },
                         else => unreachable,
                     };
