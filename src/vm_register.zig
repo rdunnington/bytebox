@@ -25,6 +25,8 @@ pub const u64x2 = def.u64x2;
 pub const f32x4 = def.f32x4;
 pub const f64x2 = def.f64x2;
 pub const v128 = def.v128;
+const BlockType = def.BlockType;
+const BlockTypeValue = def.BlockTypeValue;
 const BlockImmediates = def.BlockImmediates;
 const BranchTableImmediates = def.BranchTableImmediates;
 const CallIndirectImmediates = def.CallIndirectImmediates;
@@ -75,21 +77,41 @@ const endian_native = builtin.cpu.arch.endian();
 // 4. Generate new bytecode
 // 5. Implement the runtime instructions for the register-based bytecode
 
+const IRNodeType = enum(u8) {
+    Start,
+    Stop,
+    Phi,
+    Region,
+    Instruction,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(IRNode) == 32);
+}
+
 const IRNode = struct {
-    opcode: Opcode,
-    is_phi: bool,
-    instruction_index: u32,
+    type: IRNodeType,
+    data: union {
+        None: void,
+        Instruction: u32, // index into ModuleDefintion instruction array
+    },
     edges_in: ?[*]*IRNode,
-    edges_in_count: u32,
+    edges_in_count: u16,
     edges_out: ?[*]*IRNode,
-    edges_out_count: u32,
+    edges_out_count: u16,
 
-    fn createWithInstruction(compiler: *FunctionCompiler, instruction_index: u32) AllocError!*IRNode {
+    fn create(comptime node_type: IRNodeType, compiler: *FunctionCompiler) AllocError!*IRNode {
+        comptime switch (node_type) {
+            .Instruction => unreachable, // use createInstruction() for this node type
+            else => {},
+        };
+
         const node: *IRNode = compiler.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
-            .opcode = compiler.module_def.code.instructions.items[instruction_index].opcode,
-            .is_phi = false,
-            .instruction_index = instruction_index,
+            .type = node_type,
+            .data = .{
+                .None = {},
+            },
             .edges_in = null,
             .edges_in_count = 0,
             .edges_out = null,
@@ -98,26 +120,16 @@ const IRNode = struct {
         return node;
     }
 
-    fn createStandalone(compiler: *FunctionCompiler, opcode: Opcode) AllocError!*IRNode {
+    fn createInstruction(instruction_index: u32, compiler: *FunctionCompiler) AllocError!*IRNode {
         const node: *IRNode = compiler.ir.addOne() catch return AllocError.OutOfMemory;
         node.* = IRNode{
-            .opcode = opcode,
-            .is_phi = false,
-            .instruction_index = INVALID_INSTRUCTION_INDEX,
-            .edges_in = null,
-            .edges_in_count = 0,
-            .edges_out = null,
-            .edges_out_count = 0,
-        };
-        return node;
-    }
-
-    fn createPhi(compiler: *FunctionCompiler) AllocError!*IRNode {
-        const node: *IRNode = compiler.ir.addOne() catch return AllocError.OutOfMemory;
-        node.* = IRNode{
-            .opcode = .Invalid,
-            .is_phi = true,
-            .instruction_index = 0,
+            .type = .Instruction,
+            .data = .{
+                .Instruction = instruction_index,
+            },
+            // .opcode = compiler.module_def.code.instructions.items[instruction_index].opcode,
+            // .is_phi = false,
+            // .instruction_index = instruction_index,
             .edges_in = null,
             .edges_in_count = 0,
             .edges_out = null,
@@ -131,11 +143,14 @@ const IRNode = struct {
         if (node.edges_out) |e| allocator.free(e[0..node.edges_out_count]);
     }
 
-    fn instruction(node: IRNode, module_def: ModuleDefinition) ?*Instruction {
-        return if (node.instruction_index != INVALID_INSTRUCTION_INDEX)
-            &module_def.code.instructions.items[node.instruction_index]
-        else
-            null;
+    fn instruction(node: IRNode, module_def: ModuleDefinition) *Instruction {
+        std.debug.assert(node.type == .Instruction);
+        return &module_def.code.instructions.items[node.data.Instruction];
+    }
+
+    fn opcode(node: IRNode, module_def: ModuleDefinition) Opcode {
+        std.debug.assert(node.type == .Instruction);
+        return node.instruction(module_def).opcode;
     }
 
     fn edgesIn(node: IRNode) []*IRNode {
@@ -151,7 +166,41 @@ const IRNode = struct {
         Out,
     };
 
-    fn pushEdges(node: *IRNode, comptime direction: EdgeDirection, edges: []*IRNode, allocator: std.mem.Allocator) AllocError!void {
+    fn pushEdges(node: *IRNode, comptime direction: EdgeDirection, edges: []const *IRNode, module_def: ModuleDefinition, allocator: std.mem.Allocator) AllocError!void {
+        std.debug.assert(edges.len > 0);
+
+        switch (node.type) {
+            .Start => {
+                std.debug.assert(direction == .Out);
+                std.debug.assert(edges.len == 1);
+                std.debug.assert(edges[0].isControl(module_def));
+            },
+            .Stop => {
+                std.debug.assert(direction == .In);
+                for (edges) |e| {
+                    std.debug.assert(e.isControl(module_def));
+                }
+            },
+            .Phi => {
+                switch (direction) {
+                    .In => {
+                        for (edges) |e| {
+                            std.debug.assert(!e.isControl(module_def));
+                        }
+                    },
+                    .Out => {
+                        std.debug.assert(node.edges_out_count == 0);
+                        std.debug.assert(edges.len == 1);
+                        std.debug.assert(edges[0].type == .Region);
+                    },
+                }
+            },
+            .Region => {
+                // TODO
+            },
+            .Instruction => {},
+        }
+
         const existing = if (direction == .In) node.edgesIn() else node.edgesOut();
         var new = try allocator.alloc(*IRNode, existing.len + edges.len);
         @memcpy(new[0..existing.len], existing);
@@ -169,100 +218,75 @@ const IRNode = struct {
                 node.edges_out_count = @intCast(new.len);
             },
         }
+    }
 
-        if (node.is_phi) {
-            std.debug.assert(node.edges_in_count <= 2);
-            std.debug.assert(node.edges_out_count <= 1);
+    var pretty_print_buffer: [1024]u8 = undefined;
+    fn prettyPrint(node: *const IRNode, module_def: ModuleDefinition) []const u8 {
+        var buffer: []u8 = &pretty_print_buffer;
+        var details: []u8 = &[_]u8{};
+        if (node.type == .Instruction) {
+            const op = node.opcode(module_def);
+            details = std.fmt.bufPrint(buffer, " {}", .{op}) catch unreachable;
+            buffer = buffer[details.len..];
         }
+        return std.fmt.bufPrint(buffer, "0x{x} ({}{s})", .{ @intFromPtr(node), node.type, details }) catch unreachable;
     }
 
-    fn hasSideEffects(node: *IRNode) bool {
-        // We define a side-effect instruction as any that could affect the Store or control flow
-        return switch (node.opcode) {
-            .Call => true,
-            else => false,
-        };
-    }
+    // fn hasSideEffects(node: *IRNode) bool {
+    //     // We define a side-effect instruction as any that could affect the Store or control flow
+    //     return switch (node.opcode) {
+    //         .Call => true,
+    //         else => false,
+    //     };
+    // }
 
-    fn isFlowControl(node: *IRNode) bool {
-        return switch (node.opcode) {
-            .If,
-            .IfNoElse,
-            .Else,
-            .Return,
-            .Branch,
-            .Branch_If,
-            .Branch_Table,
+    fn isControl(node: *IRNode, module_def: ModuleDefinition) bool {
+        return switch (node.type) {
+            .Start,
+            .Stop,
             => true,
+            .Instruction => switch (node.opcode(module_def)) {
+                .If,
+                .IfNoElse,
+                .Else,
+                .End,
+                .Return,
+                .Branch,
+                .Branch_If,
+                .Branch_Table,
+                => true,
+                else => false,
+            },
             else => false,
-        };
-    }
-
-    fn numConsumedRegisters(node: *IRNode) u32 {
-        // TODO fill this out
-        return switch (node.opcode) {
-            .I32_Add,
-            .I32_Sub,
-            .I32_Mul,
-            .I32_Div_S,
-            .I32_Div_U,
-            .I32_Rem_S,
-            .I32_Rem_U,
-            .I32_And,
-            .I32_Or,
-            .I32_Xor,
-            => 2,
-
-            .If,
-            .IfNoElse,
-            .Branch_If,
-            .Return, // NOTE - this will change depending on the function signature
-            => 1,
-
-            else => 0,
-        };
-    }
-
-    fn numRegisterSlots(node: *IRNode) u32 {
-        return switch (node.opcode) {
-            .If,
-            .IfNoElse,
-            .Else,
-            .Return,
-            .Branch,
-            .Branch_If,
-            .Branch_Table,
-            => 0,
-            else => 1,
         };
     }
 
     // a node that has no out edges to instructions with side effects or control flow
-    fn isIsland(node: *IRNode, unvisited: *std.ArrayList(*IRNode)) AllocError!bool {
-        if (node.opcode == .Return) {
-            return false;
-        }
+    // fn isIsland(node: *IRNode, unvisited: *std.ArrayList(*IRNode)) AllocError!bool {
+    //     if (node.opcode == .Return) {
+    //         return false;
+    //     }
 
-        unvisited.clearRetainingCapacity();
+    //     unvisited.clearRetainingCapacity();
 
-        for (node.edgesOut()) |edge| {
-            try unvisited.append(edge);
-        }
+    //     for (node.edgesOut()) |edge| {
+    //         try unvisited.append(edge);
+    //     }
 
-        while (unvisited.items.len > 0) {
-            var next: *IRNode = unvisited.pop();
-            if (next.opcode == .Return or next.hasSideEffects() or node.isFlowControl()) {
-                return false;
-            }
-            for (next.edgesOut()) |edge| {
-                try unvisited.append(edge);
-            }
-        }
+    //     while (unvisited.items.len > 0) {
+    //         var next: *IRNode = unvisited.pop();
+    //         if (next.opcode == .Return or next.hasSideEffects() or node.isControl()) {
+    //             return false;
+    //         }
+    //         for (next.edgesOut()) |edge| {
+    //             try unvisited.append(edge);
+    //         }
+    //     }
 
-        unvisited.clearRetainingCapacity();
+    //     unvisited.clearRetainingCapacity();
 
-        return true;
-    }
+    //     return true;
+    // }
 };
 
 const RegisterSlots = struct {
@@ -359,63 +383,14 @@ const RegisterSlots = struct {
 };
 
 const FunctionIR = struct {
-    def_index: usize = 0,
-    type_def_index: usize = 0,
-    ir_root: ?*IRNode = null,
-
-    // fn definition(func: FunctionIR, module_def: ModuleDefinition) *FunctionDefinition {
-    //     return &module_def.functions.items[func.def_index];
-    // }
-
-    // fn regalloc(func: *FunctionIR, compile_data: *IntermediateCompileData, allocator: std.mem.Allocator) AllocError!void {
-    //     std.debug.assert(func.ir_root != null);
-
-    //     const ir_root = func.ir_root.?;
-    //     std.debug.assert(ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
-
-    //     var slots = RegisterSlots.init(allocator);
-    //     defer slots.deinit();
-
-    //     var visit_queue = std.ArrayList(*IRNode).init(allocator);
-    //     defer visit_queue.deinit();
-    //     try visit_queue.append(ir_root);
-
-    //     var visited = std.AutoHashMap(*IRNode, void).init(allocator);
-    //     defer visited.deinit();
-
-    //     while (visit_queue.items.len > 0) {
-    //         var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
-    //         try visited.put(node, {});
-
-    //         // mark output node slots as free - this is safe because the dataflow graph flows one way and the
-    //         // output can't be reused higher up in the graph
-    //         for (node.edgesOut()) |output_node| {
-    //             if (compile_data.register_map.get(output_node)) |index| {
-    //                 slots.freeAt(output_node, index);
-    //             }
-    //         }
-
-    //         // allocate slots for this instruction
-    //         // TODO handle multiple output slots (e.g. results of a function call)
-    //         if (node.needsRegisterSlot()) {
-    //             const index: u32 = try slots.alloc(node);
-    //             try compile_data.register_map.put(node, index);
-    //         }
-
-    //         // add inputs to the FIFO visit queue
-    //         for (node.edgesIn()) |input_node| {
-    //             if (visited.contains(input_node) == false) {
-    //                 try visit_queue.append(input_node);
-    //             }
-    //         }
-    //     }
-    // }
+    def_index: usize,
+    type_def_index: usize,
+    start: *IRNode,
+    stop: *IRNode,
 
     // TODO call this from the compiler compile function, have the compile function take instructions and local_types arrays passed down from module instantiate
     // TODO ensure callsites pass a scratch allocator
     fn codegen(func: FunctionIR, store: *FunctionStore, compile_data: *IntermediateCompileData, module_def: ModuleDefinition, scratch_allocator: std.mem.Allocator) AllocError!void {
-        std.debug.assert(func.ir_root != null);
-
         std.debug.print("==== CODEGEN: regalloc ====\n", .{});
 
         // allocate register slots for each node.
@@ -428,19 +403,22 @@ const FunctionIR = struct {
         const num_params: u32 = @intCast(func_type.getParams().len);
         const num_returns: u32 = @intCast(func_type.getReturns().len);
 
+        // control nodes are explored via depth-first search to ensure local calulations can reuse
+        // the same registers
+        var visit_stack_control_nodes = std.ArrayList(*IRNode).init(scratch_allocator); // TODO determine if we really need a stack (e.g. if depth ever goes over 1)
+        defer visit_stack_control_nodes.deinit();
+        try visit_stack_control_nodes.append(func.stop);
+
+        // we need to visit non-control nodes in breadth-first order to efficiently allocate
+        // registers - if a full branch was regalloced, there would be registers allocated
+        // to nodes much higher up the branch that could be reused by calulations lower down
+        var visit_queue = std.ArrayList(*IRNode).init(scratch_allocator);
+        defer visit_queue.deinit();
+
+        var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
+        defer visited.deinit();
+
         {
-            std.debug.assert(func.ir_root != null);
-
-            const ir_root = func.ir_root.?;
-            std.debug.assert(ir_root.opcode == .Return); // TODO need to update other places in the code to ensure this is a thing
-
-            var visit_queue = std.ArrayList(*IRNode).init(scratch_allocator);
-            defer visit_queue.deinit();
-            try visit_queue.append(ir_root);
-
-            var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
-            defer visited.deinit();
-
             // general regalloc algorithm: (DOES NOT HANDLE multiple return points yet)
             // * Reserve registers for function locals (params + local variables)
             // * Run a breadth-first traversal of the graph. Push root node (return) goes on first.
@@ -454,11 +432,18 @@ const FunctionIR = struct {
             const num_reserved_registers: u32 = @max(num_returns, num_params + num_locals);
             try register_slots.reserve(num_reserved_registers);
 
-            while (visit_queue.items.len > 0) {
-                var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
-                try visited.put(node, {});
+            while (visit_queue.items.len > 0 or visit_stack_control_nodes.items.len > 0) {
+                var node: *IRNode = undefined;
+                if (visit_queue.items.len > 0) {
+                    node = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+                    std.debug.print("\tdata node {s}\n", .{node.prettyPrint(module_def)});
+                } else {
+                    node = visit_stack_control_nodes.pop();
+                    std.debug.print("\tcontrol node {s}\n", .{node.prettyPrint(module_def)});
+                }
 
-                std.debug.print("\tnode 0x{x}: {}\n", .{ @intFromPtr(node), node.opcode });
+                // var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+                try visited.put(node, {});
 
                 const output_edges: []*IRNode = node.edgesOut();
 
@@ -481,82 +466,80 @@ const FunctionIR = struct {
                     }
                 }
 
-                const input_edges: []*IRNode = node.edgesIn();
+                const input_nodes: []*IRNode = node.edgesIn();
 
                 // allocate registers for this instruction
-                switch (node.opcode) {
-                    .Return => {
+                if (node.type == .Instruction) {
+                    const opcode = node.opcode(module_def);
+
+                    if (opcode == .Return or (opcode == .End and func.stop.edgesIn()[0] == node)) { // check if End is a returning node
                         // return values always go in the first set of registers
-                        for (input_edges, 0..) |input_node, register| {
-                            try compile_data.register_map.put(input_node, @intCast(register));
-                            std.debug.print("\t\tallocated slot {}\n", .{register});
-                        }
-                    },
-                    // .Local_Get => { // Local_Tee? Local_Set?
-                    //     // const local_index = node.instruction(module_def).?.immediate.Index;
-                    //     // try compile_data.register_map.putNoClobber(node, local_index);
-                    //     // std.debug.print("\t\tallocated slot {}\n", .{local_index});
-                    // },
-                    else => {
-                        for (input_edges) |input_node| {
-                            var register: u32 = 0;
-                            if (input_node.opcode == .Local_Get) {
-                                const instruction = input_node.instruction(module_def);
-                                register = instruction.?.immediate.Index;
-                                std.debug.assert(register < register_slots.num_reserved); // ensure this register is actually reserved
-                            } else {
-                                register = try register_slots.alloc(input_node);
+                        for (input_nodes, 0..) |input_node, register| {
+                            if (input_node.isControl(module_def) == false) {
+                                try compile_data.register_map.put(input_node, @intCast(register));
+                                std.debug.print("\t\tallocated slot {} (return)\n", .{register});
                             }
-                            try compile_data.register_map.put(input_node, register);
-                            std.debug.print("\t\tallocated slot {}\n", .{register});
                         }
-                    },
+                    } else {
+                        for (input_nodes) |input_node| {
+                            if (input_node.isControl(module_def) == false) {
+                                var register: u32 = 0;
+                                if (input_node.opcode(module_def) == .Local_Get) {
+                                    const instruction = input_node.instruction(module_def);
+                                    register = instruction.immediate.Index;
+                                    std.debug.assert(register < register_slots.num_reserved); // ensure this register is actually reserved
+                                } else {
+                                    register = try register_slots.alloc(input_node);
+                                }
+                                try compile_data.register_map.put(input_node, register);
+                                std.debug.print("\t\tallocated slot {}\n", .{register});
+                            }
+                        }
+                    }
                 }
 
                 // add inputs to the FIFO visit queue
-                for (node.edgesIn()) |input_node| {
+                for (input_nodes) |input_node| {
                     if (visited.contains(input_node) == false) {
-                        std.debug.print("\t\tqueued up node 0x{x}: {}\n", .{ @intFromPtr(input_node), input_node.opcode });
-                        try visit_queue.append(input_node);
+                        std.debug.print("\t\tqueued up node {s}\n", .{input_node.prettyPrint(module_def)});
+                        if (input_node.isControl(module_def)) {
+                            try visit_stack_control_nodes.append(input_node);
+                        } else {
+                            try visit_queue.append(input_node);
+                        }
                     }
                 }
             }
         }
 
-        // walk the graph in breadth-first order, starting from the last Return node
+        // walk the graph in breadth-first order, starting from the stop node
         // reverse the instructions array when finished (alternatively just emit in reverse order if we have the node count from regalloc)
-
-        const instructions_begin = store.instructions.items.len;
-
-        var visit_queue = std.ArrayList(*IRNode).init(scratch_allocator);
-        defer visit_queue.deinit();
-        try visit_queue.append(func.ir_root.?);
-
-        var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
-        defer visited.deinit();
-
-        var instructions = &store.instructions;
-        // var instructions = std.ArrayList(RegInstruction).init(scratch_allocator);
-        // defer instructions.deinit();
 
         std.debug.print("==== CODEGEN: emit instructions ====\n", .{});
 
-        while (visit_queue.items.len > 0) {
-            var node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+        const instructions_begin = store.instructions.items.len;
 
-            std.debug.print("\tvisit node 0x{x} ({}) - {} outs, {} ins\n", .{ @intFromPtr(node), node.opcode, node.edgesOut().len, node.edgesIn().len });
+        visit_stack_control_nodes.clearRetainingCapacity();
+        visit_queue.clearRetainingCapacity();
+        visited.clearRetainingCapacity();
 
-            switch (node.opcode) {
-                .Local_Get => {
-                    std.debug.print("\t\tskipped emit - flattened into register {}\n", .{node.instruction(module_def).?.immediate.Index});
-                    continue;
-                },
-                else => {},
+        try visit_stack_control_nodes.append(func.stop);
+
+        var instructions = &store.instructions;
+
+        while (visit_queue.items.len > 0 or visit_stack_control_nodes.items.len > 0) {
+            var node: *IRNode = undefined;
+            if (visit_queue.items.len > 0) {
+                node = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+                std.debug.assert(visited.contains(node) == false);
+                std.debug.assert(node.isControl(module_def) == false);
+            } else {
+                node = visit_stack_control_nodes.pop();
+                std.debug.assert(node.isControl(module_def));
+                std.debug.print("\tpopped control node {s}\n", .{node.prettyPrint(module_def)});
             }
 
-            // if (node.edgesIn().len == 0) {
-            //     std.debug.print("\t\tskipped due to no inputs - must be a source node");
-            // }
+            std.debug.print("\tvisit node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def), node.edgesOut().len, node.edgesIn().len });
 
             // only emit an instruction once all its out edges have been visited - this ensures all dependent instructions
             // will be executed after this one
@@ -564,6 +547,7 @@ const FunctionIR = struct {
             for (node.edgesOut()) |output_node| {
                 if (visited.contains(output_node) == false) {
                     did_visit_all_outputs = false;
+                    std.debug.print("\tnot all outputs visited...\n", .{});
                     break;
                 }
             }
@@ -574,58 +558,81 @@ const FunctionIR = struct {
             if (did_visit_all_outputs) {
                 try visited.put(node, {});
 
-                const immediates = if (node.instruction(module_def)) |instr| instr.immediate else InstructionImmediates{ .Void = {} };
+                if (node.type == .Instruction) {
+                    const instruction = node.instruction(module_def);
+                    const opcode = instruction.opcode;
+                    const immediates = instruction.immediate;
 
-                const registers_begin = store.registers.items.len;
-                switch (node.opcode) {
-                    .Local_Get => {
-                        // Local_Get doesn't have node inputs, it gets its input from its immediate index
-                        try store.registers.append(immediates.Index);
-                    },
-                    // .I32_Const => {
-                    //     const input_register: ?u32 = compile_data.register_map.get(node);
-                    //     std.debug.assert(input_register != null);
-                    //     try store.registers.append(input_register.?);
-                    // },
-                    else => {
-                        for (node.edgesIn()) |input_node| {
-                            const input_register: ?u32 = compile_data.register_map.get(input_node);
-                            std.debug.assert(input_register != null);
-                            try store.registers.append(input_register.?);
-                        }
-                    },
+                    switch (opcode) {
+                        .Local_Get => {
+                            std.debug.print("\t\tskipped emit - flattened into register {}\n", .{node.instruction(module_def).immediate.Index});
+                        },
+                        else => {
+                            const registers_begin = store.registers.items.len;
+                            switch (opcode) {
+                                .Local_Get => {
+                                    // Local_Get doesn't have node inputs, it gets its input from its immediate index
+                                    try store.registers.append(immediates.Index);
+                                },
+                                // .I32_Const => {
+                                //     const input_register: ?u32 = compile_data.register_map.get(node);
+                                //     std.debug.assert(input_register != null);
+                                //     try store.registers.append(input_register.?);
+                                // },
+                                else => {
+                                    for (node.edgesIn()) |input_node| {
+                                        if (compile_data.register_map.get(input_node)) |input_register| {
+                                            std.debug.print("\t\tinput node {s} for register {}\n", .{ input_node.prettyPrint(module_def), input_register });
+                                            try store.registers.append(input_register);
+                                        }
+                                    }
+                                },
+                            }
+
+                            if (compile_data.register_map.get(node)) |output_register| {
+                                try store.registers.append(output_register);
+                            }
+
+                            const registers_end = store.registers.items.len;
+                            const registers = store.registers.items[registers_begin..registers_end];
+
+                            std.debug.print("\tregisters: {any}\n", .{registers});
+
+                            try instructions.append(RegInstruction{
+                                .opcode = node.opcode(module_def),
+                                .immediate = immediates,
+                                .registers = registers,
+                            });
+                        },
+                    }
                 }
-
-                if (compile_data.register_map.get(node)) |output_register| {
-                    try store.registers.append(output_register);
-                }
-
-                const registers_end = store.registers.items.len;
-                const registers = store.registers.items[registers_begin..registers_end];
-
-                std.debug.print("\t{}: registers: {any}\n", .{ node.opcode, registers });
-
-                try instructions.append(RegInstruction{
-                    .opcode = node.opcode,
-                    .immediate = immediates,
-                    .registers = registers,
-                });
-            } else {
-                // try again later
-                try visit_queue.append(node);
             }
+            // } else {
+            //     // try again later
+            //     if (node.type == .Instruction) {
+            //         try visit_queue.append(node);
+            //     }
+            // }
 
             for (node.edgesIn()) |input_node| {
-                if (!visited.contains(input_node)) {
-                    try visit_queue.append(input_node);
+                std.debug.assert(input_node != node);
+
+                if (visited.contains(input_node) == false) {
+                    if (input_node.isControl(module_def)) {
+                        try visit_stack_control_nodes.append(input_node);
+                    } else {
+                        try visit_queue.append(input_node);
+                    }
                 }
             }
         }
 
         const instructions_end = store.instructions.items.len;
-        const emitted_instructions = store.instructions.items[instructions_begin..instructions_end];
 
+        const emitted_instructions = store.instructions.items[instructions_begin..instructions_end];
         std.mem.reverse(RegInstruction, emitted_instructions);
+
+        std.debug.print("==== CODEGEN: done (total instructions {}) ====\n\n", .{instructions_end - instructions_begin});
 
         try store.instances.append(FunctionInstance{
             .type_def_index = func.type_def_index,
@@ -720,12 +727,14 @@ const IntermediateCompileData = struct {
         const Block = struct {
             node_start_index: u32,
             continuation: usize, // in instruction index space
-            phi_nodes: []*IRNode,
+            block_type: BlockType,
+            type_data: BlockTypeValue,
+            // phi_nodes: []*IRNode,
         };
 
         nodes: std.ArrayList(*IRNode),
         blocks: std.ArrayList(Block),
-        phi_nodes: std.ArrayList(*IRNode),
+        // phi_nodes: std.ArrayList(*IRNode),
 
         // const ContinuationType = enum {
         //     .Normal,
@@ -736,7 +745,7 @@ const IntermediateCompileData = struct {
             return BlockStack{
                 .nodes = std.ArrayList(*IRNode).init(allocator),
                 .blocks = std.ArrayList(Block).init(allocator),
-                .phi_nodes = std.ArrayList(*IRNode).init(allocator),
+                // .phi_nodes = std.ArrayList(*IRNode).init(allocator),
             };
         }
 
@@ -745,30 +754,32 @@ const IntermediateCompileData = struct {
             self.blocks.deinit();
         }
 
-        fn pushBlock(self: *BlockStack, continuation: usize) AllocError!void {
+        fn pushBlock(self: *BlockStack, continuation: usize, block_type: BlockType, type_data: BlockTypeValue) AllocError!void {
             try self.blocks.append(Block{
                 .node_start_index = @intCast(self.nodes.items.len),
                 .continuation = continuation,
-                .phi_nodes = &[_]*IRNode{},
+                .block_type = block_type,
+                .type_data = type_data,
+                // .phi_nodes = &[_]*IRNode{},
             });
         }
 
-        fn pushBlockWithPhi(self: *BlockStack, continuation: u32, phi_nodes: []*IRNode) AllocError!void {
-            const start_slice_index = self.phi_nodes.items.len;
-            try self.phi_nodes.appendSlice(phi_nodes);
+        // fn pushBlockWithPhi(self: *BlockStack, continuation: u32, phi_nodes: []*IRNode) AllocError!void {
+        //     const start_slice_index = self.phi_nodes.items.len;
+        //     try self.phi_nodes.appendSlice(phi_nodes);
 
-            try self.blocks.append(Block{
-                .node_start_index = @intCast(self.nodes.items.len),
-                .continuation = continuation,
-                .phi_nodes = self.phi_nodes.items[start_slice_index..],
-            });
-        }
+        //     try self.blocks.append(Block{
+        //         .node_start_index = @intCast(self.nodes.items.len),
+        //         .continuation = continuation,
+        //         .phi_nodes = self.phi_nodes.items[start_slice_index..],
+        //     });
+        // }
 
         fn pushNode(self: *BlockStack, node: *IRNode) AllocError!void {
             try self.nodes.append(node);
         }
 
-        fn popBlock(self: *BlockStack) void {
+        fn popBlock(self: *BlockStack) Block {
             const block: Block = self.blocks.pop();
 
             std.debug.assert(block.node_start_index <= self.nodes.items.len);
@@ -776,6 +787,7 @@ const IntermediateCompileData = struct {
             // should never grow these arrays
             self.nodes.resize(block.node_start_index) catch unreachable;
             self.phi_nodes.resize(self.phi_nodes.items.len - block.phi_nodes.len) catch unreachable;
+            return block;
         }
 
         fn currentBlockNodes(self: *BlockStack) []*IRNode {
@@ -876,7 +888,7 @@ const IntermediateCompileData = struct {
         self.scratch_node_list_2.deinit();
     }
 
-    fn popPushValueStackNodes(self: *IntermediateCompileData, node: *IRNode, num_consumed: usize, num_pushed: usize) AllocError!void {
+    fn popPushValueStackNodes(self: *IntermediateCompileData, node: *IRNode, num_consumed: usize, num_pushed: usize, module_def: ModuleDefinition) AllocError!void {
         if (self.is_unreachable) {
             return;
         }
@@ -889,14 +901,17 @@ const IntermediateCompileData = struct {
             e.* = self.value_stack.pop();
         }
 
-        try node.pushEdges(.In, edges, self.allocator);
+        try node.pushEdges(.In, edges, module_def, self.allocator);
         for (edges) |e| {
             var consumer_edges = [_]*IRNode{node};
-            try e.pushEdges(.Out, &consumer_edges, self.allocator);
+            try e.pushEdges(.Out, &consumer_edges, module_def, self.allocator);
         }
         try self.value_stack.appendNTimes(node, num_pushed);
     }
 
+    // TODO: could have a limit on how many constants can be folded at a particular time. And when the limit is run over, have some
+    // sort of LRU cache scheme that evicts the oldest constant. This way pathologically bad functions that have an insane number
+    // of constants don't inflate permanent register usage too much.
     fn foldConstant(self: *IntermediateCompileData, compiler: *FunctionCompiler, comptime valtype: ValType, instruction_index: u32, instruction: Instruction) AllocError!*IRNode {
         var val: TaggedVal = undefined;
         val.type = valtype;
@@ -911,7 +926,7 @@ const IntermediateCompileData = struct {
 
         const res = try self.unique_constants.getOrPut(val);
         if (res.found_existing == false) {
-            const node = try IRNode.createWithInstruction(compiler, instruction_index);
+            const node = try IRNode.createInstruction(instruction_index, compiler);
             res.value_ptr.* = node;
         }
         if (self.is_unreachable == false) {
@@ -979,10 +994,8 @@ const FunctionCompiler = struct {
         defer compile_data.deinit();
 
         for (0..compiler.module_def.functions.items.len) |i| {
-            std.debug.print("compiler.module_def.functions.items.len: {}, i: {}\n\n", .{ compiler.module_def.functions.items.len, i });
-            var function_ir = try compiler.compileFunc(i, &compile_data);
-            if (function_ir.ir_root != null) {
-                // try function_ir.regalloc(&compile_data, compiler.allocator);
+            // std.debug.print("compiler.module_def.functions.items.len: {}, i: {}\n\n", .{ compiler.module_def.functions.items.len, i });
+            if (try compiler.generateIR(i, &compile_data)) |function_ir| {
                 try function_ir.codegen(store, &compile_data, compiler.module_def.*, compiler.allocator);
             }
 
@@ -990,7 +1003,7 @@ const FunctionCompiler = struct {
         }
     }
 
-    fn compileFunc(compiler: *FunctionCompiler, index: usize, compile_data: *IntermediateCompileData) AllocError!FunctionIR {
+    fn generateIR(compiler: *FunctionCompiler, index: usize, compile_data: *IntermediateCompileData) AllocError!?FunctionIR {
         const UniqueValueToIRNodeMap = std.HashMap(TaggedVal, *IRNode, TaggedVal.HashMapContext, std.hash_map.default_max_load_percentage);
 
         const Helpers = struct {
@@ -999,7 +1012,6 @@ const FunctionCompiler = struct {
                     .Noop,
                     .Block,
                     .Loop,
-                    .End,
                     .Drop,
                     .I32_Const,
                     .I64_Const,
@@ -1014,14 +1026,17 @@ const FunctionCompiler = struct {
             }
         };
 
-        const func: *const FunctionDefinition = &compiler.module_def.functions.items[index];
-        const func_type: *const FunctionTypeDefinition = func.typeDefinition(compiler.module_def.*);
+        const module_def: *const ModuleDefinition = compiler.module_def;
+        const func: *const FunctionDefinition = &module_def.functions.items[index];
+        const func_type: *const FunctionTypeDefinition = func.typeDefinition(module_def.*);
 
         std.debug.print("compiling func index {}\n", .{index});
 
-        try compile_data.warmup(func.*, compiler.module_def.*);
+        try compile_data.warmup(func.*, module_def.*);
 
-        try compile_data.blocks.pushBlock(func.continuation);
+        try compile_data.blocks.pushBlock(func.continuation, .TypeIndex, BlockTypeValue{
+            .TypeIndex = func.type_index,
+        });
 
         var locals = compile_data.locals.items; // for convenience later
 
@@ -1029,140 +1044,153 @@ const FunctionCompiler = struct {
         var unique_constants = UniqueValueToIRNodeMap.init(compiler.allocator);
         defer unique_constants.deinit();
 
-        const instructions: []Instruction = func.instructions(compiler.module_def.*);
+        const instructions: []Instruction = func.instructions(module_def.*);
         if (instructions.len == 0) {
             std.log.warn("Skipping function with no instructions (index {}).", .{index});
-            return FunctionIR{};
+            return null;
         }
 
-        var ir_root: ?*IRNode = null;
+        const start: *IRNode = try IRNode.create(.Start, compiler);
+        const stop: *IRNode = try IRNode.create(.Stop, compiler);
+        var current_control_stack = std.ArrayList(*IRNode).init(compiler.allocator);
+        defer current_control_stack.deinit();
+        try current_control_stack.append(start);
 
         for (instructions, 0..) |instruction, local_instruction_index| {
             const instruction_index: u32 = @intCast(func.instructions_begin + local_instruction_index);
 
             var node: ?*IRNode = null;
             if (Helpers.opcodeHasDefaultIRMapping(instruction.opcode)) {
-                node = try IRNode.createWithInstruction(compiler, instruction_index);
+                node = try IRNode.createInstruction(instruction_index, compiler);
             }
 
             std.debug.print("opcode: {}\n", .{instruction.opcode});
 
             switch (instruction.opcode) {
-                // .Loop => {
-                //     instruction.
+                // .Block => {
+                //     // compile_data.label_stack += 1;
+
+                //     // try compile_data.label_stack.append(node);
+                //     // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                //     try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation);
                 // },
-                // .If => {},
-                .Block => {
-                    // compile_data.label_stack += 1;
+                // .Loop => {
+                //     // compile_data.label_stack += 1;
+                //     // compile_data.label_stack.append(node);
+                //     // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                //     try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
+                // },
+                // .If => {
+                //     var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                //     defer compile_data.scratch_node_list_1.clearRetainingCapacity();
 
-                    // try compile_data.label_stack.append(node);
-                    // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
-                    try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation);
-                },
-                .Loop => {
-                    // compile_data.label_stack += 1;
-                    // compile_data.label_stack.append(node);
-                    // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
-                    try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
-                },
-                .If => {
-                    var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
-                    defer compile_data.scratch_node_list_1.clearRetainingCapacity();
+                //     std.debug.assert(phi_nodes.items.len == 0);
 
-                    std.debug.assert(phi_nodes.items.len == 0);
+                //     for (0..instruction.immediate.If.num_returns) |_| {
+                //         try phi_nodes.append(.Phi, try IRNode.create(compiler));
+                //     }
 
-                    for (0..instruction.immediate.If.num_returns) |_| {
-                        try phi_nodes.append(try IRNode.createPhi(compiler));
-                    }
+                //     try compile_data.blocks.pushBlockWithPhi(instruction.immediate.If.end_continuation, phi_nodes.items[0..]);
+                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
 
-                    try compile_data.blocks.pushBlockWithPhi(instruction.immediate.If.end_continuation, phi_nodes.items[0..]);
-                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
-                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+                //     try compile_data.popPushValueStackNodes(node.?, 1, 0);
 
-                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+                //     // after the if consumes the value it needs, push the phi nodes on since these will be the return values
+                //     // of the block
+                //     try compile_data.value_stack.appendSlice(phi_nodes.items);
+                // },
+                // .IfNoElse => {
+                //     try compile_data.blocks.pushBlock(instruction.immediate.If.end_continuation);
+                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+                //     try compile_data.popPushValueStackNodes(node.?, 1, 0);
 
-                    // after the if consumes the value it needs, push the phi nodes on since these will be the return values
-                    // of the block
-                    try compile_data.value_stack.appendSlice(phi_nodes.items);
-                },
-                .IfNoElse => {
-                    try compile_data.blocks.pushBlock(instruction.immediate.If.end_continuation);
-                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
-                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
-                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+                //     // TODO figure out if there needs to be any phi nodes and if so what two inputs they have
+                // },
+                // .Else => {
+                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
 
-                    // TODO figure out if there needs to be any phi nodes and if so what two inputs they have
-                },
-                .Else => {
-                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
-                    try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
-
-                    // TODO hook up the phi nodes with the stuffs
-                },
+                //     // TODO hook up the phi nodes with the stuffs
+                // },
                 .End => {
                     // TODO finish up anything with phi nodes?
 
                     // the last End opcode returns the values on the stack
                     // if (compile_data.label_continuations.items.len == 1) {
                     if (compile_data.blocks.blocks.items.len == 1) {
-                        node = try IRNode.createStandalone(compiler, .Return);
-                        try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0);
+                        // node = try IRNode.createStandalone(compiler, .Return);
+                        try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0, module_def.*);
                         // _ = compile_data.label_continuations.pop();
+                    }
+
+                    // TODO update this when we add real support for blocks
+                    std.debug.assert(current_control_stack.items.len == 1);
+
+                    {
+                        const last_index = current_control_stack.items.len - 1;
+                        const prev_control_node: *IRNode = current_control_stack.items[last_index];
+                        current_control_stack.items[last_index] = node.?;
+
+                        const out_edges = [_]*IRNode{node.?};
+                        try prev_control_node.pushEdges(.Out, &out_edges, module_def.*, compiler.allocator);
+
+                        const in_edges = [_]*IRNode{prev_control_node};
+                        try node.?.pushEdges(.In, &in_edges, module_def.*, compiler.allocator);
                     }
 
                     // At the end of every block, we ensure all nodes with side effects are still in the graph. Order matters
                     // since mutations to the Store or control flow changes must happen in the order of the original instructions.
-                    {
-                        var nodes_with_side_effects: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
-                        defer nodes_with_side_effects.clearRetainingCapacity();
+                    // {
+                    //     var nodes_with_side_effects: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                    //     defer nodes_with_side_effects.clearRetainingCapacity();
 
-                        const current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
+                    //     const current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
 
-                        for (current_block_nodes) |block_node| {
-                            if (block_node.hasSideEffects() or block_node.isFlowControl()) {
-                                try nodes_with_side_effects.append(block_node);
-                            }
-                        }
+                    //     for (current_block_nodes) |block_node| {
+                    //         if (block_node.hasSideEffects() or block_node.isControl()) {
+                    //             try nodes_with_side_effects.append(block_node);
+                    //         }
+                    //     }
 
-                        if (nodes_with_side_effects.items.len >= 2) {
-                            var i: i32 = @intCast(nodes_with_side_effects.items.len - 2);
-                            while (i >= 0) : (i -= 1) {
-                                const ii: u32 = @intCast(i);
-                                var node_a: *IRNode = nodes_with_side_effects.items[ii];
-                                if (try node_a.isIsland(&compile_data.scratch_node_list_2)) {
-                                    var node_b: *IRNode = nodes_with_side_effects.items[ii + 1];
+                    //     if (nodes_with_side_effects.items.len >= 2) {
+                    //         var i: i32 = @intCast(nodes_with_side_effects.items.len - 2);
+                    //         while (i >= 0) : (i -= 1) {
+                    //             const ii: u32 = @intCast(i);
+                    //             var node_a: *IRNode = nodes_with_side_effects.items[ii];
+                    //             if (try node_a.isIsland(&compile_data.scratch_node_list_2)) {
+                    //                 var node_b: *IRNode = nodes_with_side_effects.items[ii + 1];
 
-                                    var in_edges = [_]*IRNode{node_b};
-                                    try node_a.pushEdges(.Out, &in_edges, compile_data.allocator);
+                    //                 var in_edges = [_]*IRNode{node_b};
+                    //                 try node_a.pushEdges(.Out, &in_edges, compile_data.allocator);
 
-                                    var out_edges = [_]*IRNode{node_a};
-                                    try node_b.pushEdges(.In, &out_edges, compile_data.allocator);
-                                }
-                            }
-                        }
-                    }
-
-                    compile_data.blocks.popBlock();
+                    //                 var out_edges = [_]*IRNode{node_a};
+                    //                 try node_b.pushEdges(.In, &out_edges, compile_data.allocator);
+                    //             }
+                    //         }
+                    //     }
+                    // }
                 },
                 .Branch => {
                     try compile_data.addPendingEdgeLabel(node.?, instruction.immediate.LabelId);
                     compile_data.is_unreachable = true;
                 },
                 .Branch_If => {
-                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0, module_def.*);
                 },
                 .Branch_Table => {
                     assert(node != null);
 
-                    try compile_data.popPushValueStackNodes(node.?, 1, 0);
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0, module_def.*);
 
                     // var continuation_edges: std.ArrayList(*IRNode).init(allocator);
                     // defer continuation_edges.deinit();
 
-                    const immediates: *const BranchTableImmediates = &compiler.module_def.code.branch_table.items[instruction.immediate.Index];
+                    const immediates: *const BranchTableImmediates = &module_def.code.branch_table.items[instruction.immediate.Index];
 
                     try compile_data.addPendingEdgeLabel(node.?, immediates.fallback_id);
-                    const label_ids: []const u32 = immediates.getLabelIds(compiler.module_def.*);
+                    const label_ids: []const u32 = immediates.getLabelIds(module_def.*);
                     for (label_ids) |continuation| {
                         try compile_data.addPendingEdgeLabel(node.?, continuation);
                     }
@@ -1176,17 +1204,17 @@ const FunctionCompiler = struct {
                     // TODO need to somehow connect to the various labels it wants to jump to?
                 },
                 .Return => {
-                    try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0);
+                    try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0, module_def.*);
                     compile_data.is_unreachable = true;
                 },
-                .Call => {
-                    const calling_func_def: *const FunctionDefinition = &compiler.module_def.functions.items[index];
-                    const calling_func_type: *const FunctionTypeDefinition = calling_func_def.typeDefinition(compiler.module_def.*);
-                    const num_returns: usize = calling_func_type.getReturns().len;
-                    const num_params: usize = calling_func_type.getParams().len;
+                // .Call => {
+                //     const calling_func_def: *const FunctionDefinition = &module_def.functions.items[index];
+                //     const calling_func_type: *const FunctionTypeDefinition = calling_func_def.typeDefinition(module_def.*);
+                //     const num_returns: usize = calling_func_type.getReturns().len;
+                //     const num_params: usize = calling_func_type.getParams().len;
 
-                    try compile_data.popPushValueStackNodes(node.?, num_params, num_returns);
-                },
+                //     try compile_data.popPushValueStackNodes(node.?, num_params, num_returns);
+                // },
                 // .Call_Indirect
                 .Drop => {
                     if (compile_data.is_unreachable == false) {
@@ -1262,7 +1290,7 @@ const FunctionCompiler = struct {
 
                 // TODO add a lot more of these simpler opcodes
                 => {
-                    try compile_data.popPushValueStackNodes(node.?, 2, 1);
+                    try compile_data.popPushValueStackNodes(node.?, 2, 1, module_def.*);
                 },
                 .I32_Eqz,
                 .I32_Clz,
@@ -1280,7 +1308,7 @@ const FunctionCompiler = struct {
                 .F32_Neg,
                 .F64_Neg,
                 => {
-                    try compile_data.popPushValueStackNodes(node.?, 1, 1);
+                    try compile_data.popPushValueStackNodes(node.?, 1, 1, module_def.*);
                 },
                 .Local_Get => {
                     assert(node == null);
@@ -1288,7 +1316,7 @@ const FunctionCompiler = struct {
                     if (compile_data.is_unreachable == false) {
                         const local: *?*IRNode = &locals[instruction.immediate.Index];
                         if (local.* == null) {
-                            local.* = try IRNode.createWithInstruction(compiler, instruction_index);
+                            local.* = try IRNode.createInstruction(instruction_index, compiler);
                         }
                         node = local.*;
                         try compile_data.value_stack.append(node.?);
@@ -1323,10 +1351,10 @@ const FunctionCompiler = struct {
 
                     if (pending.continuation == instruction_index) {
                         var out_edges = [_]*IRNode{current_node};
-                        try pending.node.pushEdges(.Out, &out_edges, compile_data.allocator);
+                        try pending.node.pushEdges(.Out, &out_edges, module_def.*, compile_data.allocator);
 
                         var in_edges = [_]*IRNode{pending.node};
-                        try current_node.pushEdges(.In, &in_edges, compile_data.allocator);
+                        try current_node.pushEdges(.In, &in_edges, module_def.*, compile_data.allocator);
 
                         _ = compile_data.pending_continuation_edges.swapRemove(i);
                     } else {
@@ -1338,15 +1366,12 @@ const FunctionCompiler = struct {
 
                 try compile_data.blocks.pushNode(current_node);
             }
-
-            // TODO don't assume only one return node - there can be multiple in real functions
-            if (node) |n| {
-                if (n.opcode == .Return) {
-                    std.debug.assert(ir_root == null);
-                    ir_root = node;
-                }
-            }
         }
+
+        std.debug.assert(current_control_stack.items.len == 1);
+        const last_control_node: *IRNode = current_control_stack.pop();
+        try last_control_node.pushEdges(.Out, &[_]*IRNode{stop}, module_def.*, compiler.allocator);
+        try stop.pushEdges(.In, &[_]*IRNode{last_control_node}, module_def.*, compiler.allocator);
 
         // resolve any nodes that have side effects that somehow became isolated
         // TODO will have to stress test this with a bunch of different cases of nodes
@@ -1367,24 +1392,9 @@ const FunctionCompiler = struct {
         return FunctionIR{
             .def_index = index,
             .type_def_index = func.type_index,
-            .ir_root = ir_root,
+            .start = start,
+            .stop = stop,
         };
-
-        // return FunctionIR.init(
-        //     index,
-        //     func.type_index,
-        //     ir_root.?,
-        //     compiler.allocator,
-        // );
-
-        // try compiler.functions.append(FunctionIR.init(
-        //     index,
-        //     func.type_index,
-        //     ir_root.?,
-        //     compiler.allocator,
-        // ));
-
-        // try compiler.functions.items[compiler.functions.items.len - 1].regalloc(compiler.allocator);
     }
 };
 
@@ -1671,7 +1681,7 @@ const InstructionFuncs = struct {
         &op_Noop, // &op_If,
         &op_Noop, // &op_IfNoElse,
         &op_Noop, // &op_Else,
-        &op_Noop, // &op_End,
+        &op_End, // &op_End,
         &op_Noop, // &op_Branch,
         &op_Noop, // &op_Branch_If,
         &op_Noop, // &op_Branch_Table,
@@ -2281,6 +2291,13 @@ const InstructionFuncs = struct {
     fn op_Noop(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
         try preamble("Noop", pc, ms);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, ms });
+    }
+
+    fn op_End(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        try preamble("End", pc, ms);
+        _ = code;
+
+        // TODO fill out
     }
 
     fn op_Return(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {

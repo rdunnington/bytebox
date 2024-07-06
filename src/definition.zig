@@ -349,7 +349,7 @@ pub const Limits = struct {
     }
 };
 
-const BlockType = enum(u8) {
+pub const BlockType = enum(u8) {
     Void,
     ValType,
     TypeIndex,
@@ -581,7 +581,7 @@ pub const FunctionTypeDefinition = struct {
 };
 
 pub const FunctionDefinition = struct {
-    type_index: usize,
+    type_index: u32,
     instructions_begin: usize,
     instructions_end: usize,
     continuation: usize,
@@ -3067,7 +3067,7 @@ pub const ModuleDefinition = struct {
                         return error.ValidationUnknownFunction;
                     }
 
-                    var func_type_index: usize = undefined;
+                    var func_type_index: u32 = undefined;
                     if (self.start_func_index.? < self.imports.functions.items.len) {
                         func_type_index = self.imports.functions.items[self.start_func_index.?].type_index;
                     } else {
