@@ -1840,10 +1840,10 @@ const InstructionFuncs = struct {
         try preamble("Select", pc, code, stack);
 
         const boolean: i32 = stack.popI32();
-        const v2: Val = stack.popValue();
         const v1: Val = stack.popValue();
+        const v2: Val = stack.popValue();
 
-        if (boolean != 0) {
+        if (boolean == 0) {
             stack.pushValue(v1);
         } else {
             stack.pushValue(v2);
@@ -1856,10 +1856,10 @@ const InstructionFuncs = struct {
         try preamble("Select_T", pc, code, stack);
 
         const boolean: i32 = stack.popI32();
-        const v2: Val = stack.popValue();
         const v1: Val = stack.popValue();
+        const v2: Val = stack.popValue();
 
-        if (boolean != 0) {
+        if (boolean == 0) {
             stack.pushValue(v1);
         } else {
             stack.pushValue(v2);

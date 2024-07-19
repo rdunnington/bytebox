@@ -34,6 +34,7 @@ const ConstantExpression = def.ConstantExpression;
 const DataDefinition = def.DataDefinition;
 const ElementDefinition = def.ElementDefinition;
 const ElementMode = def.ElementMode;
+const FunctionImportDefinition = def.FunctionImportDefinition;
 const FunctionDefinition = def.FunctionDefinition;
 const FunctionExport = def.FunctionExport;
 const FunctionHandle = def.FunctionHandle;
@@ -166,6 +167,56 @@ const IRNode = struct {
         Out,
     };
 
+    const EdgeIterFilter = enum {
+        Control,
+        Data,
+    };
+
+    const EdgeIter = struct {
+        module_def: *const ModuleDefinition,
+        edges: []*IRNode,
+        filter: EdgeIterFilter,
+        index: u32,
+
+        fn next(self: *EdgeIter) ?*IRNode {
+            while (true) {
+                if (self.index < self.edges.len) {
+                    const node = self.edges[self.index];
+                    self.index += 1;
+
+                    const is_control = node.isControl(self.module_def.*);
+                    if (self.filter == .Control and is_control) {
+                        return node;
+                    } else if (self.filter == .Data and is_control == false) {
+                        return node;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            return null;
+        }
+    };
+
+    fn edgesFilter(node: IRNode, comptime direction: EdgeDirection, module_def: *const ModuleDefinition, filter: EdgeIterFilter) EdgeIter {
+        const edges = switch (direction) {
+            .In => node.edgesIn(),
+            .Out => node.edgesOut(),
+        };
+        return EdgeIter{
+            .module_def = module_def,
+            .edges = edges,
+            .filter = filter,
+            .index = 0,
+        };
+    }
+
+    fn pushEdge(node: *IRNode, comptime direction: EdgeDirection, edge: *IRNode, module_def: ModuleDefinition, allocator: std.mem.Allocator) AllocError!void {
+        var consumer_edges = [_]*IRNode{edge};
+        try node.pushEdges(direction, &consumer_edges, module_def, allocator);
+    }
+
     fn pushEdges(node: *IRNode, comptime direction: EdgeDirection, edges: []const *IRNode, module_def: ModuleDefinition, allocator: std.mem.Allocator) AllocError!void {
         std.debug.assert(edges.len > 0);
 
@@ -189,9 +240,12 @@ const IRNode = struct {
                         }
                     },
                     .Out => {
-                        std.debug.assert(node.edges_out_count == 0);
-                        std.debug.assert(edges.len == 1);
-                        std.debug.assert(edges[0].type == .Region);
+                        // make sure there's only one Region node for out edges
+                        if (edges[0].type == .Region) {
+                            for (node.edgesOut()) |phi_out_edge| {
+                                std.debug.assert(phi_out_edge.type != .Region);
+                            }
+                        }
                     },
                 }
             },
@@ -244,6 +298,7 @@ const IRNode = struct {
         return switch (node.type) {
             .Start,
             .Stop,
+            .Region,
             => true,
             .Instruction => switch (node.opcode(module_def)) {
                 .If,
@@ -473,28 +528,30 @@ const FunctionIR = struct {
                     const opcode = node.opcode(module_def);
 
                     if (opcode == .Return or (opcode == .End and func.stop.edgesIn()[0] == node)) { // check if End is a returning node
-                        // return values always go in the first set of registers
-                        for (input_nodes, 0..) |input_node, register| {
-                            if (input_node.isControl(module_def) == false) {
-                                try compile_data.register_map.put(input_node, @intCast(register));
-                                std.debug.print("\t\tallocated slot {} (return)\n", .{register});
-                            }
+                        var iter = node.edgesFilter(.In, &module_def, .Data);
+                        var register: i32 = 0; // return values always go in the first set of registers, so index starts at 0
+                        while (iter.next()) |input_node| {
+                            try compile_data.register_map.put(input_node, @intCast(register));
+                            std.debug.print("\t\tallocated slot {} (return) for node {}\n", .{ register, input_node });
+                            register += 1;
                         }
                     } else {
-                        for (input_nodes) |input_node| {
-                            if (input_node.isControl(module_def) == false) {
-                                var register: u32 = 0;
-                                if (input_node.opcode(module_def) == .Local_Get) {
-                                    const instruction = input_node.instruction(module_def);
-                                    register = instruction.immediate.Index;
-                                    std.debug.assert(register < register_slots.num_reserved); // ensure this register is actually reserved
-                                } else {
-                                    register = try register_slots.alloc(input_node);
-                                }
-                                try compile_data.register_map.put(input_node, register);
-                                std.debug.print("\t\tallocated slot {}\n", .{register});
+                        var iter = node.edgesFilter(.In, &module_def, .Data);
+                        while (iter.next()) |input_node| {
+                            // for (input_nodes) |input_node| {
+                            // if (input_node.isControl(module_def) == false) {
+                            var register: u32 = 0;
+                            if (input_node.type == .Instruction and input_node.opcode(module_def) == .Local_Get) {
+                                const instruction = input_node.instruction(module_def);
+                                register = instruction.immediate.Index;
+                                std.debug.assert(register < register_slots.num_reserved); // ensure this register is actually reserved
+                            } else {
+                                register = try register_slots.alloc(input_node);
                             }
+                            try compile_data.register_map.put(input_node, register);
+                            std.debug.print("\t\tallocated slot {}\n", .{register});
                         }
+                        // }
                     }
                 }
 
@@ -531,15 +588,24 @@ const FunctionIR = struct {
             var node: *IRNode = undefined;
             if (visit_queue.items.len > 0) {
                 node = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
-                std.debug.assert(visited.contains(node) == false);
+
+                // we could have marked this node as visited on an earlier pass since it could potentially be an
+                // input into multiple nodes, or multiple inputs into the same node
+                if (visited.contains(node)) {
+                    continue;
+                }
+
+                std.debug.print("\tvisit data node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def), node.edgesOut().len, node.edgesIn().len });
+                // std.debug.assert(visited.contains(node) == false);
                 std.debug.assert(node.isControl(module_def) == false);
             } else {
                 node = visit_stack_control_nodes.pop();
+                std.debug.print("\tvisit control node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def), node.edgesOut().len, node.edgesIn().len });
                 std.debug.assert(node.isControl(module_def));
-                std.debug.print("\tpopped control node {s}\n", .{node.prettyPrint(module_def)});
+                // std.debug.print("\tpopped control node {s}\n", .{node.prettyPrint(module_def)});
             }
 
-            std.debug.print("\tvisit node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def), node.edgesOut().len, node.edgesIn().len });
+            // std.debug.print("\tvisit node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def), node.edgesOut().len, node.edgesIn().len });
 
             // only emit an instruction once all its out edges have been visited - this ensures all dependent instructions
             // will be executed after this one
@@ -727,14 +793,45 @@ const IntermediateCompileData = struct {
         const Block = struct {
             node_start_index: u32,
             continuation: usize, // in instruction index space
-            block_type: BlockType,
-            type_data: BlockTypeValue,
-            // phi_nodes: []*IRNode,
+            num_returns: u32,
+
+            // records the state of stack and locals at the start of the block
+            stack: std.ArrayList(*IRNode),
+            locals: std.ArrayList(?*IRNode),
+
+            fn init(start_index: u32, continuation: usize, num_returns: u32, allocator: std.mem.Allocator) Block {
+                return Block{
+                    .node_start_index = start_index,
+                    .continuation = continuation,
+                    .num_returns = num_returns,
+                    .stack = std.ArrayList(*IRNode).init(allocator),
+                    .locals = std.ArrayList(?*IRNode).init(allocator),
+                };
+            }
+
+            fn initWithState(start_index: u32, continuation: usize, num_returns: u32, stack: []*IRNode, locals: []?*IRNode, allocator: std.mem.Allocator) AllocError!Block {
+                var block = Block{
+                    .node_start_index = start_index,
+                    .continuation = continuation,
+                    .num_returns = num_returns,
+                    .stack = std.ArrayList(*IRNode).init(allocator),
+                    .locals = std.ArrayList(?*IRNode).init(allocator),
+                };
+                try block.stack.appendSlice(stack);
+                try block.locals.appendSlice(locals);
+
+                return block;
+            }
+
+            fn deinit(self: Block) void {
+                self.stack.deinit();
+                self.locals.deinit();
+            }
         };
 
         nodes: std.ArrayList(*IRNode),
         blocks: std.ArrayList(Block),
-        // phi_nodes: std.ArrayList(*IRNode),
+        allocator: std.mem.Allocator,
 
         // const ContinuationType = enum {
         //     .Normal,
@@ -745,7 +842,7 @@ const IntermediateCompileData = struct {
             return BlockStack{
                 .nodes = std.ArrayList(*IRNode).init(allocator),
                 .blocks = std.ArrayList(Block).init(allocator),
-                // .phi_nodes = std.ArrayList(*IRNode).init(allocator),
+                .allocator = allocator,
             };
         }
 
@@ -754,26 +851,15 @@ const IntermediateCompileData = struct {
             self.blocks.deinit();
         }
 
-        fn pushBlock(self: *BlockStack, continuation: usize, block_type: BlockType, type_data: BlockTypeValue) AllocError!void {
-            try self.blocks.append(Block{
-                .node_start_index = @intCast(self.nodes.items.len),
-                .continuation = continuation,
-                .block_type = block_type,
-                .type_data = type_data,
-                // .phi_nodes = &[_]*IRNode{},
-            });
+        fn push(self: *BlockStack, continuation: usize, num_returns: u32) AllocError!void {
+            const block = Block.init(@intCast(self.nodes.items.len), continuation, num_returns, self.allocator);
+            try self.blocks.append(block);
         }
 
-        // fn pushBlockWithPhi(self: *BlockStack, continuation: u32, phi_nodes: []*IRNode) AllocError!void {
-        //     const start_slice_index = self.phi_nodes.items.len;
-        //     try self.phi_nodes.appendSlice(phi_nodes);
-
-        //     try self.blocks.append(Block{
-        //         .node_start_index = @intCast(self.nodes.items.len),
-        //         .continuation = continuation,
-        //         .phi_nodes = self.phi_nodes.items[start_slice_index..],
-        //     });
-        // }
+        fn pushWithState(self: *BlockStack, continuation: usize, num_returns: u32, stack: []*IRNode, locals: []?*IRNode) AllocError!void {
+            const block = try Block.initWithState(@intCast(self.nodes.items.len), continuation, num_returns, stack, locals, self.allocator);
+            try self.blocks.append(block);
+        }
 
         fn pushNode(self: *BlockStack, node: *IRNode) AllocError!void {
             try self.nodes.append(node);
@@ -785,8 +871,8 @@ const IntermediateCompileData = struct {
             std.debug.assert(block.node_start_index <= self.nodes.items.len);
 
             // should never grow these arrays
+            std.debug.assert(block.node_start_index <= self.nodes.items.len);
             self.nodes.resize(block.node_start_index) catch unreachable;
-            self.phi_nodes.resize(self.phi_nodes.items.len - block.phi_nodes.len) catch unreachable;
             return block;
         }
 
@@ -893,19 +979,20 @@ const IntermediateCompileData = struct {
             return;
         }
 
-        var edges_buffer: [8]*IRNode = undefined; // 8 should be more stack slots than any one instruction can pop
-        std.debug.assert(num_consumed <= edges_buffer.len);
+        if (num_consumed > 0) {
+            var edges_buffer: [8]*IRNode = undefined; // 8 should be more stack slots than any one instruction can pop
+            std.debug.assert(num_consumed <= edges_buffer.len);
 
-        const edges = edges_buffer[0..num_consumed];
-        for (edges) |*e| {
-            e.* = self.value_stack.pop();
+            const edges = edges_buffer[0..num_consumed];
+            for (edges) |*e| {
+                e.* = self.value_stack.pop();
+            }
+            try node.pushEdges(.In, edges, module_def, self.allocator);
+            for (edges) |e| {
+                try e.pushEdge(.Out, node, module_def, self.allocator);
+            }
         }
 
-        try node.pushEdges(.In, edges, module_def, self.allocator);
-        for (edges) |e| {
-            var consumer_edges = [_]*IRNode{node};
-            try e.pushEdges(.Out, &consumer_edges, module_def, self.allocator);
-        }
         try self.value_stack.appendNTimes(node, num_pushed);
     }
 
@@ -1034,9 +1121,7 @@ const FunctionCompiler = struct {
 
         try compile_data.warmup(func.*, module_def.*);
 
-        try compile_data.blocks.pushBlock(func.continuation, .TypeIndex, BlockTypeValue{
-            .TypeIndex = func.type_index,
-        });
+        try compile_data.blocks.push(func.continuation, func_type.calcNumReturns());
 
         var locals = compile_data.locals.items; // for convenience later
 
@@ -1052,9 +1137,11 @@ const FunctionCompiler = struct {
 
         const start: *IRNode = try IRNode.create(.Start, compiler);
         const stop: *IRNode = try IRNode.create(.Stop, compiler);
-        var current_control_stack = std.ArrayList(*IRNode).init(compiler.allocator);
-        defer current_control_stack.deinit();
-        try current_control_stack.append(start);
+        var current_control_node: *IRNode = start;
+
+        // mainly for If instructions to help the corresponding End instruction figure out if they should swap the block stack/locals
+        var instruction_control_stack = std.ArrayList(*IRNode).init(compiler.allocator);
+        defer instruction_control_stack.deinit();
 
         for (instructions, 0..) |instruction, local_instruction_index| {
             const instruction_index: u32 = @intCast(func.instructions_begin + local_instruction_index);
@@ -1067,77 +1154,164 @@ const FunctionCompiler = struct {
             std.debug.print("opcode: {}\n", .{instruction.opcode});
 
             switch (instruction.opcode) {
-                // .Block => {
-                //     // compile_data.label_stack += 1;
+                .Block => {
+                    // compile_data.label_stack += 1;
 
-                //     // try compile_data.label_stack.append(node);
-                //     // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
-                //     try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation);
-                // },
+                    // try compile_data.label_stack.append(node);
+                    // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+
+                    // instruction.immediate.Block
+                    const block_immediates = instruction.immediate.Block;
+                    const num_block_returns = BlockTypeValue.getBlocktypeReturnTypes(block_immediates.block_value, block_immediates.block_type, module_def).len;
+
+                    try compile_data.blocks.push(instruction.immediate.Block.continuation, @intCast(num_block_returns));
+                },
                 // .Loop => {
                 //     // compile_data.label_stack += 1;
                 //     // compile_data.label_stack.append(node);
                 //     // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
-                //     try compile_data.blocks.pushBlock(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
+                //     try compile_data.blocks.push(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
                 // },
-                // .If => {
-                //     var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
-                //     defer compile_data.scratch_node_list_1.clearRetainingCapacity();
+                .If => {
+                    try current_control_node.pushEdge(.Out, node.?, module_def.*, compiler.allocator);
+                    try node.?.pushEdge(.In, current_control_node, module_def.*, compiler.allocator);
+                    current_control_node = node.?;
 
-                //     std.debug.assert(phi_nodes.items.len == 0);
+                    try instruction_control_stack.append(node.?);
 
-                //     for (0..instruction.immediate.If.num_returns) |_| {
-                //         try phi_nodes.append(.Phi, try IRNode.create(compiler));
-                //     }
+                    // var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                    // defer compile_data.scratch_node_list_1.clearRetainingCapacity();
 
-                //     try compile_data.blocks.pushBlockWithPhi(instruction.immediate.If.end_continuation, phi_nodes.items[0..]);
-                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
-                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+                    // std.debug.assert(phi_nodes.items.len == 0);
 
-                //     try compile_data.popPushValueStackNodes(node.?, 1, 0);
+                    // for (0..instruction.immediate.If.num_returns) |_| {
+                    //     const phi: *IRNode = try IRNode.create(.Phi, compiler);
+                    //     try phi_nodes.append(phi);
+                    // }
 
-                //     // after the if consumes the value it needs, push the phi nodes on since these will be the return values
-                //     // of the block
-                //     try compile_data.value_stack.appendSlice(phi_nodes.items);
-                // },
-                // .IfNoElse => {
-                //     try compile_data.blocks.pushBlock(instruction.immediate.If.end_continuation);
-                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
-                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
-                //     try compile_data.popPushValueStackNodes(node.?, 1, 0);
+                    // make sure the if node consumes the top stack value before making a copy of it when the block is pushed
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0, module_def.*);
 
-                //     // TODO figure out if there needs to be any phi nodes and if so what two inputs they have
-                // },
-                // .Else => {
-                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
-                //     try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+                    try compile_data.blocks.pushWithState(instruction.immediate.If.end_continuation, instruction.immediate.If.num_returns, compile_data.value_stack.items, compile_data.locals.items);
+                    // try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                    // try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
 
-                //     // TODO hook up the phi nodes with the stuffs
-                // },
+                    // after the if consumes the value it needs, push the phi nodes on since these will be the return values
+                    // of the block
+                    // try compile_data.value_stack.appendSlice(phi_nodes.items);
+                },
+                .IfNoElse => {
+                    std.debug.assert(instruction.immediate.If.num_returns == 0);
+
+                    try current_control_node.pushEdge(.Out, node.?, module_def.*, compiler.allocator);
+                    try node.?.pushEdge(.In, current_control_node, module_def.*, compiler.allocator);
+                    current_control_node = node.?;
+
+                    try instruction_control_stack.append(node.?);
+
+                    // make sure the if node consumes the top stack value before making a copy of it when the block is pushed
+                    try compile_data.popPushValueStackNodes(node.?, 1, 0, module_def.*);
+
+                    try compile_data.blocks.pushWithState(instruction.immediate.If.end_continuation, 0, compile_data.value_stack.items, compile_data.locals.items);
+                    // try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+                    // try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.else_continuation);
+                },
+                .Else => {
+                    // try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
+
+                    const block: *IntermediateCompileData.BlockStack.Block = &compile_data.blocks.blocks.items[compile_data.blocks.blocks.items.len - 1];
+                    std.mem.swap(std.ArrayList(*IRNode), &block.stack, &compile_data.value_stack);
+                    std.mem.swap(std.ArrayList(?*IRNode), &block.locals, &compile_data.locals);
+                },
                 .End => {
-                    // TODO finish up anything with phi nodes?
+                    var block: IntermediateCompileData.BlockStack.Block = compile_data.blocks.popBlock();
+                    defer block.deinit();
+
+                    // resolve the current stack and locals with the saved state via phi nodes. only If/IfNoElse should fall into here
+                    if (block.stack.items.len > 0 or block.locals.items.len > 0) {
+                        const region: *IRNode = try IRNode.create(.Region, compiler);
+                        try region.pushEdge(.In, current_control_node, module_def.*, compiler.allocator);
+                        try current_control_node.pushEdge(.Out, region, module_def.*, compiler.allocator);
+
+                        current_control_node = region;
+
+                        var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                        std.debug.assert(phi_nodes.items.len == 0);
+                        defer phi_nodes.clearRetainingCapacity();
+
+                        // Ensure the stack and local nodes are the ones from the truthy branch, so the stack
+                        // comparison code can push the edges in the correct order
+                        const block_pair_node = instruction_control_stack.pop();
+                        const block_pair_opcode = block_pair_node.opcode(module_def.*);
+                        std.debug.assert(block_pair_opcode == .If or block_pair_opcode == .IfNoElse);
+                        if (block_pair_opcode == .If) {
+                            std.mem.swap(std.ArrayList(*IRNode), &block.stack, &compile_data.value_stack);
+                            std.mem.swap(std.ArrayList(?*IRNode), &block.locals, &compile_data.locals);
+                        }
+
+                        // TODO figure out if we can optimize these compares by only looking at values that actually changed
+
+                        if (block.stack.items.len > 0) {
+                            std.debug.assert(block.stack.items.len == compile_data.value_stack.items.len);
+                            for (block.stack.items, compile_data.value_stack.items, 0..) |false_value, true_value, i| {
+                                if (false_value != true_value) {
+                                    const phi: *IRNode = try IRNode.create(.Phi, compiler);
+                                    const in_edges = [_]*IRNode{ true_value, false_value }; // TODO maybe need that Proj node to make sure these are coming from the correct if/else branch?
+                                    try phi.pushEdges(.In, &in_edges, module_def.*, compiler.allocator);
+                                    try phi.pushEdge(.Out, region, module_def.*, compiler.allocator);
+
+                                    compile_data.value_stack.items[i] = phi; // TODO I wonder if aliasing is a problem here
+
+                                    try phi_nodes.append(phi);
+                                }
+                            }
+                        }
+
+                        if (block.locals.items.len > 0) {
+                            std.debug.assert(block.locals.items.len == compile_data.locals.items.len);
+
+                            // don't need to compare parameters since they are immutable
+                            const num_params = func_type.num_params;
+                            for (block.locals.items[num_params..], compile_data.locals.items[num_params..], num_params..) |false_local, true_local, i| {
+                                std.debug.print("\ttrue_local: {?}\n", .{true_local});
+                                std.debug.print("\tfalse_local: {?}\n", .{false_local});
+                                if (false_local != true_local) {
+                                    std.debug.assert(true_local != null);
+                                    std.debug.assert(false_local != null);
+
+                                    const phi: *IRNode = try IRNode.create(.Phi, compiler);
+                                    const in_edges = [_]*IRNode{ true_local.?, false_local.? }; // TODO maybe need that Proj node to make sure these are coming from the correct if/else branch?
+                                    try phi.pushEdges(.In, &in_edges, module_def.*, compiler.allocator);
+                                    try phi.pushEdge(.Out, region, module_def.*, compiler.allocator);
+
+                                    compile_data.locals.items[i] = phi; // TODO I wonder if aliasing is a problem here
+
+                                    try phi_nodes.append(phi);
+                                }
+                            }
+                        }
+
+                        if (phi_nodes.items.len > 0) {
+                            try region.pushEdges(.In, phi_nodes.items, module_def.*, compiler.allocator); // note that phis don't have a back edge to the control region (at least right now...)
+                        }
+                    } else {
+                        std.debug.assert(block.stack.items.len == 0);
+                        std.debug.assert(block.locals.items.len == 0);
+
+                        const out_edges = [_]*IRNode{node.?};
+                        try current_control_node.pushEdges(.Out, &out_edges, module_def.*, compiler.allocator);
+
+                        const in_edges = [_]*IRNode{current_control_node};
+                        try node.?.pushEdges(.In, &in_edges, module_def.*, compiler.allocator);
+
+                        current_control_node = node.?;
+                    }
 
                     // the last End opcode returns the values on the stack
-                    // if (compile_data.label_continuations.items.len == 1) {
-                    if (compile_data.blocks.blocks.items.len == 1) {
+                    if (compile_data.blocks.blocks.items.len == 0) {
                         // node = try IRNode.createStandalone(compiler, .Return);
                         try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0, module_def.*);
                         // _ = compile_data.label_continuations.pop();
-                    }
-
-                    // TODO update this when we add real support for blocks
-                    std.debug.assert(current_control_stack.items.len == 1);
-
-                    {
-                        const last_index = current_control_stack.items.len - 1;
-                        const prev_control_node: *IRNode = current_control_stack.items[last_index];
-                        current_control_stack.items[last_index] = node.?;
-
-                        const out_edges = [_]*IRNode{node.?};
-                        try prev_control_node.pushEdges(.Out, &out_edges, module_def.*, compiler.allocator);
-
-                        const in_edges = [_]*IRNode{prev_control_node};
-                        try node.?.pushEdges(.In, &in_edges, module_def.*, compiler.allocator);
                     }
 
                     // At the end of every block, we ensure all nodes with side effects are still in the graph. Order matters
@@ -1207,19 +1381,32 @@ const FunctionCompiler = struct {
                     try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0, module_def.*);
                     compile_data.is_unreachable = true;
                 },
-                // .Call => {
-                //     const calling_func_def: *const FunctionDefinition = &module_def.functions.items[index];
-                //     const calling_func_type: *const FunctionTypeDefinition = calling_func_def.typeDefinition(module_def.*);
-                //     const num_returns: usize = calling_func_type.getReturns().len;
-                //     const num_params: usize = calling_func_type.getParams().len;
+                .Call => {
+                    const call_index = instruction.immediate.Index;
+                    const type_index = blk: {
+                        if (index < module_def.imports.functions.items.len) {
+                            const import: *const FunctionImportDefinition = &module_def.imports.functions.items[call_index];
+                            break :blk import.type_index;
+                        } else {
+                            const local_index = module_def.imports.functions.items.len - call_index;
+                            const call_def: *const FunctionDefinition = &module_def.functions.items[local_index];
+                            break :blk call_def.type_index;
+                        }
+                    };
+                    const calling_func_type: *const FunctionTypeDefinition = &module_def.types.items[type_index];
+                    const num_params: usize = calling_func_type.num_params;
+                    const num_returns: usize = calling_func_type.calcNumReturns();
 
-                //     try compile_data.popPushValueStackNodes(node.?, num_params, num_returns);
-                // },
+                    try compile_data.popPushValueStackNodes(node.?, num_params, num_returns, module_def.*);
+                },
                 // .Call_Indirect
                 .Drop => {
                     if (compile_data.is_unreachable == false) {
                         _ = compile_data.value_stack.pop();
                     }
+                },
+                .Select, .Select_T => {
+                    try compile_data.popPushValueStackNodes(node.?, 3, 1, module_def.*);
                 },
                 .I32_Const => {
                     assert(node == null);
@@ -1368,10 +1555,8 @@ const FunctionCompiler = struct {
             }
         }
 
-        std.debug.assert(current_control_stack.items.len == 1);
-        const last_control_node: *IRNode = current_control_stack.pop();
-        try last_control_node.pushEdges(.Out, &[_]*IRNode{stop}, module_def.*, compiler.allocator);
-        try stop.pushEdges(.In, &[_]*IRNode{last_control_node}, module_def.*, compiler.allocator);
+        try current_control_node.pushEdges(.Out, &[_]*IRNode{stop}, module_def.*, compiler.allocator);
+        try stop.pushEdges(.In, &[_]*IRNode{current_control_node}, module_def.*, compiler.allocator);
 
         // resolve any nodes that have side effects that somehow became isolated
         // TODO will have to stress test this with a bunch of different cases of nodes
@@ -2273,8 +2458,9 @@ const InstructionFuncs = struct {
     };
 
     fn op_Invalid(pc: u32, code: [*]const RegInstruction, ms: *MachineState) TrapError!void {
+        std.debug.print(">>>>>>>> op_Invalid for instr: {}\n", .{code[pc]});
         try preamble("Invalid", pc, ms);
-        _ = code;
+        // _ = code;
         unreachable;
     }
 

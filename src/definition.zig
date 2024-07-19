@@ -359,14 +359,14 @@ pub const BlockTypeValue = extern union {
     ValType: ValType,
     TypeIndex: u32,
 
-    fn getBlocktypeParamTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
+    pub fn getBlocktypeParamTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
         switch (block_type) {
             else => return &BlockTypeStatics.empty,
             .TypeIndex => return module_def.types.items[value.TypeIndex].getParams(),
         }
     }
 
-    fn getBlocktypeReturnTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
+    pub fn getBlocktypeReturnTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
         switch (block_type) {
             .Void => return &BlockTypeStatics.empty,
             .ValType => return switch (value.ValType) {
@@ -742,23 +742,23 @@ pub const ImportNames = struct {
     import_name: []const u8,
 };
 
-const FunctionImportDefinition = struct {
+pub const FunctionImportDefinition = struct {
     names: ImportNames,
     type_index: u32,
 };
 
-const TableImportDefinition = struct {
+pub const TableImportDefinition = struct {
     names: ImportNames,
     reftype: ValType,
     limits: Limits,
 };
 
-const MemoryImportDefinition = struct {
+pub const MemoryImportDefinition = struct {
     names: ImportNames,
     limits: Limits,
 };
 
-const GlobalImportDefinition = struct {
+pub const GlobalImportDefinition = struct {
     names: ImportNames,
     valtype: ValType,
     mut: GlobalMut,
