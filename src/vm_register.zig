@@ -1154,7 +1154,7 @@ const FunctionCompiler = struct {
             std.debug.print("opcode: {}\n", .{instruction.opcode});
 
             switch (instruction.opcode) {
-                .Block => {
+                .Block, .Loop => {
                     // compile_data.label_stack += 1;
 
                     // try compile_data.label_stack.append(node);
@@ -1167,10 +1167,14 @@ const FunctionCompiler = struct {
                     try compile_data.blocks.push(instruction.immediate.Block.continuation, @intCast(num_block_returns));
                 },
                 // .Loop => {
-                //     // compile_data.label_stack += 1;
-                //     // compile_data.label_stack.append(node);
-                //     // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
-                //     try compile_data.blocks.push(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
+                // compile_data.label_stack += 1;
+                // compile_data.label_stack.append(node);
+                // try compile_data.label_continuations.append(instruction.immediate.Block.continuation);
+                // try compile_data.blocks.push(instruction.immediate.Block.continuation); // TODO record the kind of block so we know this is a loop?
+                // TODO unreachable
+                // try compile_data.blocks.pushWithState(instruction.immediate.If.end_continuation, instruction.immediate.If.num_returns, compile_data.value_stack.items, compile_data.locals.items);
+                // try compile_data.blocks.push(instruction.immediate.If.end_continuation, instruction.immediate.If.num_returns, compile_data.value_stack.items, compile_data.locals.items);
+
                 // },
                 .If => {
                     try current_control_node.pushEdge(.Out, node.?, module_def.*, compiler.allocator);
@@ -1381,25 +1385,29 @@ const FunctionCompiler = struct {
                     try compile_data.popPushValueStackNodes(node.?, func_type.getReturns().len, 0, module_def.*);
                     compile_data.is_unreachable = true;
                 },
-                .Call => {
-                    const call_index = instruction.immediate.Index;
+                .Call, .Call_Indirect => {
+                    const num_stack_consumed: u32 = if (instruction.opcode == .Call) 0 else 1;
                     const type_index = blk: {
-                        if (index < module_def.imports.functions.items.len) {
-                            const import: *const FunctionImportDefinition = &module_def.imports.functions.items[call_index];
-                            break :blk import.type_index;
+                        if (instruction.opcode == .Call) {
+                            const call_index = instruction.immediate.Index;
+                            if (call_index < module_def.imports.functions.items.len) {
+                                const import: *const FunctionImportDefinition = &module_def.imports.functions.items[call_index];
+                                break :blk import.type_index;
+                            } else {
+                                const local_index = module_def.imports.functions.items.len - call_index;
+                                const call_def: *const FunctionDefinition = &module_def.functions.items[local_index];
+                                break :blk call_def.type_index;
+                            }
                         } else {
-                            const local_index = module_def.imports.functions.items.len - call_index;
-                            const call_def: *const FunctionDefinition = &module_def.functions.items[local_index];
-                            break :blk call_def.type_index;
+                            break :blk instruction.immediate.CallIndirect.type_index;
                         }
                     };
                     const calling_func_type: *const FunctionTypeDefinition = &module_def.types.items[type_index];
                     const num_params: usize = calling_func_type.num_params;
                     const num_returns: usize = calling_func_type.calcNumReturns();
 
-                    try compile_data.popPushValueStackNodes(node.?, num_params, num_returns, module_def.*);
+                    try compile_data.popPushValueStackNodes(node.?, num_params + num_stack_consumed, num_returns, module_def.*);
                 },
-                // .Call_Indirect
                 .Drop => {
                     if (compile_data.is_unreachable == false) {
                         _ = compile_data.value_stack.pop();
