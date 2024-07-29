@@ -371,7 +371,7 @@ const IRNode = struct {
     }
 
     // a node that has no out edges to instructions with side effects or control flow
-    // fn isIsland(node: *IRNode, unvisited: *std.ArrayList(*IRNode)) AllocError!bool {
+    // fn isIsland(node: *IRNode, unvisited: *NodeList) AllocError!bool {
     //     if (node.opcode == .Return) {
     //         return false;
     //     }
@@ -397,6 +397,10 @@ const IRNode = struct {
     //     return true;
     // }
 };
+
+const NodeSet = std.AutoHashMap(*IRNode, void);
+const NodeList = std.ArrayList(*IRNode);
+const NullableNodeList = std.ArrayList(?*IRNode);
 
 const RegisterSlots = struct {
     const Slot = struct {
@@ -500,6 +504,12 @@ const FunctionIR = struct {
     // TODO call this from the compiler compile function, have the compile function take instructions and local_types arrays passed down from module instantiate
     // TODO ensure callsites pass a scratch allocator
     fn codegen(func: FunctionIR, store: *FunctionStore, compile_data: *IntermediateCompileData, module_def: ModuleDefinition, scratch_allocator: std.mem.Allocator) AllocError!void {
+        {
+            var viz_path_buffer: [256]u8 = undefined;
+            const viz_path = std.fmt.bufPrint(&viz_path_buffer, "E:\\Dev\\zig_projects\\bytebox\\viz\\viz_{}.txt", .{func.def_index}) catch unreachable;
+            try func.dumpVizGraph(viz_path, module_def, scratch_allocator);
+        }
+
         std.debug.print("==== CODEGEN: regalloc ====\n", .{});
 
         // allocate register slots for each node.
@@ -514,17 +524,17 @@ const FunctionIR = struct {
 
         // control nodes are explored via depth-first search to ensure local calulations can reuse
         // the same registers
-        var visit_stack_control_nodes = std.ArrayList(*IRNode).init(scratch_allocator); // TODO determine if we really need a stack (e.g. if depth ever goes over 1)
+        var visit_stack_control_nodes = NodeList.init(scratch_allocator); // TODO determine if we really need a stack (e.g. if depth ever goes over 1)
         defer visit_stack_control_nodes.deinit();
         try visit_stack_control_nodes.append(func.stop);
 
         // we need to visit non-control nodes in breadth-first order to efficiently allocate
         // registers - if a full branch was regalloced, there would be registers allocated
         // to nodes much higher up the branch that could be reused by calulations lower down
-        var visit_queue = std.ArrayList(*IRNode).init(scratch_allocator);
+        var visit_queue = NodeList.init(scratch_allocator);
         defer visit_queue.deinit();
 
-        var visited = std.AutoHashMap(*IRNode, void).init(scratch_allocator);
+        var visited = NodeSet.init(scratch_allocator);
         defer visited.deinit();
 
         {
@@ -623,10 +633,26 @@ const FunctionIR = struct {
             }
         }
 
-        // walk the graph in breadth-first order, starting from the stop node
-        // reverse the instructions array when finished (alternatively just emit in reverse order if we have the node count from regalloc)
+        // walk the graph in breadth-first order, starting from the start node to ensure instructions are emitted in the
+        // correct order
 
         std.debug.print("==== CODEGEN: emit instructions ====\n", .{});
+
+        // const EmitHelpers = struct {
+        //     fn queue_edges(node: *IRNode, is_control: bool, visited: NodeSet, control_queue: *NodeList, data_queue: *NodeList) void {
+        //         for (node.edgesIn()) |input_node| {
+        //             std.debug.assert(input_node != node);
+
+        //             if (visited.contains(input_node) == false) {
+        //                 if (input_node.isControl(module_def)) {
+        //                     try control_queue.append(input_node);
+        //                 } else {
+        //                     try data_queue.append(input_node);
+        //                 }
+        //             }
+        //         }
+        //     }
+        // };
 
         const instructions_begin = store.instructions.items.len;
 
@@ -634,14 +660,43 @@ const FunctionIR = struct {
         visit_queue.clearRetainingCapacity();
         visited.clearRetainingCapacity();
 
-        try visit_stack_control_nodes.append(func.stop);
+        // try visit_stack_control_nodes.append(func.start);
+
+        var current_control_node: ?*IRNode = func.start;
 
         var instructions = &store.instructions;
 
-        while (visit_queue.items.len > 0 or visit_stack_control_nodes.items.len > 0) {
-            var node: *IRNode = undefined;
-            if (visit_queue.items.len > 0) {
-                node = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
+        while (current_control_node) |control_node| {
+            std.debug.print("\tvisit control node {s} - {} outs, {} ins\n", .{ control_node.prettyPrint(module_def, .{}), control_node.edges_out_count, control_node.edges_in_count });
+
+            var next_control_node: ?*IRNode = null;
+            for (control_node.edgesOut()) |output_node| {
+                std.debug.assert(output_node != control_node);
+
+                if (visited.contains(output_node) == false) {
+                    std.debug.assert(output_node.isControl(module_def));
+                    std.debug.assert(next_control_node == null); // TODO handle multiple control outputs
+
+                    next_control_node = output_node;
+                    // } else {
+                    //     try visit_queue.append(input_node);
+                    // }
+                }
+            }
+
+            for (control_node.edgesIn()) |input_node| {
+                if ((visited.contains(input_node) == false) and (input_node.isControl(module_def) == false)) {
+                    try visit_queue.append(input_node);
+                }
+            }
+
+            // queueing the control node must come after the other data inputs to ensure it is emitted after them
+            if (control_node.type == .Instruction) {
+                try visit_queue.append(control_node);
+            }
+
+            while (visit_queue.items.len > 0) {
+                const node: *IRNode = visit_queue.orderedRemove(0); // visit the graph in breadth-first order (FIFO queue)
 
                 // we could have marked this node as visited on an earlier pass since it could potentially be an
                 // input into multiple nodes, or multiple inputs into the same node
@@ -650,116 +705,136 @@ const FunctionIR = struct {
                 }
 
                 std.debug.print("\tvisit data node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def, .{}), node.edgesOut().len, node.edgesIn().len });
+
                 // std.debug.assert(visited.contains(node) == false);
-                std.debug.assert(node.isControl(module_def) == false);
-            } else {
-                node = visit_stack_control_nodes.pop();
-                std.debug.print("\tvisit control node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def, .{}), node.edgesOut().len, node.edgesIn().len });
-                std.debug.assert(node.isControl(module_def));
+                // std.debug.assert(node.isControl(module_def) == false);
+                // is_control = false;
+                // } else {
+                //     node = visit_stack_control_nodes.pop();
+                //     std.debug.assert(node.isControl(module_def));
+                //     is_control = true;
                 // std.debug.print("\tpopped control node {s}\n", .{node.prettyPrint(module_def, .{})});
-            }
+                // }
 
-            // std.debug.print("\tvisit node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def, .{}), node.edgesOut().len, node.edgesIn().len });
+                // std.debug.print("\tvisit node {s} - {} outs, {} ins\n", .{ node.prettyPrint(module_def, .{}), node.edgesOut().len, node.edgesIn().len });
 
-            // only emit an instruction once all its out edges have been visited - this ensures all dependent instructions
-            // will be executed after this one
-            var did_visit_all_outputs: bool = true;
-            for (node.edgesOut()) |output_node| {
-                if (visited.contains(output_node) == false) {
-                    did_visit_all_outputs = false;
-                    std.debug.print("\tnot all outputs visited...\n", .{});
-                    break;
-                }
-            }
+                // control nodes are only emitted after all of their inputs have been visited
+                // only emit an instruction once all its out edges have been visited - this ensures all dependent instructions
+                // will be executed after this one
+                // var can_emit: bool = true;
+                // if (is_control) {
+                //     if (node.type == .Instruction)
+                // } else {
 
-            // TODO ideally dedupe the register slices to save cache space - since they don't change,
-            // instructions can share their register slices if the values are the same. Could be as
-            // simple as a hashmap([]u32, u32), where a slice hashes to an offset in the registers array.
-            if (did_visit_all_outputs) {
-                try visited.put(node, {});
+                // }
 
-                if (node.type == .Instruction) {
-                    const instruction = node.instruction(module_def);
-                    const opcode = instruction.opcode;
-                    const immediates = instruction.immediate;
-
-                    switch (opcode) {
-                        .Local_Get => {
-                            std.debug.print("\t\tskipped emit - flattened into register {}\n", .{node.instruction(module_def).immediate.Index});
-                        },
-                        else => {
-                            const registers_begin = store.registers.items.len;
-                            switch (opcode) {
-                                .Local_Get => {
-                                    // Local_Get doesn't have node inputs, it gets its input from its immediate index
-                                    try store.registers.append(immediates.Index);
-                                },
-                                // .I32_Const => {
-                                //     const input_register: ?u32 = compile_data.register_map.get(node);
-                                //     std.debug.assert(input_register != null);
-                                //     try store.registers.append(input_register.?);
-                                // },
-                                else => {
-                                    var iter = node.edgesFilter(.In, &module_def, .Data);
-                                    while (iter.next()) |input_node| {
-                                        if (compile_data.register_map.get(input_node)) |input_register| {
-                                            std.debug.print("\t\tinput node {s} for register {}\n", .{ input_node.prettyPrint(module_def, .{}), input_register });
-                                            try store.registers.append(input_register);
-                                        }
-                                    }
-                                },
-                            }
-
-                            if (compile_data.register_map.get(node)) |output_register| {
-                                try store.registers.append(output_register);
-                            }
-
-                            const registers_end = store.registers.items.len;
-                            const registers = store.registers.items[registers_begin..registers_end];
-
-                            std.debug.print("\tregisters: {any}\n", .{registers});
-
-                            try instructions.append(RegInstruction{
-                                .opcode = node.opcode(module_def),
-                                .immediate = immediates,
-                                .registers = registers,
-                            });
-                        },
+                var can_emit: bool = true;
+                for (node.edgesOut()) |output_node| {
+                    if (output_node.isControl(module_def) == false) {
+                        if (visited.contains(output_node) == false) {
+                            can_emit = false;
+                            std.debug.print("\tnot all outputs visited...\n", .{});
+                            break;
+                        }
                     }
                 }
-            }
-            // } else {
-            //     // try again later
-            //     if (node.type == .Instruction) {
-            //         try visit_queue.append(node);
-            //     }
-            // }
 
-            for (node.edgesIn()) |input_node| {
-                std.debug.assert(input_node != node);
+                // TODO ideally dedupe the register slices to save cache space - since they don't change,
+                // instructions can share their register slices if the values are the same. Could be as
+                // simple as a hashmap([]u32, u32), where a slice of registers maps to an offset in the registers array.
+                if (can_emit) {
+                    try visited.put(node, {});
 
-                if (visited.contains(input_node) == false) {
-                    if (input_node.isControl(module_def)) {
-                        try visit_stack_control_nodes.append(input_node);
-                    } else {
+                    switch (node.type) {
+                        .Instruction => {
+                            const instruction = node.instruction(module_def);
+                            const opcode = instruction.opcode;
+                            const immediates = instruction.immediate;
+
+                            switch (opcode) {
+                                .Local_Get => {
+                                    std.debug.print("\t\tskipped emit - flattened into register {}\n", .{node.instruction(module_def).immediate.Index});
+                                },
+                                else => {
+                                    const registers_begin = store.registers.items.len;
+                                    switch (opcode) {
+                                        .Local_Get => {
+                                            // Local_Get doesn't have node inputs, it gets its input from its immediate index
+                                            try store.registers.append(immediates.Index);
+                                        },
+                                        // .I32_Const => {
+                                        //     const input_register: ?u32 = compile_data.register_map.get(node);
+                                        //     std.debug.assert(input_register != null);
+                                        //     try store.registers.append(input_register.?);
+                                        // },
+                                        else => {
+                                            var iter = node.edgesFilter(.In, &module_def, .Data);
+                                            while (iter.next()) |input_node| {
+                                                if (compile_data.register_map.get(input_node)) |input_register| {
+                                                    std.debug.print("\t\tinput node {s} for register {}\n", .{ input_node.prettyPrint(module_def, .{}), input_register });
+                                                    try store.registers.append(input_register);
+                                                }
+                                            }
+                                        },
+                                    }
+
+                                    if (compile_data.register_map.get(node)) |output_register| {
+                                        try store.registers.append(output_register);
+                                    }
+
+                                    const registers_end = store.registers.items.len;
+                                    const registers = store.registers.items[registers_begin..registers_end];
+
+                                    std.debug.print("\tregisters: {any}\n", .{registers});
+
+                                    try instructions.append(RegInstruction{
+                                        .opcode = node.opcode(module_def),
+                                        .immediate = immediates,
+                                        .registers = registers,
+                                    });
+                                },
+                            }
+                        },
+                        .Phi => {},
+                        else => unreachable,
+                    }
+                }
+                // } else {
+                //     // try again later
+                //     if (node.type == .Instruction) {
+                //         try visit_queue.append(node);
+                //     }
+                // }
+
+                // queue up more data nodes, if any
+                for (node.edgesIn()) |input_node| {
+                    std.debug.assert(input_node != node);
+
+                    if (visited.contains(input_node) == false) {
+                        std.debug.assert(input_node.isControl(module_def) == false); // data nodes should not have control inputs
                         try visit_queue.append(input_node);
                     }
                 }
             }
+
+            // mark it as visited below since it may have already been marked if it was an instruction node
+            try visited.put(control_node, {});
+
+            current_control_node = next_control_node;
         }
 
         const instructions_end = store.instructions.items.len;
 
         const emitted_instructions = store.instructions.items[instructions_begin..instructions_end];
-        std.mem.reverse(RegInstruction, emitted_instructions);
 
         std.debug.print("==== CODEGEN: done (total instructions {}) ====\n\n", .{instructions_end - instructions_begin});
 
-        {
-            var viz_path_buffer: [256]u8 = undefined;
-            const viz_path = std.fmt.bufPrint(&viz_path_buffer, "E:\\Dev\\zig_projects\\bytebox\\viz\\viz_{}.txt", .{func.def_index}) catch unreachable;
-            try func.dumpVizGraph(viz_path, module_def, scratch_allocator);
+        for (emitted_instructions) |reg_instr| {
+            std.debug.print("\t{}\n", .{reg_instr.opcode});
         }
+        // emitted_instructions
+
+        std.debug.print("===============================================\n\n", .{});
 
         try store.instances.append(FunctionInstance{
             .type_def_index = func.type_def_index,
@@ -855,16 +930,16 @@ const IntermediateCompileData = struct {
             num_returns: u32,
 
             // records the state of stack and locals at the start of the block
-            stack: std.ArrayList(*IRNode),
-            locals: std.ArrayList(?*IRNode),
+            stack: NodeList,
+            locals: NullableNodeList,
 
             fn init(start_index: u32, continuation: usize, num_returns: u32, allocator: std.mem.Allocator) Block {
                 return Block{
                     .node_start_index = start_index,
                     .continuation = continuation,
                     .num_returns = num_returns,
-                    .stack = std.ArrayList(*IRNode).init(allocator),
-                    .locals = std.ArrayList(?*IRNode).init(allocator),
+                    .stack = NodeList.init(allocator),
+                    .locals = NullableNodeList.init(allocator),
                 };
             }
 
@@ -873,8 +948,8 @@ const IntermediateCompileData = struct {
                     .node_start_index = start_index,
                     .continuation = continuation,
                     .num_returns = num_returns,
-                    .stack = std.ArrayList(*IRNode).init(allocator),
-                    .locals = std.ArrayList(?*IRNode).init(allocator),
+                    .stack = NodeList.init(allocator),
+                    .locals = NullableNodeList.init(allocator),
                 };
                 try block.stack.appendSlice(stack);
                 try block.locals.appendSlice(locals);
@@ -888,7 +963,7 @@ const IntermediateCompileData = struct {
             }
         };
 
-        nodes: std.ArrayList(*IRNode),
+        nodes: NodeList,
         blocks: std.ArrayList(Block),
         allocator: std.mem.Allocator,
 
@@ -899,7 +974,7 @@ const IntermediateCompileData = struct {
 
         fn init(allocator: std.mem.Allocator) BlockStack {
             return BlockStack{
-                .nodes = std.ArrayList(*IRNode).init(allocator),
+                .nodes = NodeList.init(allocator),
                 .blocks = std.ArrayList(Block).init(allocator),
                 .allocator = allocator,
             };
@@ -949,14 +1024,14 @@ const IntermediateCompileData = struct {
 
     allocator: std.mem.Allocator,
 
-    // all_nodes: std.ArrayList(*IRNode),
+    // all_nodes: NodeList,
 
     blocks: BlockStack,
 
     // This stack is a record of the nodes to push values onto the stack. If an instruction would push
     // multiple values onto the stack, it would be in this list as many times as values it pushed. Note
     // that we don't have to do any type checking here because the module has already been validated.
-    value_stack: std.ArrayList(*IRNode),
+    value_stack: NodeList,
 
     // records the current block continuation
     // label_continuations: std.ArrayList(u32),
@@ -970,7 +1045,7 @@ const IntermediateCompileData = struct {
     // we need a way to represent what's in the locals slot as an SSA node. This array lets us do that. We also
     // reuse the Local_Get instructions to indicate the "initial value" of the slot. Since our IRNode only stores
     // indices to instructions, we'll just lazily set these when they're fetched for the first time.
-    locals: std.ArrayList(?*IRNode),
+    locals: NullableNodeList,
 
     // Lets us collapse multiple const IR nodes with the same type/value into a single one
     unique_constants: UniqueValueToIRNodeMap,
@@ -978,23 +1053,23 @@ const IntermediateCompileData = struct {
     //
     register_map: std.AutoHashMap(*const IRNode, u32),
 
-    scratch_node_list_1: std.ArrayList(*IRNode),
-    scratch_node_list_2: std.ArrayList(*IRNode),
+    scratch_node_list_1: NodeList,
+    scratch_node_list_2: NodeList,
 
     fn init(allocator: std.mem.Allocator) IntermediateCompileData {
         return IntermediateCompileData{
             .allocator = allocator,
-            // .all_nodes = std.ArrayList(*IRNode).init(allocator),
+            // .all_nodes = NodeList.init(allocator),
             .blocks = BlockStack.init(allocator),
-            .value_stack = std.ArrayList(*IRNode).init(allocator),
+            .value_stack = NodeList.init(allocator),
             // .label_continuations = std.ArrayList(u32).init(allocator),
             .pending_continuation_edges = std.ArrayList(PendingContinuationEdge).init(allocator),
             .is_unreachable = false,
-            .locals = std.ArrayList(?*IRNode).init(allocator),
+            .locals = NullableNodeList.init(allocator),
             .unique_constants = UniqueValueToIRNodeMap.init(allocator),
             .register_map = std.AutoHashMap(*const IRNode, u32).init(allocator),
-            .scratch_node_list_1 = std.ArrayList(*IRNode).init(allocator),
-            .scratch_node_list_2 = std.ArrayList(*IRNode).init(allocator),
+            .scratch_node_list_1 = NodeList.init(allocator),
+            .scratch_node_list_2 = NodeList.init(allocator),
         };
     }
 
@@ -1199,7 +1274,7 @@ const FunctionCompiler = struct {
         var current_control_node: *IRNode = start;
 
         // mainly for If instructions to help the corresponding End instruction figure out if they should swap the block stack/locals
-        var instruction_control_stack = std.ArrayList(*IRNode).init(compiler.allocator);
+        var instruction_control_stack = NodeList.init(compiler.allocator);
         defer instruction_control_stack.deinit();
 
         for (instructions, 0..) |instruction, local_instruction_index| {
@@ -1243,7 +1318,7 @@ const FunctionCompiler = struct {
 
                     try instruction_control_stack.append(node.?);
 
-                    // var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                    // var phi_nodes: *NodeList = &compile_data.scratch_node_list_1;
                     // defer compile_data.scratch_node_list_1.clearRetainingCapacity();
 
                     // std.debug.assert(phi_nodes.items.len == 0);
@@ -1288,8 +1363,8 @@ const FunctionCompiler = struct {
                     // try compile_data.addPendingEdgeContinuation(node.?, instruction.immediate.If.end_continuation + 1);
 
                     const block: *IntermediateCompileData.BlockStack.Block = &compile_data.blocks.blocks.items[compile_data.blocks.blocks.items.len - 1];
-                    std.mem.swap(std.ArrayList(*IRNode), &block.stack, &compile_data.value_stack);
-                    std.mem.swap(std.ArrayList(?*IRNode), &block.locals, &compile_data.locals);
+                    std.mem.swap(NodeList, &block.stack, &compile_data.value_stack);
+                    std.mem.swap(NullableNodeList, &block.locals, &compile_data.locals);
                 },
                 .End => {
                     var block: IntermediateCompileData.BlockStack.Block = compile_data.blocks.popBlock();
@@ -1303,7 +1378,7 @@ const FunctionCompiler = struct {
 
                         current_control_node = region;
 
-                        var phi_nodes: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                        var phi_nodes: *NodeList = &compile_data.scratch_node_list_1;
                         std.debug.assert(phi_nodes.items.len == 0);
                         defer phi_nodes.clearRetainingCapacity();
 
@@ -1313,8 +1388,8 @@ const FunctionCompiler = struct {
                         const block_pair_opcode = block_pair_node.opcode(module_def.*);
                         std.debug.assert(block_pair_opcode == .If or block_pair_opcode == .IfNoElse);
                         if (block_pair_opcode == .If) {
-                            std.mem.swap(std.ArrayList(*IRNode), &block.stack, &compile_data.value_stack);
-                            std.mem.swap(std.ArrayList(?*IRNode), &block.locals, &compile_data.locals);
+                            std.mem.swap(NodeList, &block.stack, &compile_data.value_stack);
+                            std.mem.swap(NullableNodeList, &block.locals, &compile_data.locals);
                         }
 
                         // TODO figure out if we can optimize these compares by only looking at values that actually changed
@@ -1388,7 +1463,7 @@ const FunctionCompiler = struct {
                     // At the end of every block, we ensure all nodes with side effects are still in the graph. Order matters
                     // since mutations to the Store or control flow changes must happen in the order of the original instructions.
                     // {
-                    //     var nodes_with_side_effects: *std.ArrayList(*IRNode) = &compile_data.scratch_node_list_1;
+                    //     var nodes_with_side_effects: *NodeList = &compile_data.scratch_node_list_1;
                     //     defer nodes_with_side_effects.clearRetainingCapacity();
 
                     //     const current_block_nodes: []*IRNode = compile_data.blocks.currentBlockNodes();
@@ -1429,7 +1504,7 @@ const FunctionCompiler = struct {
 
                     try compile_data.popPushValueStackNodes(node.?, 1, 0, module_def.*);
 
-                    // var continuation_edges: std.ArrayList(*IRNode).init(allocator);
+                    // var continuation_edges: NodeList.init(allocator);
                     // defer continuation_edges.deinit();
 
                     const immediates: *const BranchTableImmediates = &module_def.code.branch_table.items[instruction.immediate.Index];
