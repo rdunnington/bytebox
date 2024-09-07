@@ -725,7 +725,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
     const MemoryInstance = bytebox.MemoryInstance;
 
     var memory = try allocator.create(MemoryInstance);
-    memory.* = MemoryInstance.init(bytebox.Limits{
+    memory.* = try MemoryInstance.init(bytebox.Limits{
         .min = 1,
         .max = 2,
         .limit_type = 1,
@@ -1549,7 +1549,8 @@ pub fn main() !void {
         defer allocator.free(suite_wast_mem64_path);
 
         const suite_wast_path = blk: {
-            if (pathExists(suite_wast_mem64_path)) {
+            const is_64bit_arch = @sizeOf(usize) >= @sizeOf(u64);
+            if (is_64bit_arch and pathExists(suite_wast_mem64_path)) {
                 if (opts.log_suite) {
                     print("Using memory64 for suite {s}\n", .{suite});
                 }
