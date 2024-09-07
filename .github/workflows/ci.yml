@@ -46,6 +46,13 @@ jobs:
         run: |
           zig build
 
+      - name: 32-bit builds
+        if: runner.os == 'Linux'
+        run: |
+          zig build -Dtarget=x86-windows-gnu
+          zig build -Dtarget=x86-linux-gnu
+          zig build -Dtarget=arm-linux-gnueabi
+
       - name: Run unit tests
         run: |
           zig build test-unit

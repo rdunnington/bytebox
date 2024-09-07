@@ -25,6 +25,7 @@ const CError = enum(c_int) {
     UnknownExport,
     UnknownImport,
     IncompatibleImport,
+    Uninstantiable64BitLimitsOn32BitArch,
     TrapDebug,
     TrapUnreachable,
     TrapIntegerDivisionByZero,
@@ -167,8 +168,9 @@ export fn bb_error_str(c_error: CError) [*:0]const u8 {
         .OutOfMemory => "BB_ERROR_OUTOFMEMORY",
         .InvalidParameter => "BB_ERROR_INVALIDPARAMETER",
         .UnknownExport => "BB_ERROR_UNKNOWNEXPORT",
-        .UnknownImport => "BB_ERROR_UNKNOWNIMPORT",
-        .IncompatibleImport => "BB_ERROR_INCOMPATIBLEIMPORT",
+        .UnknownImport => "BB_ERROR_UNLINKABLE_UNKNOWNIMPORT",
+        .IncompatibleImport => "BB_ERROR_UNLINKABLE_INCOMPATIBLEIMPORT",
+        .Uninstantiable64BitLimitsOn32BitArch => "BB_ERROR_UNINSTANTIABLE_64BITLIMITSON32BITARCH",
         .TrapDebug => "BB_ERROR_TRAP_DEBUG",
         .TrapUnreachable => "BB_ERROR_TRAP_UNREACHABLE",
         .TrapIntegerDivisionByZero => "BB_ERROR_TRAP_INTEGERDIVISIONBYZERO",
@@ -309,17 +311,25 @@ export fn bb_import_package_add_memory(package: ?*ModuleImportPackage, config: ?
 
         var allocator: *std.mem.Allocator = &package.?.allocator;
 
-        var mem_instance = allocator.create(core.MemoryInstance) catch return CError.OutOfMemory;
-
         const wasm_memory_config = core.WasmMemoryExternal{
             .resize_callback = config.?.resize.?,
             .free_callback = config.?.free.?,
             .userdata = config.?.userdata,
         };
 
-        mem_instance.* = core.MemoryInstance.init(limits, wasm_memory_config);
+        var temp_instance = core.MemoryInstance.init(limits, wasm_memory_config) catch |e| {
+            std.debug.assert(e == error.Uninstantiable64BitLimitsOn32BitArch);
+            return CError.Uninstantiable64BitLimitsOn32BitArch;
+        };
+
+        var mem_instance = allocator.create(core.MemoryInstance) catch {
+            temp_instance.deinit();
+            return CError.OutOfMemory;
+        };
+
+        mem_instance.* = temp_instance;
         if (mem_instance.grow(limits.min) == false) {
-            unreachable;
+            @panic("OutOfMemory");
         }
 
         const mem_import = core.MemoryImport{
@@ -582,6 +592,7 @@ fn translateError(err: anyerror) CError {
         error.OutOfMemory => return CError.OutOfMemory,
         error.UnlinkableUnknownImport => return CError.UnknownImport,
         error.UnlinkableIncompatibleImportType => return CError.IncompatibleImport,
+        error.Uninstantiable64BitLimitsOn32BitArch => return CError.Uninstantiable64BitLimitsOn32BitArch,
         error.TrapDebug => return CError.TrapDebug,
         error.TrapUnreachable => return CError.TrapUnreachable,
         error.TrapIntegerDivisionByZero => return CError.TrapIntegerDivisionByZero,

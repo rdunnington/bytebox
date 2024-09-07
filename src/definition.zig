@@ -270,6 +270,8 @@ pub const TaggedVal = struct {
 };
 
 pub const Limits = struct {
+    // Note that 32bit architectures should be able to decode and validate wasm modules that
+    // were compiled with 64-bit limits. However, they will be unable to instantiate them.
     min: u64,
     max: ?u64,
     limit_type: u8,
@@ -284,8 +286,8 @@ pub const Limits = struct {
     // 0x06 n:u64        ⇒ i64, {min n, max ?}, 1  ;; from threads proposal
     // 0x07 n:u64 m:u64  ⇒ i64, {min n, max m}, 1  ;; from threads proposal
 
-    pub const k_max_bytes_i32 = k_max_pages_i32 * MemoryDefinition.k_page_size;
-    pub const k_max_pages_i32 = std.math.powi(usize, 2, 16) catch unreachable;
+    pub const k_max_bytes_i32 = (1024 * 1024 * 1024 * 4);
+    pub const k_max_pages_i32 = k_max_bytes_i32 / MemoryDefinition.k_page_size;
 
     // Technically the max bytes should be maxInt(u64), but that is wayyy more memory than PCs have available and
     // is just a waste of virtual address space in the implementation. Instead we'll set the upper limit to 128GB.
@@ -305,6 +307,7 @@ pub const Limits = struct {
         if (is_u32 and min > std.math.maxInt(u32)) {
             return error.MalformedLimits;
         }
+
         var max: ?u64 = null;
 
         switch (std.math.rem(u8, limit_type, 2) catch unreachable) {
@@ -336,7 +339,7 @@ pub const Limits = struct {
         return if (self.limit_type < 4) .I32 else .I64;
     }
 
-    pub fn maxPages(self: Limits) usize {
+    pub fn maxPages(self: Limits) u64 {
         if (self.max) |max| {
             return @max(1, max);
         }
@@ -344,7 +347,7 @@ pub const Limits = struct {
         return self.indexTypeMaxPages();
     }
 
-    pub fn indexTypeMaxPages(self: Limits) usize {
+    pub fn indexTypeMaxPages(self: Limits) u64 {
         return if (self.limit_type < 4) k_max_pages_i32 else k_max_pages_i64;
     }
 };
@@ -662,7 +665,7 @@ pub const TableDefinition = struct {
 pub const MemoryDefinition = struct {
     limits: Limits,
 
-    pub const k_page_size: usize = 64 * 1024;
+    pub const k_page_size: u64 = 64 * 1024;
 };
 
 pub const ElementMode = enum {
@@ -1480,12 +1483,12 @@ const ModuleValidator = struct {
 
     fn getTableReftype(module: *const ModuleDefinition, index: u64) !ValType {
         if (index < module.imports.tables.items.len) {
-            return module.imports.tables.items[index].reftype;
+            return module.imports.tables.items[@intCast(index)].reftype;
         }
 
         const local_index = index - module.imports.tables.items.len;
         if (local_index < module.tables.items.len) {
-            return module.tables.items[local_index].reftype;
+            return module.tables.items[@intCast(local_index)].reftype;
         }
 
         return error.ValidationUnknownTable;
@@ -1559,12 +1562,12 @@ const ModuleValidator = struct {
                     if (frame.is_function) {
                         const func_type: *const FunctionTypeDefinition = &module_.types.items[func_.type_index];
                         if (locals_index < func_type.num_params) {
-                            return func_type.getParams()[locals_index];
+                            return func_type.getParams()[@intCast(locals_index)];
                         } else {
                             if (func_.locals.items.len <= locals_index - func_type.num_params) {
                                 return error.ValidationUnknownLocal;
                             }
-                            return func_.locals.items[locals_index - func_type.num_params];
+                            return func_.locals.items[@as(usize, @intCast(locals_index)) - func_type.num_params];
                         }
                     }
                 }
@@ -1578,7 +1581,7 @@ const ModuleValidator = struct {
 
             fn getGlobalValtype(module_: *const ModuleDefinition, global_index: u64, required_mutability: GlobalMutablilityRequirement) !ValType {
                 if (global_index < module_.imports.globals.items.len) {
-                    const global: *const GlobalImportDefinition = &module_.imports.globals.items[global_index];
+                    const global: *const GlobalImportDefinition = &module_.imports.globals.items[@intCast(global_index)];
                     if (required_mutability == .Mutable and global.mut == .Immutable) {
                         return error.ValidationImmutableGlobal;
                     }
@@ -1587,7 +1590,7 @@ const ModuleValidator = struct {
 
                 const module_global_index = global_index - module_.imports.globals.items.len;
                 if (module_global_index < module_.globals.items.len) {
-                    const global: *const GlobalDefinition = &module_.globals.items[module_global_index];
+                    const global: *const GlobalDefinition = &module_.globals.items[@intCast(module_global_index)];
                     if (required_mutability == .Mutable and global.mut == .Immutable) {
                         return error.ValidationImmutableGlobal;
                     }
@@ -1739,14 +1742,14 @@ const ModuleValidator = struct {
                 try self.freeControlTypes(&frame);
             },
             .Branch => {
-                const control_index: u64 = instruction.immediate.LabelId;
+                const control_index: u32 = instruction.immediate.LabelId;
                 const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
 
                 try Helpers.popReturnTypes(self, block_return_types);
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
             .Branch_If => {
-                const control_index: u64 = instruction.immediate.LabelId;
+                const control_index: u32 = instruction.immediate.LabelId;
                 const block_return_types: []const ValType = try Helpers.getControlTypes(self, control_index);
                 try self.popType(.I32);
 
@@ -1800,7 +1803,9 @@ const ModuleValidator = struct {
                     return error.ValidationUnknownFunction;
                 }
 
-                const type_index: usize = module.getFuncTypeIndex(func_index);
+                std.debug.assert(func_index < std.math.maxInt(usize));
+
+                const type_index: usize = module.getFuncTypeIndex(@intCast(func_index));
                 try Helpers.popPushFuncTypes(self, type_index, module);
             },
             .Call_Indirect => {
@@ -2959,10 +2964,11 @@ pub const ModuleDefinition = struct {
                     while (memory_index < num_memories) : (memory_index += 1) {
                         const limits = try Limits.decode(reader);
 
-                        if (limits.min > limits.maxPages()) {
+                        const max_pages = limits.maxPages();
+                        if (limits.min > max_pages) {
                             self.log.err(
                                 "Validation error: max memory pages exceeded. Got {} but max is {}",
-                                .{ limits.min, limits.indexTypeMaxPages() },
+                                .{ limits.min, max_pages },
                             );
                             return error.ValidationMemoryMaxPagesExceeded;
                         }
@@ -2971,10 +2977,12 @@ pub const ModuleDefinition = struct {
                             if (max < limits.min) {
                                 return error.ValidationMemoryInvalidMaxLimit;
                             }
-                            if (max > limits.indexTypeMaxPages()) {
+
+                            const index_max_pages = limits.indexTypeMaxPages();
+                            if (max > index_max_pages) {
                                 self.log.err(
                                     "Validation error: max memory pages exceeded. Got {} but max is {}",
-                                    .{ max, limits.indexTypeMaxPages() },
+                                    .{ max, index_max_pages },
                                 );
                                 return error.ValidationMemoryMaxPagesExceeded;
                             }

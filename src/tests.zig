@@ -79,7 +79,7 @@ test "MemoryInstance.init" {
             .max = null,
             .limit_type = 0, // i32 index type
         };
-        var memory = MemoryInstance.init(limits, null);
+        var memory = try MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.limits.min, 0);
         try expectEqual(memory.limits.max, Limits.k_max_pages_i32);
@@ -93,7 +93,7 @@ test "MemoryInstance.init" {
             .max = null,
             .limit_type = 4, // i64 index type
         };
-        var memory = MemoryInstance.init(limits, null);
+        var memory = try MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.limits.min, 0);
         try expectEqual(memory.limits.max, Limits.k_max_pages_i64);
@@ -107,7 +107,7 @@ test "MemoryInstance.init" {
             .max = 25,
             .limit_type = 1,
         };
-        var memory = MemoryInstance.init(limits, null);
+        var memory = try MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.limits.min, 0);
         try expectEqual(memory.limits.max, limits.max);
@@ -122,7 +122,7 @@ test "MemoryInstance.Internal.grow" {
             .max = null,
             .limit_type = 0,
         };
-        var memory = MemoryInstance.init(limits, null);
+        var memory = try MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.grow(0), true);
         try expectEqual(memory.grow(1), true);
@@ -139,7 +139,7 @@ test "MemoryInstance.Internal.grow" {
             .max = 25,
             .limit_type = 1,
         };
-        var memory = MemoryInstance.init(limits, null);
+        var memory = try MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.grow(25), true);
         try expectEqual(memory.size(), 25);
@@ -155,7 +155,7 @@ test "MemoryInstance.Internal.growAbsolute" {
             .max = null,
             .limit_type = 0,
         };
-        var memory = MemoryInstance.init(limits, null);
+        var memory = try MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.growAbsolute(0), true);
         try expectEqual(memory.size(), 0);
@@ -173,7 +173,7 @@ test "MemoryInstance.Internal.growAbsolute" {
             .max = 25,
             .limit_type = 1,
         };
-        var memory = MemoryInstance.init(limits, null);
+        var memory = try MemoryInstance.init(limits, null);
         defer memory.deinit();
         try expectEqual(memory.growAbsolute(25), true);
         try expectEqual(memory.size(), 25);
