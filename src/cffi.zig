@@ -42,7 +42,7 @@ const CModuleDefinitionInitOpts = extern struct {
     debug_name: ?[*:0]u8,
 };
 
-const CHostFunction = *const fn (userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) void;
+const CHostFunction = *const fn (userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) error{}!void;
 
 const CWasmMemoryConfig = extern struct {
     resize: ?core.WasmMemoryResizeFunction,
