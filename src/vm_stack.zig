@@ -55,6 +55,7 @@ const UnlinkableError = inst.UnlinkableError;
 const UninstantiableError = inst.UninstantiableError;
 const ExportError = inst.ExportError;
 const TrapError = inst.TrapError;
+const HostFunctionError = inst.HostFunctionError;
 const DebugTrace = inst.DebugTrace;
 const TableInstance = inst.TableInstance;
 const MemoryInstance = inst.MemoryInstance;
@@ -1064,7 +1065,7 @@ const InstructionFuncs = struct {
             };
         }
 
-        fn callImport(pc: u32, stack: *Stack, func: *const FunctionImport) TrapError!FuncCallData {
+        fn callImport(pc: u32, stack: *Stack, func: *const FunctionImport) (TrapError || HostFunctionError)!FuncCallData {
             switch (func.data) {
                 .Host => |data| {
                     const params_len: u32 = @as(u32, @intCast(data.func_def.getParams().len));

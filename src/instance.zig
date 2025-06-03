@@ -359,9 +359,9 @@ const ImportType = enum(u8) {
 };
 
 const root = @import("root");
-const HostFunctionErrors = if (@hasDecl(root, "HostFunctionErrors")) root.HostFunctionErrors else error{};
+pub const HostFunctionError = if (@hasDecl(root, "HostFunctionError")) root.HostFunctionError else error{};
 
-const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) HostFunctionErrors!void;
+const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) HostFunctionError!void;
 
 const HostFunction = struct {
     userdata: ?*anyopaque,
