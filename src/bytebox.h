@@ -66,6 +66,13 @@ typedef struct bb_module_instance bb_module_instance;
 typedef struct bb_import_package bb_import_package;
 
 typedef void bb_host_function(void* userdata, bb_module_instance* module, const bb_val* params, bb_val* returns);
+struct bb_import_function
+{
+	bb_host_function* callback;
+	void* userdata;
+};
+typedef struct bb_import_function bb_import_function;
+
 typedef void* bb_wasm_memory_resize(void* mem, size_t new_size_bytes, size_t old_size_bytes, void* userdata);
 typedef void bb_wasm_memory_free(void* mem, size_t size_bytes, void* userdata);
 
@@ -148,7 +155,7 @@ bb_slice bb_module_definition_get_custom_section(const bb_module_definition* def
 
 bb_import_package* bb_import_package_init(const char* name);
 void bb_import_package_deinit(bb_import_package* package);	  // only deinit when all module_instances using the package have been destroyed
-bb_error bb_import_package_add_function(bb_import_package* package, bb_host_function* func, const char* export_name, const bb_valtype* params, size_t num_params, const bb_valtype* returns, size_t num_returns, void* userdata);
+bb_error bb_import_package_add_function(bb_import_package* package, const char* export_name, const bb_valtype* params, size_t num_params, const bb_valtype* returns, size_t num_returns, bb_import_function* userdata);
 bb_error bb_import_package_add_memory(bb_import_package* package, const bb_wasm_memory_config* config, const char* export_name, uint32_t min_pages, uint32_t max_pages);
 
 void bb_set_debug_trace_mode(bb_debug_trace_mode mode);
