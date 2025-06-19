@@ -42,7 +42,7 @@ const CModuleDefinitionInitOpts = extern struct {
     debug_name: ?[*:0]u8,
 };
 
-const CHostFunction = *const fn (userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) error{}!void;
+const CHostFunction = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) callconv(.C) void;
 
 const CWasmMemoryConfig = extern struct {
     resize: ?core.WasmMemoryResizeFunction,
@@ -254,8 +254,20 @@ export fn bb_import_package_deinit(package: ?*ModuleImportPackage) void {
     }
 }
 
-export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?CHostFunction, c_name: ?[*:0]const u8, c_params: ?[*]ValType, num_params: usize, c_returns: ?[*]ValType, num_returns: usize, userdata: ?*anyopaque) CError {
-    if (package != null and c_name != null and func != null) {
+
+const HostFunc = extern struct {
+    userdata: ?*anyopaque,
+    callback: CHostFunction,
+};
+
+fn trampoline(userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) error{}!void {
+    const host: *HostFunc = @alignCast(@ptrCast(userdata));
+
+    @call(.auto, host.callback, .{host.userdata, module, params, returns});
+}
+
+export fn bb_import_package_add_function(package: ?*ModuleImportPackage, c_name: ?[*:0]const u8, c_params: ?[*]ValType, num_params: usize, c_returns: ?[*]ValType, num_returns: usize, userdata: ?*HostFunc) CError {
+    if (package != null and c_name != null and userdata != null) {
         if (num_params > 0 and c_params == null) {
             return CError.InvalidParameter;
         }
@@ -267,7 +279,7 @@ export fn bb_import_package_add_function(package: ?*ModuleImportPackage, func: ?
         const param_types: []ValType = if (c_params) |params| params[0..num_params] else &[_]ValType{};
         const return_types: []ValType = if (c_returns) |returns| returns[0..num_returns] else &[_]ValType{};
 
-        package.?.addHostFunction(name, param_types, return_types, func.?, userdata) catch {
+        package.?.addHostFunction(name, param_types, return_types, trampoline, userdata) catch {
             return CError.OutOfMemory;
         };
 
