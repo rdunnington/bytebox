@@ -55,6 +55,7 @@ const UnlinkableError = inst.UnlinkableError;
 const UninstantiableError = inst.UninstantiableError;
 const ExportError = inst.ExportError;
 const TrapError = inst.TrapError;
+const HostFunctionError = inst.HostFunctionError;
 const DebugTrace = inst.DebugTrace;
 const TableInstance = inst.TableInstance;
 const MemoryInstance = inst.MemoryInstance;
@@ -1064,7 +1065,7 @@ const InstructionFuncs = struct {
             };
         }
 
-        fn callImport(pc: u32, stack: *Stack, func: *const FunctionImport) TrapError!FuncCallData {
+        fn callImport(pc: u32, stack: *Stack, func: *const FunctionImport) (TrapError || HostFunctionError)!FuncCallData {
             switch (func.data) {
                 .Host => |data| {
                     const params_len: u32 = @as(u32, @intCast(data.func_def.getParams().len));
@@ -1077,7 +1078,7 @@ const InstructionFuncs = struct {
 
                         DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
 
-                        data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
+                        try data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
 
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
@@ -5515,7 +5516,7 @@ pub const StackVM = struct {
             .Host => |data| {
                 DebugTrace.traceHostFunction(module, 1, func_import.name);
 
-                data.callback(data.userdata, module, params, returns);
+                try data.callback(data.userdata, module, params, returns);
             },
             .Wasm => |data| {
                 var import_instance: *ModuleInstance = data.module_instance;

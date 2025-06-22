@@ -127,6 +127,27 @@ pub fn build(b: *Build) void {
         .options = options,
     });
 
+    // Cffi test
+    const cffi_test_step = b.step("test-cffi", "Run cffi test");
+    const cffi_build = b.addExecutable(.{
+        .name = "test-cffi",
+        .target = target,
+        .optimize = optimize,
+    });
+    cffi_build.addCSourceFile(.{
+        .file = b.path("test/cffi/main.c"),
+    });
+    cffi_build.addIncludePath(b.path("src/bytebox.h"));
+    cffi_build.linkLibC();
+    cffi_build.linkLibrary(lib_bytebox);
+
+    const ffi_guest = buildWasmExe(b, "test/cffi/module.zig", .Wasm32);
+
+    const cffi_run_step = b.addRunArtifact(cffi_build);
+    cffi_run_step.addFileArg(ffi_guest.getEmittedBin());
+    cffi_test_step.dependOn(&cffi_run_step.step);
+
+
     // All tests
     const all_tests_step = b.step("test", "Run unit, wasm, and wasi tests");
     all_tests_step.dependOn(unit_test_step);

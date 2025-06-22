@@ -638,31 +638,31 @@ const TestOpts = struct {
 
 fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackage {
     const Functions = struct {
-        fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
+        fn printI32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) error{}!void {
             // std.debug.print("{}", .{params[0].I32});
         }
 
-        fn printI64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
+        fn printI64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) error{}!void {
             // std.debug.print("{}", .{params[0].I64});
         }
 
-        fn printF32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
+        fn printF32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) error{}!void {
             // std.debug.print("{}", .{params[0].F32});
         }
 
-        fn printF64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
+        fn printF64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) error{}!void {
             // std.debug.print("{}", .{params[0].F64});
         }
 
-        fn printI32F32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
+        fn printI32F32(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) error{}!void {
             // std.debug.print("{} {}", .{ params[0].I32, params[1].F32 });
         }
 
-        fn printF64F64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
+        fn printF64F64(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) error{}!void {
             // std.debug.print("{} {}", .{ params[0].F64, params[1].F64 });
         }
 
-        fn print(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) void {
+        fn print(_: ?*anyopaque, _: *bytebox.ModuleInstance, _: [*]const Val, _: [*]Val) error{}!void {
             // std.debug.print("\n", .{});
         }
     };

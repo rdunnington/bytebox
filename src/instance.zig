@@ -358,7 +358,10 @@ const ImportType = enum(u8) {
     Wasm,
 };
 
-const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) void;
+const root = @import("root");
+pub const HostFunctionError = if (@hasDecl(root, "HostFunctionError")) root.HostFunctionError else error{};
+
+const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) HostFunctionError!void;
 
 const HostFunction = struct {
     userdata: ?*anyopaque,
