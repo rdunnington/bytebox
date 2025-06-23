@@ -254,7 +254,6 @@ export fn bb_import_package_deinit(package: ?*ModuleImportPackage) void {
     }
 }
 
-
 const HostFunc = extern struct {
     userdata: ?*anyopaque,
     callback: CHostFunction,
@@ -263,7 +262,7 @@ const HostFunc = extern struct {
 fn trampoline(userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) error{}!void {
     const host: *HostFunc = @alignCast(@ptrCast(userdata));
 
-    @call(.auto, host.callback, .{host.userdata, module, params, returns});
+    @call(.auto, host.callback, .{ host.userdata, module, params, returns });
 }
 
 export fn bb_import_package_add_function(package: ?*ModuleImportPackage, c_name: ?[*:0]const u8, c_params: ?[*]ValType, num_params: usize, c_returns: ?[*]ValType, num_returns: usize, userdata: ?*HostFunc) CError {
@@ -612,16 +611,16 @@ comptime {
 
         // Default stack-probe functions emitted by LLVM
         if (is_mingw) {
-            @export(_chkstk, .{ .name = "_alloca", .linkage = .weak });
-            @export(___chkstk_ms, .{ .name = "___chkstk_ms", .linkage = .weak });
+            @export(&_chkstk, .{ .name = "_alloca", .linkage = .weak });
+            @export(&___chkstk_ms, .{ .name = "___chkstk_ms", .linkage = .weak });
 
             if (builtin.cpu.arch.isAARCH64()) {
-                @export(__chkstk, .{ .name = "__chkstk", .linkage = .weak });
+                @export(&__chkstk, .{ .name = "__chkstk", .linkage = .weak });
             }
         } else if (!builtin.link_libc) {
             // This symbols are otherwise exported by MSVCRT.lib
-            @export(_chkstk, .{ .name = "_chkstk", .linkage = .weak });
-            @export(__chkstk, .{ .name = "__chkstk", .linkage = .weak });
+            @export(&_chkstk, .{ .name = "_chkstk", .linkage = .weak });
+            @export(&__chkstk, .{ .name = "__chkstk", .linkage = .weak });
         }
     }
 
@@ -629,7 +628,7 @@ comptime {
         .x86,
         .x86_64,
         => {
-            @export(zig_probe_stack, .{ .name = "__zig_probe_stack", .linkage = .weak });
+            @export(&zig_probe_stack, .{ .name = "__zig_probe_stack", .linkage = .weak });
         },
         else => {},
     }

@@ -1111,13 +1111,13 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                                         const expected_typed = @as(VectorType, @bitCast(expected_value_));
 
                                         var is_equal = true;
-                                        const child_type = @typeInfo(VectorType).Vector.child;
+                                        const child_type = @typeInfo(VectorType).vector.child;
                                         switch (child_type) {
                                             i8, i16, i32, i64 => {
                                                 is_equal = std.meta.eql(actual_typed, expected_typed);
                                             },
                                             f32, f64 => {
-                                                const len = @typeInfo(VectorType).Vector.len;
+                                                const len = @typeInfo(VectorType).vector.len;
                                                 var vec_i: u32 = 0;
                                                 while (vec_i < len) : (vec_i += 1) {
                                                     if (std.math.isNan(expected_typed[vec_i])) {

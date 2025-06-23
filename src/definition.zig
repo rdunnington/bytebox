@@ -1309,7 +1309,7 @@ pub const NameCustomSection = struct {
             return a.func_index < b.func_index;
         }
 
-        fn order(_: void, a: NameAssoc, b: NameAssoc) std.math.Order {
+        fn order(a: NameAssoc, b: NameAssoc) std.math.Order {
             if (a.func_index < b.func_index) {
                 return .lt;
             } else if (a.func_index > b.func_index) {
@@ -1410,12 +1410,12 @@ pub const NameCustomSection = struct {
             if (self.function_names.items[func_index].func_index == func_index) {
                 return self.function_names.items[func_index].name;
             } else {
-                const temp_nameassoc = NameAssoc{
+                const search_item = NameAssoc{
                     .name = "",
                     .func_index = func_index,
                 };
 
-                if (std.sort.binarySearch(NameAssoc, temp_nameassoc, self.function_names.items, {}, NameAssoc.order)) |found_index| {
+                if (std.sort.binarySearch(NameAssoc, self.function_names.items, search_item, NameAssoc.order)) |found_index| {
                     return self.function_names.items[found_index].name;
                 }
             }
@@ -1637,7 +1637,7 @@ const ModuleValidator = struct {
             }
 
             fn validateVectorLane(comptime T: type, laneidx: u32) !void {
-                const vec_type_info = @typeInfo(T).Vector;
+                const vec_type_info = @typeInfo(T).vector;
                 if (vec_type_info.len <= laneidx) {
                     return error.ValidationInvalidLaneIndex;
                 }
@@ -1660,14 +1660,14 @@ const ModuleValidator = struct {
 
             fn validateVecExtractLane(comptime T: type, validator: *ModuleValidator, instruction_: Instruction) !void {
                 try validateVectorLane(T, instruction_.immediate.Index);
-                const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).Vector.child);
+                const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).vector.child);
                 try validator.popType(.V128);
                 try validator.pushType(lane_valtype);
             }
 
             fn validateVecReplaceLane(comptime T: type, validator: *ModuleValidator, instruction_: Instruction) !void {
                 try validateVectorLane(T, instruction_.immediate.Index);
-                const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).Vector.child);
+                const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).vector.child);
                 try validator.popType(lane_valtype);
                 try validator.popType(.V128);
                 try validator.pushType(.V128);
@@ -2553,7 +2553,9 @@ const ModuleValidator = struct {
         if (self.type_stack.items.len <= top_frame.types_stack_height) {
             return error.ValidationTypeMismatch;
         }
-        return self.type_stack.pop();
+
+        std.debug.assert(self.type_stack.items.len > 0);
+        return self.type_stack.pop().?;
     }
 
     fn popType(self: *ModuleValidator, expected_or_null: ?ValType) !void {

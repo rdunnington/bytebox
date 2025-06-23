@@ -5,7 +5,7 @@ const std = @import("std");
 pub const StableArray = @import("stable-array").StableArray;
 
 pub fn decodeLEB128(comptime T: type, reader: anytype) !T {
-    if (@typeInfo(T).Int.signedness == .signed) {
+    if (@typeInfo(T).int.signedness == .signed) {
         return std.leb.readILEB128(T, reader) catch |e| {
             if (e == error.Overflow) {
                 return error.MalformedLEB128;

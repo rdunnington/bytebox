@@ -1,6 +1,13 @@
 .{
-    .name = "bytebox",
+    .name = .bytebox,
     .version = "0.0.1",
+    .fingerprint = 0x5a2a0eadb1367749,
+    .dependencies = .{
+        .@"zig-stable-array" = .{
+            .url = "https://github.com/rdunnington/zig-stable-array/archive/9cdccbb42f56305eec9c8090f7123c99bc0e6793.tar.gz",
+            .hash = "stable_array-0.1.0-3ihgvfZaAADfEtMl2cUuB-Owkfa_F6fWHaaJltcXM2T6",
+        },
+    },
     .minimum_zig_version = "0.13.0",
     .paths = .{
         "src",
@@ -14,11 +21,5 @@
         "build.zig.zon",
         "LICENSE",
         "README.md",
-    },
-    .dependencies = .{
-        .@"zig-stable-array" = .{
-            .url = "https://github.com/rdunnington/zig-stable-array/archive/bbb120cd0e4a8a83a21217e67ab6d7697a809756.tar.gz",
-            .hash = "12202fe89e68d38484a313816e571eca786b36775e3aa2831def7b20815fa81831f1",
-        },
     },
 }

@@ -911,7 +911,7 @@ const InstructionFuncs = struct {
             } else if (truncated < std.math.minInt(T)) {
                 return error.TrapIntegerOverflow;
             } else {
-                if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
+                if (@typeInfo(T).int.bits < @typeInfo(@TypeOf(truncated)).float.bits) {
                     if (truncated > std.math.maxInt(T)) {
                         return error.TrapIntegerOverflow;
                     }
@@ -945,7 +945,7 @@ const InstructionFuncs = struct {
             } else if (truncated < std.math.minInt(T)) {
                 return std.math.minInt(T);
             } else {
-                if (@typeInfo(T).Int.bits < @typeInfo(@TypeOf(truncated)).Float.bits) {
+                if (@typeInfo(T).int.bits < @typeInfo(@TypeOf(truncated)).float.bits) {
                     if (truncated > std.math.maxInt(T)) {
                         return std.math.maxInt(T);
                     }
@@ -1134,7 +1134,7 @@ const InstructionFuncs = struct {
 
         fn vectorUnOp(comptime T: type, op: VectorUnaryOp, stack: *Stack) void {
             const vec = @as(T, @bitCast(stack.popV128()));
-            const type_info = @typeInfo(T).Vector;
+            const type_info = @typeInfo(T).vector;
             const child_type = type_info.child;
             const result = switch (op) {
                 .Ceil => @ceil(vec),
@@ -1181,39 +1181,39 @@ const InstructionFuncs = struct {
         }
 
         fn vectorBinOp(comptime T: type, comptime op: VectorBinaryOp, stack: *Stack) void {
-            const type_info = @typeInfo(T).Vector;
+            const type_info = @typeInfo(T).vector;
             const child_type = type_info.child;
             const v2 = @as(T, @bitCast(stack.popV128()));
             const v1 = @as(T, @bitCast(stack.popV128()));
             const result = switch (op) {
                 .Add => blk: {
                     break :blk switch (@typeInfo(child_type)) {
-                        .Int => v1 +% v2,
-                        .Float => v1 + v2,
+                        .int => v1 +% v2,
+                        .float => v1 + v2,
                         else => unreachable,
                     };
                 },
                 .Add_Sat => v1 +| v2,
                 .Sub => blk: {
                     break :blk switch (@typeInfo(child_type)) {
-                        .Int => v1 -% v2,
-                        .Float => v1 - v2,
+                        .int => v1 -% v2,
+                        .float => v1 - v2,
                         else => unreachable,
                     };
                 },
                 .Sub_Sat => v1 -| v2,
                 .Mul => blk: {
                     break :blk switch (@typeInfo(child_type)) {
-                        .Int => v1 *% v2,
-                        .Float => v1 * v2,
+                        .int => v1 *% v2,
+                        .float => v1 * v2,
                         else => unreachable,
                     };
                 },
                 .Div => v1 / v2,
                 .Min => blk: {
                     break :blk switch (@typeInfo(child_type)) {
-                        .Int => @min(v1, v2),
-                        .Float => blk2: {
+                        .int => @min(v1, v2),
+                        .float => blk2: {
                             const is_nan = v1 != v1;
                             const is_min = v1 < v2;
                             const pred = vectorOr(type_info.len, is_nan, is_min);
@@ -1226,8 +1226,8 @@ const InstructionFuncs = struct {
                 .PMin => @select(child_type, (v2 < v1), v2, v1),
                 .Max => blk: {
                     break :blk switch (@typeInfo(child_type)) {
-                        .Int => @max(v1, v2),
-                        .Float => blk2: {
+                        .int => @max(v1, v2),
+                        .float => blk2: {
                             const is_nan = v1 != v1;
                             const is_min = v1 > v2;
                             const pred = vectorOr(type_info.len, is_nan, is_min);
@@ -1247,7 +1247,7 @@ const InstructionFuncs = struct {
         }
 
         fn vectorAbs(comptime T: type, stack: *Stack) void {
-            const type_info = @typeInfo(T).Vector;
+            const type_info = @typeInfo(T).vector;
             const child_type = type_info.child;
             const vec = @as(T, @bitCast(stack.popV128()));
             var arr: [type_info.len]child_type = undefined;
@@ -1259,7 +1259,7 @@ const InstructionFuncs = struct {
         }
 
         fn vectorAvgrU(comptime T: type, stack: *Stack) void {
-            const type_info = @typeInfo(T).Vector;
+            const type_info = @typeInfo(T).vector;
             const child_type = type_info.child;
             const type_big_width = std.meta.Int(.unsigned, @bitSizeOf(child_type) * 2);
 
@@ -1295,7 +1295,7 @@ const InstructionFuncs = struct {
                 .Le => v1 <= v2,
                 .Ge => v1 >= v2,
             };
-            const vec_type_info = @typeInfo(T).Vector;
+            const vec_type_info = @typeInfo(T).vector;
 
             const no_bits: std.meta.Int(.unsigned, @bitSizeOf(vec_type_info.child)) = 0;
             const yes_bits = ~no_bits;
@@ -1314,7 +1314,7 @@ const InstructionFuncs = struct {
         fn vectorShift(comptime T: type, comptime direction: VectorShiftDirection, stack: *Stack) void {
             const shift_unsafe: i32 = stack.popI32();
             const vec = @as(T, @bitCast(stack.popV128()));
-            const shift_safe = std.math.mod(i32, shift_unsafe, @bitSizeOf(@typeInfo(T).Vector.child)) catch unreachable;
+            const shift_safe = std.math.mod(i32, shift_unsafe, @bitSizeOf(@typeInfo(T).vector.child)) catch unreachable;
             const shift_fn = if (direction == .Left) std.math.shl else std.math.shr;
             const shifted = shift_fn(T, vec, shift_safe);
             stack.pushV128(@as(v128, @bitCast(shifted)));
@@ -1330,16 +1330,16 @@ const InstructionFuncs = struct {
 
         fn vectorBitmask(comptime T: type, vec: v128) i32 {
             switch (@typeInfo(T)) {
-                .Vector => |vec_type_info| {
+                .vector => |vec_type_info| {
                     switch (@typeInfo(vec_type_info.child)) {
-                        .Int => {},
+                        .int => {},
                         else => @compileError("Vector child type must be an int"),
                     }
                 },
                 else => @compileError("Expected T to be a vector type"),
             }
 
-            const child_type: type = @typeInfo(T).Vector.child;
+            const child_type: type = @typeInfo(T).vector.child;
 
             if (child_type == i8) {
                 const high_bit: u8 = 1 << (@bitSizeOf(u8) - 1);
@@ -1362,7 +1362,7 @@ const InstructionFuncs = struct {
                 const bitmask = @as(i32, @bitCast(reduction));
                 return bitmask;
             } else {
-                const vec_len = @typeInfo(T).Vector.len;
+                const vec_len = @typeInfo(T).vector.len;
                 const int_type: type = std.meta.Int(.unsigned, @bitSizeOf(child_type));
 
                 const high_bit: int_type = 1 << (@bitSizeOf(int_type) - 1);
@@ -1385,7 +1385,7 @@ const InstructionFuncs = struct {
         }
 
         fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
-            const vec_type_info = @typeInfo(T).Vector;
+            const vec_type_info = @typeInfo(T).vector;
 
             var vec = @as(T, @bitCast(stack.popV128()));
             const immediate = instruction.immediate.MemoryOffsetAndLane;
@@ -1402,7 +1402,7 @@ const InstructionFuncs = struct {
         }
 
         fn vectorLoadLaneZero(comptime T: type, instruction: Instruction, stack: *Stack) !void {
-            const vec_type_info = @typeInfo(T).Vector;
+            const vec_type_info = @typeInfo(T).vector;
 
             const mem_offset = instruction.immediate.MemoryOffset;
             const scalar = try loadFromMem(vec_type_info.child, stack, mem_offset);
@@ -1423,7 +1423,7 @@ const InstructionFuncs = struct {
             const vec = @as(T, @bitCast(stack.popV128()));
             const lane_value = vec[lane];
 
-            const child_type = @typeInfo(T).Vector.child;
+            const child_type = @typeInfo(T).vector.child;
             switch (child_type) {
                 i8, u8, i16, u16, i32 => stack.pushI32(lane_value),
                 i64 => stack.pushI64(lane_value),
@@ -1434,7 +1434,7 @@ const InstructionFuncs = struct {
         }
 
         fn vectorReplaceLane(comptime T: type, lane: u32, stack: *Stack) void {
-            const child_type = @typeInfo(T).Vector.child;
+            const child_type = @typeInfo(T).vector.child;
             const lane_value = switch (child_type) {
                 i8, i16, i32 => @as(child_type, @truncate(stack.popI32())),
                 i64 => stack.popI64(),
@@ -1458,7 +1458,7 @@ const InstructionFuncs = struct {
         };
 
         fn vectorAddPairwise(comptime in_type: type, comptime out_type: type, stack: *Stack) void {
-            const out_info = @typeInfo(out_type).Vector;
+            const out_info = @typeInfo(out_type).vector;
 
             const vec = @as(in_type, @bitCast(stack.popV128()));
             var arr: [out_info.len]out_info.child = undefined;
@@ -1472,7 +1472,7 @@ const InstructionFuncs = struct {
         }
 
         fn vectorMulPairwise(comptime in_type: type, comptime out_type: type, side: OpHelpers.VectorSide, stack: *Stack) void {
-            const info_out = @typeInfo(out_type).Vector;
+            const info_out = @typeInfo(out_type).vector;
 
             const vec2 = @as(in_type, @bitCast(stack.popV128()));
             const vec1 = @as(in_type, @bitCast(stack.popV128()));
@@ -1489,8 +1489,8 @@ const InstructionFuncs = struct {
         }
 
         fn vectorExtend(comptime in_type: type, comptime out_type: type, comptime side: VectorSide, stack: *Stack) void {
-            const in_info = @typeInfo(in_type).Vector;
-            const out_info = @typeInfo(out_type).Vector;
+            const in_info = @typeInfo(in_type).vector;
+            const out_info = @typeInfo(out_type).vector;
             const side_offset = if (side == .Low) 0 else in_info.len / 2;
 
             const vec = @as(in_type, @bitCast(stack.popV128()));
@@ -1504,7 +1504,7 @@ const InstructionFuncs = struct {
 
         fn saturate(comptime T: type, v: anytype) @TypeOf(v) {
             switch (@typeInfo(T)) {
-                .Int => {},
+                .int => {},
                 else => unreachable,
             }
             const min = std.math.minInt(T);
@@ -1514,8 +1514,8 @@ const InstructionFuncs = struct {
         }
 
         fn vectorConvert(comptime in_type: type, comptime out_type: type, comptime side: VectorSide, convert: VectorConvert, stack: *Stack) void {
-            const in_info = @typeInfo(in_type).Vector;
-            const out_info = @typeInfo(out_type).Vector;
+            const in_info = @typeInfo(in_type).vector;
+            const out_info = @typeInfo(out_type).vector;
             const side_offset = if (side == .Low) 0 else in_info.len / 2;
 
             const vec_in = @as(in_type, @bitCast(stack.popV128()));
@@ -1523,14 +1523,14 @@ const InstructionFuncs = struct {
             for (arr, 0..) |_, i| {
                 const v: in_info.child = if (i < in_info.len) vec_in[i + side_offset] else 0;
                 switch (@typeInfo(out_info.child)) {
-                    .Int => arr[i] = blk: {
+                    .int => arr[i] = blk: {
                         if (convert == .SafeCast) {
                             break :blk @as(out_info.child, @intFromFloat(v));
                         } else {
                             break :blk saturatedTruncateTo(out_info.child, v);
                         }
                     },
-                    .Float => arr[i] = @as(out_info.child, @floatFromInt(v)),
+                    .float => arr[i] = @as(out_info.child, @floatFromInt(v)),
                     else => unreachable,
                 }
             }
@@ -1539,8 +1539,8 @@ const InstructionFuncs = struct {
         }
 
         fn vectorNarrowingSaturate(comptime in_type: type, comptime out_type: type, vec: in_type) out_type {
-            const in_info = @typeInfo(in_type).Vector;
-            const out_info = @typeInfo(out_type).Vector;
+            const in_info = @typeInfo(in_type).vector;
+            const out_info = @typeInfo(out_type).vector;
             const T: type = out_info.child;
 
             std.debug.assert(out_info.len == in_info.len);
@@ -1553,7 +1553,7 @@ const InstructionFuncs = struct {
         }
 
         fn vectorNarrow(comptime in_type: type, comptime out_type: type, stack: *Stack) void {
-            const out_info = @typeInfo(out_type).Vector;
+            const out_info = @typeInfo(out_type).vector;
 
             const out_type_half = @Vector(out_info.len / 2, out_info.child);
 
