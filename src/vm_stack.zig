@@ -1083,8 +1083,13 @@ const InstructionFuncs = struct {
                         stack.num_values = (stack.num_values - params_len) + returns_len;
                         const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
 
-                        assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
-                        std.mem.copyForwards(Val, returns_dest, returns_temp);
+                        if (params_len > 0) {
+                            assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
+                            std.mem.copyForwards(Val, returns_dest, returns_temp);
+                        } else {
+                            // no copy needed in this case since the return values will go into the same location
+                            assert(returns_dest.ptr == returns_temp.ptr);
+                        }
 
                         return FuncCallData{
                             .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
