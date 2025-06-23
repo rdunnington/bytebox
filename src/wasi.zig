@@ -47,7 +47,7 @@ const WasiContext = struct {
         };
 
         {
-            var cwd_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
             const cwd: []const u8 = try std.process.getCwd(&cwd_buffer);
             context.cwd = try context.strings.put(cwd);
         }
@@ -135,7 +135,7 @@ const WasiContext = struct {
         // validate the scope of the path never leaves the preopen root
         {
             var depth: i32 = 0;
-            var token_iter = std.mem.tokenize(u8, path, &[_]u8{ '/', '\\' });
+            var token_iter = std.mem.tokenizeAny(u8, path, &[_]u8{ '/', '\\' });
             while (token_iter.next()) |item| {
                 if (std.mem.eql(u8, item, "..")) {
                     depth -= 1;
@@ -148,7 +148,7 @@ const WasiContext = struct {
             }
         }
 
-        var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+        var static_path_buffer: [std.fs.max_path_bytes * 2]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
         const allocator = fba.allocator();
 
@@ -223,7 +223,7 @@ const WasiContext = struct {
                 var info: *FdInfo = undefined;
                 var fd_table_index: u32 = undefined;
 
-                if (self.fd_table_freelist.popOrNull()) |free_index| {
+                if (self.fd_table_freelist.pop()) |free_index| {
                     fd_table_index = free_index;
                     info = &self.fd_table.items[free_index];
                 } else {
@@ -627,8 +627,25 @@ const WindowsApi = struct {
     extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
     extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(WINAPI) BOOL;
     extern "kernel32" fn SetEndOfFile(file: HANDLE) callconv(WINAPI) BOOL;
+    extern "kernel32" fn GetSystemTimeAsFileTime(systemTimeAsFileTime: *FILETIME) void;
+    extern "kernel32" fn GetProcessTimes(hProcess: HANDLE, lpCreationTime: *FILETIME, lpExitTime: *FILETIME, lpKernelTime: *FILETIME, lpUserTime: *FILETIME) BOOL;
 
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
+};
+
+const Linux = struct {
+    const clockid_t = std.posix.clockid_t;
+    const timespec = std.posix.timespec;
+    // copy of std.os.linux function, but with a bugfix for the system.clock_getres call. Delete and replace
+    // with the fixed version in a future update
+    pub fn clock_getres(clock_id: clockid_t, res: *timespec) std.posix.ClockGetTimeError!void {
+        switch (std.posix.errno(std.posix.system.clock_getres(@intCast(@intFromEnum(clock_id)), res))) {
+            .SUCCESS => return,
+            .FAULT => unreachable,
+            .INVAL => return std.posix.ClockGetTimeError.UnsupportedClock,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
 };
 
 const FD_OS_INVALID = switch (builtin.os.tag) {
@@ -646,7 +663,7 @@ const Helpers = struct {
     }
 
     fn resolvePath(fd_info: *const WasiContext.FdInfo, path_relative: []const u8, path_buffer: []u8, _: *Errno) ?[]const u8 {
-        var fba = std.heap.FixedBufferAllocator.init(path_buffer[std.fs.MAX_PATH_BYTES..]);
+        var fba = std.heap.FixedBufferAllocator.init(path_buffer[std.fs.max_path_bytes..]);
         const allocator = fba.allocator();
 
         const paths = [_][]const u8{ fd_info.path_absolute, path_relative };
@@ -731,7 +748,9 @@ const Helpers = struct {
         returns[0] = Val{ .I32 = @intFromEnum(errno) };
     }
 
-    fn convertClockId(wasi_clockid: i32) i32 {
+    const ClockId = if (builtin.os.tag == .windows) i32 else std.posix.clockid_t;
+
+    fn convertClockId(wasi_clockid: i32) ClockId {
         const clockid_t: std.os.wasi.clockid_t = @enumFromInt(wasi_clockid);
         return switch (clockid_t) {
             std.os.wasi.clockid_t.REALTIME => if (builtin.os.tag != .windows) std.posix.CLOCK.REALTIME else WindowsApi.CLOCK.REALTIME,
@@ -743,8 +762,8 @@ const Helpers = struct {
 
     fn posixTimespecToWasi(ts: std.posix.timespec) std.os.wasi.timestamp_t {
         const ns_per_second = 1000000000;
-        const sec_part = @as(u64, @intCast(ts.tv_sec));
-        const nsec_part = @as(u64, @intCast(ts.tv_nsec));
+        const sec_part = @as(u64, @intCast(ts.sec));
+        const nsec_part = @as(u64, @intCast(ts.nsec));
         const timestamp_ns: u64 = (sec_part * ns_per_second) + nsec_part;
         return timestamp_ns;
     }
@@ -1117,7 +1136,7 @@ const Helpers = struct {
             access_time_was_set = true;
         }
         if (flags.ATIM_NOW) {
-            std.os.windows.kernel32.GetSystemTimeAsFileTime(&filetime_now);
+            WindowsApi.GetSystemTimeAsFileTime(&filetime_now);
             filetime_now_needs_set = false;
             access_time = filetime_now;
             access_time_was_set = true;
@@ -1131,7 +1150,7 @@ const Helpers = struct {
         }
         if (flags.MTIM_NOW) {
             if (filetime_now_needs_set) {
-                std.os.windows.kernel32.GetSystemTimeAsFileTime(&filetime_now);
+                WindowsApi.GetSystemTimeAsFileTime(&filetime_now);
             }
             modify_time = filetime_now;
             modify_time_was_set = true;
@@ -1146,11 +1165,11 @@ const Helpers = struct {
     }
 
     fn timespecFromTimestamp(timestamp: u64) std.posix.timespec {
-        const tv_sec = timestamp / 1_000_000_000;
-        const tv_nsec = timestamp - tv_sec * 1_000_000_000;
+        const sec = timestamp / 1_000_000_000;
+        const nsec = timestamp - sec * 1_000_000_000;
         return .{
-            .tv_sec = @as(isize, @intCast(tv_sec)),
-            .tv_nsec = @as(isize, @intCast(tv_nsec)),
+            .sec = @as(isize, @intCast(sec)),
+            .nsec = @as(isize, @intCast(nsec)),
         };
     }
 
@@ -1161,31 +1180,31 @@ const Helpers = struct {
 
         var times = [2]std.posix.timespec{
             .{ // access time
-                .tv_sec = 0,
-                .tv_nsec = UTIME_OMIT,
+                .sec = 0,
+                .nsec = UTIME_OMIT,
             },
             .{ // modification time
-                .tv_sec = 0,
-                .tv_nsec = UTIME_OMIT,
+                .sec = 0,
+                .nsec = UTIME_OMIT,
             },
         };
 
         const flags: std.os.wasi.fstflags_t = @bitCast(@as(u16, @intCast(fstflags)));
         if (flags.ATIM) {
             const ts: std.posix.timespec = timespecFromTimestamp(timestamp_wasi_access);
-            times[0].tv_sec = ts.tv_sec;
-            times[0].tv_nsec = ts.tv_nsec;
+            times[0].sec = ts.sec;
+            times[0].nsec = ts.nsec;
         }
         if (flags.ATIM_NOW) {
-            times[0].tv_nsec = UTIME_NOW;
+            times[0].nsec = UTIME_NOW;
         }
         if (flags.MTIM) {
             const ts: std.posix.timespec = timespecFromTimestamp(timestamp_wasi_modified);
-            times[1].tv_sec = ts.tv_sec;
-            times[1].tv_nsec = ts.tv_nsec;
+            times[1].sec = ts.sec;
+            times[1].nsec = ts.nsec;
         }
         if (flags.MTIM_NOW) {
-            times[1].tv_nsec = UTIME_NOW;
+            times[1].nsec = UTIME_NOW;
         }
 
         std.posix.futimens(fd, &times) catch |err| {
@@ -1501,10 +1520,10 @@ const Helpers = struct {
 
             const filename_utf16le = @as([*]u16, @ptrCast(&file_info.FileName))[0 .. file_info.FileNameLength / @sizeOf(u16)];
 
-            var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+            var static_path_buffer: [std.fs.max_path_bytes * 2]u8 = undefined;
             var fba = std.heap.FixedBufferAllocator.init(&static_path_buffer);
             const allocator = fba.allocator();
-            const filename: []u8 = std.unicode.utf16leToUtf8Alloc(allocator, filename_utf16le) catch unreachable;
+            const filename: []u8 = std.unicode.utf16LeToUtf8Alloc(allocator, filename_utf16le) catch unreachable;
 
             var filetype: std.os.wasi.filetype_t = .REGULAR_FILE;
             if (file_info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
@@ -1736,7 +1755,7 @@ fn wasi_environ_get(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]c
 fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) WasiError!void {
     var errno = Errno.SUCCESS;
 
-    const system_clockid: i32 = Helpers.convertClockId(params[0].I32);
+    const system_clockid: Helpers.ClockId = Helpers.convertClockId(params[0].I32);
     const timestamp_mem_begin = Helpers.signedCast(u32, params[1].I32, &errno);
 
     if (errno == .SUCCESS) {
@@ -1762,9 +1781,11 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const 
                 }
             }
         } else {
+            const clock_getres = if (builtin.os.tag == .linux) Linux.clock_getres else std.posix.clock_getres;
+
             var ts: std.posix.timespec = undefined;
-            if (std.posix.clock_getres(system_clockid, &ts)) {
-                freqency_ns = @as(u64, @intCast(ts.tv_nsec));
+            if (clock_getres(system_clockid, &ts)) {
+                freqency_ns = @as(u64, @intCast(ts.nsec));
             } else |_| {
                 errno = Errno.INVAL;
             }
@@ -1779,7 +1800,7 @@ fn wasi_clock_res_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const 
 fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) WasiError!void {
     var errno = Errno.SUCCESS;
 
-    const system_clockid: i32 = Helpers.convertClockId(params[0].I32);
+    const system_clockid: Helpers.ClockId = Helpers.convertClockId(params[0].I32);
     //const precision = params[1].I64; // unused
     const timestamp_mem_begin = Helpers.signedCast(u32, params[2].I32, &errno);
 
@@ -1792,7 +1813,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
             switch (clockid) {
                 std.os.wasi.clockid_t.REALTIME => {
                     var ft: WindowsApi.FILETIME = undefined;
-                    std.os.windows.kernel32.GetSystemTimeAsFileTime(&ft);
+                    WindowsApi.GetSystemTimeAsFileTime(&ft);
 
                     timestamp_ns = Helpers.windowsFiletimeToWasi(ft);
                 },
@@ -1811,7 +1832,7 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
                     var exitTime: WindowsApi.FILETIME = undefined;
                     var kernelTime: WindowsApi.FILETIME = undefined;
                     var userTime: WindowsApi.FILETIME = undefined;
-                    if (std.os.windows.kernel32.GetProcessTimes(WindowsApi.GetCurrentProcess(), &createTime, &exitTime, &kernelTime, &userTime) == std.os.windows.TRUE) {
+                    if (WindowsApi.GetProcessTimes(WindowsApi.GetCurrentProcess(), &createTime, &exitTime, &kernelTime, &userTime) == std.os.windows.TRUE) {
                         const timestamp_100ns: u64 = Helpers.filetimeToU64(kernelTime) + Helpers.filetimeToU64(userTime);
                         timestamp_ns = timestamp_100ns * 100;
                     } else {
@@ -1832,10 +1853,10 @@ fn wasi_clock_time_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const
                 },
             }
         } else {
-            var ts: std.posix.timespec = undefined;
-            if (std.posix.clock_gettime(system_clockid, &ts)) {
+            const maybe_ts: ?std.posix.timespec = std.posix.clock_gettime(system_clockid) catch null;
+            if (maybe_ts) |ts| {
                 timestamp_ns = Helpers.posixTimespecToWasi(ts);
-            } else |_| {
+            } else {
                 errno = Errno.INVAL;
             }
         }
@@ -2496,7 +2517,7 @@ fn wasi_path_remove_directory(userdata: ?*anyopaque, module: *ModuleInstance, pa
         if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+                    var static_path_buffer: [std.fs.max_path_bytes * 2]u8 = undefined;
                     if (Helpers.resolvePath(fd_info, path, &static_path_buffer, &errno)) |resolved_path| {
                         std.posix.unlinkat(FD_OS_INVALID, resolved_path, std.posix.AT.REMOVEDIR) catch |err| {
                             errno = Errno.translateError(err);
@@ -2532,7 +2553,7 @@ fn wasi_path_symlink(userdata: ?*anyopaque, module: *ModuleInstance, params: [*]
                     if (context.hasPathAccess(fd_info, link_contents, &errno)) {
                         if (context.hasPathAccess(fd_info, link_path, &errno)) {
                             if (builtin.os.tag == .windows) {
-                                var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+                                var static_path_buffer: [std.fs.max_path_bytes * 2]u8 = undefined;
                                 if (Helpers.resolvePath(fd_info, link_path, &static_path_buffer, &errno)) |resolved_link_path| {
                                     const w = std.os.windows;
 
@@ -2581,7 +2602,7 @@ fn wasi_path_unlink_file(userdata: ?*anyopaque, module: *ModuleInstance, params:
         if (Helpers.getMemorySlice(module, path_mem_offset, path_mem_length, &errno)) |path| {
             if (context.fdLookup(fd_dir_wasi, &errno)) |fd_info| {
                 if (context.hasPathAccess(fd_info, path, &errno)) {
-                    var static_path_buffer: [std.fs.MAX_PATH_BYTES * 2]u8 = undefined;
+                    var static_path_buffer: [std.fs.max_path_bytes * 2]u8 = undefined;
                     if (Helpers.resolvePath(fd_info, path, &static_path_buffer, &errno)) |resolved_path| {
                         std.posix.unlinkat(FD_OS_INVALID, resolved_path, 0) catch |err| {
                             errno = Errno.translateError(err);
@@ -2617,9 +2638,9 @@ fn wasi_random_get(_: ?*anyopaque, module: *ModuleInstance, params: [*]const Val
 }
 
 pub const WasiOpts = struct {
-    argv: ?[][]const u8 = null,
-    env: ?[][]const u8 = null,
-    dirs: ?[][]const u8 = null,
+    argv: ?[]const []const u8 = null,
+    env: ?[]const []const u8 = null,
+    dirs: ?[]const []const u8 = null,
 };
 
 pub fn initImports(opts: WasiOpts, allocator: std.mem.Allocator) !ModuleImportPackage {

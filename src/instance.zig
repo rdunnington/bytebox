@@ -1281,7 +1281,7 @@ pub const ModuleInstance = struct {
     }
 
     pub fn memoryWriteInt(self: *ModuleInstance, comptime T: type, value: T, offset: usize) bool {
-        var bytes: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
+        var bytes: [(@typeInfo(T).int.bits + 7) / 8]u8 = undefined;
         std.mem.writeInt(T, &bytes, value, .little);
 
         const destination = self.memorySlice(offset, bytes.len);

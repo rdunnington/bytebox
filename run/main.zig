@@ -27,25 +27,25 @@ const CmdOpts = struct {
     invalid_arg: ?[]const u8 = null,
     missing_options: ?[]const u8 = null,
 
-    wasm_argv: ?[][]const u8 = null,
-    wasm_env: ?[][]const u8 = null,
-    wasm_dirs: ?[][]const u8 = null,
+    wasm_argv: ?[]const []const u8 = null,
+    wasm_env: ?[]const []const u8 = null,
+    wasm_dirs: ?[]const []const u8 = null,
 };
 
 const InvokeArgs = struct {
     funcname: []const u8,
-    args: [][]const u8,
+    args: []const []const u8,
 };
 
 fn isArgvOption(arg: []const u8) bool {
     return arg.len > 0 and arg[0] == '-';
 }
 
-fn getArgSafe(index: usize, args: [][]const u8) ?[]const u8 {
+fn getArgSafe(index: usize, args: []const []const u8) ?[]const u8 {
     return if (index < args.len) args[index] else null;
 }
 
-fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_buffer: *std.ArrayList([]const u8)) CmdOpts {
+fn parseCmdOpts(args: []const [:0]const u8, env_buffer: *std.ArrayList([]const u8), dir_buffer: *std.ArrayList([]const u8)) CmdOpts {
     var opts = CmdOpts{};
 
     if (args.len < 2) {
@@ -54,7 +54,7 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
 
     var arg_index: usize = 1;
     while (arg_index < args.len) {
-        const arg = args[arg_index];
+        const arg: [:0]const u8 = args[arg_index];
 
         if (arg_index == 1 and !isArgvOption(arg)) {
             opts.filename = arg;
@@ -139,7 +139,7 @@ fn parseCmdOpts(args: [][]const u8, env_buffer: *std.ArrayList([]const u8), dir_
 
 const version_string = "bytebox v0.0.1";
 
-fn printHelp(args: [][]const u8) void {
+fn printHelp(args: []const []const u8) void {
     const usage_string: []const u8 =
         \\Usage: {s} <FILE> [WASM_ARGS]... [OPTION]...
         \\
@@ -188,7 +188,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
+    const args: []const [:0]u8 = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
     var env_buffer = std.ArrayList([]const u8).init(allocator);
@@ -275,7 +275,7 @@ pub fn main() !void {
     };
 
     const invoke_funcname: []const u8 = if (opts.invoke) |invoke| invoke.funcname else "_start";
-    const invoke_args: [][]const u8 = if (opts.invoke) |invoke| invoke.args else &[_][]u8{};
+    const invoke_args: []const []const u8 = if (opts.invoke) |invoke| invoke.args else &[_][]u8{};
 
     const func_handle: bytebox.FunctionHandle = module_instance.getFunctionHandle(invoke_funcname) catch {
         // don't log an error if the user didn't explicitly try to invoke a function
@@ -414,6 +414,6 @@ fn writeSignature(strbuf: *std.ArrayList(u8), info: *const bytebox.FunctionExpor
 
 fn valtypeToString(valtype: ValType) []const u8 {
     return switch (valtype) {
-        inline else => |v| @typeInfo(ValType).Enum.fields[@intFromEnum(v)].name,
+        inline else => |v| @typeInfo(ValType).@"enum".fields[@intFromEnum(v)].name,
     };
 }
