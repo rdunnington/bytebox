@@ -255,8 +255,8 @@ export fn bb_import_package_deinit(package: ?*ModuleImportPackage) void {
 }
 
 const HostFunc = extern struct {
-    userdata: ?*anyopaque,
     callback: CHostFunction,
+    userdata: ?*anyopaque,
 };
 
 fn trampoline(userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) error{}!void {

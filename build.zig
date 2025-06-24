@@ -147,13 +147,13 @@ pub fn build(b: *Build) void {
     cffi_run_step.addFileArg(ffi_guest.getEmittedBin());
     cffi_test_step.dependOn(&cffi_run_step.step);
 
-
     // All tests
     const all_tests_step = b.step("test", "Run unit, wasm, and wasi tests");
     all_tests_step.dependOn(unit_test_step);
     all_tests_step.dependOn(wasm_testsuite_step);
     all_tests_step.dependOn(wasi_testsuite_step);
     all_tests_step.dependOn(mem64_test_step);
+    all_tests_step.dependOn(cffi_test_step);
 }
 
 fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, imports: []const ModuleImport, opts: ExeOpts) *Build.Step {
