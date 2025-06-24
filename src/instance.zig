@@ -40,6 +40,7 @@ pub const UnlinkableError = error{
 pub const UninstantiableError = error{
     UninstantiableOutOfBoundsTableAccess,
     UninstantiableOutOfBoundsMemoryAccess,
+    Uninstantiable64BitLimitsOn32BitArch,
 };
 
 pub const ExportError = error{
@@ -141,6 +142,8 @@ pub const TableInstance = struct {
     pub fn init(reftype: ValType, limits: Limits, allocator: std.mem.Allocator) !TableInstance {
         std.debug.assert(reftype.isRefType());
 
+        try verifyLimitsAreInstantiable(limits);
+
         var table = TableInstance{
             .refs = std.ArrayList(Val).init(allocator),
             .reftype = reftype,
@@ -148,7 +151,7 @@ pub const TableInstance = struct {
         };
 
         if (limits.min > 0) {
-            try table.refs.appendNTimes(try Val.nullRef(reftype), limits.min);
+            try table.refs.appendNTimes(try Val.nullRef(reftype), @intCast(limits.min));
         }
         return table;
     }
@@ -161,7 +164,7 @@ pub const TableInstance = struct {
         const max = if (table.limits.max) |m| m else std.math.maxInt(i32);
         std.debug.assert(table.refs.items.len == table.limits.min);
 
-        const old_length: usize = table.limits.min;
+        const old_length: usize = @intCast(table.limits.min);
         if (old_length + length > max) {
             return false;
         }
@@ -250,9 +253,15 @@ pub const MemoryInstance = struct {
     limits: Limits,
     mem: BackingMemory,
 
-    pub fn init(limits: Limits, params: ?WasmMemoryExternal) MemoryInstance {
+    pub fn init(limits: Limits, params: ?WasmMemoryExternal) UninstantiableError!MemoryInstance {
+        try verifyLimitsAreInstantiable(limits);
+
         const max_pages = limits.maxPages();
         const max_bytes: u64 = max_pages * k_page_size;
+
+        if (max_bytes > std.math.maxInt(usize)) {
+            return error.Uninstantiable64BitLimitsOn32BitArch;
+        }
 
         const mem = if (params == null) BackingMemory{
             .Internal = StableArray(u8).init(@intCast(max_bytes)),
@@ -299,7 +308,9 @@ pub const MemoryInstance = struct {
             return false;
         }
 
-        const commit_size: usize = (self.limits.min + num_pages) * k_page_size;
+        const commit_size_64: u64 = (self.limits.min + num_pages) * k_page_size;
+        std.debug.assert(commit_size_64 <= std.math.maxInt(usize));
+        const commit_size: usize = @intCast(commit_size_64);
 
         switch (self.mem) {
             .Internal => |*m| m.resize(commit_size) catch return false,
@@ -951,6 +962,7 @@ pub const ModuleInstance = struct {
             var is_eql: bool = undefined;
             switch (import_table.data) {
                 .Host => |table_instance| {
+                    try verifyLimitsAreInstantiable(table_instance.limits);
                     is_eql = table_instance.reftype == table_import_def.reftype and
                         Helpers.areLimitsCompatible(&table_import_def.limits, &table_instance.limits);
                 },
@@ -975,6 +987,7 @@ pub const ModuleInstance = struct {
             var is_eql: bool = undefined;
             switch (import_memory.data) {
                 .Host => |memory_instance| {
+                    try verifyLimitsAreInstantiable(memory_instance.limits);
                     is_eql = Helpers.areLimitsCompatible(&memory_import_def.limits, &memory_instance.limits);
                 },
                 .Wasm => |data| {
@@ -1021,6 +1034,7 @@ pub const ModuleInstance = struct {
         try store.tables.ensureTotalCapacity(module_def.imports.tables.items.len + module_def.tables.items.len);
 
         for (module_def.tables.items) |*def_table| {
+            try verifyLimitsAreInstantiable(def_table.limits);
             const t = try TableInstance.init(def_table.reftype, def_table.limits, allocator);
             try store.tables.append(t);
         }
@@ -1028,7 +1042,7 @@ pub const ModuleInstance = struct {
         try store.memories.ensureTotalCapacity(module_def.imports.memories.items.len + module_def.memories.items.len);
 
         for (module_def.memories.items) |*def_memory| {
-            var memory = MemoryInstance.init(def_memory.limits, opts.wasm_memory_external);
+            var memory = try MemoryInstance.init(def_memory.limits, opts.wasm_memory_external);
             if (memory.grow(def_memory.limits.min) == false) {
                 unreachable;
             }
@@ -1327,3 +1341,16 @@ pub const ModuleInstance = struct {
         }
     }
 };
+
+fn verifyLimitsAreInstantiable(limits: Limits) UninstantiableError!void {
+    if (!limits.isIndex32() and (@sizeOf(usize) < @sizeOf(u64))) {
+        return error.Uninstantiable64BitLimitsOn32BitArch;
+    }
+
+    const max_pages = limits.maxPages();
+    const max_bytes: u64 = max_pages * MemoryDefinition.k_page_size;
+
+    if (max_bytes > std.math.maxInt(usize)) {
+        return error.Uninstantiable64BitLimitsOn32BitArch;
+    }
+}

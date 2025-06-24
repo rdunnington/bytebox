@@ -1454,7 +1454,7 @@ const Helpers = struct {
 
         while (fbs.pos < fbs.buffer.len and errno.* == .SUCCESS) {
             if (file_index < fd_info.dir_entries.items.len) {
-                for (fd_info.dir_entries.items[file_index..]) |entry| {
+                for (fd_info.dir_entries.items[@intCast(file_index)..]) |entry| {
                     const cookie = file_index + 1;
                     writer.writeInt(u64, cookie, .little) catch break;
                     writer.writeInt(u64, entry.inode, .little) catch break;

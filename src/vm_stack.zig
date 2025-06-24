@@ -958,7 +958,7 @@ const InstructionFuncs = struct {
             return @as(T, @intFromFloat(truncated));
         }
 
-        fn loadFromMem(comptime T: type, stack: *Stack, offset_from_memarg: usize) TrapError!T {
+        fn loadFromMem(comptime T: type, stack: *Stack, offset_from_memarg: u64) TrapError!T {
             const offset_from_stack: i64 = stack.popIndexType();
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
@@ -966,7 +966,9 @@ const InstructionFuncs = struct {
 
             const store: *Store = &stack.topFrame().module_instance.store;
             const memory: *const MemoryInstance = store.getMemory(0);
-            const offset: usize = offset_from_memarg + @as(usize, @intCast(offset_from_stack));
+            const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
+            std.debug.assert(offset_64 <= std.math.maxInt(usize));
+            const offset: usize = @intCast(offset_64);
 
             const bit_count = @bitSizeOf(T);
             const read_type = switch (bit_count) {
@@ -991,13 +993,15 @@ const InstructionFuncs = struct {
             return @as(T, @bitCast(value));
         }
 
-        fn loadArrayFromMem(comptime read_type: type, comptime out_type: type, comptime array_len: usize, store: *Store, offset_from_memarg: usize, offset_from_stack: i32) TrapError![array_len]out_type {
+        fn loadArrayFromMem(comptime read_type: type, comptime out_type: type, comptime array_len: usize, store: *Store, offset_from_memarg: u64, offset_from_stack: i32) TrapError![array_len]out_type {
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
             }
 
             const memory: *const MemoryInstance = store.getMemory(0);
-            const offset: usize = offset_from_memarg + @as(usize, @intCast(offset_from_stack));
+            const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
+            std.debug.assert(offset_64 <= std.math.maxInt(usize));
+            const offset: usize = @intCast(offset_64);
 
             const byte_count = @sizeOf(read_type);
             const end = offset + (byte_count * array_len);
@@ -1018,7 +1022,7 @@ const InstructionFuncs = struct {
             return ret;
         }
 
-        fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: usize) TrapError!void {
+        fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: u64) TrapError!void {
             const offset_from_stack: i64 = stack.popIndexType();
             if (offset_from_stack < 0) {
                 return error.TrapOutOfBoundsMemoryAccess;
@@ -1026,7 +1030,9 @@ const InstructionFuncs = struct {
 
             const store: *Store = &stack.topFrame().module_instance.store;
             const memory: *MemoryInstance = store.getMemory(0);
-            const offset: usize = offset_from_memarg + @as(usize, @intCast(offset_from_stack));
+            const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
+            std.debug.assert(offset_64 <= std.math.maxInt(usize));
+            const offset: usize = @intCast(offset_64);
 
             const bit_count = @bitSizeOf(@TypeOf(value));
             const write_type = switch (bit_count) {
@@ -1399,7 +1405,7 @@ const InstructionFuncs = struct {
             stack.pushV128(@as(v128, @bitCast(vec)));
         }
 
-        fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptime len: usize, mem_offset: usize, stack: *Stack) !void {
+        fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptime len: usize, mem_offset: u64, stack: *Stack) !void {
             const offset_from_stack: i32 = stack.popI32();
             const array: [len]extend_type = try OpHelpers.loadArrayFromMem(mem_type, extend_type, len, &stack.topFrame().module_instance.store, mem_offset, offset_from_stack);
             const vec: @Vector(len, extend_type) = array;
@@ -3500,9 +3506,9 @@ const InstructionFuncs = struct {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
-        const source_offset = @as(u64, @intCast(source_offset_s));
-        const dest_offset = @as(u64, @intCast(dest_offset_s));
-        const length = @as(u64, @intCast(length_s));
+        const source_offset = @as(usize, @intCast(source_offset_s));
+        const dest_offset = @as(usize, @intCast(dest_offset_s));
+        const length = @as(usize, @intCast(length_s));
 
         const source = buffer[source_offset .. source_offset + length];
         const destination = buffer[dest_offset .. dest_offset + length];
@@ -3532,8 +3538,8 @@ const InstructionFuncs = struct {
             return error.TrapOutOfBoundsMemoryAccess;
         }
 
-        const offset = @as(u64, @intCast(offset_s));
-        const length = @as(u64, @intCast(length_s));
+        const offset = @as(usize, @intCast(offset_s));
+        const length = @as(usize, @intCast(length_s));
 
         const destination = buffer[offset .. offset + length];
         @memset(destination, value);
