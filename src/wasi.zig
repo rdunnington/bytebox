@@ -627,8 +627,8 @@ const WindowsApi = struct {
     extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
     extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(WINAPI) BOOL;
     extern "kernel32" fn SetEndOfFile(file: HANDLE) callconv(WINAPI) BOOL;
-    extern "kernel32" fn GetSystemTimeAsFileTime(systemTimeAsFileTime: *FILETIME) void;
-    extern "kernel32" fn GetProcessTimes(hProcess: HANDLE, lpCreationTime: *FILETIME, lpExitTime: *FILETIME, lpKernelTime: *FILETIME, lpUserTime: *FILETIME) BOOL;
+    extern "kernel32" fn GetSystemTimeAsFileTime(systemTimeAsFileTime: *FILETIME) callconv(WINAPI) void;
+    extern "kernel32" fn GetProcessTimes(hProcess: HANDLE, lpCreationTime: *FILETIME, lpExitTime: *FILETIME, lpKernelTime: *FILETIME, lpUserTime: *FILETIME) callconv(WINAPI) BOOL;
 
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
