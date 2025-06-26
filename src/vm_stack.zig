@@ -443,7 +443,8 @@ const InstructionFuncs = struct {
         &op_Branch_If,
         &op_Branch_Table,
         &op_Return,
-        &op_Call,
+        &op_Call_Local,
+        &op_Call_Import,
         &op_Call_Indirect,
         &op_Drop,
         &op_Select,
@@ -1591,10 +1592,10 @@ const InstructionFuncs = struct {
     };
 
     fn preamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
-        const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
-        const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
-
         if (metering.enabled) {
+            const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
+            const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
+
             if (root_stackvm.meter_state.enabled) {
                 const meter = metering.reduce(root_stackvm.meter_state.meter, code[pc]);
                 root_stackvm.meter_state.meter = meter;
@@ -1607,6 +1608,9 @@ const InstructionFuncs = struct {
         }
 
         if (config.enable_debug_trap) {
+            const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
+            const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
+
             if (root_stackvm.debug_state) |*debug_state| {
                 if (debug_state.trap_counter > 0) {
                     debug_state.trap_counter -= 1;
@@ -1771,23 +1775,32 @@ const InstructionFuncs = struct {
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
 
-    fn op_Call(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+    fn op_Call_Local(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Call", pc, code, stack);
+
+        const func_index: u32 = code[pc].immediate.Index;
+        const module_instance: *ModuleInstance = stack.topFrame().module_instance;
+        const stack_vm = StackVM.fromVM(module_instance.vm);
+
+        std.debug.assert(func_index < stack_vm.functions.items.len);
+
+        const func: *const FunctionInstance = &stack_vm.functions.items[@as(usize, @intCast(func_index))];
+        const next: FuncCallData = try OpHelpers.call(pc, stack, module_instance, func);
+
+        try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
+    }
+
+    fn op_Call_Import(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Call", pc, code, stack);
 
         const func_index: u32 = code[pc].immediate.Index;
         const module_instance: *ModuleInstance = stack.topFrame().module_instance;
         const store: *const Store = &module_instance.store;
-        const stack_vm = StackVM.fromVM(module_instance.vm);
 
-        var next: FuncCallData = undefined;
-        if (func_index >= store.imports.functions.items.len) {
-            const func_instance_index = func_index - store.imports.functions.items.len;
-            const func: *const FunctionInstance = &stack_vm.functions.items[@as(usize, @intCast(func_instance_index))];
-            next = try OpHelpers.call(pc, stack, module_instance, func);
-        } else {
-            const func_import = &store.imports.functions.items[func_index];
-            next = try OpHelpers.callImport(pc, stack, func_import);
-        }
+        std.debug.assert(func_index < store.imports.functions.items.len);
+
+        const func_import = &store.imports.functions.items[func_index];
+        const next: FuncCallData = try OpHelpers.callImport(pc, stack, func_import);
 
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
