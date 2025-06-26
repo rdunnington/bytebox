@@ -96,6 +96,9 @@ const FunctionInstance = struct {
     num_locals: u32,
     num_params: u16,
     num_returns: u16,
+
+    max_values: u32,
+    max_labels: u32,
 };
 
 const Label = struct {
@@ -174,12 +177,6 @@ const Stack = struct {
         stack.frames.len = opts.max_frames;
     }
 
-    fn checkExhausted(stack: *Stack, comptime extra_values: u32) !void {
-        if (stack.num_values + extra_values >= stack.values.len) {
-            return error.TrapStackExhausted;
-        }
-    }
-
     fn pushValue(stack: *Stack, value: Val) void {
         stack.values[stack.num_values] = value;
         stack.num_values += 1;
@@ -255,16 +252,14 @@ const Stack = struct {
     }
 
     fn pushLabel(stack: *Stack, num_returns: u32, continuation: u32) !void {
-        if (stack.num_labels < stack.labels.len) {
-            stack.labels[stack.num_labels] = Label{
-                .num_returns = num_returns,
-                .continuation = continuation,
-                .start_offset_values = stack.num_values,
-            };
-            stack.num_labels += 1;
-        } else {
-            return error.TrapStackExhausted;
-        }
+        std.debug.assert(stack.num_labels < stack.labels.len);
+
+        stack.labels[stack.num_labels] = Label{
+            .num_returns = num_returns,
+            .continuation = continuation,
+            .start_offset_values = stack.num_values,
+        };
+        stack.num_labels += 1;
     }
 
     fn popLabel(stack: *Stack) void {
@@ -313,31 +308,44 @@ const Stack = struct {
     }
 
     fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: *ModuleInstance) TrapError!void {
+        // check stack exhaustion
+        if (stack.frames.len <= stack.num_frames + 1) {
+            @branchHint(std.builtin.BranchHint.cold);
+            return error.TrapStackExhausted;
+        }
+        if (stack.values.len <= stack.num_values + func.max_values + func.num_locals) {
+            @branchHint(std.builtin.BranchHint.cold);
+            return error.TrapStackExhausted;
+        }
+        if (stack.labels.len <= stack.num_labels + func.max_labels) {
+            @branchHint(std.builtin.BranchHint.cold);
+            return error.TrapStackExhausted;
+        }
+
         // the stack should already be populated with the params to the function, so all that's
         // left to do is initialize the locals to their default values
         const values_index_begin: u32 = stack.num_values - func.num_params;
         const values_index_end: u32 = stack.num_values + func.num_locals;
 
-        if (stack.num_frames < stack.frames.len and values_index_end < stack.values.len) {
-            const locals_and_params: []Val = stack.values[values_index_begin..values_index_end];
-            const locals = stack.values[stack.num_values..values_index_end];
+        std.debug.assert(stack.num_frames < stack.frames.len);
+        std.debug.assert(values_index_end < stack.values.len);
 
-            stack.num_values = values_index_end;
+        const locals_and_params: []Val = stack.values[values_index_begin..values_index_end];
+        const locals = stack.values[stack.num_values..values_index_end];
 
-            @memset(std.mem.sliceAsBytes(locals), 0);
+        stack.num_values = values_index_end;
 
-            stack.frames[stack.num_frames] = CallFrame{
-                .func = func,
-                .module_instance = module_instance,
-                .locals = locals_and_params,
-                .num_returns = func.num_returns,
-                .start_offset_values = values_index_begin,
-                .start_offset_labels = stack.num_labels,
-            };
-            stack.num_frames += 1;
-        } else {
-            return error.TrapStackExhausted;
-        }
+        @memset(std.mem.sliceAsBytes(locals), 0);
+
+        stack.frames[stack.num_frames] = CallFrame{
+            .func = func,
+            .module_instance = module_instance,
+            .locals = locals_and_params,
+            .num_returns = func.num_returns,
+            .start_offset_values = values_index_begin,
+            .start_offset_labels = stack.num_labels,
+        };
+        stack.num_frames += 1;
     }
 
     fn popFrame(stack: *Stack) ?FuncCallData {
@@ -1077,33 +1085,31 @@ const InstructionFuncs = struct {
                     const params_len: u32 = @as(u32, @intCast(data.func_def.getParams().len));
                     const returns_len: u32 = @as(u32, @intCast(data.func_def.calcNumReturns()));
 
-                    if (stack.num_values + returns_len < stack.values.len) {
-                        const module: *ModuleInstance = stack.topFrame().module_instance;
-                        const params = stack.values[stack.num_values - params_len .. stack.num_values];
-                        const returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
+                    std.debug.assert(stack.num_values + returns_len < stack.values.len);
 
-                        DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
+                    const module: *ModuleInstance = stack.topFrame().module_instance;
+                    const params = stack.values[stack.num_values - params_len .. stack.num_values];
+                    const returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
 
-                        try data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
+                    DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
 
-                        stack.num_values = (stack.num_values - params_len) + returns_len;
-                        const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
+                    try data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
 
-                        if (params_len > 0) {
-                            assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
-                            std.mem.copyForwards(Val, returns_dest, returns_temp);
-                        } else {
-                            // no copy needed in this case since the return values will go into the same location
-                            assert(returns_dest.ptr == returns_temp.ptr);
-                        }
+                    stack.num_values = (stack.num_values - params_len) + returns_len;
+                    const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
 
-                        return FuncCallData{
-                            .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
-                            .continuation = pc + 1,
-                        };
+                    if (params_len > 0) {
+                        assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
+                        std.mem.copyForwards(Val, returns_dest, returns_temp);
                     } else {
-                        return error.TrapStackExhausted;
+                        // no copy needed in this case since the return values will go into the same location
+                        assert(returns_dest.ptr == returns_temp.ptr);
                     }
+
+                    return FuncCallData{
+                        .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
+                        .continuation = pc + 1,
+                    };
                 },
                 .Wasm => |data| {
                     var stack_vm: *StackVM = StackVM.fromVM(data.module_instance.vm);
@@ -1878,7 +1884,6 @@ const InstructionFuncs = struct {
 
     fn op_Local_Get(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Local_Get", pc, code, stack);
-        try stack.checkExhausted(1);
         const locals_index: u32 = code[pc].immediate.Index;
         const frame: *const CallFrame = stack.topFrame();
         const v: Val = frame.locals[locals_index];
@@ -1907,7 +1912,6 @@ const InstructionFuncs = struct {
 
     fn op_Global_Get(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Global_Get", pc, code, stack);
-        try stack.checkExhausted(1);
         const global_index: u32 = code[pc].immediate.Index;
         const global: *GlobalInstance = stack.topFrame().module_instance.store.getGlobal(global_index);
         stack.pushValue(global.value);
@@ -2111,7 +2115,6 @@ const InstructionFuncs = struct {
 
     fn op_Memory_Size(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Memory_Size", pc, code, stack);
-        try stack.checkExhausted(1);
         const memory_index: usize = 0;
         var memory_instance: *const MemoryInstance = stack.topFrame().module_instance.store.getMemory(memory_index);
 
@@ -2155,7 +2158,6 @@ const InstructionFuncs = struct {
 
     fn op_I32_Const(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Const", pc, code, stack);
-        try stack.checkExhausted(1);
         const v: i32 = code[pc].immediate.ValueI32;
         stack.pushI32(v);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -2163,7 +2165,6 @@ const InstructionFuncs = struct {
 
     fn op_I64_Const(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_Const", pc, code, stack);
-        try stack.checkExhausted(1);
         const v: i64 = code[pc].immediate.ValueI64;
         stack.pushI64(v);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -2171,7 +2172,6 @@ const InstructionFuncs = struct {
 
     fn op_F32_Const(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F32_Const", pc, code, stack);
-        try stack.checkExhausted(1);
         const v: f32 = code[pc].immediate.ValueF32;
         stack.pushF32(v);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -2179,7 +2179,6 @@ const InstructionFuncs = struct {
 
     fn op_F64_Const(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_Const", pc, code, stack);
-        try stack.checkExhausted(1);
         const v: f64 = code[pc].immediate.ValueF64;
         stack.pushF64(v);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -3358,7 +3357,6 @@ const InstructionFuncs = struct {
 
     fn op_Ref_Null(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Ref_Null", pc, code, stack);
-        try stack.checkExhausted(1);
         const valtype = code[pc].immediate.ValType;
         const val = try Val.nullRef(valtype);
         stack.pushValue(val);
@@ -3375,7 +3373,6 @@ const InstructionFuncs = struct {
 
     fn op_Ref_Func(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Ref_Func", pc, code, stack);
-        try stack.checkExhausted(1);
         const func_index: u32 = code[pc].immediate.Index;
         const val = Val{ .FuncRef = .{ .index = func_index, .module_instance = stack.topFrame().module_instance } };
         stack.pushValue(val);
@@ -4139,7 +4136,6 @@ const InstructionFuncs = struct {
 
     fn op_V128_Const(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("V128_Const", pc, code, stack);
-        try stack.checkExhausted(1);
         const v: v128 = code[pc].immediate.ValueVec;
         stack.pushV128(v);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
@@ -5303,6 +5299,9 @@ pub const StackVM = struct {
                 .num_locals = @intCast(def_func.locals.items.len),
                 .num_params = @intCast(param_types.len),
                 .num_returns = @intCast(func_type.getReturns().len),
+
+                .max_values = @intCast(def_func.stack_stats.values),
+                .max_labels = @intCast(def_func.stack_stats.labels),
             };
             try self.functions.append(f);
         }
