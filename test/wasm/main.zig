@@ -1282,6 +1282,15 @@ fn pathExists(path: []const u8) bool {
     return true;
 }
 
+fn getNextArg(args: []const []const u8, index: *usize, print_help: *bool) ?[]const u8 {
+    index.* += 1;
+    if (index.* < args.len) {
+        return args[index.*];
+    }
+    print_help.* = true;
+    return null;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator: std.mem.Allocator = gpa.allocator();
@@ -1291,81 +1300,47 @@ pub fn main() !void {
 
     var opts = TestOpts{};
 
-    var args_index: u32 = 1; // skip program name
+    var print_help: bool = false;
+
+    var args_index: usize = 1; // skip program name
     while (args_index < args.len) : (args_index += 1) {
         const arg = args[args_index];
         if (strcmp("--help", arg) or strcmp("-h", arg) or strcmp("help", arg)) {
-            const help_text =
-                \\
-                \\Usage: {s} [OPTION]...
-                \\    --backend <type>
-                \\      Options are: stack (default), register
-                \\
-                \\    --suite <suitename>
-                \\      Only run tests belonging to the given suite. Examples: i32, br_if,
-                \\      utf8-import-field, unwind
-                \\
-                \\    --module <filename>
-                \\      Only decode and initialize the given module. Only tests belonging to the
-                \\      given module file are run.
-                \\
-                \\    --command <type>
-                \\      Only run tests with the given command type. Examples: assert_return
-                \\      assert_trap, assert_invalid
-                \\
-                \\    --test <testname>
-                \\      Run all tests where the 'field' in the json driver matches this filter.
-                \\
-                \\    --trace <level>
-                \\      Print debug traces while executing the test at the given level. <level> can
-                \\      be: none (default), function, instruction
-                \\
-                \\    --force-wasm-regen-only
-                \\      By default, if a given testsuite can't find its' .json file driver, it will
-                \\      regenerate the wasm files and json driver, then run the test. This command
-                \\      will force regeneration of said files and skip running all tests.
-                \\
-                \\    --log-suite
-                \\      Log the name of each suite and aggregate test result.
-                \\
-                \\    --module-logging
-                \\      Enables logging from inside the module when reporting errors.
-                \\
-                \\    --verbose
-                \\      Turn on verbose logging for each step of the test suite run.
-                \\
-                \\
-            ;
-            print(help_text, .{args[0]});
-            return;
+            print_help = true;
         } else if (strcmp("--backend", arg)) {
-            args_index += 1;
-            opts.vm_type = parseVmType(args[args_index]);
+            if (getNextArg(args, &args_index, &print_help)) |vm_type| {
+                opts.vm_type = parseVmType(vm_type);
+            }
         } else if (strcmp("--suite", arg)) {
-            args_index += 1;
-            opts.suite_filter_or_null = args[args_index];
-            print("found suite filter: {s}\n", .{opts.suite_filter_or_null.?});
+            if (getNextArg(args, &args_index, &print_help)) |filter| {
+                opts.suite_filter_or_null = filter;
+                print("found suite filter: {s}\n", .{opts.suite_filter_or_null.?});
+            }
         } else if (strcmp("--module", arg)) {
-            args_index += 1;
-            opts.module_filter_or_null = args[args_index];
-            print("found module filter: {s}\n", .{opts.module_filter_or_null.?});
+            if (getNextArg(args, &args_index, &print_help)) |filter| {
+                opts.module_filter_or_null = filter;
+                print("found module filter: {s}\n", .{opts.module_filter_or_null.?});
+            }
         } else if (strcmp("--command", arg)) {
-            args_index += 1;
-            opts.command_filter_or_null = args[args_index];
-            print("found command filter: {s}\n", .{opts.command_filter_or_null.?});
+            if (getNextArg(args, &args_index, &print_help)) |filter| {
+                opts.command_filter_or_null = filter;
+                print("found command filter: {s}\n", .{opts.command_filter_or_null.?});
+            }
         } else if (strcmp("--test", arg)) {
-            args_index += 1;
-            opts.test_filter_or_null = args[args_index];
-            print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
+            if (getNextArg(args, &args_index, &print_help)) |filter| {
+                opts.test_filter_or_null = filter;
+                print("found test filter: {s}\n", .{opts.test_filter_or_null.?});
+            }
         } else if (strcmp("--trace", arg)) {
-            args_index += 1;
-            if (config.enable_debug_trace == false) {
-                print("Debug tracing must be enabled at compile time -Ddebug_trace=true\n", .{});
-            } else if (bytebox.DebugTrace.parseMode(args[args_index])) |mode| {
-                bytebox.DebugTrace.setMode(mode);
-            } else {
-                print("got invalid trace mode '{s}', check help for allowed options", .{args[args_index]});
-                return;
+            if (getNextArg(args, &args_index, &print_help)) |trace_mode_str| {
+                if (config.enable_debug_trace == false) {
+                    print("Debug tracing must be enabled at compile time -Ddebug_trace=true\n", .{});
+                } else if (bytebox.DebugTrace.parseMode(trace_mode_str)) |mode| {
+                    bytebox.DebugTrace.setMode(mode);
+                } else {
+                    print("got invalid trace mode '{s}', check help for allowed options", .{trace_mode_str});
+                    return;
+                }
             }
         } else if (strcmp("--force-wasm-regen-only", arg)) {
             opts.force_wasm_regen_only = true;
@@ -1377,7 +1352,55 @@ pub fn main() !void {
         } else if (strcmp("--verbose", arg) or strcmp("-v", arg)) {
             g_verbose_logging = true;
             print("verbose logging: on\n", .{});
+        } else {
+            print_help = true;
         }
+    }
+
+    if (print_help) {
+        const help_text =
+            \\
+            \\Usage: {s} [OPTION]...
+            \\    --backend <type>
+            \\      Options are: stack (default), register
+            \\
+            \\    --suite <suitename>
+            \\      Only run tests belonging to the given suite. Examples: i32, br_if,
+            \\      utf8-import-field, unwind
+            \\
+            \\    --module <filename>
+            \\      Only decode and initialize the given module. Only tests belonging to the
+            \\      given module file are run.
+            \\
+            \\    --command <type>
+            \\      Only run tests with the given command type. Examples: assert_return
+            \\      assert_trap, assert_invalid
+            \\
+            \\    --test <testname>
+            \\      Run all tests where the 'field' in the json driver matches this filter.
+            \\
+            \\    --trace <level>
+            \\      Print debug traces while executing the test at the given level. <level> can
+            \\      be: none (default), function, instruction
+            \\
+            \\    --force-wasm-regen-only
+            \\      By default, if a given testsuite can't find its' .json file driver, it will
+            \\      regenerate the wasm files and json driver, then run the test. This command
+            \\      will force regeneration of said files and skip running all tests.
+            \\
+            \\    --log-suite
+            \\      Log the name of each suite and aggregate test result.
+            \\
+            \\    --module-logging
+            \\      Enables logging from inside the module when reporting errors.
+            \\
+            \\    --verbose
+            \\      Turn on verbose logging for each step of the test suite run.
+            \\
+            \\
+        ;
+        print(help_text, .{args[0]});
+        return;
     }
 
     const all_suites = [_][]const u8{
