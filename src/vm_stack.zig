@@ -336,6 +336,8 @@ const Stack = struct {
 
         stack.num_values = values_index_end;
 
+        // All locals must be initialized to their default value
+        // https://webassembly.github.io/spec/core/exec/instructions.html#exec-invoke
         @memset(std.mem.sliceAsBytes(locals), 0);
 
         stack.frames[stack.num_frames] = CallFrame{
@@ -360,6 +362,9 @@ const Stack = struct {
         const dest_end: usize = frame.start_offset_values + num_returns;
         assert(dest_begin <= source_begin);
 
+        // Because a function's locals take up stack space, the return values are located
+        // after the locals, so we need to copy them back down to the start of the function's
+        // stack space, where the caller expects them to be.
         const returns_source: []const Val = stack.values[source_begin..source_end];
         const returns_dest: []Val = stack.values[dest_begin..dest_end];
         std.mem.copyForwards(Val, returns_dest, returns_source);
