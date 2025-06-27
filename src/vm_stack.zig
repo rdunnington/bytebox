@@ -92,6 +92,7 @@ const DebugTraceStackVM = struct {
 const FunctionInstance = struct {
     type_def_index: usize,
     def_index: usize,
+    code: [*]const Instruction,
     instructions_begin: usize,
     num_locals: u32,
     num_params: u16,
@@ -313,7 +314,7 @@ const Stack = struct {
             @branchHint(std.builtin.BranchHint.cold);
             return error.TrapStackExhausted;
         }
-        if (stack.values.len <= stack.num_values + func.max_values + func.num_locals) {
+        if (stack.values.len <= stack.num_values + func.max_values) {
             @branchHint(std.builtin.BranchHint.cold);
             return error.TrapStackExhausted;
         }
@@ -350,17 +351,17 @@ const Stack = struct {
 
     fn popFrame(stack: *Stack) ?FuncCallData {
         const frame: *CallFrame = stack.topFrame();
-        const frame_label: Label = stack.labels[frame.start_offset_labels];
 
+        const continuation: u32 = stack.labels[frame.start_offset_labels].continuation;
         const num_returns: usize = frame.num_returns;
         const source_begin: usize = stack.num_values - num_returns;
         const source_end: usize = stack.num_values;
         const dest_begin: usize = frame.start_offset_values;
         const dest_end: usize = frame.start_offset_values + num_returns;
+        assert(dest_begin <= source_begin);
 
         const returns_source: []const Val = stack.values[source_begin..source_end];
         const returns_dest: []Val = stack.values[dest_begin..dest_end];
-        assert(dest_begin <= source_begin);
         std.mem.copyForwards(Val, returns_dest, returns_source);
 
         stack.num_values = @as(u32, @intCast(dest_end));
@@ -369,8 +370,8 @@ const Stack = struct {
 
         if (stack.num_frames > 0) {
             return FuncCallData{
-                .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
-                .continuation = frame_label.continuation,
+                .code = stack.topFrame().func.code,
+                .continuation = continuation,
             };
         }
 
@@ -397,23 +398,6 @@ const Stack = struct {
 };
 
 // TODO move all definition stuff into definition.zig and vm stuff into vm_stack.zig
-
-// new idea:
-// embed immediates with the opcodes in a stream of opaque data. each opcode knows how much data it uses and
-// increments the program counter by that amount. so it would look something like this:
-// op1
-// op1 immediate
-// op2 (no immediate)
-// op3
-// op3 imm1
-// op3 imm2
-// op3 imm3
-//
-// this way the opcode and immediate data is all in cache in the same stream, but there are no wasted bytes
-// due to union padding.
-// could experiment with adding alignment padding later
-
-// const InstructionFunc = *const fn (pc: u32, code: [*]const u8, stack: *Stack) anyerror!void;
 
 // pc is the "program counter", which points to the next instruction to execute
 const InstructionFunc = *const fn (pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void;
@@ -1075,7 +1059,7 @@ const InstructionFuncs = struct {
             DebugTrace.traceFunction(module_instance, stack.num_frames, func.def_index);
 
             return FuncCallData{
-                .code = module_instance.module_def.code.instructions.items.ptr,
+                .code = func.code,
                 .continuation = @intCast(func.instructions_begin),
             };
         }
@@ -1123,7 +1107,7 @@ const InstructionFuncs = struct {
         fn branch(stack: *Stack, label_id: u32) ?FuncCallData {
             const label: *const Label = stack.findLabel(@as(u32, @intCast(label_id)));
             const frame_label: *const Label = stack.frameLabel();
-            // TODO generate BranchToFunctionEnd up if this can be statically determined at decode time (or just generate a Return?)
+            // TODO generate BranchToFunctionEnd if this can be statically determined at decode time (or just generate a Return?)
             if (label == frame_label) {
                 return stack.popFrame();
             }
@@ -5305,15 +5289,21 @@ pub const StackVM = struct {
             const func_type: *const FunctionTypeDefinition = &module.module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
 
+            const num_locals: u32 = @intCast(def_func.locals.items.len);
+            const num_params: u16 = @intCast(param_types.len);
+            const num_values: u32 = @intCast(def_func.stack_stats.values);
+
             const f = FunctionInstance{
                 .type_def_index = def_func.type_index,
                 .def_index = @as(u32, @intCast(i)),
+                .code = module.module_def.code.instructions.items.ptr,
                 .instructions_begin = def_func.instructions_begin,
-                .num_locals = @intCast(def_func.locals.items.len),
-                .num_params = @intCast(param_types.len),
+                .num_locals = num_locals,
+                .num_params = num_params,
                 .num_returns = @intCast(func_type.getReturns().len),
 
-                .max_values = @intCast(def_func.stack_stats.values),
+                // maximum number of values that can be on the stack for this function
+                .max_values = num_values + num_locals + num_params,
                 .max_labels = @intCast(def_func.stack_stats.labels),
             };
             try self.functions.append(f);
@@ -5514,7 +5504,7 @@ pub const StackVM = struct {
 
         DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
 
-        try InstructionFuncs.run(@intCast(func.instructions_begin), module.module_def.code.instructions.items.ptr, &self.stack);
+        try InstructionFuncs.run(@intCast(func.instructions_begin), func.code, &self.stack);
 
         if (returns_slice.len > 0) {
             var index: i32 = @as(i32, @intCast(returns_slice.len - 1));
