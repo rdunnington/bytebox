@@ -920,10 +920,11 @@ pub const Instruction = struct {
         };
 
         const wasm_op: WasmOpcode = try WasmOpcode.decode(reader);
-        const opcode: Opcode = wasm_op.toOpcode();
+
+        var opcode: ?Opcode = null;
         var immediate = InstructionImmediates{ .Void = {} };
 
-        switch (opcode) {
+        switch (wasm_op) {
             .Select_T => {
                 const num_types = try common.decodeLEB128(u32, reader);
                 if (num_types != 1) {
@@ -982,7 +983,6 @@ pub const Instruction = struct {
                     },
                 };
             },
-            .IfNoElse => unreachable, // we convert the If opcode to IfNoElse only after reaching the end of the block, not when decoding the opcode and immediates
             .Branch => {
                 immediate = InstructionImmediates{ .LabelId = try common.decodeLEB128(u32, reader) };
             },
@@ -1033,7 +1033,15 @@ pub const Instruction = struct {
                 }
             },
             .Call => {
-                immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) }; // function index
+                var index = try common.decodeLEB128(u32, reader);
+                if (module.imports.functions.items.len <= index) {
+                    index -= @intCast(module.imports.functions.items.len);
+                    opcode = .Call_Local;
+                } else {
+                    opcode = .Call_Import;
+                }
+
+                immediate = InstructionImmediates{ .Index = index }; // function index
             },
             .Call_Indirect => {
                 immediate = InstructionImmediates{ .CallIndirect = .{
@@ -1292,8 +1300,13 @@ pub const Instruction = struct {
             else => {},
         }
 
+        // if the wasm opcode wasn't already translated to the internal opcode, use the default translation
+        if (opcode == null) {
+            opcode = wasm_op.toOpcode();
+        }
+
         return .{
-            .opcode = opcode,
+            .opcode = opcode.?,
             .immediate = immediate,
         };
     }
@@ -1532,7 +1545,7 @@ const ModuleValidator = struct {
         self.stack_stats = .{};
         const func_type_def: *const FunctionTypeDefinition = &module.types.items[func.type_index];
 
-        try self.pushControl(Opcode.Call, func_type_def.getParams(), func_type_def.getReturns());
+        try self.pushControl(Opcode.Call_Local, func_type_def.getParams(), func_type_def.getReturns());
     }
 
     fn validateCode(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition, instruction: Instruction) !void {
@@ -1803,9 +1816,23 @@ const ModuleValidator = struct {
                 try Helpers.popReturnTypes(self, block_return_types);
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
-            .Call => {
+            .Call_Local => {
+                const local_func_index: u64 = instruction.immediate.Index;
+                if (module.functions.items.len <= local_func_index) {
+                    return error.ValidationUnknownFunction;
+                }
+
+                // Local functions' index space is located after the imports, but the Call_Local instruction immediate
+                // has been setup to point directly into the local function index space.
+                const func_index = module.imports.functions.items.len + local_func_index;
+                std.debug.assert(func_index < std.math.maxInt(usize));
+
+                const type_index: usize = module.getFuncTypeIndex(@intCast(func_index));
+                try Helpers.popPushFuncTypes(self, type_index, module);
+            },
+            .Call_Import => {
                 const func_index: u64 = instruction.immediate.Index;
-                if (module.imports.functions.items.len + module.functions.items.len <= func_index) {
+                if (module.imports.functions.items.len <= func_index) {
                     return error.ValidationUnknownFunction;
                 }
 
@@ -2597,7 +2624,7 @@ const ModuleValidator = struct {
             .is_unreachable = false,
         });
 
-        if (opcode != .Call) {
+        if (opcode != .Call_Local) {
             for (start_types) |valtype| {
                 try self.pushType(valtype);
             }

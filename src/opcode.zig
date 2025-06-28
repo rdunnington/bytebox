@@ -17,7 +17,8 @@ pub const Opcode = enum(u16) {
     Branch_If,
     Branch_Table,
     Return,
-    Call,
+    Call_Local, // Technically mapped to WasmOpcode.Call, but has different behavior (module-internal calls only)
+    Call_Import, // Has no corresponding mapping in WasmOpcode, only calls imported functions
     Call_Indirect,
     Drop,
     Select,
@@ -957,7 +958,7 @@ const ConversionTables = struct {
         Opcode.Branch_If, // 0x0D
         Opcode.Branch_Table, // 0x0E
         Opcode.Return, // 0x0F
-        Opcode.Call, // 0x10
+        Opcode.Invalid, // 0x10 (WasmOpcode.Call)
         Opcode.Call_Indirect, // 0x11
         Opcode.Invalid, // 0x12
         Opcode.Invalid, // 0x13
