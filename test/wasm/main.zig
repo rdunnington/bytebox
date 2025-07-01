@@ -1251,6 +1251,8 @@ pub fn parseVmType(backend_str: []const u8) VmType {
         return .Stack;
     } else if (strcmp("register", backend_str)) {
         return .Register;
+    } else if (strcmp("stack_switch", backend_str)) {
+        return .StackSwitch;
     } else {
         print("Failed parsing backend string '{s}'. Expected 'stack' or 'register'.", .{backend_str});
         return .Stack;

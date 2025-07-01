@@ -12,6 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
+        vm: [stack, stack_switch]
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v2
@@ -60,15 +61,15 @@ jobs:
 
       - name: Run wasm testsuite
         run: |
-          zig build test-wasm -- --log-suite
+          zig build test-wasm -- --log-suite --backend ${{ matrix.vm }}
 
       - name: Run mem64 test
         run: |
-          zig build test-mem64
+          zig build test-mem64 -- --backend ${{ matrix.vm }}
 
       - name: Run wasi testsuite
         run: |
-          zig build test-wasi
+          zig build test-wasi -- --backend ${{ matrix.vm }}
 
       - name: Run cffi test
         run: |

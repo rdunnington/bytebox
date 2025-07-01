@@ -3,6 +3,7 @@ const common = @import("common.zig");
 const def = @import("definition.zig");
 const inst = @import("instance.zig");
 const vm_stack = @import("vm_stack.zig");
+const vm_stack_switch = @import("vm_stack_switch.zig");
 const vm_register = @import("vm_register.zig");
 pub const config = @import("config");
 pub const wasi = @import("wasi.zig");
@@ -65,12 +66,14 @@ pub fn createModuleDefinition(allocator: std.mem.Allocator, opts: ModuleDefiniti
 
 pub const VmType = enum {
     Stack,
+    StackSwitch,
     Register,
 };
 
 pub fn createModuleInstance(vm_type: VmType, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) AllocError!*ModuleInstance {
     const vm: *inst.VM = switch (vm_type) {
         .Stack => try inst.VM.create(vm_stack.StackVM, allocator),
+        .StackSwitch => try inst.VM.create(vm_stack_switch.StackVM, allocator),
         .Register => try inst.VM.create(vm_register.RegisterVM, allocator),
     };
     return try ModuleInstance.create(module_def, vm, allocator);

@@ -76,331 +76,13 @@ const DebugTrapInstructionMode = inst.DebugTrapInstructionMode;
 
 const metering = @import("metering.zig");
 
-const DebugTraceStackVM = struct {
-    fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Stack) void {
-        if (config.enable_debug_trace and DebugTrace.shouldTraceInstructions()) {
-            const frame: *const CallFrame = stack.topFrame();
-            const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
-            const module_name = name_section.getModuleName();
-            const function_name = name_section.findFunctionName(frame.func.def_index);
-
-            std.debug.print("\t0x{x} - {s}!{s}: {s}\n", .{ pc, module_name, function_name, instruction_name });
-        }
-    }
-};
-
-const FunctionInstance = struct {
-    type_def_index: usize,
-    def_index: usize,
-    code: [*]const Instruction,
-    instructions_begin: usize,
-    num_locals: u32,
-    num_params: u16,
-    num_returns: u16,
-
-    max_values: u32,
-    max_labels: u32,
-};
-
-const Label = struct {
-    num_returns: u32,
-    continuation: u32,
-    start_offset_values: u32,
-};
-
-const CallFrame = struct {
-    func: *const FunctionInstance,
-    module_instance: *ModuleInstance,
-    locals: []Val,
-    num_returns: u16,
-    start_offset_values: u32,
-    start_offset_labels: u16,
-};
-
-const FuncCallData = struct {
-    code: [*]const Instruction,
-    continuation: u32,
-};
-
-const Stack = struct {
-    values: []Val,
-    labels: []Label,
-    frames: []CallFrame,
-    num_values: u32,
-    num_labels: u16,
-    num_frames: u16,
-    mem: []u8,
-    allocator: std.mem.Allocator,
-
-    const AllocOpts = struct {
-        max_values: u32,
-        max_labels: u16,
-        max_frames: u16,
-    };
-
-    fn init(allocator: std.mem.Allocator) Stack {
-        const stack = Stack{
-            .values = &[_]Val{},
-            .labels = &[_]Label{},
-            .frames = &[_]CallFrame{},
-            .num_values = 0,
-            .num_labels = 0,
-            .num_frames = 0,
-            .mem = &[_]u8{},
-            .allocator = allocator,
-        };
-
-        return stack;
-    }
-
-    fn deinit(stack: *Stack) void {
-        if (stack.mem.len > 0) {
-            stack.allocator.free(stack.mem);
-        }
-    }
-
-    fn allocMemory(stack: *Stack, opts: AllocOpts) !void {
-        const alignment = @max(@alignOf(Val), @alignOf(Label), @alignOf(CallFrame));
-        const values_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_values)) * @sizeOf(Val), alignment);
-        const labels_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_labels)) * @sizeOf(Label), alignment);
-        const frames_alloc_size = std.mem.alignForward(usize, @as(usize, @intCast(opts.max_frames)) * @sizeOf(CallFrame), alignment);
-        const total_alloc_size: usize = values_alloc_size + labels_alloc_size + frames_alloc_size;
-
-        const begin_labels = values_alloc_size;
-        const begin_frames = values_alloc_size + labels_alloc_size;
-
-        stack.mem = try stack.allocator.alloc(u8, total_alloc_size);
-        stack.values.ptr = @as([*]Val, @alignCast(@ptrCast(stack.mem.ptr)));
-        stack.values.len = opts.max_values;
-        stack.labels.ptr = @as([*]Label, @alignCast(@ptrCast(stack.mem[begin_labels..].ptr)));
-        stack.labels.len = opts.max_labels;
-        stack.frames.ptr = @as([*]CallFrame, @alignCast(@ptrCast(stack.mem[begin_frames..].ptr)));
-        stack.frames.len = opts.max_frames;
-    }
-
-    fn pushValue(stack: *Stack, value: Val) void {
-        stack.values[stack.num_values] = value;
-        stack.num_values += 1;
-    }
-
-    fn pushI32(stack: *Stack, v: i32) void {
-        stack.values[stack.num_values] = Val{ .I32 = v };
-        stack.num_values += 1;
-    }
-
-    fn pushI64(stack: *Stack, v: i64) void {
-        stack.values[stack.num_values] = Val{ .I64 = v };
-        stack.num_values += 1;
-    }
-
-    fn pushF32(stack: *Stack, v: f32) void {
-        stack.values[stack.num_values] = Val{ .F32 = v };
-        stack.num_values += 1;
-    }
-
-    fn pushF64(stack: *Stack, v: f64) void {
-        stack.values[stack.num_values] = Val{ .F64 = v };
-        stack.num_values += 1;
-    }
-
-    fn pushV128(stack: *Stack, v: v128) void {
-        stack.values[stack.num_values] = Val{ .V128 = v };
-        stack.num_values += 1;
-    }
-
-    fn popValue(stack: *Stack) Val {
-        stack.num_values -= 1;
-        const value: Val = stack.values[stack.num_values];
-        return value;
-    }
-
-    fn topValue(stack: *const Stack) Val {
-        return stack.values[stack.num_values - 1];
-    }
-
-    fn popI32(stack: *Stack) i32 {
-        stack.num_values -= 1;
-        return stack.values[stack.num_values].I32;
-    }
-
-    fn popI64(stack: *Stack) i64 {
-        stack.num_values -= 1;
-        return stack.values[stack.num_values].I64;
-    }
-
-    fn popF32(stack: *Stack) f32 {
-        stack.num_values -= 1;
-        return stack.values[stack.num_values].F32;
-    }
-
-    fn popF64(stack: *Stack) f64 {
-        stack.num_values -= 1;
-        return stack.values[stack.num_values].F64;
-    }
-
-    fn popV128(stack: *Stack) v128 {
-        stack.num_values -= 1;
-        return stack.values[stack.num_values].V128;
-    }
-
-    fn popIndexType(stack: *Stack) i64 {
-        const index_type: ValType = stack.topFrame().module_instance.store.getMemory(0).limits.indexType();
-        return switch (index_type) {
-            .I32 => stack.popI32(),
-            .I64 => stack.popI64(),
-            else => unreachable,
-        };
-    }
-
-    fn pushLabel(stack: *Stack, num_returns: u32, continuation: u32) !void {
-        std.debug.assert(stack.num_labels < stack.labels.len);
-
-        stack.labels[stack.num_labels] = Label{
-            .num_returns = num_returns,
-            .continuation = continuation,
-            .start_offset_values = stack.num_values,
-        };
-        stack.num_labels += 1;
-    }
-
-    fn popLabel(stack: *Stack) void {
-        stack.num_labels -= 1;
-    }
-
-    fn findLabel(stack: Stack, id: u32) *const Label {
-        const index: usize = (stack.num_labels - 1) - id;
-        return &stack.labels[index];
-    }
-
-    fn topLabel(stack: Stack) *const Label {
-        return &stack.labels[stack.num_labels - 1];
-    }
-
-    fn frameLabel(stack: Stack) *const Label {
-        const frame: *const CallFrame = stack.topFrame();
-        const frame_label: *const Label = &stack.labels[frame.start_offset_labels];
-        return frame_label;
-    }
-
-    fn popAllUntilLabelId(stack: *Stack, label_id: u64, pop_final_label: bool, num_returns: usize) void {
-        const label_index: u16 = @as(u16, @intCast((stack.num_labels - label_id) - 1));
-        const label: *const Label = &stack.labels[label_index];
-
-        if (pop_final_label) {
-            const source_begin: usize = stack.num_values - num_returns;
-            const source_end: usize = stack.num_values;
-            const dest_begin: usize = label.start_offset_values;
-            const dest_end: usize = label.start_offset_values + num_returns;
-
-            const returns_source: []const Val = stack.values[source_begin..source_end];
-            const returns_dest: []Val = stack.values[dest_begin..dest_end];
-            if (dest_begin <= source_begin) {
-                std.mem.copyForwards(Val, returns_dest, returns_source);
-            } else {
-                std.mem.copyBackwards(Val, returns_dest, returns_source);
-            }
-
-            stack.num_values = @as(u32, @intCast(dest_end));
-            stack.num_labels = label_index;
-        } else {
-            stack.num_values = label.start_offset_values;
-            stack.num_labels = label_index + 1;
-        }
-    }
-
-    fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: *ModuleInstance) TrapError!void {
-        // check stack exhaustion
-        if (stack.frames.len <= stack.num_frames + 1) {
-            @branchHint(std.builtin.BranchHint.cold);
-            return error.TrapStackExhausted;
-        }
-        if (stack.values.len <= stack.num_values + func.max_values) {
-            @branchHint(std.builtin.BranchHint.cold);
-            return error.TrapStackExhausted;
-        }
-        if (stack.labels.len <= stack.num_labels + func.max_labels) {
-            @branchHint(std.builtin.BranchHint.cold);
-            return error.TrapStackExhausted;
-        }
-
-        // the stack should already be populated with the params to the function, so all that's
-        // left to do is initialize the locals to their default values
-        const values_index_begin: u32 = stack.num_values - func.num_params;
-        const values_index_end: u32 = stack.num_values + func.num_locals;
-
-        std.debug.assert(stack.num_frames < stack.frames.len);
-        std.debug.assert(values_index_end < stack.values.len);
-
-        const locals_and_params: []Val = stack.values[values_index_begin..values_index_end];
-        const locals = stack.values[stack.num_values..values_index_end];
-
-        stack.num_values = values_index_end;
-
-        // All locals must be initialized to their default value
-        // https://webassembly.github.io/spec/core/exec/instructions.html#exec-invoke
-        @memset(std.mem.sliceAsBytes(locals), 0);
-
-        stack.frames[stack.num_frames] = CallFrame{
-            .func = func,
-            .module_instance = module_instance,
-            .locals = locals_and_params,
-            .num_returns = func.num_returns,
-            .start_offset_values = values_index_begin,
-            .start_offset_labels = stack.num_labels,
-        };
-        stack.num_frames += 1;
-    }
-
-    fn popFrame(stack: *Stack) ?FuncCallData {
-        const frame: *CallFrame = stack.topFrame();
-
-        const continuation: u32 = stack.labels[frame.start_offset_labels].continuation;
-        const num_returns: usize = frame.num_returns;
-        const source_begin: usize = stack.num_values - num_returns;
-        const source_end: usize = stack.num_values;
-        const dest_begin: usize = frame.start_offset_values;
-        const dest_end: usize = frame.start_offset_values + num_returns;
-        assert(dest_begin <= source_begin);
-
-        // Because a function's locals take up stack space, the return values are located
-        // after the locals, so we need to copy them back down to the start of the function's
-        // stack space, where the caller expects them to be.
-        const returns_source: []const Val = stack.values[source_begin..source_end];
-        const returns_dest: []Val = stack.values[dest_begin..dest_end];
-        std.mem.copyForwards(Val, returns_dest, returns_source);
-
-        stack.num_values = @as(u32, @intCast(dest_end));
-        stack.num_labels = frame.start_offset_labels;
-        stack.num_frames -= 1;
-
-        if (stack.num_frames > 0) {
-            return FuncCallData{
-                .code = stack.topFrame().func.code,
-                .continuation = continuation,
-            };
-        }
-
-        return null;
-    }
-
-    fn topFrame(stack: Stack) *CallFrame {
-        return &stack.frames[stack.num_frames - 1];
-    }
-
-    fn popAll(stack: *Stack) void {
-        stack.num_values = 0;
-        stack.num_labels = 0;
-        stack.num_frames = 0;
-    }
-
-    fn debugDump(stack: Stack) void {
-        std.debug.print("===== stack dump =====\n", .{});
-        for (stack.values[0..stack.num_values]) |val| {
-            std.debug.print("I32: {}, I64: {}, F32: {}, F64: {}\n", .{ val.I32, val.I64, val.F32, val.F64 });
-        }
-        std.debug.print("======================\n", .{});
-    }
-};
+const shared = @import("stack.zig");
+const FunctionInstance = shared.FunctionInstance;
+const CallFrame = shared.CallFrame;
+const FuncCallData = shared.FuncCallData;
+const Label = shared.Label;
+const Stack = shared.Stack;
+const OpHelpers = shared.OpHelpers;
 
 // TODO move all definition stuff into definition.zig and vm stuff into vm_stack.zig
 
@@ -869,749 +551,8 @@ const InstructionFuncs = struct {
         return opcodeToFuncTable[@intFromEnum(opcode)];
     }
 
-    const OpHelpers = struct {
-        const NanPropagateOp = enum {
-            Min,
-            Max,
-        };
-
-        fn propagateNanWithOp(comptime op: NanPropagateOp, v1: anytype, v2: @TypeOf(v1)) @TypeOf(v1) {
-            if (std.math.isNan(v1)) {
-                return v1;
-            } else if (std.math.isNan(v2)) {
-                return v2;
-            } else {
-                return switch (op) {
-                    .Min => @min(v1, v2),
-                    .Max => @max(v1, v2),
-                };
-            }
-        }
-
-        fn truncateTo(comptime T: type, value: anytype) TrapError!T {
-            switch (T) {
-                i32 => {},
-                u32 => {},
-                i64 => {},
-                u64 => {},
-                else => @compileError("Only i32 and i64 are supported outputs."),
-            }
-            switch (@TypeOf(value)) {
-                f32 => {},
-                f64 => {},
-                else => @compileError("Only f32 and f64 are supported inputs."),
-            }
-
-            const truncated = @trunc(value);
-
-            if (std.math.isNan(truncated)) {
-                return error.TrapInvalidIntegerConversion;
-            } else if (truncated < std.math.minInt(T)) {
-                return error.TrapIntegerOverflow;
-            } else {
-                if (@typeInfo(T).int.bits < @typeInfo(@TypeOf(truncated)).float.bits) {
-                    if (truncated > std.math.maxInt(T)) {
-                        return error.TrapIntegerOverflow;
-                    }
-                } else {
-                    if (truncated >= std.math.maxInt(T)) {
-                        return error.TrapIntegerOverflow;
-                    }
-                }
-            }
-            return @as(T, @intFromFloat(truncated));
-        }
-
-        fn saturatedTruncateTo(comptime T: type, value: anytype) T {
-            switch (T) {
-                i32 => {},
-                u32 => {},
-                i64 => {},
-                u64 => {},
-                else => @compileError("Only i32 and i64 are supported outputs."),
-            }
-            switch (@TypeOf(value)) {
-                f32 => {},
-                f64 => {},
-                else => @compileError("Only f32 and f64 are supported inputs."),
-            }
-
-            const truncated = @trunc(value);
-
-            if (std.math.isNan(truncated)) {
-                return 0;
-            } else if (truncated < std.math.minInt(T)) {
-                return std.math.minInt(T);
-            } else {
-                if (@typeInfo(T).int.bits < @typeInfo(@TypeOf(truncated)).float.bits) {
-                    if (truncated > std.math.maxInt(T)) {
-                        return std.math.maxInt(T);
-                    }
-                } else {
-                    if (truncated >= std.math.maxInt(T)) {
-                        return std.math.maxInt(T);
-                    }
-                }
-            }
-            return @as(T, @intFromFloat(truncated));
-        }
-
-        fn loadFromMem(comptime T: type, stack: *Stack, offset_from_memarg: u64) TrapError!T {
-            const offset_from_stack: i64 = stack.popIndexType();
-            if (offset_from_stack < 0) {
-                return error.TrapOutOfBoundsMemoryAccess;
-            }
-
-            const store: *Store = &stack.topFrame().module_instance.store;
-            const memory: *const MemoryInstance = store.getMemory(0);
-            const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
-            std.debug.assert(offset_64 <= std.math.maxInt(usize));
-            const offset: usize = @intCast(offset_64);
-
-            const bit_count = @bitSizeOf(T);
-            const read_type = switch (bit_count) {
-                8 => u8,
-                16 => u16,
-                32 => u32,
-                64 => u64,
-                128 => u128,
-                else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
-            };
-
-            const end = offset + (bit_count / 8);
-
-            const buffer = memory.buffer();
-            if (buffer.len < end) {
-                return error.TrapOutOfBoundsMemoryAccess;
-            }
-
-            const mem = buffer[offset..end];
-            const byte_count = bit_count / 8;
-            const value = std.mem.readInt(read_type, mem[0..byte_count], .little);
-            return @as(T, @bitCast(value));
-        }
-
-        fn loadArrayFromMem(comptime read_type: type, comptime out_type: type, comptime array_len: usize, store: *Store, offset_from_memarg: u64, offset_from_stack: i32) TrapError![array_len]out_type {
-            if (offset_from_stack < 0) {
-                return error.TrapOutOfBoundsMemoryAccess;
-            }
-
-            const memory: *const MemoryInstance = store.getMemory(0);
-            const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
-            std.debug.assert(offset_64 <= std.math.maxInt(usize));
-            const offset: usize = @intCast(offset_64);
-
-            const byte_count = @sizeOf(read_type);
-            const end = offset + (byte_count * array_len);
-
-            const buffer = memory.buffer();
-            if (buffer.len < end) {
-                return error.TrapOutOfBoundsMemoryAccess;
-            }
-
-            var ret: [array_len]out_type = undefined;
-            const mem = buffer[offset..end];
-            var i: usize = 0;
-            while (i < array_len) : (i += 1) {
-                const value_start = i * byte_count;
-                const value_end = value_start + byte_count;
-                ret[i] = std.mem.readInt(read_type, mem[value_start..value_end][0..byte_count], .little);
-            }
-            return ret;
-        }
-
-        fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: u64) TrapError!void {
-            const offset_from_stack: i64 = stack.popIndexType();
-            if (offset_from_stack < 0) {
-                return error.TrapOutOfBoundsMemoryAccess;
-            }
-
-            const store: *Store = &stack.topFrame().module_instance.store;
-            const memory: *MemoryInstance = store.getMemory(0);
-            const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
-            std.debug.assert(offset_64 <= std.math.maxInt(usize));
-            const offset: usize = @intCast(offset_64);
-
-            const bit_count = @bitSizeOf(@TypeOf(value));
-            const write_type = switch (bit_count) {
-                8 => u8,
-                16 => u16,
-                32 => u32,
-                64 => u64,
-                128 => u128,
-                else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
-            };
-
-            const end = offset + (bit_count / 8);
-            const buffer = memory.buffer();
-
-            if (buffer.len < end) {
-                return error.TrapOutOfBoundsMemoryAccess;
-            }
-
-            const write_value = @as(write_type, @bitCast(value));
-
-            const mem = buffer[offset..end];
-            const byte_count = bit_count / 8;
-            std.mem.writeInt(write_type, mem[0..byte_count], write_value, .little);
-        }
-
-        fn call(pc: u32, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) TrapError!FuncCallData {
-            const continuation: u32 = pc + 1;
-            try stack.pushFrame(func, module_instance);
-            try stack.pushLabel(func.num_returns, continuation);
-
-            DebugTrace.traceFunction(module_instance, stack.num_frames, func.def_index);
-
-            return FuncCallData{
-                .code = func.code,
-                .continuation = @intCast(func.instructions_begin),
-            };
-        }
-
-        fn callImport(pc: u32, stack: *Stack, func: *const FunctionImport) (TrapError || HostFunctionError)!FuncCallData {
-            switch (func.data) {
-                .Host => |data| {
-                    const params_len: u32 = @as(u32, @intCast(data.func_def.getParams().len));
-                    const returns_len: u32 = @as(u32, @intCast(data.func_def.calcNumReturns()));
-
-                    std.debug.assert(stack.num_values + returns_len < stack.values.len);
-
-                    const module: *ModuleInstance = stack.topFrame().module_instance;
-                    const params = stack.values[stack.num_values - params_len .. stack.num_values];
-                    const returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
-
-                    DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
-
-                    try data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
-
-                    stack.num_values = (stack.num_values - params_len) + returns_len;
-                    const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
-
-                    if (params_len > 0) {
-                        assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
-                        std.mem.copyForwards(Val, returns_dest, returns_temp);
-                    } else {
-                        // no copy needed in this case since the return values will go into the same location
-                        assert(returns_dest.ptr == returns_temp.ptr);
-                    }
-
-                    return FuncCallData{
-                        .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
-                        .continuation = pc + 1,
-                    };
-                },
-                .Wasm => |data| {
-                    var stack_vm: *StackVM = StackVM.fromVM(data.module_instance.vm);
-                    const func_instance: *const FunctionInstance = &stack_vm.functions.items[data.index];
-                    return try call(pc, stack, data.module_instance, func_instance);
-                },
-            }
-        }
-
-        fn branch(stack: *Stack, label_id: u32) ?FuncCallData {
-            const label: *const Label = stack.findLabel(@as(u32, @intCast(label_id)));
-            const frame_label: *const Label = stack.frameLabel();
-            // TODO generate BranchToFunctionEnd if this can be statically determined at decode time (or just generate a Return?)
-            if (label == frame_label) {
-                return stack.popFrame();
-            }
-
-            // TODO split branches up into different types to avoid this lookup and if statement
-            const module_def: *const ModuleDefinition = stack.topFrame().module_instance.module_def;
-            const is_loop_continuation: bool = module_def.code.instructions.items[label.continuation].opcode == .Loop;
-
-            if (is_loop_continuation == false or label_id != 0) {
-                const pop_final_label = !is_loop_continuation;
-                stack.popAllUntilLabelId(label_id, pop_final_label, label.num_returns);
-            }
-
-            return FuncCallData{
-                .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
-                .continuation = label.continuation + 1, // branching takes care of popping/pushing values so skip the End instruction
-            };
-        }
-
-        const VectorUnaryOp = enum(u8) {
-            Ceil,
-            Floor,
-            Trunc,
-            Nearest,
-        };
-
-        fn vectorUnOp(comptime T: type, op: VectorUnaryOp, stack: *Stack) void {
-            const vec = @as(T, @bitCast(stack.popV128()));
-            const type_info = @typeInfo(T).vector;
-            const child_type = type_info.child;
-            const result = switch (op) {
-                .Ceil => @ceil(vec),
-                .Floor => @floor(vec),
-                .Trunc => @trunc(vec),
-                .Nearest => blk: {
-                    const zeroes: T = @splat(0);
-                    const twos: T = @splat(2);
-
-                    const ceil = @ceil(vec);
-                    const floor = @floor(vec);
-                    const is_half = (ceil - vec) == (vec - floor);
-                    const evens = @select(child_type, @mod(ceil, twos) == zeroes, ceil, floor);
-                    const rounded = @round(vec);
-                    break :blk @select(child_type, is_half, evens, rounded);
-                },
-            };
-            stack.pushV128(@as(v128, @bitCast(result)));
-        }
-
-        const VectorBinaryOp = enum(u8) {
-            Add,
-            Add_Sat,
-            Sub,
-            Sub_Sat,
-            Mul,
-            Div,
-            Min,
-            PMin,
-            Max,
-            PMax,
-            And,
-            AndNot,
-            Or,
-            Xor,
-        };
-
-        fn vectorOr(comptime len: usize, v1: @Vector(len, bool), v2: @Vector(len, bool)) @Vector(len, bool) {
-            var arr: [len]bool = undefined;
-            for (&arr, 0..) |*v, i| {
-                v.* = v1[i] or v2[i];
-            }
-            return arr;
-        }
-
-        fn vectorBinOp(comptime T: type, comptime op: VectorBinaryOp, stack: *Stack) void {
-            const type_info = @typeInfo(T).vector;
-            const child_type = type_info.child;
-            const v2 = @as(T, @bitCast(stack.popV128()));
-            const v1 = @as(T, @bitCast(stack.popV128()));
-            const result = switch (op) {
-                .Add => blk: {
-                    break :blk switch (@typeInfo(child_type)) {
-                        .int => v1 +% v2,
-                        .float => v1 + v2,
-                        else => unreachable,
-                    };
-                },
-                .Add_Sat => v1 +| v2,
-                .Sub => blk: {
-                    break :blk switch (@typeInfo(child_type)) {
-                        .int => v1 -% v2,
-                        .float => v1 - v2,
-                        else => unreachable,
-                    };
-                },
-                .Sub_Sat => v1 -| v2,
-                .Mul => blk: {
-                    break :blk switch (@typeInfo(child_type)) {
-                        .int => v1 *% v2,
-                        .float => v1 * v2,
-                        else => unreachable,
-                    };
-                },
-                .Div => v1 / v2,
-                .Min => blk: {
-                    break :blk switch (@typeInfo(child_type)) {
-                        .int => @min(v1, v2),
-                        .float => blk2: {
-                            const is_nan = v1 != v1;
-                            const is_min = v1 < v2;
-                            const pred = vectorOr(type_info.len, is_nan, is_min);
-                            const r = @select(child_type, pred, v1, v2);
-                            break :blk2 r;
-                        },
-                        else => unreachable,
-                    };
-                },
-                .PMin => @select(child_type, (v2 < v1), v2, v1),
-                .Max => blk: {
-                    break :blk switch (@typeInfo(child_type)) {
-                        .int => @max(v1, v2),
-                        .float => blk2: {
-                            const is_nan = v1 != v1;
-                            const is_min = v1 > v2;
-                            const pred = vectorOr(type_info.len, is_nan, is_min);
-                            const r = @select(child_type, pred, v1, v2);
-                            break :blk2 r;
-                        },
-                        else => unreachable,
-                    };
-                },
-                .PMax => @select(child_type, (v2 > v1), v2, v1),
-                .And => v1 & v2,
-                .AndNot => v1 & (~v2),
-                .Or => v1 | v2,
-                .Xor => v1 ^ v2,
-            };
-            stack.pushV128(@as(v128, @bitCast(result)));
-        }
-
-        fn vectorAbs(comptime T: type, stack: *Stack) void {
-            const type_info = @typeInfo(T).vector;
-            const child_type = type_info.child;
-            const vec = @as(T, @bitCast(stack.popV128()));
-            var arr: [type_info.len]child_type = undefined;
-            for (&arr, 0..) |*v, i| {
-                v.* = @as(child_type, @bitCast(@abs(vec[i])));
-            }
-            const abs: T = arr;
-            stack.pushV128(@as(v128, @bitCast(abs)));
-        }
-
-        fn vectorAvgrU(comptime T: type, stack: *Stack) void {
-            const type_info = @typeInfo(T).vector;
-            const child_type = type_info.child;
-            const type_big_width = std.meta.Int(.unsigned, @bitSizeOf(child_type) * 2);
-
-            const v1 = @as(T, @bitCast(stack.popV128()));
-            const v2 = @as(T, @bitCast(stack.popV128()));
-            var arr: [type_info.len]child_type = undefined;
-            for (&arr, 0..) |*v, i| {
-                const vv1: type_big_width = v1[i];
-                const vv2: type_big_width = v2[i];
-                v.* = @as(child_type, @intCast(@divTrunc(vv1 + vv2 + 1, 2)));
-            }
-            const result: T = arr;
-            stack.pushV128(@as(v128, @bitCast(result)));
-        }
-
-        const VectorBoolOp = enum(u8) {
-            Eq,
-            Ne,
-            Lt,
-            Gt,
-            Le,
-            Ge,
-        };
-
-        fn vectorBoolOp(comptime T: type, comptime op: VectorBoolOp, stack: *Stack) void {
-            const v2 = @as(T, @bitCast(stack.popV128()));
-            const v1 = @as(T, @bitCast(stack.popV128()));
-            const bools = switch (op) {
-                .Eq => v1 == v2,
-                .Ne => v1 != v2,
-                .Lt => v1 < v2,
-                .Gt => v1 > v2,
-                .Le => v1 <= v2,
-                .Ge => v1 >= v2,
-            };
-            const vec_type_info = @typeInfo(T).vector;
-
-            const no_bits: std.meta.Int(.unsigned, @bitSizeOf(vec_type_info.child)) = 0;
-            const yes_bits = ~no_bits;
-
-            const yes_vec: T = @splat(@bitCast(yes_bits));
-            const no_vec: T = @splat(@bitCast(no_bits));
-            const result: T = @select(vec_type_info.child, bools, yes_vec, no_vec);
-            stack.pushV128(@as(v128, @bitCast(result)));
-        }
-
-        const VectorShiftDirection = enum {
-            Left,
-            Right,
-        };
-
-        fn vectorShift(comptime T: type, comptime direction: VectorShiftDirection, stack: *Stack) void {
-            const shift_unsafe: i32 = stack.popI32();
-            const vec = @as(T, @bitCast(stack.popV128()));
-            const shift_safe = std.math.mod(i32, shift_unsafe, @bitSizeOf(@typeInfo(T).vector.child)) catch unreachable;
-            const shift_fn = if (direction == .Left) std.math.shl else std.math.shr;
-            const shifted = shift_fn(T, vec, shift_safe);
-            stack.pushV128(@as(v128, @bitCast(shifted)));
-        }
-
-        fn vectorAllTrue(comptime T: type, vec: v128) i32 {
-            const v = @as(T, @bitCast(vec));
-            const zeroes: T = @splat(0);
-            const bools = v != zeroes;
-            const any_true: bool = @reduce(.And, bools);
-            return if (any_true) 1 else 0;
-        }
-
-        fn vectorBitmask(comptime T: type, vec: v128) i32 {
-            switch (@typeInfo(T)) {
-                .vector => |vec_type_info| {
-                    switch (@typeInfo(vec_type_info.child)) {
-                        .int => {},
-                        else => @compileError("Vector child type must be an int"),
-                    }
-                },
-                else => @compileError("Expected T to be a vector type"),
-            }
-
-            const child_type: type = @typeInfo(T).vector.child;
-
-            if (child_type == i8) {
-                const high_bit: u8 = 1 << (@bitSizeOf(u8) - 1);
-                const high_bits_mask: @Vector(16, u8) = @splat(high_bit);
-
-                const shift_type = std.meta.Int(.unsigned, std.math.log2(@bitSizeOf(u16)));
-                const shifts_left: @Vector(16, shift_type) = @splat(8);
-                var shifts_right_array: [16]shift_type = undefined;
-                for (&shifts_right_array, 0..) |*element, i| {
-                    element.* = @as(shift_type, @intCast(15 - i));
-                }
-                const shifts_right = @as(@Vector(16, shift_type), shifts_right_array);
-
-                const v = @as(@Vector(16, u8), @bitCast(vec));
-                const v_high_bits = high_bits_mask & v;
-                const v_high_bits_u16: @Vector(16, u16) = v_high_bits;
-                const v_high_bits_shifted_left = @shlExact(v_high_bits_u16, shifts_left);
-                const v_high_bits_shifted_right = @shrExact(v_high_bits_shifted_left, shifts_right);
-                const reduction: u32 = @reduce(.Or, v_high_bits_shifted_right);
-                const bitmask = @as(i32, @bitCast(reduction));
-                return bitmask;
-            } else {
-                const vec_len = @typeInfo(T).vector.len;
-                const int_type: type = std.meta.Int(.unsigned, @bitSizeOf(child_type));
-
-                const high_bit: int_type = 1 << (@bitSizeOf(int_type) - 1);
-                const high_bits_mask: @Vector(vec_len, int_type) = @splat(high_bit);
-
-                const shift_type = std.meta.Int(.unsigned, std.math.log2(@bitSizeOf(int_type)));
-                var shifts_right_array: [vec_len]shift_type = undefined;
-                for (&shifts_right_array, 0..) |*element, i| {
-                    element.* = @as(shift_type, @intCast((@bitSizeOf(int_type) - 1) - i));
-                }
-                const shifts_right = @as(@Vector(vec_len, shift_type), shifts_right_array);
-
-                const v = @as(@Vector(vec_len, int_type), @bitCast(vec));
-                const v_high_bits = high_bits_mask & v;
-                const v_high_bits_shifted_right = @shrExact(v_high_bits, shifts_right);
-                const reduction: u32 = @as(u32, @intCast(@reduce(.Or, v_high_bits_shifted_right))); // cast should be fine thanks to the rshift
-                const bitmask = @as(i32, @bitCast(reduction));
-                return bitmask;
-            }
-        }
-
-        fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
-            const vec_type_info = @typeInfo(T).vector;
-
-            var vec = @as(T, @bitCast(stack.popV128()));
-            const immediate = instruction.immediate.MemoryOffsetAndLane;
-            const scalar = try loadFromMem(vec_type_info.child, stack, immediate.offset);
-            vec[immediate.laneidx] = scalar;
-            stack.pushV128(@as(v128, @bitCast(vec)));
-        }
-
-        fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptime len: usize, mem_offset: u64, stack: *Stack) !void {
-            const offset_from_stack: i32 = stack.popI32();
-            const array: [len]extend_type = try OpHelpers.loadArrayFromMem(mem_type, extend_type, len, &stack.topFrame().module_instance.store, mem_offset, offset_from_stack);
-            const vec: @Vector(len, extend_type) = array;
-            stack.pushV128(@as(v128, @bitCast(vec)));
-        }
-
-        fn vectorLoadLaneZero(comptime T: type, instruction: Instruction, stack: *Stack) !void {
-            const vec_type_info = @typeInfo(T).vector;
-
-            const mem_offset = instruction.immediate.MemoryOffset;
-            const scalar = try loadFromMem(vec_type_info.child, stack, mem_offset);
-            var vec: T = @splat(0);
-            vec[0] = scalar;
-            stack.pushV128(@as(v128, @bitCast(vec)));
-        }
-
-        fn vectorStoreLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
-            const vec = @as(T, @bitCast(stack.popV128()));
-            const immediate = instruction.immediate.MemoryOffsetAndLane;
-            const scalar = vec[immediate.laneidx];
-            try storeInMem(scalar, stack, immediate.offset);
-            stack.pushV128(@as(v128, @bitCast(vec)));
-        }
-
-        fn vectorExtractLane(comptime T: type, lane: u32, stack: *Stack) void {
-            const vec = @as(T, @bitCast(stack.popV128()));
-            const lane_value = vec[lane];
-
-            const child_type = @typeInfo(T).vector.child;
-            switch (child_type) {
-                i8, u8, i16, u16, i32 => stack.pushI32(lane_value),
-                i64 => stack.pushI64(lane_value),
-                f32 => stack.pushF32(lane_value),
-                f64 => stack.pushF64(lane_value),
-                else => unreachable,
-            }
-        }
-
-        fn vectorReplaceLane(comptime T: type, lane: u32, stack: *Stack) void {
-            const child_type = @typeInfo(T).vector.child;
-            const lane_value = switch (child_type) {
-                i8, i16, i32 => @as(child_type, @truncate(stack.popI32())),
-                i64 => stack.popI64(),
-                f32 => stack.popF32(),
-                f64 => stack.popF64(),
-                else => unreachable,
-            };
-            var vec = @as(T, @bitCast(stack.popV128()));
-            vec[lane] = lane_value;
-            stack.pushV128(@as(v128, @bitCast(vec)));
-        }
-
-        const VectorSide = enum {
-            Low,
-            High,
-        };
-
-        const VectorConvert = enum {
-            SafeCast,
-            Saturate,
-        };
-
-        fn vectorAddPairwise(comptime in_type: type, comptime out_type: type, stack: *Stack) void {
-            const out_info = @typeInfo(out_type).vector;
-
-            const vec = @as(in_type, @bitCast(stack.popV128()));
-            var arr: [out_info.len]out_info.child = undefined;
-            for (&arr, 0..) |*v, i| {
-                const v1: out_info.child = vec[i * 2];
-                const v2: out_info.child = vec[(i * 2) + 1];
-                v.* = v1 + v2;
-            }
-            const sum: out_type = arr;
-            stack.pushV128(@as(v128, @bitCast(sum)));
-        }
-
-        fn vectorMulPairwise(comptime in_type: type, comptime out_type: type, side: OpHelpers.VectorSide, stack: *Stack) void {
-            const info_out = @typeInfo(out_type).vector;
-
-            const vec2 = @as(in_type, @bitCast(stack.popV128()));
-            const vec1 = @as(in_type, @bitCast(stack.popV128()));
-
-            var arr: [info_out.len]info_out.child = undefined;
-            for (&arr, 0..) |*v, i| {
-                const index = if (side == .Low) i else i + info_out.len;
-                const v1: info_out.child = vec1[index];
-                const v2: info_out.child = vec2[index];
-                v.* = v1 * v2;
-            }
-            const product = arr;
-            stack.pushV128(@as(v128, @bitCast(product)));
-        }
-
-        fn vectorExtend(comptime in_type: type, comptime out_type: type, comptime side: VectorSide, stack: *Stack) void {
-            const in_info = @typeInfo(in_type).vector;
-            const out_info = @typeInfo(out_type).vector;
-            const side_offset = if (side == .Low) 0 else in_info.len / 2;
-
-            const vec = @as(in_type, @bitCast(stack.popV128()));
-            var arr: [out_info.len]out_info.child = undefined;
-            for (&arr, 0..) |*v, i| {
-                v.* = vec[i + side_offset];
-            }
-            const extended: out_type = arr;
-            stack.pushV128(@as(v128, @bitCast(extended)));
-        }
-
-        fn saturate(comptime T: type, v: anytype) @TypeOf(v) {
-            switch (@typeInfo(T)) {
-                .int => {},
-                else => unreachable,
-            }
-            const min = std.math.minInt(T);
-            const max = std.math.maxInt(T);
-            const clamped = std.math.clamp(v, min, max);
-            return clamped;
-        }
-
-        fn vectorConvert(comptime in_type: type, comptime out_type: type, comptime side: VectorSide, convert: VectorConvert, stack: *Stack) void {
-            const in_info = @typeInfo(in_type).vector;
-            const out_info = @typeInfo(out_type).vector;
-            const side_offset = if (side == .Low) 0 else in_info.len / 2;
-
-            const vec_in = @as(in_type, @bitCast(stack.popV128()));
-            var arr: [out_info.len]out_info.child = undefined;
-            for (arr, 0..) |_, i| {
-                const v: in_info.child = if (i < in_info.len) vec_in[i + side_offset] else 0;
-                switch (@typeInfo(out_info.child)) {
-                    .int => arr[i] = blk: {
-                        if (convert == .SafeCast) {
-                            break :blk @as(out_info.child, @intFromFloat(v));
-                        } else {
-                            break :blk saturatedTruncateTo(out_info.child, v);
-                        }
-                    },
-                    .float => arr[i] = @as(out_info.child, @floatFromInt(v)),
-                    else => unreachable,
-                }
-            }
-            const vec_out: out_type = arr;
-            stack.pushV128(@as(v128, @bitCast(vec_out)));
-        }
-
-        fn vectorNarrowingSaturate(comptime in_type: type, comptime out_type: type, vec: in_type) out_type {
-            const in_info = @typeInfo(in_type).vector;
-            const out_info = @typeInfo(out_type).vector;
-            const T: type = out_info.child;
-
-            std.debug.assert(out_info.len == in_info.len);
-
-            var arr: [out_info.len]T = undefined;
-            for (&arr, 0..) |*v, i| {
-                v.* = @as(T, @intCast(std.math.clamp(vec[i], std.math.minInt(T), std.math.maxInt(T))));
-            }
-            return arr;
-        }
-
-        fn vectorNarrow(comptime in_type: type, comptime out_type: type, stack: *Stack) void {
-            const out_info = @typeInfo(out_type).vector;
-
-            const out_type_half = @Vector(out_info.len / 2, out_info.child);
-
-            const v2 = @as(in_type, @bitCast(stack.popV128()));
-            const v1 = @as(in_type, @bitCast(stack.popV128()));
-            const v1_narrow: out_type_half = vectorNarrowingSaturate(in_type, out_type_half, v1);
-            const v2_narrow: out_type_half = vectorNarrowingSaturate(in_type, out_type_half, v2);
-            const mask = switch (out_info.len) {
-                16 => @Vector(16, i32){ 0, 1, 2, 3, 4, 5, 6, 7, -1, -2, -3, -4, -5, -6, -7, -8 },
-                8 => @Vector(8, i32){ 0, 1, 2, 3, -1, -2, -3, -4 },
-                4 => @Vector(8, i32){ 0, 1, -1, -2 },
-                else => unreachable,
-            };
-
-            const mix = @shuffle(out_info.child, v1_narrow, v2_narrow, mask);
-            stack.pushV128(@as(v128, @bitCast(mix)));
-        }
-    };
-
-    fn preamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
-        if (metering.enabled) {
-            const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
-            const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
-
-            if (root_stackvm.meter_state.enabled) {
-                const meter = metering.reduce(root_stackvm.meter_state.meter, code[pc]);
-                root_stackvm.meter_state.meter = meter;
-                if (meter == 0) {
-                    root_stackvm.meter_state.pc = pc;
-                    root_stackvm.meter_state.opcode = code[pc].opcode;
-                    return metering.MeteringTrapError.TrapMeterExceeded;
-                }
-            }
-        }
-
-        if (config.enable_debug_trap) {
-            const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
-            const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
-
-            if (root_stackvm.debug_state) |*debug_state| {
-                if (debug_state.trap_counter > 0) {
-                    debug_state.trap_counter -= 1;
-                    if (debug_state.trap_counter == 0) {
-                        debug_state.pc = pc;
-                        return error.TrapDebug;
-                    }
-                }
-            }
-        }
-
-        DebugTraceStackVM.traceInstruction(name, pc, stack);
+    inline fn preamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) !void {
+        return shared.preamble(StackVM, name, pc, code, stack);
     }
 
     fn op_Invalid(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
@@ -1642,43 +583,26 @@ const InstructionFuncs = struct {
 
     fn op_Block(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Block", pc, code, stack);
-        try stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
+        stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_Loop(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Loop", pc, code, stack);
-        try stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
+        stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_If(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("If", pc, code, stack);
-        var next_pc: u32 = undefined;
-
-        const condition = stack.popI32();
-        if (condition != 0) {
-            try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
-            next_pc = pc + 1;
-        } else {
-            try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
-            next_pc = code[pc].immediate.If.else_continuation + 1;
-        }
+        const next_pc = try OpHelpers.ifCond(stack, pc, code);
 
         try @call(.always_tail, InstructionFuncs.lookup(code[next_pc].opcode), .{ next_pc, code, stack });
     }
 
     fn op_IfNoElse(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("IfNoElse", pc, code, stack);
-        var next_pc: u32 = undefined;
-
-        const condition = stack.popI32();
-        if (condition != 0) {
-            try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
-            next_pc = pc + 1;
-        } else {
-            next_pc = code[pc].immediate.If.else_continuation + 1;
-        }
+        const next_pc = try OpHelpers.ifNoElse(stack, pc, code);
 
         try @call(.always_tail, InstructionFuncs.lookup(code[next_pc].opcode), .{ next_pc, code, stack });
     }
@@ -1692,30 +616,7 @@ const InstructionFuncs = struct {
 
     fn op_End(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("End", pc, code, stack);
-
-        // TODO - this instruction tries to determine at runtime what behavior to take, but we can
-        // probably determine this in the decode phase and split into 3 different end instructions
-        // to avoid branching. Probably could bake the return types length into the immediate to avoid
-        // cache misses on the lookup we're currently doing.
-
-        var next: FuncCallData = undefined;
-
-        // determine if this is a a scope or function call exit
-        const top_label: *const Label = stack.topLabel();
-        const frame_label: *const Label = stack.frameLabel();
-        if (top_label != frame_label) {
-            // Since the only values on the stack should be the returns from the block, we just pop the
-            // label, which leaves the value stack alone.
-            stack.popLabel();
-
-            next = FuncCallData{
-                .continuation = pc + 1,
-                .code = code,
-            };
-        } else {
-            next = stack.popFrame() orelse return;
-        }
-
+        const next = OpHelpers.end(stack, pc, code) orelse return;
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
 
@@ -1728,32 +629,14 @@ const InstructionFuncs = struct {
 
     fn op_Branch_If(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Branch_If", pc, code, stack);
-        var next: FuncCallData = undefined;
-        const v = stack.popI32();
-        if (v != 0) {
-            const label_id: u32 = code[pc].immediate.LabelId;
-            next = OpHelpers.branch(stack, label_id) orelse return;
-        } else {
-            next = FuncCallData{
-                .code = code,
-                .continuation = pc + 1,
-            };
-        }
+        const next = OpHelpers.branchIf(stack, pc, code) orelse return;
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
 
     fn op_Branch_Table(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Branch_Table", pc, code, stack);
-        const module_instance: *const ModuleInstance = stack.topFrame().module_instance;
-        const all_branch_table_immediates: []const BranchTableImmediates = stack.topFrame().module_instance.module_def.code.branch_table.items;
-        const immediate_index = code[pc].immediate.Index;
 
-        const immediates: BranchTableImmediates = all_branch_table_immediates[immediate_index];
-        const table: []const u32 = immediates.getLabelIds(module_instance.module_def.*);
-
-        const label_index = stack.popI32();
-        const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@as(usize, @intCast(label_index))] else immediates.fallback_id;
-        const next: FuncCallData = OpHelpers.branch(stack, label_id) orelse return;
+        const next = OpHelpers.branchTable(stack, code[pc]) orelse return;
 
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
@@ -1766,15 +649,7 @@ const InstructionFuncs = struct {
 
     fn op_Call_Local(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Call", pc, code, stack);
-
-        const func_index: u32 = code[pc].immediate.Index;
-        const module_instance: *ModuleInstance = stack.topFrame().module_instance;
-        const stack_vm = StackVM.fromVM(module_instance.vm);
-
-        std.debug.assert(func_index < stack_vm.functions.items.len);
-
-        const func: *const FunctionInstance = &stack_vm.functions.items[@as(usize, @intCast(func_index))];
-        const next: FuncCallData = try OpHelpers.call(pc, stack, module_instance, func);
+        const next: FuncCallData = try OpHelpers.callLocal(StackVM, stack, pc, code);
 
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
@@ -1782,14 +657,7 @@ const InstructionFuncs = struct {
     fn op_Call_Import(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Call", pc, code, stack);
 
-        const func_index: u32 = code[pc].immediate.Index;
-        const module_instance: *ModuleInstance = stack.topFrame().module_instance;
-        const store: *const Store = &module_instance.store;
-
-        std.debug.assert(func_index < store.imports.functions.items.len);
-
-        const func_import = &store.imports.functions.items[func_index];
-        const next: FuncCallData = try OpHelpers.callImport(pc, stack, func_import);
+        const next = try OpHelpers.callImport(StackVM, stack, pc, code);
 
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
@@ -1797,51 +665,7 @@ const InstructionFuncs = struct {
     fn op_Call_Indirect(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Call_Indirect", pc, code, stack);
 
-        const current_module: *ModuleInstance = stack.topFrame().module_instance;
-        const immediates: *const CallIndirectImmediates = &code[pc].immediate.CallIndirect;
-        const table_index: u32 = immediates.table_index;
-
-        const table: *const TableInstance = current_module.store.getTable(table_index);
-
-        const ref_index = stack.popI32();
-        if (table.refs.items.len <= ref_index or ref_index < 0) {
-            return error.TrapUndefinedElement;
-        }
-
-        const ref: Val = table.refs.items[@as(usize, @intCast(ref_index))];
-        if (ref.isNull()) {
-            return error.TrapUninitializedElement;
-        }
-
-        const func_index = ref.FuncRef.index;
-
-        std.debug.assert(ref.FuncRef.module_instance != null); // Should have been set in module instantiation
-
-        var call_module: *ModuleInstance = ref.FuncRef.module_instance.?;
-        var call_store = &call_module.store;
-        var call_stackvm = StackVM.fromVM(call_module.vm);
-
-        var next: FuncCallData = undefined;
-        if (func_index >= call_store.imports.functions.items.len) {
-            const func: *const FunctionInstance = &call_stackvm.functions.items[func_index - call_store.imports.functions.items.len];
-            if (func.type_def_index != immediates.type_index) {
-                const func_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[func.type_def_index];
-                const immediate_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[immediates.type_index];
-
-                var type_comparer = FunctionTypeDefinition.SortContext{};
-                if (type_comparer.eql(func_type_def, immediate_type_def) == false) {
-                    return error.TrapIndirectCallTypeMismatch;
-                }
-            }
-            next = try OpHelpers.call(pc, stack, call_module, func);
-        } else {
-            var func_import: *const FunctionImport = &call_store.imports.functions.items[func_index];
-            const func_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[immediates.type_index];
-            if (func_import.isTypeSignatureEql(func_type_def) == false) {
-                return error.TrapIndirectCallTypeMismatch;
-            }
-            next = try OpHelpers.callImport(pc, stack, func_import);
-        }
+        const next = try OpHelpers.callIndirect(StackVM, stack, pc, code);
 
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
@@ -2181,505 +1005,319 @@ const InstructionFuncs = struct {
 
     fn op_F64_Const(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_Const", pc, code, stack);
-        const v: f64 = code[pc].immediate.ValueF64;
-        stack.pushF64(v);
+        OpHelpers.f64Const(stack, code[pc]);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Eqz(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Eqz", pc, code, stack);
-        const v1: i32 = stack.popI32();
-        const result: i32 = if (v1 == 0) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32Eqz(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Eq(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Eq", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result: i32 = if (v1 == v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32Eq(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_NE", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result: i32 = if (v1 != v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32Ne(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_LT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_LT_S", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result: i32 = if (v1 < v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32LtS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_LT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_LT_U", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const result: i32 = if (v1 < v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32LtU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_GT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_GT_S", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result: i32 = if (v1 > v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32GtS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_GT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_GT_U", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const result: i32 = if (v1 > v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32GtU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_LE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_LE_S", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result: i32 = if (v1 <= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32LeS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_LE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_LE_U", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const result: i32 = if (v1 <= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32LeU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_GE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_GE_S", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result: i32 = if (v1 >= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32GeS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_GE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_GE_U", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const result: i32 = if (v1 >= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i32GeU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Eqz(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_Eqz", pc, code, stack);
-        const v1: i64 = stack.popI64();
-        const result: i32 = if (v1 == 0) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64Eqz(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_Eq(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_Eq", pc, code, stack);
-        const v2: i64 = stack.popI64();
-        const v1: i64 = stack.popI64();
-        const result: i32 = if (v1 == v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64Eq(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_NE", pc, code, stack);
-        const v2: i64 = stack.popI64();
-        const v1: i64 = stack.popI64();
-        const result: i32 = if (v1 != v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64Ne(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_LT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_LT_S", pc, code, stack);
-        const v2: i64 = stack.popI64();
-        const v1: i64 = stack.popI64();
-        const result: i32 = if (v1 < v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64LtS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_LT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_LT_U", pc, code, stack);
-        const v2: u64 = @as(u64, @bitCast(stack.popI64()));
-        const v1: u64 = @as(u64, @bitCast(stack.popI64()));
-        const result: i32 = if (v1 < v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64LtU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_GT_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_GT_S", pc, code, stack);
-        const v2: i64 = stack.popI64();
-        const v1: i64 = stack.popI64();
-        const result: i32 = if (v1 > v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64GtS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_GT_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_GT_U", pc, code, stack);
-        const v2: u64 = @as(u64, @bitCast(stack.popI64()));
-        const v1: u64 = @as(u64, @bitCast(stack.popI64()));
-        const result: i32 = if (v1 > v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64GtU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_LE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_LE_S", pc, code, stack);
-        const v2: i64 = stack.popI64();
-        const v1: i64 = stack.popI64();
-        const result: i32 = if (v1 <= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64LeS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_LE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_LE_U", pc, code, stack);
-        const v2: u64 = @as(u64, @bitCast(stack.popI64()));
-        const v1: u64 = @as(u64, @bitCast(stack.popI64()));
-        const result: i32 = if (v1 <= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64LeU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_GE_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_GE_S", pc, code, stack);
-        const v2: i64 = stack.popI64();
-        const v1: i64 = stack.popI64();
-        const result: i32 = if (v1 >= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64GeS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I64_GE_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I64_GE_U", pc, code, stack);
-        const v2: u64 = @as(u64, @bitCast(stack.popI64()));
-        const v1: u64 = @as(u64, @bitCast(stack.popI64()));
-        const result: i32 = if (v1 >= v2) 1 else 0;
-        stack.pushI32(result);
+        OpHelpers.i64GeU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F32_EQ", pc, code, stack);
-        const v2 = stack.popF32();
-        const v1 = stack.popF32();
-        const value: i32 = if (v1 == v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f32Eq(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F32_NE", pc, code, stack);
-        const v2 = stack.popF32();
-        const v1 = stack.popF32();
-        const value: i32 = if (v1 != v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f32Ne(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_LT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F32_LT", pc, code, stack);
-        const v2 = stack.popF32();
-        const v1 = stack.popF32();
-        const value: i32 = if (v1 < v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f32Lt(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_GT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F32_GT", pc, code, stack);
-        const v2 = stack.popF32();
-        const v1 = stack.popF32();
-        const value: i32 = if (v1 > v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f32Gt(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_LE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F32_LE", pc, code, stack);
-        const v2 = stack.popF32();
-        const v1 = stack.popF32();
-        const value: i32 = if (v1 <= v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f32Le(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F32_GE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F32_GE", pc, code, stack);
-        const v2 = stack.popF32();
-        const v1 = stack.popF32();
-        const value: i32 = if (v1 >= v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f32Ge(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_EQ(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_EQ", pc, code, stack);
-        const v2 = stack.popF64();
-        const v1 = stack.popF64();
-        const value: i32 = if (v1 == v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f64Eq(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_NE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_NE", pc, code, stack);
-        const v2 = stack.popF64();
-        const v1 = stack.popF64();
-        const value: i32 = if (v1 != v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f64Ne(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_LT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_LT", pc, code, stack);
-        const v2 = stack.popF64();
-        const v1 = stack.popF64();
-        const value: i32 = if (v1 < v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f64Lt(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_GT(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_GT", pc, code, stack);
-        const v2 = stack.popF64();
-        const v1 = stack.popF64();
-        const value: i32 = if (v1 > v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f64Gt(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_LE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_LE", pc, code, stack);
-        const v2 = stack.popF64();
-        const v1 = stack.popF64();
-        const value: i32 = if (v1 <= v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f64Le(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_F64_GE(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("F64_GE", pc, code, stack);
-        const v2 = stack.popF64();
-        const v1 = stack.popF64();
-        const value: i32 = if (v1 >= v2) 1 else 0;
-        stack.pushI32(value);
+        OpHelpers.f64Ge(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Clz(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Clz", pc, code, stack);
-        const v: i32 = stack.popI32();
-        const num_zeroes = @clz(v);
-        stack.pushI32(num_zeroes);
+        OpHelpers.i32Clz(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Ctz(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Ctz", pc, code, stack);
-        const v: i32 = stack.popI32();
-        const num_zeroes = @ctz(v);
-        stack.pushI32(num_zeroes);
+        OpHelpers.i32Ctz(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Popcnt(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Popcnt", pc, code, stack);
-        const v: i32 = stack.popI32();
-        const num_bits_set = @popCount(v);
-        stack.pushI32(num_bits_set);
+        OpHelpers.i32Popcnt(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Add(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Add", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result = v1 +% v2;
-        stack.pushI32(result);
+        OpHelpers.i32Add(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Sub(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Sub", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const result = v1 -% v2;
-        stack.pushI32(result);
+        OpHelpers.i32Sub(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Mul(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Mul", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const value = v1 *% v2;
-        stack.pushI32(value);
+        OpHelpers.i32Mul(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Div_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Div_S", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const value = std.math.divTrunc(i32, v1, v2) catch |e| {
-            if (e == error.DivisionByZero) {
-                return error.TrapIntegerDivisionByZero;
-            } else if (e == error.Overflow) {
-                return error.TrapIntegerOverflow;
-            } else {
-                return e;
-            }
-        };
-        stack.pushI32(value);
+        try OpHelpers.i32DivS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Div_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Div_U", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const value_unsigned = std.math.divFloor(u32, v1, v2) catch |e| {
-            if (e == error.DivisionByZero) {
-                return error.TrapIntegerDivisionByZero;
-            } else if (e == error.Overflow) {
-                return error.TrapIntegerOverflow;
-            } else {
-                return e;
-            }
-        };
-        const value = @as(i32, @bitCast(value_unsigned));
-        stack.pushI32(value);
+        try OpHelpers.i32DivU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Rem_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Rem_S", pc, code, stack);
-        const v2: i32 = stack.popI32();
-        const v1: i32 = stack.popI32();
-        const denom: i32 = @intCast(@abs(v2));
-        const value = std.math.rem(i32, v1, denom) catch |e| {
-            if (e == error.DivisionByZero) {
-                return error.TrapIntegerDivisionByZero;
-            } else {
-                return e;
-            }
-        };
-        stack.pushI32(value);
+        try OpHelpers.i32RemS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Rem_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Rem_U", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const value_unsigned = std.math.rem(u32, v1, v2) catch |e| {
-            if (e == error.DivisionByZero) {
-                return error.TrapIntegerDivisionByZero;
-            } else {
-                return e;
-            }
-        };
-        const value = @as(i32, @bitCast(value_unsigned));
-        stack.pushI32(value);
+        try OpHelpers.i32RemU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_And(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_And", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const value = @as(i32, @bitCast(v1 & v2));
-        stack.pushI32(value);
+        OpHelpers.i32And(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Or(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Or", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const value = @as(i32, @bitCast(v1 | v2));
-        stack.pushI32(value);
+        OpHelpers.i32Or(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Xor(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Xor", pc, code, stack);
-        const v2: u32 = @as(u32, @bitCast(stack.popI32()));
-        const v1: u32 = @as(u32, @bitCast(stack.popI32()));
-        const value = @as(i32, @bitCast(v1 ^ v2));
-        stack.pushI32(value);
+        OpHelpers.i32Xor(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Shl(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Shl", pc, code, stack);
-        const shift_unsafe: i32 = stack.popI32();
-        const int: i32 = stack.popI32();
-        const shift: i32 = try std.math.mod(i32, shift_unsafe, 32);
-        const value = std.math.shl(i32, int, shift);
-        stack.pushI32(value);
+        try OpHelpers.i32Shl(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Shr_S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Shr_S", pc, code, stack);
-        const shift_unsafe: i32 = stack.popI32();
-        const int: i32 = stack.popI32();
-        const shift = try std.math.mod(i32, shift_unsafe, 32);
-        const value = std.math.shr(i32, int, shift);
-        stack.pushI32(value);
+        try OpHelpers.i32ShrS(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Shr_U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Shr_U", pc, code, stack);
-        const shift_unsafe: u32 = @as(u32, @bitCast(stack.popI32()));
-        const int: u32 = @as(u32, @bitCast(stack.popI32()));
-        const shift = try std.math.mod(u32, shift_unsafe, 32);
-        const value = @as(i32, @bitCast(std.math.shr(u32, int, shift)));
-        stack.pushI32(value);
+        try OpHelpers.i32ShrU(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Rotl(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Rotl", pc, code, stack);
-        const rot: u32 = @as(u32, @bitCast(stack.popI32()));
-        const int: u32 = @as(u32, @bitCast(stack.popI32()));
-        const value = @as(i32, @bitCast(std.math.rotl(u32, int, rot)));
-        stack.pushI32(value);
+        OpHelpers.i32Rotl(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
     fn op_I32_Rotr(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("I32_Rotr", pc, code, stack);
-        const rot: u32 = @as(u32, @bitCast(stack.popI32()));
-        const int: u32 = @as(u32, @bitCast(stack.popI32()));
-        const value = @as(i32, @bitCast(std.math.rotr(u32, int, rot)));
-        stack.pushI32(value);
+        OpHelpers.i32Rotr(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -5248,7 +3886,7 @@ pub const StackVM = struct {
     debug_state: ?DebugState,
     meter_state: MeterState,
 
-    fn fromVM(vm: *VM) *StackVM {
+    pub fn fromVM(vm: *VM) *StackVM {
         return @as(*StackVM, @alignCast(@ptrCast(vm.impl)));
     }
 
@@ -5505,7 +4143,7 @@ pub const StackVM = struct {
         }
 
         try self.stack.pushFrame(&func, module);
-        try self.stack.pushLabel(func.num_returns, @intCast(func_def.continuation));
+        self.stack.pushLabel(func.num_returns, @intCast(func_def.continuation));
 
         DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
 
