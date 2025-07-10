@@ -83,6 +83,39 @@ const FunctionInstance = Stack.FunctionInstance;
 
 const OpHelpers = @import("stack_ops.zig");
 
+fn preamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
+    if (metering.enabled) {
+        const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
+        const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
+
+        if (root_stackvm.meter_state.enabled) {
+            const meter = metering.reduce(root_stackvm.meter_state.meter, code[pc]);
+            root_stackvm.meter_state.meter = meter;
+            if (meter == 0) {
+                root_stackvm.meter_state.pc = pc;
+                root_stackvm.meter_state.opcode = code[pc].opcode;
+                return metering.MeteringTrapError.TrapMeterExceeded;
+            }
+        }
+    }
+
+    if (config.enable_debug_trap) {
+        const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
+        const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
+
+        if (root_stackvm.debug_state) |*debug_state| {
+            if (debug_state.trap_counter > 0) {
+                debug_state.trap_counter -= 1;
+                if (debug_state.trap_counter == 0) {
+                    debug_state.pc = pc;
+                    return error.TrapDebug;
+                }
+            }
+        }
+    }
+
+    OpHelpers.traceInstruction(name, pc, stack);
+}
 
 // TODO move all definition stuff into definition.zig and vm stuff into vm_stack.zig
 
@@ -549,40 +582,6 @@ const InstructionFuncs = struct {
 
     fn lookup(opcode: Opcode) InstructionFunc {
         return opcodeToFuncTable[@intFromEnum(opcode)];
-    }
-
-    fn preamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
-        if (metering.enabled) {
-            const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
-            const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
-
-            if (root_stackvm.meter_state.enabled) {
-                const meter = metering.reduce(root_stackvm.meter_state.meter, code[pc]);
-                root_stackvm.meter_state.meter = meter;
-                if (meter == 0) {
-                    root_stackvm.meter_state.pc = pc;
-                    root_stackvm.meter_state.opcode = code[pc].opcode;
-                    return metering.MeteringTrapError.TrapMeterExceeded;
-                }
-            }
-        }
-
-        if (config.enable_debug_trap) {
-            const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
-            const root_stackvm: *StackVM = StackVM.fromVM(root_module_instance.vm);
-
-            if (root_stackvm.debug_state) |*debug_state| {
-                if (debug_state.trap_counter > 0) {
-                    debug_state.trap_counter -= 1;
-                    if (debug_state.trap_counter == 0) {
-                        debug_state.pc = pc;
-                        return error.TrapDebug;
-                    }
-                }
-            }
-        }
-
-        OpHelpers.traceInstruction(name, pc, stack);
     }
 
     fn op_Invalid(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
@@ -3540,7 +3539,11 @@ pub const StackVM = struct {
 
         DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
 
-        try InstructionFuncs.run(@intCast(func.instructions_begin), func.code, &self.stack);
+        if (config.vm_kind == .tailcall) {
+            try InstructionFuncs.run(@intCast(func.instructions_begin), func.code, &self.stack);
+        } else {
+            try self.run(@intCast(func.instructions_begin), func.code);
+        }
 
         if (returns_slice.len > 0) {
             var index: i32 = @as(i32, @intCast(returns_slice.len - 1));
@@ -3571,6 +3574,3108 @@ pub const StackVM = struct {
                 var import_instance: *ModuleInstance = data.module_instance;
                 const handle: FunctionHandle = try import_instance.getFunctionHandle(func_import.name); // TODO could cache this in the func_import
                 try import_instance.vm.invoke(import_instance, handle, params, returns, opts);
+            },
+        }
+    }
+
+    fn run(self: *StackVM, start_pc: u32, start_code: [*]const Instruction) anyerror!void {
+        var pc: u32 = start_pc;
+        var code: [*]const Instruction = start_code;
+        const stack = &self.stack;
+
+        interpret: switch (code[pc].opcode) {
+            Opcode.Invalid => {
+                try preamble("Invalid", pc, code, stack);
+                unreachable;
+            },
+
+            Opcode.Unreachable => {
+                try preamble("Unreachable", pc, code, stack);
+                return error.TrapUnreachable;
+            },
+
+            Opcode.DebugTrap => {
+                try preamble("DebugTrap", pc, code, stack);
+                return OpHelpers.debugTrap(pc, stack);
+            },
+
+            Opcode.Noop => {
+                try preamble("Noop", pc, code, stack);
+                pc = pc + 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Block => {
+                try preamble("Block", pc, code, stack);
+                try OpHelpers.block(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Loop => {
+                try preamble("Loop", pc, code, stack);
+                try OpHelpers.loop(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.If => {
+                try preamble("If", pc, code, stack);
+
+                pc = OpHelpers.@"if"(pc, code, stack);
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.IfNoElse => {
+                try preamble("IfNoElse", pc, code, stack);
+                pc = OpHelpers.ifNoElse(pc, code, stack);
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Else => {
+                try preamble("Else", pc, code, stack);
+                // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
+                pc = OpHelpers.@"else"(pc, code);
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.End => {
+                try preamble("End", pc, code, stack);
+
+                const next = OpHelpers.end(pc, code, stack) orelse return;
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Branch => {
+                try preamble("Branch", pc, code, stack);
+                const next: FuncCallData = OpHelpers.branch(pc, code, stack) orelse return;
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Branch_If => {
+                try preamble("Branch_If", pc, code, stack);
+                const next = OpHelpers.branchIf(pc, code, stack) orelse return;
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Branch_Table => {
+                try preamble("Branch_Table", pc, code, stack);
+                const next = OpHelpers.branchTable(pc, code, stack) orelse return;
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Return => {
+                try preamble("Return", pc, code, stack);
+                const next: FuncCallData = OpHelpers.@"return"(stack) orelse return;
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Call_Local => {
+                try preamble("Call", pc, code, stack);
+
+                const next = try OpHelpers.callLocal(pc, code, stack);
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Call_Import => {
+                try preamble("Call", pc, code, stack);
+
+                const next = try OpHelpers.callImport(pc, code, stack);
+
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Call_Indirect => {
+                try preamble("Call_Indirect", pc, code, stack);
+
+                const next = try OpHelpers.callIndirect(pc, code, stack);
+
+                pc = next.continuation;
+                code = next.code;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Drop => {
+                try preamble("Drop", pc, code, stack);
+                OpHelpers.drop(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Select => {
+                try preamble("Select", pc, code, stack);
+
+                OpHelpers.select(stack);
+
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Select_T => {
+                try preamble("Select_T", pc, code, stack);
+
+                OpHelpers.selectT(stack);
+
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Local_Get => {
+                try preamble("Local_Get", pc, code, stack);
+                OpHelpers.localGet(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Local_Set => {
+                try preamble("Local_Set", pc, code, stack);
+
+                OpHelpers.localSet(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Local_Tee => {
+                try preamble("Local_Tee", pc, code, stack);
+                OpHelpers.localTee(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Global_Get => {
+                try preamble("Global_Get", pc, code, stack);
+                OpHelpers.globalGet(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Global_Set => {
+                try preamble("Global_Set", pc, code, stack);
+                OpHelpers.globalSet(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Table_Get => {
+                try preamble("Table_Get", pc, code, stack);
+                try OpHelpers.tableGet(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Table_Set => {
+                try preamble("Table_Set", pc, code, stack);
+                try OpHelpers.tableSet(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Load => {
+                try preamble("I32_Load", pc, code, stack);
+                try OpHelpers.i32Load(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Load => {
+                try preamble("I64_Load", pc, code, stack);
+                try OpHelpers.i64Load(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Load => {
+                try preamble("F32_Load", pc, code, stack);
+                try OpHelpers.f32Load(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Load => {
+                try preamble("F64_Load", pc, code, stack);
+                try OpHelpers.f64Load(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Load8_S => {
+                try preamble("I32_Load8_S", pc, code, stack);
+                try OpHelpers.i32Load8S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Load8_U => {
+                try preamble("I32_Load8_U", pc, code, stack);
+                try OpHelpers.i32Load8U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Load16_S => {
+                try preamble("I32_Load16_S", pc, code, stack);
+                try OpHelpers.i32Load16S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Load16_U => {
+                try preamble("I32_Load16_U", pc, code, stack);
+                try OpHelpers.i32Load16U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Load8_S => {
+                try preamble("I64_Load8_S", pc, code, stack);
+                try OpHelpers.i64Load8S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Load8_U => {
+                try preamble("I64_Load8_U", pc, code, stack);
+                try OpHelpers.i64Load8U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Load16_S => {
+                try preamble("I64_Load16_S", pc, code, stack);
+                try OpHelpers.i64Load16S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Load16_U => {
+                try preamble("I64_Load16_U", pc, code, stack);
+                try OpHelpers.i64Load16U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Load32_S => {
+                try preamble("I64_Load32_S", pc, code, stack);
+                try OpHelpers.i64Load32S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Load32_U => {
+                try preamble("I64_Load32_U", pc, code, stack);
+                try OpHelpers.i64Load32U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Store => {
+                try preamble("I32_Store", pc, code, stack);
+                try OpHelpers.i32Store(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Store => {
+                try preamble("I64_Store", pc, code, stack);
+                try OpHelpers.i64Store(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Store => {
+                try preamble("F32_Store", pc, code, stack);
+                try OpHelpers.f32Store(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Store => {
+                try preamble("F64_Store", pc, code, stack);
+                try OpHelpers.f64Store(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Store8 => {
+                try preamble("I32_Store8", pc, code, stack);
+                try OpHelpers.i32Store8(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Store16 => {
+                try preamble("I32_Store16", pc, code, stack);
+                try OpHelpers.i32Store16(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Store8 => {
+                try preamble("I64_Store8", pc, code, stack);
+                try OpHelpers.i64Store8(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Store16 => {
+                try preamble("I64_Store16", pc, code, stack);
+                try OpHelpers.i64Store16(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Store32 => {
+                try preamble("I64_Store32", pc, code, stack);
+                try OpHelpers.i64Store32(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Memory_Size => {
+                try preamble("Memory_Size", pc, code, stack);
+                OpHelpers.memorySize(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Memory_Grow => {
+                try preamble("Memory_Grow", pc, code, stack);
+                OpHelpers.memoryGrow(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Const => {
+                try preamble("I32_Const", pc, code, stack);
+                OpHelpers.i32Const(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Const => {
+                try preamble("I64_Const", pc, code, stack);
+                OpHelpers.i64Const(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Const => {
+                try preamble("F32_Const", pc, code, stack);
+                OpHelpers.f32Const(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Const => {
+                try preamble("F64_Const", pc, code, stack);
+                OpHelpers.f64Const(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Eqz => {
+                try preamble("I32_Eqz", pc, code, stack);
+                OpHelpers.i32Eqz(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Eq => {
+                try preamble("I32_Eq", pc, code, stack);
+                OpHelpers.i32Eq(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_NE => {
+                try preamble("I32_NE", pc, code, stack);
+                OpHelpers.i32NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_LT_S => {
+                try preamble("I32_LT_S", pc, code, stack);
+                OpHelpers.i32LTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_LT_U => {
+                try preamble("I32_LT_U", pc, code, stack);
+                OpHelpers.i32LTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_GT_S => {
+                try preamble("I32_GT_S", pc, code, stack);
+                OpHelpers.i32GTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_GT_U => {
+                try preamble("I32_GT_U", pc, code, stack);
+                OpHelpers.i32GTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_LE_S => {
+                try preamble("I32_LE_S", pc, code, stack);
+                OpHelpers.i32LES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_LE_U => {
+                try preamble("I32_LE_U", pc, code, stack);
+                OpHelpers.i32LEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_GE_S => {
+                try preamble("I32_GE_S", pc, code, stack);
+                OpHelpers.i32GES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_GE_U => {
+                try preamble("I32_GE_U", pc, code, stack);
+                OpHelpers.i32GEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Eqz => {
+                try preamble("I64_Eqz", pc, code, stack);
+                OpHelpers.i64Eqz(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Eq => {
+                try preamble("I64_Eq", pc, code, stack);
+                OpHelpers.i64Eq(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_NE => {
+                try preamble("I64_NE", pc, code, stack);
+                OpHelpers.i64NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_LT_S => {
+                try preamble("I64_LT_S", pc, code, stack);
+                OpHelpers.i64LTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_LT_U => {
+                try preamble("I64_LT_U", pc, code, stack);
+                OpHelpers.i64LTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_GT_S => {
+                try preamble("I64_GT_S", pc, code, stack);
+                OpHelpers.i64GTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_GT_U => {
+                try preamble("I64_GT_U", pc, code, stack);
+                OpHelpers.i64GTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_LE_S => {
+                try preamble("I64_LE_S", pc, code, stack);
+                OpHelpers.i64LES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_LE_U => {
+                try preamble("I64_LE_U", pc, code, stack);
+                OpHelpers.i64LEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_GE_S => {
+                try preamble("I64_GE_S", pc, code, stack);
+                OpHelpers.i64GES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_GE_U => {
+                try preamble("I64_GE_U", pc, code, stack);
+                OpHelpers.i64GEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_EQ => {
+                try preamble("F32_EQ", pc, code, stack);
+                OpHelpers.f32EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_NE => {
+                try preamble("F32_NE", pc, code, stack);
+                OpHelpers.f32NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_LT => {
+                try preamble("F32_LT", pc, code, stack);
+                OpHelpers.f32LT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_GT => {
+                try preamble("F32_GT", pc, code, stack);
+                OpHelpers.f32GT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_LE => {
+                try preamble("F32_LE", pc, code, stack);
+                OpHelpers.f32LE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_GE => {
+                try preamble("F32_GE", pc, code, stack);
+                OpHelpers.f32GE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_EQ => {
+                try preamble("F64_EQ", pc, code, stack);
+                OpHelpers.f64EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_NE => {
+                try preamble("F64_NE", pc, code, stack);
+                OpHelpers.f64NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_LT => {
+                try preamble("F64_LT", pc, code, stack);
+                OpHelpers.f64LT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_GT => {
+                try preamble("F64_GT", pc, code, stack);
+                OpHelpers.f64GT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_LE => {
+                try preamble("F64_LE", pc, code, stack);
+                OpHelpers.f64LE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_GE => {
+                try preamble("F64_GE", pc, code, stack);
+                OpHelpers.f64GE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Clz => {
+                try preamble("I32_Clz", pc, code, stack);
+                OpHelpers.i32Clz(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Ctz => {
+                try preamble("I32_Ctz", pc, code, stack);
+                OpHelpers.i32Ctz(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Popcnt => {
+                try preamble("I32_Popcnt", pc, code, stack);
+                OpHelpers.i32Popcnt(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Add => {
+                try preamble("I32_Add", pc, code, stack);
+                OpHelpers.i32Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Sub => {
+                try preamble("I32_Sub", pc, code, stack);
+                OpHelpers.i32Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Mul => {
+                try preamble("I32_Mul", pc, code, stack);
+                OpHelpers.i32Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Div_S => {
+                try preamble("I32_Div_S", pc, code, stack);
+                try OpHelpers.i32DivS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Div_U => {
+                try preamble("I32_Div_U", pc, code, stack);
+                try OpHelpers.i32DivU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Rem_S => {
+                try preamble("I32_Rem_S", pc, code, stack);
+                try OpHelpers.i32RemS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Rem_U => {
+                try preamble("I32_Rem_U", pc, code, stack);
+                try OpHelpers.i32RemU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_And => {
+                try preamble("I32_And", pc, code, stack);
+                OpHelpers.i32And(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Or => {
+                try preamble("I32_Or", pc, code, stack);
+                OpHelpers.i32Or(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Xor => {
+                try preamble("I32_Xor", pc, code, stack);
+                OpHelpers.i32Xor(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Shl => {
+                try preamble("I32_Shl", pc, code, stack);
+                try OpHelpers.i32Shl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Shr_S => {
+                try preamble("I32_Shr_S", pc, code, stack);
+                try OpHelpers.i32ShrS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Shr_U => {
+                try preamble("I32_Shr_U", pc, code, stack);
+                try OpHelpers.i32ShrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Rotl => {
+                try preamble("I32_Rotl", pc, code, stack);
+                OpHelpers.i32Rotl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Rotr => {
+                try preamble("I32_Rotr", pc, code, stack);
+                OpHelpers.i32Rotr(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Clz => {
+                try preamble("I64_Clz", pc, code, stack);
+                OpHelpers.i64Clz(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Ctz => {
+                try preamble("I64_Ctz", pc, code, stack);
+                OpHelpers.i64Ctz(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Popcnt => {
+                try preamble("I64_Popcnt", pc, code, stack);
+                OpHelpers.i64Popcnt(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Add => {
+                try preamble("I64_Add", pc, code, stack);
+                OpHelpers.i64Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Sub => {
+                try preamble("I64_Sub", pc, code, stack);
+                OpHelpers.i64Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Mul => {
+                try preamble("I64_Mul", pc, code, stack);
+                OpHelpers.i64Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Div_S => {
+                try preamble("I64_Div_S", pc, code, stack);
+                try OpHelpers.i64DivS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Div_U => {
+                try preamble("I64_Div_U", pc, code, stack);
+                try OpHelpers.i64DivU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Rem_S => {
+                try preamble("I64_Rem_S", pc, code, stack);
+                try OpHelpers.i64RemS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Rem_U => {
+                try preamble("I64_Rem_U", pc, code, stack);
+                try OpHelpers.i64RemU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_And => {
+                try preamble("I64_And", pc, code, stack);
+                OpHelpers.i64And(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Or => {
+                try preamble("I64_Or", pc, code, stack);
+                OpHelpers.i64Or(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Xor => {
+                try preamble("I64_Xor", pc, code, stack);
+                OpHelpers.i64Xor(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Shl => {
+                try preamble("I64_Shl", pc, code, stack);
+                try OpHelpers.i64Shl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Shr_S => {
+                try preamble("I64_Shr_S", pc, code, stack);
+                try OpHelpers.i64ShrS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Shr_U => {
+                try preamble("I64_Shr_U", pc, code, stack);
+                try OpHelpers.i64ShrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Rotl => {
+                try preamble("I64_Rotl", pc, code, stack);
+                OpHelpers.i64Rotl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Rotr => {
+                try preamble("I64_Rotr", pc, code, stack);
+                OpHelpers.i64Rotr(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Abs => {
+                try preamble("F32_Abs", pc, code, stack);
+                OpHelpers.f32Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Neg => {
+                try preamble("F32_Neg", pc, code, stack);
+                OpHelpers.f32Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Ceil => {
+                try preamble("F32_Ceil", pc, code, stack);
+                OpHelpers.f32Ceil(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Floor => {
+                try preamble("F32_Floor", pc, code, stack);
+                OpHelpers.f32Floor(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Trunc => {
+                try preamble("F32_Trunc", pc, code, stack);
+                OpHelpers.f32Trunc(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Nearest => {
+                try preamble("F32_Nearest", pc, code, stack);
+                OpHelpers.f32Nearest(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Sqrt => {
+                try preamble("F32_Sqrt", pc, code, stack);
+                OpHelpers.f32Sqrt(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Add => {
+                try preamble("F32_Add", pc, code, stack);
+                OpHelpers.f32Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Sub => {
+                try preamble("F32_Sub", pc, code, stack);
+                OpHelpers.f32Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Mul => {
+                try preamble("F32_Mul", pc, code, stack);
+                OpHelpers.f32Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Div => {
+                try preamble("F32_Div", pc, code, stack);
+                OpHelpers.f32Div(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Min => {
+                try preamble("F32_Min", pc, code, stack);
+                OpHelpers.f32Min(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Max => {
+                try preamble("F32_Max", pc, code, stack);
+                OpHelpers.f32Max(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Copysign => {
+                try preamble("F32_Copysign", pc, code, stack);
+                OpHelpers.f32Copysign(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Abs => {
+                try preamble("F64_Abs", pc, code, stack);
+                OpHelpers.f64Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Neg => {
+                try preamble("F64_Neg", pc, code, stack);
+                OpHelpers.f64Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Ceil => {
+                try preamble("F64_Ceil", pc, code, stack);
+                OpHelpers.f64Ceil(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Floor => {
+                try preamble("F64_Floor", pc, code, stack);
+                OpHelpers.f64Floor(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Trunc => {
+                try preamble("F64_Trunc", pc, code, stack);
+                OpHelpers.f64Trunc(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Nearest => {
+                try preamble("F64_Nearest", pc, code, stack);
+                OpHelpers.f64Nearest(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Sqrt => {
+                try preamble("F64_Sqrt", pc, code, stack);
+                OpHelpers.f64Sqrt(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Add => {
+                try preamble("F64_Add", pc, code, stack);
+                OpHelpers.f64Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Sub => {
+                try preamble("F64_Sub", pc, code, stack);
+                OpHelpers.f64Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Mul => {
+                try preamble("F64_Mul", pc, code, stack);
+                OpHelpers.f64Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Div => {
+                try preamble("F64_Div", pc, code, stack);
+                OpHelpers.f64Div(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Min => {
+                try preamble("F64_Min", pc, code, stack);
+                OpHelpers.f64Min(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Max => {
+                try preamble("F64_Max", pc, code, stack);
+                OpHelpers.f64Max(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Copysign => {
+                try preamble("F64_Copysign", pc, code, stack);
+                OpHelpers.f64Copysign(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Wrap_I64 => {
+                try preamble("I32_Wrap_I64", pc, code, stack);
+                OpHelpers.i32WrapI64(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_F32_S => {
+                try preamble("I32_Trunc_F32_S", pc, code, stack);
+                try OpHelpers.i32TruncF32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_F32_U => {
+                try preamble("I32_Trunc_F32_U", pc, code, stack);
+                try OpHelpers.i32TruncF32U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_F64_S => {
+                try preamble("I32_Trunc_F64_S", pc, code, stack);
+                try OpHelpers.i32TruncF64S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_F64_U => {
+                try preamble("I32_Trunc_F64_U", pc, code, stack);
+                try OpHelpers.i32TruncF64U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Extend_I32_S => {
+                try preamble("I64_Extend_I32_S", pc, code, stack);
+                OpHelpers.i64ExtendI32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Extend_I32_U => {
+                try preamble("I64_Extend_I32_U", pc, code, stack);
+                OpHelpers.i64ExtendI32U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_F32_S => {
+                try preamble("I64_Trunc_F32_S", pc, code, stack);
+                try OpHelpers.i64TruncF32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_F32_U => {
+                try preamble("I64_Trunc_F32_U", pc, code, stack);
+                try OpHelpers.i64TruncF32U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_F64_S => {
+                try preamble("I64_Trunc_F64_S", pc, code, stack);
+                try OpHelpers.i64TruncF64S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_F64_U => {
+                try preamble("I64_Trunc_F64_U", pc, code, stack);
+                try OpHelpers.i64TruncF64U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Convert_I32_S => {
+                try preamble("F32_Convert_I32_S", pc, code, stack);
+                OpHelpers.f32ConvertI32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Convert_I32_U => {
+                try preamble("F32_Convert_I32_U", pc, code, stack);
+                OpHelpers.f32ConvertI32U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Convert_I64_S => {
+                try preamble("F32_Convert_I64_S", pc, code, stack);
+                OpHelpers.f32ConvertI64S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Convert_I64_U => {
+                try preamble("F32_Convert_I64_U", pc, code, stack);
+                OpHelpers.f32ConvertI64U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Demote_F64 => {
+                try preamble("F32_Demote_F64", pc, code, stack);
+                OpHelpers.f32DemoteF64(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Convert_I32_S => {
+                try preamble("F64_Convert_I32_S", pc, code, stack);
+                OpHelpers.f64ConvertI32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Convert_I32_U => {
+                try preamble("F64_Convert_I32_U", pc, code, stack);
+                OpHelpers.f64ConvertI32U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Convert_I64_S => {
+                try preamble("F64_Convert_I64_S", pc, code, stack);
+                OpHelpers.f64ConvertI64S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Convert_I64_U => {
+                try preamble("F64_Convert_I64_U", pc, code, stack);
+                OpHelpers.f64ConvertI64U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Promote_F32 => {
+                try preamble("F64_Promote_F32", pc, code, stack);
+                OpHelpers.f64PromoteF32(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Reinterpret_F32 => {
+                try preamble("I32_Reinterpret_F32", pc, code, stack);
+                OpHelpers.i32ReinterpretF32(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Reinterpret_F64 => {
+                try preamble("I64_Reinterpret_F64", pc, code, stack);
+                OpHelpers.i64ReinterpretF64(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32_Reinterpret_I32 => {
+                try preamble("F32_Reinterpret_I32", pc, code, stack);
+                OpHelpers.f32ReinterpretI32(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64_Reinterpret_I64 => {
+                try preamble("F64_Reinterpret_I64", pc, code, stack);
+                OpHelpers.f64ReinterpretI64(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Extend8_S => {
+                try preamble("I32_Extend8_S", pc, code, stack);
+                OpHelpers.i32Extend8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Extend16_S => {
+                try preamble("I32_Extend16_S", pc, code, stack);
+                OpHelpers.i32Extend16S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Extend8_S => {
+                try preamble("I64_Extend8_S", pc, code, stack);
+                OpHelpers.i64Extend8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Extend16_S => {
+                try preamble("I64_Extend16_S", pc, code, stack);
+                OpHelpers.i64Extend16S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Extend32_S => {
+                try preamble("I64_Extend32_S", pc, code, stack);
+                OpHelpers.i64Extend32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Ref_Null => {
+                try preamble("Ref_Null", pc, code, stack);
+                try OpHelpers.refNull(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Ref_Is_Null => {
+                try preamble("Ref_Is_Null", pc, code, stack);
+                OpHelpers.refIsNull(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Ref_Func => {
+                try preamble("Ref_Func", pc, code, stack);
+                OpHelpers.refFunc(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_Sat_F32_S => {
+                try preamble("I32_Trunc_Sat_F32_S", pc, code, stack);
+                OpHelpers.i32TruncSatF32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_Sat_F32_U => {
+                try preamble("I32_Trunc_Sat_F32_U", pc, code, stack);
+                OpHelpers.i32TruncSatF32U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_Sat_F64_S => {
+                try preamble("I32_Trunc_Sat_F64_S", pc, code, stack);
+                OpHelpers.i32TruncSatF64S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32_Trunc_Sat_F64_U => {
+                try preamble("I32_Trunc_Sat_F64_U", pc, code, stack);
+                OpHelpers.i32TruncSatF64U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_Sat_F32_S => {
+                try preamble("I64_Trunc_Sat_F32_S", pc, code, stack);
+                OpHelpers.i64TruncSatF32S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_Sat_F32_U => {
+                try preamble("I64_Trunc_Sat_F32_U", pc, code, stack);
+                OpHelpers.i64TruncSatF32U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_Sat_F64_S => {
+                try preamble("I64_Trunc_Sat_F64_S", pc, code, stack);
+                OpHelpers.i64TruncSatF64S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64_Trunc_Sat_F64_U => {
+                try preamble("I64_Trunc_Sat_F64_U", pc, code, stack);
+                OpHelpers.i64TruncSatF64U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Memory_Init => {
+                try preamble("Memory_Init", pc, code, stack);
+                try OpHelpers.memoryInit(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Data_Drop => {
+                try preamble("Data_Drop", pc, code, stack);
+                OpHelpers.dataDrop(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Memory_Copy => {
+                try preamble("Memory_Copy", pc, code, stack);
+                try OpHelpers.memoryCopy(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Memory_Fill => {
+                try preamble("Memory_Fill", pc, code, stack);
+                try OpHelpers.memoryFill(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Table_Init => {
+                try preamble("Table_Init", pc, code, stack);
+                try OpHelpers.tableInit(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Elem_Drop => {
+                try preamble("Elem_Drop", pc, code, stack);
+                OpHelpers.elemDrop(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Table_Copy => {
+                try preamble("Table_Copy", pc, code, stack);
+                try OpHelpers.tableCopy(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Table_Grow => {
+                try preamble("Table_Grow", pc, code, stack);
+                OpHelpers.tableGrow(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Table_Size => {
+                try preamble("Table_Size", pc, code, stack);
+                OpHelpers.tableSize(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Table_Fill => {
+                try preamble("Table_Fill", pc, code, stack);
+                try OpHelpers.tableFill(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load => {
+                try preamble("V128_Load", pc, code, stack);
+                try OpHelpers.v128Load(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load8x8_S => {
+                try preamble("V128_Load8x8_S", pc, code, stack);
+                try OpHelpers.v128Load8x8S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load8x8_U => {
+                try preamble("V128_Load8x8_S", pc, code, stack);
+                try OpHelpers.v128Load8x8U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load16x4_S => {
+                try preamble("V128_Load16x4_S", pc, code, stack);
+                try OpHelpers.v128Load16x4S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load16x4_U => {
+                try preamble("V128_Load16x4_U", pc, code, stack);
+                try OpHelpers.v128Load16x4U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load32x2_S => {
+                try preamble("V128_Load32x2_S", pc, code, stack);
+                try OpHelpers.v128Load32x2S(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load32x2_U => {
+                try preamble("V128_Load32x2_U", pc, code, stack);
+                try OpHelpers.v128Load32x2U(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load8_Splat => {
+                try preamble("V128_Load8_Splat", pc, code, stack);
+                try OpHelpers.v128Load8Splat(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load16_Splat => {
+                try preamble("V128_Load16_Splat", pc, code, stack);
+                try OpHelpers.v128Load16Splat(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load32_Splat => {
+                try preamble("V128_Load32_Splat", pc, code, stack);
+                try OpHelpers.v128Load32Splat(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load64_Splat => {
+                try preamble("V128_Load64_Splat", pc, code, stack);
+                try OpHelpers.v128Load64Splat(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Splat => {
+                try preamble("I8x16_Splat", pc, code, stack);
+                OpHelpers.i8x16Splat(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Splat => {
+                try preamble("I16x8_Splat", pc, code, stack);
+                OpHelpers.i16x8Splat(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Splat => {
+                try preamble("I32x4_Splat", pc, code, stack);
+                OpHelpers.i32x4Splat(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Splat => {
+                try preamble("I64x2_Splat", pc, code, stack);
+                OpHelpers.i64x2Splat(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Splat => {
+                try preamble("F32x4_Splat", pc, code, stack);
+                OpHelpers.f32x4Splat(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Splat => {
+                try preamble("F64x2_Splat", pc, code, stack);
+                OpHelpers.f64x2Splat(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Extract_Lane_S => {
+                try preamble("I8x16_Extract_Lane_S", pc, code, stack);
+                OpHelpers.i8x16ExtractLaneS(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Extract_Lane_U => {
+                try preamble("I8x16_Extract_Lane_U", pc, code, stack);
+                OpHelpers.i8x16ExtractLaneU(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Replace_Lane => {
+                try preamble("I8x16_Replace_Lane", pc, code, stack);
+                OpHelpers.i8x16ReplaceLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extract_Lane_S => {
+                try preamble("I16x8_Extract_Lane_S", pc, code, stack);
+                OpHelpers.i16x8ExtractLaneS(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extract_Lane_U => {
+                try preamble("I16x8_Extract_Lane_U", pc, code, stack);
+                OpHelpers.i16x8ExtractLaneU(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Replace_Lane => {
+                try preamble("I16x8_Replace_Lane", pc, code, stack);
+                OpHelpers.i16x8ReplaceLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extract_Lane => {
+                try preamble("I32x4_Extract_Lane", pc, code, stack);
+                OpHelpers.i32x4ExtractLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Replace_Lane => {
+                try preamble("I32x4_Replace_Lane", pc, code, stack);
+                OpHelpers.i32x4ReplaceLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Extract_Lane => {
+                try preamble("I64x2_Extract_Lane", pc, code, stack);
+                OpHelpers.i64x2ExtractLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Replace_Lane => {
+                try preamble("I64x2_Replace_Lane", pc, code, stack);
+                OpHelpers.i64x2ReplaceLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Extract_Lane => {
+                try preamble("F32x4_Extract_Lane", pc, code, stack);
+                OpHelpers.f32x4ExtractLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Replace_Lane => {
+                try preamble("F32x4_Replace_Lane", pc, code, stack);
+                OpHelpers.f32x4ReplaceLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Extract_Lane => {
+                try preamble("F64x2_Extract_Lane", pc, code, stack);
+                OpHelpers.f64x2ExtractLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Replace_Lane => {
+                try preamble("F64x2_Replace_Lane", pc, code, stack);
+                OpHelpers.f64x2ReplaceLane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_EQ => {
+                try preamble("I8x16_EQ", pc, code, stack);
+                OpHelpers.i8x16EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_NE => {
+                try preamble("I8x16_NE", pc, code, stack);
+                OpHelpers.i8x16NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_LT_S => {
+                try preamble("I8x16_LT_S", pc, code, stack);
+                OpHelpers.i8x16LTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_LT_U => {
+                try preamble("I8x16_LT_U", pc, code, stack);
+                OpHelpers.i8x16LTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_GT_S => {
+                try preamble("I8x16_GT_S", pc, code, stack);
+                OpHelpers.i8x16GTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_GT_U => {
+                try preamble("I8x16_GT_U", pc, code, stack);
+                OpHelpers.i8x16GTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_LE_S => {
+                try preamble("I8x16_LE_S", pc, code, stack);
+                OpHelpers.i8x16LES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_LE_U => {
+                try preamble("I8x16_LE_U", pc, code, stack);
+                OpHelpers.i8x16LEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_GE_S => {
+                try preamble("I8x16_GE_S", pc, code, stack);
+                OpHelpers.i8x16GES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_GE_U => {
+                try preamble("I8x16_GE_U", pc, code, stack);
+                OpHelpers.i8x16GEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_EQ => {
+                try preamble("I16x8_EQ", pc, code, stack);
+                OpHelpers.i16x8EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_NE => {
+                try preamble("I16x8_NE", pc, code, stack);
+                OpHelpers.i16x8NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_LT_S => {
+                try preamble("I16x8_LT_S", pc, code, stack);
+                OpHelpers.i16x8LTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_LT_U => {
+                try preamble("I16x8_LT_U", pc, code, stack);
+                OpHelpers.i16x8LTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_GT_S => {
+                try preamble("I16x8_GT_S", pc, code, stack);
+                OpHelpers.i16x8GTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_GT_U => {
+                try preamble("I16x8_GT_U", pc, code, stack);
+                OpHelpers.i16x8GTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_LE_S => {
+                try preamble("I16x8_LE_S", pc, code, stack);
+                OpHelpers.i16x8LES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_LE_U => {
+                try preamble("I16x8_LE_U", pc, code, stack);
+                OpHelpers.i16x8LEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_GE_S => {
+                try preamble("I16x8_GE_S", pc, code, stack);
+                OpHelpers.i16x8GES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_GE_U => {
+                try preamble("I16x8_GE_U", pc, code, stack);
+                OpHelpers.i16x8GEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_EQ => {
+                try preamble("I32x4_EQ", pc, code, stack);
+                OpHelpers.i32x4EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_NE => {
+                try preamble("I32x4_NE", pc, code, stack);
+                OpHelpers.i32x4NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_LT_S => {
+                try preamble("I32x4_LT_S", pc, code, stack);
+                OpHelpers.i32x4LTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_LT_U => {
+                try preamble("I32x4_LT_U", pc, code, stack);
+                OpHelpers.i32x4LTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_GT_S => {
+                try preamble("I32x4_GT_S", pc, code, stack);
+                OpHelpers.i32x4GTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_GT_U => {
+                try preamble("I32x4_GT_U", pc, code, stack);
+                OpHelpers.i32x4GTU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_LE_S => {
+                try preamble("I32x4_LE_S", pc, code, stack);
+                OpHelpers.i32x4LES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_LE_U => {
+                try preamble("I32x4_LE_U", pc, code, stack);
+                OpHelpers.i32x4LEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_GE_S => {
+                try preamble("I32x4_GE_S", pc, code, stack);
+                OpHelpers.i32x4GES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_GE_U => {
+                try preamble("I32x4_GE_U", pc, code, stack);
+                OpHelpers.i32x4GEU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_EQ => {
+                try preamble("F32x4_EQ", pc, code, stack);
+                OpHelpers.f32x4EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_NE => {
+                try preamble("F32x4_NE", pc, code, stack);
+                OpHelpers.f32x4NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_LT => {
+                try preamble("F32x4_LT", pc, code, stack);
+                OpHelpers.f32x4LT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_GT => {
+                try preamble("F32x4_GT", pc, code, stack);
+                OpHelpers.f32x4GT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_LE => {
+                try preamble("F32x4_LE", pc, code, stack);
+                OpHelpers.f32x4LE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_GE => {
+                try preamble("F32x4_GE", pc, code, stack);
+                OpHelpers.f32x4GE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_EQ => {
+                try preamble("F64x2_EQ", pc, code, stack);
+                OpHelpers.f64x2EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_NE => {
+                try preamble("F64x2_NE", pc, code, stack);
+                OpHelpers.f64x2NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_LT => {
+                try preamble("F64x2_LT", pc, code, stack);
+                OpHelpers.f64x2LT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_GT => {
+                try preamble("F64x2_GT", pc, code, stack);
+                OpHelpers.f64x2GT(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_LE => {
+                try preamble("F64x2_LE", pc, code, stack);
+                OpHelpers.f64x2LE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_GE => {
+                try preamble("F64x2_GE", pc, code, stack);
+                OpHelpers.f64x2GE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Store => {
+                try preamble("V128_Store", pc, code, stack);
+                try OpHelpers.v128Store(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Const => {
+                try preamble("V128_Const", pc, code, stack);
+                OpHelpers.v128Const(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Shuffle => {
+                try preamble("I8x16_Shuffle", pc, code, stack);
+                OpHelpers.i8x16Shuffle(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Swizzle => {
+                try preamble("I8x16_Swizzle", pc, code, stack);
+                OpHelpers.i8x16Swizzle(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Not => {
+                try preamble("V128_Not", pc, code, stack);
+                OpHelpers.v128Not(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_And => {
+                try preamble("V128_And", pc, code, stack);
+                OpHelpers.v128And(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_AndNot => {
+                try preamble("V128_AndNot", pc, code, stack);
+                OpHelpers.v128AndNot(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Or => {
+                try preamble("V128_Or", pc, code, stack);
+                OpHelpers.v128Or(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Xor => {
+                try preamble("V128_Xor", pc, code, stack);
+                OpHelpers.v128Xor(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Bitselect => {
+                try preamble("V128_Bitselect", pc, code, stack);
+                OpHelpers.v128Bitselect(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_AnyTrue => {
+                try preamble("V128_AnyTrue", pc, code, stack);
+                OpHelpers.v128AnyTrue(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load8_Lane => {
+                try preamble("V128_Load8_Lane", pc, code, stack);
+                try OpHelpers.v128Load8Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load16_Lane => {
+                try preamble("V128_Load16_Lane", pc, code, stack);
+                try OpHelpers.v128Load16Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load32_Lane => {
+                try preamble("V128_Load32_Lane", pc, code, stack);
+                try OpHelpers.v128Load32Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load64_Lane => {
+                try preamble("V128_Load64_Lane", pc, code, stack);
+                try OpHelpers.v128Load64Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Store8_Lane => {
+                try preamble("V128_Store8_Lane", pc, code, stack);
+                try OpHelpers.v128Store8Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Store16_Lane => {
+                try preamble("V128_Store16_Lane", pc, code, stack);
+                try OpHelpers.v128Store16Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Store32_Lane => {
+                try preamble("V128_Store32_Lane", pc, code, stack);
+                try OpHelpers.v128Store32Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Store64_Lane => {
+                try preamble("V128_Store64_Lane", pc, code, stack);
+                try OpHelpers.v128Store64Lane(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load32_Zero => {
+                try preamble("V128_Load32_Zero", pc, code, stack);
+                try OpHelpers.v128Load32Zero(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.V128_Load64_Zero => {
+                try preamble("V128_Load64_Zero", pc, code, stack);
+                try OpHelpers.v128Load64Zero(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Demote_F64x2_Zero => {
+                try preamble("F32x4_Demote_F64x2_Zero", pc, code, stack);
+                OpHelpers.f32x4DemoteF64x2Zero(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Promote_Low_F32x4 => {
+                try preamble("F64x2_Promote_Low_F32x4", pc, code, stack);
+                OpHelpers.f64x2PromoteLowF32x4(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Abs => {
+                try preamble("I8x16_Abs", pc, code, stack);
+                OpHelpers.i8x16Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Neg => {
+                try preamble("I8x16_Neg", pc, code, stack);
+                OpHelpers.i8x16Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Popcnt => {
+                try preamble("I8x16_Popcnt", pc, code, stack);
+                OpHelpers.i8x16Popcnt(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_AllTrue => {
+                try preamble("I8x16_AllTrue", pc, code, stack);
+                OpHelpers.i8x16AllTrue(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Bitmask => {
+                try preamble("I8x16_Bitmask", pc, code, stack);
+                OpHelpers.i8x16Bitmask(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Narrow_I16x8_S => {
+                try preamble("I8x16_Narrow_I16x8_S", pc, code, stack);
+                OpHelpers.i8x16NarrowI16x8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Narrow_I16x8_U => {
+                try preamble("I8x16_Narrow_I16x8_U", pc, code, stack);
+                OpHelpers.i8x16NarrowI16x8U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Ceil => {
+                try preamble("F32x4_Ceil", pc, code, stack);
+                OpHelpers.f32x4Ceil(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Floor => {
+                try preamble("F32x4_Floor", pc, code, stack);
+                OpHelpers.f32x4Floor(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Trunc => {
+                try preamble("F32x4_Trunc", pc, code, stack);
+                OpHelpers.f32x4Trunc(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Nearest => {
+                try preamble("F32x4_Nearest", pc, code, stack);
+                OpHelpers.f32x4Nearest(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Shl => {
+                try preamble("I8x16_Shl", pc, code, stack);
+                OpHelpers.i8x16Shl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Shr_S => {
+                try preamble("I8x16_Shr_S", pc, code, stack);
+                OpHelpers.i8x16ShrS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Shr_U => {
+                try preamble("I8x16_Shr_U", pc, code, stack);
+                OpHelpers.i8x16ShrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Add => {
+                try preamble("I8x16_Add", pc, code, stack);
+                OpHelpers.i8x16Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Add_Sat_S => {
+                try preamble("I8x16_Add_Sat_S", pc, code, stack);
+                OpHelpers.i8x16AddSatS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Add_Sat_U => {
+                try preamble("I8x16_Add_Sat_U", pc, code, stack);
+                OpHelpers.i8x16AddSatU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Sub => {
+                try preamble("I8x16_Sub", pc, code, stack);
+                OpHelpers.i8x16Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Sub_Sat_S => {
+                try preamble("I8x16_Sub_Sat_S", pc, code, stack);
+                OpHelpers.i8x16SubSatS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Sub_Sat_U => {
+                try preamble("I8x16_Sub_Sat_U", pc, code, stack);
+                OpHelpers.i8x16SubSatU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Ceil => {
+                try preamble("F64x2_Ceil", pc, code, stack);
+                OpHelpers.f64x2Ceil(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Floor => {
+                try preamble("F64x2_Floor", pc, code, stack);
+                OpHelpers.f64x2Floor(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Min_S => {
+                try preamble("I8x16_Min_S", pc, code, stack);
+                OpHelpers.i8x16MinS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Min_U => {
+                try preamble("I8x16_Min_U", pc, code, stack);
+                OpHelpers.i8x16MinU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Max_S => {
+                try preamble("I8x16_Max_S", pc, code, stack);
+                OpHelpers.i8x16MaxS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Max_U => {
+                try preamble("I8x16_Max_U", pc, code, stack);
+                OpHelpers.i8x16MaxU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Trunc => {
+                try preamble("F64x2_Trunc", pc, code, stack);
+                OpHelpers.f64x2Trunc(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I8x16_Avgr_U => {
+                try preamble("I8x16_Avgr_U", pc, code, stack);
+                OpHelpers.i8x16AvgrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extadd_Pairwise_I8x16_S => {
+                try preamble("I16x8_Extadd_Pairwise_I8x16_S", pc, code, stack);
+                OpHelpers.i16x8ExtaddPairwiseI8x16S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extadd_Pairwise_I8x16_U => {
+                try preamble("I16x8_Extadd_Pairwise_I8x16_U", pc, code, stack);
+                OpHelpers.i16x8ExtaddPairwiseI8x16U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extadd_Pairwise_I16x8_S => {
+                try preamble("I32x4_Extadd_Pairwise_I16x8_S", pc, code, stack);
+                OpHelpers.i32x4ExtaddPairwiseI16x8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extadd_Pairwise_I16x8_U => {
+                try preamble("I32x4_Extadd_Pairwise_I16x8_U", pc, code, stack);
+                OpHelpers.i32x4ExtaddPairwiseI16x8U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Abs => {
+                try preamble("I16x8_Abs", pc, code, stack);
+                OpHelpers.i16x8Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Neg => {
+                try preamble("I16x8_Neg", pc, code, stack);
+                OpHelpers.i16x8Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Q15mulr_Sat_S => {
+                try preamble("I16x8_Q15mulr_Sat_S", pc, code, stack);
+                OpHelpers.i16x8Q15mulrSatS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_AllTrue => {
+                try preamble("I16x8_AllTrue", pc, code, stack);
+                OpHelpers.i16x8AllTrue(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Bitmask => {
+                try preamble("I16x8_Bitmask", pc, code, stack);
+                OpHelpers.i16x8Bitmask(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Narrow_I32x4_S => {
+                try preamble("I16x8_Narrow_I32x4_S", pc, code, stack);
+                OpHelpers.i16x8NarrowI32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Narrow_I32x4_U => {
+                try preamble("I16x8_Narrow_I32x4_U", pc, code, stack);
+                OpHelpers.i16x8NarrowI32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extend_Low_I8x16_S => {
+                try preamble("I16x8_Extend_Low_I8x16_S", pc, code, stack);
+                OpHelpers.i16x8ExtendLowI8x16S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extend_High_I8x16_S => {
+                try preamble("I16x8_Extend_High_I8x16_S", pc, code, stack);
+                OpHelpers.i16x8ExtendHighI8x16S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extend_Low_I8x16_U => {
+                try preamble("I16x8_Extend_Low_I8x16_U", pc, code, stack);
+                OpHelpers.i16x8ExtendLowI8x16U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+            Opcode.I16x8_Extend_High_I8x16_U => {
+                try preamble("I16x8_Extend_High_I8x16_U", pc, code, stack);
+                OpHelpers.i16x8ExtendHighI8x16U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Shl => {
+                try preamble("I16x8_Shl", pc, code, stack);
+                OpHelpers.i16x8Shl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Shr_S => {
+                try preamble("I16x8_Shr_S", pc, code, stack);
+                OpHelpers.i16x8ShrS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Shr_U => {
+                try preamble("I16x8_Shr_U", pc, code, stack);
+                OpHelpers.i16x8ShrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Add => {
+                try preamble("I16x8_Add", pc, code, stack);
+                OpHelpers.i16x8Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Add_Sat_S => {
+                try preamble("I16x8_Add_Sat_S", pc, code, stack);
+                OpHelpers.i16x8AddSatS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Add_Sat_U => {
+                try preamble("I16x8_Add_Sat_U", pc, code, stack);
+                OpHelpers.i16x8AddSatU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Sub => {
+                try preamble("I16x8_Sub", pc, code, stack);
+                OpHelpers.i16x8Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Sub_Sat_S => {
+                try preamble("I16x8_Sub_Sat_S", pc, code, stack);
+                OpHelpers.i16x8SubSatS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Sub_Sat_U => {
+                try preamble("I16x8_Sub_Sat_U", pc, code, stack);
+                OpHelpers.i16x8SubSatU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Nearest => {
+                try preamble("F64x2_Nearest", pc, code, stack);
+                OpHelpers.f64x2Nearest(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Mul => {
+                try preamble("I16x8_Mul", pc, code, stack);
+                OpHelpers.i16x8Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Min_S => {
+                try preamble("I16x8_Min_S", pc, code, stack);
+                OpHelpers.i16x8MinS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Min_U => {
+                try preamble("I16x8_Min_U", pc, code, stack);
+                OpHelpers.i16x8MinU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Max_S => {
+                try preamble("I16x8_Max_S", pc, code, stack);
+                OpHelpers.i16x8MaxS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Max_U => {
+                try preamble("I16x8_Max_U", pc, code, stack);
+                OpHelpers.i16x8MaxU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Avgr_U => {
+                try preamble("I16x8_Avgr_U", pc, code, stack);
+                OpHelpers.i16x8AvgrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extmul_Low_I8x16_S => {
+                try preamble("I16x8_Extmul_Low_I8x16_S", pc, code, stack);
+                OpHelpers.i16x8ExtmulLowI8x16S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extmul_High_I8x16_S => {
+                try preamble("I16x8_Extmul_High_I8x16_S", pc, code, stack);
+                OpHelpers.i16x8ExtmulHighI8x16S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extmul_Low_I8x16_U => {
+                try preamble("I16x8_Extmul_Low_I8x16_U", pc, code, stack);
+                OpHelpers.i16x8ExtmulLowI8x16U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I16x8_Extmul_High_I8x16_U => {
+                try preamble("I16x8_Extmul_High_I8x16_U", pc, code, stack);
+                OpHelpers.i16x8ExtmulHighI8x16U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Abs => {
+                try preamble("I32x4_Abs", pc, code, stack);
+                OpHelpers.i32x4Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Neg => {
+                try preamble("I32x4_Neg", pc, code, stack);
+                OpHelpers.i32x4Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_AllTrue => {
+                try preamble("I32x4_AllTrue", pc, code, stack);
+                OpHelpers.i32x4AllTrue(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Bitmask => {
+                try preamble("I32x4_Bitmask", pc, code, stack);
+                OpHelpers.i32x4Bitmask(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extend_Low_I16x8_S => {
+                try preamble("I32x4_Extend_Low_I16x8_S", pc, code, stack);
+                OpHelpers.i32x4ExtendLowI16x8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extend_High_I16x8_S => {
+                try preamble("I32x4_Extend_High_I16x8_S", pc, code, stack);
+                OpHelpers.i32x4ExtendHighI16x8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extend_Low_I16x8_U => {
+                try preamble("I32x4_Extend_Low_I16x8_U", pc, code, stack);
+                OpHelpers.i32x4ExtendLowI16x8U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extend_High_I16x8_U => {
+                try preamble("I32x4_Extend_High_I16x8_U", pc, code, stack);
+                OpHelpers.i32x4ExtendHighI16x8U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Shl => {
+                try preamble("I32x4_Shl", pc, code, stack);
+                OpHelpers.i32x4Shl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Shr_S => {
+                try preamble("I32x4_Shr_S", pc, code, stack);
+                OpHelpers.i32x4ShrS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Shr_U => {
+                try preamble("I32x4_Shr_U", pc, code, stack);
+                OpHelpers.i32x4ShrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Abs => {
+                try preamble("I64x2_Abs", pc, code, stack);
+                OpHelpers.i64x2Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Neg => {
+                try preamble("I64x2_Neg", pc, code, stack);
+                OpHelpers.i64x2Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_AllTrue => {
+                try preamble("I64x2_AllTrue", pc, code, stack);
+                OpHelpers.i64x2AllTrue(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Bitmask => {
+                try preamble("I64x2_Bitmask", pc, code, stack);
+                OpHelpers.i64x2Bitmask(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Extend_Low_I32x4_S => {
+                try preamble("I64x2_Extend_Low_I32x4_S", pc, code, stack);
+                OpHelpers.i64x2ExtendLowI32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Extend_High_I32x4_S => {
+                try preamble("I64x2_Extend_High_I32x4_S", pc, code, stack);
+                OpHelpers.i64x2ExtendHighI32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Extend_Low_I32x4_U => {
+                try preamble("I64x2_Extend_Low_I32x4_U", pc, code, stack);
+                OpHelpers.i64x2ExtendLowI32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Extend_High_I32x4_U => {
+                try preamble("I64x2_Extend_High_I32x4_U", pc, code, stack);
+                OpHelpers.i64x2ExtendHighI32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Shl => {
+                try preamble("I64x2_Shl", pc, code, stack);
+                OpHelpers.i64x2Shl(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Shr_S => {
+                try preamble("I64x2_Shr_S", pc, code, stack);
+                OpHelpers.i64x2ShrS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Shr_U => {
+                try preamble("I64x2_Shr_U", pc, code, stack);
+                OpHelpers.i64x2ShrU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Add => {
+                try preamble("I32x4_Add", pc, code, stack);
+                OpHelpers.i32x4Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Sub => {
+                try preamble("I32x4_Sub", pc, code, stack);
+                OpHelpers.i32x4Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Mul => {
+                try preamble("I32x4_Mul", pc, code, stack);
+                OpHelpers.i32x4Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Min_S => {
+                try preamble("I32x4_Min_S", pc, code, stack);
+                OpHelpers.i32x4MinS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Min_U => {
+                try preamble("I32x4_Min_U", pc, code, stack);
+                OpHelpers.i32x4MinU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Max_S => {
+                try preamble("I32x4_Max_S", pc, code, stack);
+                OpHelpers.i32x4MaxS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Max_U => {
+                try preamble("I32x4_Max_U", pc, code, stack);
+                OpHelpers.i32x4MaxU(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Dot_I16x8_S => {
+                try preamble("I32x4_Dot_I16x8_S", pc, code, stack);
+                OpHelpers.i32x4DotI16x8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extmul_Low_I16x8_S => {
+                try preamble("I32x4_Extmul_Low_I16x8_S", pc, code, stack);
+                OpHelpers.i32x4ExtmulLowI16x8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extmul_High_I16x8_S => {
+                try preamble("I32x4_Extmul_High_I16x8_S", pc, code, stack);
+                OpHelpers.i32x4ExtmulHighI16x8S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extmul_Low_I16x8_U => {
+                try preamble("I32x4_Extmul_Low_I16x8_U", pc, code, stack);
+                OpHelpers.i32x4ExtmulLowI16x8U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Extmul_High_I16x8_U => {
+                try preamble("I32x4_Extmul_High_I16x8_U", pc, code, stack);
+                OpHelpers.i32x4ExtmulHighI16x8U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Add => {
+                try preamble("I64x2_Add", pc, code, stack);
+                OpHelpers.i64x2Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Sub => {
+                try preamble("I64x2_Sub", pc, code, stack);
+                OpHelpers.i64x2Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Mul => {
+                try preamble("I64x2_Mul", pc, code, stack);
+                OpHelpers.i64x2Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_EQ => {
+                try preamble("I64x2_EQ", pc, code, stack);
+                OpHelpers.i64x2EQ(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_NE => {
+                try preamble("I64x2_NE", pc, code, stack);
+                OpHelpers.i64x2NE(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_LT_S => {
+                try preamble("I64x2_LT_S", pc, code, stack);
+                OpHelpers.i64x2LTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_GT_S => {
+                try preamble("I64x2_GT_S", pc, code, stack);
+                OpHelpers.i64x2GTS(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_LE_S => {
+                try preamble("I64x2_LE_S", pc, code, stack);
+                OpHelpers.i64x2LES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_GE_S => {
+                try preamble("I64x2_GE_S", pc, code, stack);
+                OpHelpers.i64x2GES(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I64x2_Extmul_Low_I32x4_S => {
+                try preamble("I64x2_GE_S", pc, code, stack);
+                OpHelpers.i64x2ExtmulLowI32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+            Opcode.I64x2_Extmul_High_I32x4_S => {
+                try preamble("I64x2_GE_S", pc, code, stack);
+                OpHelpers.i64x2ExtmulHighI32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+            Opcode.I64x2_Extmul_Low_I32x4_U => {
+                try preamble("I64x2_GE_S", pc, code, stack);
+                OpHelpers.i64x2ExtmulLowI32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+            Opcode.I64x2_Extmul_High_I32x4_U => {
+                try preamble("I64x2_GE_S", pc, code, stack);
+                OpHelpers.i64x2ExtmulHighI32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Abs => {
+                try preamble("F32x4_Abs", pc, code, stack);
+                OpHelpers.f32x4Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Neg => {
+                try preamble("F32x4_Neg", pc, code, stack);
+                OpHelpers.f32x4Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Sqrt => {
+                try preamble("F32x4_Sqrt", pc, code, stack);
+                OpHelpers.f32x4Sqrt(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Add => {
+                try preamble("F32x4_Add", pc, code, stack);
+                OpHelpers.f32x4Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Sub => {
+                try preamble("F32x4_Sub", pc, code, stack);
+                OpHelpers.f32x4Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Mul => {
+                try preamble("F32x4_Mul", pc, code, stack);
+                OpHelpers.f32x4Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Div => {
+                try preamble("F32x4_Div", pc, code, stack);
+                OpHelpers.f32x4Div(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Min => {
+                try preamble("F32x4_Min", pc, code, stack);
+                OpHelpers.f32x4Min(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Max => {
+                try preamble("F32x4_Max", pc, code, stack);
+                OpHelpers.f32x4Max(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_PMin => {
+                try preamble("F32x4_PMin", pc, code, stack);
+                OpHelpers.f32x4PMin(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_PMax => {
+                try preamble("F32x4_PMax", pc, code, stack);
+                OpHelpers.f32x4PMax(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Abs => {
+                try preamble("F64x2_Abs", pc, code, stack);
+                OpHelpers.f64x2Abs(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Neg => {
+                try preamble("F64x2_Neg", pc, code, stack);
+                OpHelpers.f64x2Neg(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Sqrt => {
+                try preamble("F64x2_Sqrt", pc, code, stack);
+                OpHelpers.f64x2Sqrt(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Add => {
+                try preamble("F64x2_Add", pc, code, stack);
+                OpHelpers.f64x2Add(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Sub => {
+                try preamble("F64x2_Sub", pc, code, stack);
+                OpHelpers.f64x2Sub(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Mul => {
+                try preamble("F64x2_Mul", pc, code, stack);
+                OpHelpers.f64x2Mul(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Div => {
+                try preamble("F64x2_Div", pc, code, stack);
+                OpHelpers.f64x2Div(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Min => {
+                try preamble("F64x2_Min", pc, code, stack);
+                OpHelpers.f64x2Min(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Max => {
+                try preamble("F64x2_Max", pc, code, stack);
+                OpHelpers.f64x2Max(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_PMin => {
+                try preamble("F64x2_PMin", pc, code, stack);
+                OpHelpers.f64x2PMin(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_PMax => {
+                try preamble("F64x2_PMax", pc, code, stack);
+                OpHelpers.f64x2PMax(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Trunc_Sat_F32x4_S => {
+                try preamble("F32x4_Trunc_Sat_F32x4_S", pc, code, stack);
+                OpHelpers.f32x4TruncSatF32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Trunc_Sat_F32x4_U => {
+                try preamble("F32x4_Trunc_Sat_F32x4_U", pc, code, stack);
+                OpHelpers.f32x4TruncSatF32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Convert_I32x4_S => {
+                try preamble("F32x4_Convert_I32x4_S", pc, code, stack);
+                OpHelpers.f32x4ConvertI32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F32x4_Convert_I32x4_U => {
+                try preamble("F32x4_Convert_I32x4_U", pc, code, stack);
+                OpHelpers.f32x4ConvertI32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Trunc_Sat_F64x2_S_Zero => {
+                try preamble("I32x4_Trunc_Sat_F64x2_S_Zero", pc, code, stack);
+                OpHelpers.i32x4TruncSatF64x2SZero(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.I32x4_Trunc_Sat_F64x2_U_Zero => {
+                try preamble("I32x4_Trunc_Sat_F64x2_U_Zero", pc, code, stack);
+                OpHelpers.i32x4TruncSatF64x2UZero(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Convert_Low_I32x4_S => {
+                try preamble("F64x2_Convert_Low_I32x4_S", pc, code, stack);
+                OpHelpers.f64x2ConvertLowI32x4S(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.F64x2_Convert_Low_I32x4_U => {
+                try preamble("F64x2_Convert_Low_I32x4_U", pc, code, stack);
+                OpHelpers.f64x2ConvertLowI32x4U(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
             },
         }
     }
