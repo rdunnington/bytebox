@@ -16,18 +16,32 @@ const ExeOpts = struct {
     options: *Build.Step.Options,
 };
 
+const StackVmKind = enum {
+    tailcall,
+    labeled_switch,
+};
+
 pub fn build(b: *Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
     const enable_metering = b.option(bool, "meter", "Enable metering") orelse false;
     const enable_debug_trace = b.option(bool, "debug_trace", "Enable debug tracing feature") orelse false;
     const enable_debug_trap = b.option(bool, "debug_trap", "Enable debug trap features") orelse false;
+    const vm_kind = b.option(StackVmKind, "vm_kind",
+        \\Determines which stack vm implementation to use.
+        \\ You may want to benchmark which one fits your usecase best.
+        \\
+    ) orelse switch (target.result.cpu.arch) {
+        .mips, .mipsel, .mips64, .mips64el => StackVmKind.labeled_switch,
+        else => StackVmKind.tailcall,
+    };
 
     const options = b.addOptions();
     options.addOption(bool, "enable_metering", enable_metering);
     options.addOption(bool, "enable_debug_trace", enable_debug_trace);
     options.addOption(bool, "enable_debug_trap", enable_debug_trap);
-
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    options.addOption(StackVmKind, "vm_kind", vm_kind);
 
     const stable_array = b.dependency("zig-stable-array", .{
         .target = target,
