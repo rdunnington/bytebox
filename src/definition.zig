@@ -159,23 +159,37 @@ pub const ValType = enum(c_int) {
     }
 };
 
+// FuncRefs that are in the "index" state without a valid pointer are unresolved. They will
+// all be resolved by instantiation time in the VM, which has the actual function instance
+// data to which func points.
+pub const FuncRef = extern union {
+    func: *const anyopaque,
+    index: usize,
+
+    const k_null_sentinel: usize = std.math.maxInt(usize);
+
+    pub fn nullRef() FuncRef {
+        return .{ .index = k_null_sentinel };
+    }
+
+    pub fn isNull(funcref: FuncRef) bool {
+        return funcref.index == k_null_sentinel;
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(?*const anyopaque) == @sizeOf(usize));
+        std.debug.assert(@sizeOf(FuncRef) == @sizeOf(usize));
+    }
+};
+
 pub const Val = extern union {
     I32: i32,
     I64: i64,
     F32: f32,
     F64: f64,
     V128: v128,
-    FuncRef: extern struct {
-        index: u32, // index into functions
-        module_instance: ?*ModuleInstance, // TODO make this an index as well
-
-        // fn getModule(self: @This()) *ModuleInstance {
-        //     return @as(*ModuleInstance, @alignCast(@ptrCast(self.module_instance)));
-        // }
-    },
-    ExternRef: u32, // TODO figure out what this indexes
-
-    const k_null_funcref: u32 = std.math.maxInt(u32);
+    FuncRef: FuncRef,
+    ExternRef: usize,
 
     pub fn default(valtype: ValType) Val {
         return switch (valtype) {
@@ -189,21 +203,21 @@ pub const Val = extern union {
         };
     }
 
-    pub fn nullRef(valtype: ValType) !Val {
-        return switch (valtype) {
-            .FuncRef => funcrefFromIndex(Val.k_null_funcref),
-            .ExternRef => Val{ .ExternRef = Val.k_null_funcref },
-            else => error.MalformedBytecode,
-        };
+    pub fn funcrefFromIndex(index: usize) Val {
+        return Val{ .FuncRef = .{ .index = index } };
     }
 
-    pub fn funcrefFromIndex(index: u32) Val {
-        return Val{ .FuncRef = .{ .index = index, .module_instance = null } };
+    pub fn nullRef(valtype: ValType) ?Val {
+        return switch (valtype) {
+            .FuncRef => Val{ .FuncRef = FuncRef.nullRef() },
+            .ExternRef => Val{ .ExternRef = FuncRef.k_null_sentinel },
+            else => null,
+        };
     }
 
     pub fn isNull(v: Val) bool {
         // Because FuncRef.index is located at the same memory location as ExternRef, this passes for both types
-        return v.FuncRef.index == k_null_funcref;
+        return v.FuncRef.index == FuncRef.k_null_sentinel;
     }
 
     pub fn eql(valtype: ValType, v1: Val, v2: Val) bool {
@@ -213,15 +227,15 @@ pub const Val = extern union {
             .F32 => v1.F32 == v2.F32,
             .F64 => v1.F64 == v2.F64,
             .V128 => @reduce(.And, v1.V128 == v2.V128),
-            .FuncRef => std.meta.eql(v1.FuncRef, v2.FuncRef),
+            .FuncRef => v1.FuncRef.index == v2.FuncRef.index,
             .ExternRef => v1.ExternRef == v2.ExternRef,
         };
     }
 };
 
 test "Val.isNull" {
-    const v1: Val = try Val.nullRef(.FuncRef);
-    const v2: Val = try Val.nullRef(.ExternRef);
+    const v1: Val = Val.nullRef(.FuncRef).?;
+    const v2: Val = Val.nullRef(.ExternRef).?;
 
     try std.testing.expect(v1.isNull() == true);
     try std.testing.expect(v2.isNull() == true);
@@ -237,11 +251,14 @@ pub const TaggedVal = struct {
     val: Val,
     type: ValType,
 
-    pub fn nullRef(valtype: ValType) !TaggedVal {
-        return TaggedVal{
-            .val = try Val.nullRef(valtype),
-            .type = valtype,
-        };
+    pub fn nullRef(valtype: ValType) ?TaggedVal {
+        if (Val.nullRef(valtype)) |val| {
+            return TaggedVal{
+                .val = val,
+                .type = valtype,
+            };
+        }
+        return null;
     }
 
     pub fn funcrefFromIndex(index: u32) TaggedVal {
@@ -420,7 +437,7 @@ pub const ConstantExpression = union(ConstantExpressionType) {
             .F32_Const => ConstantExpression{ .Value = TaggedVal{ .type = .F32, .val = .{ .F32 = try decodeFloat(f32, reader) } } },
             .F64_Const => ConstantExpression{ .Value = TaggedVal{ .type = .F64, .val = .{ .F64 = try decodeFloat(f64, reader) } } },
             .V128_Const => ConstantExpression{ .Value = TaggedVal{ .type = .V128, .val = .{ .V128 = try decodeVec(reader) } } },
-            .Ref_Null => ConstantExpression{ .Value = try TaggedVal.nullRef(try ValType.decode(reader)) },
+            .Ref_Null => ConstantExpression{ .Value = TaggedVal.nullRef(try ValType.decode(reader)) orelse return error.MalformedBytecode },
             .Ref_Func => ConstantExpression{ .Value = TaggedVal.funcrefFromIndex(try common.decodeLEB128(u32, reader)) },
             .Global_Get => ConstantExpression{ .Global = try common.decodeLEB128(u32, reader) },
             else => return error.ValidationBadConstantExpression,
@@ -471,54 +488,6 @@ pub const ConstantExpression = union(ConstantExpressionType) {
         }
 
         return expr;
-    }
-
-    pub fn resolve(self: *ConstantExpression, module_instance: *ModuleInstance) Val {
-        switch (self.*) {
-            .Value => |val| {
-                var inner_val: Val = val.val;
-                if (val.type == .FuncRef) {
-                    inner_val.FuncRef.module_instance = module_instance;
-                }
-                return inner_val;
-            },
-            .Global => |global_index| {
-                const store: *Store = &module_instance.store;
-                std.debug.assert(global_index < store.imports.globals.items.len + store.globals.items.len);
-                const global: *GlobalInstance = store.getGlobal(global_index);
-                return global.value;
-            },
-        }
-    }
-
-    pub fn resolveTo(self: *ConstantExpression, module_instance: *ModuleInstance, comptime T: type) T {
-        const val: Val = self.resolve(module_instance);
-        switch (T) {
-            i32 => return val.I32,
-            u32 => return @as(u32, @bitCast(val.I32)),
-            i64 => return val.I64,
-            u64 => return @as(u64, @bitCast(val.I64)),
-            f32 => return val.F64,
-            f64 => return val.F64,
-            else => unreachable,
-        }
-    }
-
-    pub fn resolveType(self: *const ConstantExpression, module_def: *const ModuleDefinition) ValType {
-        switch (self.*) {
-            .Value => |val| return val.type,
-            .Global => |index| {
-                if (index < module_def.imports.globals.items.len) {
-                    const global_import_def: *const GlobalImportDefinition = &module_def.imports.globals.items[index];
-                    return global_import_def.valtype;
-                } else {
-                    const local_index: usize = module_def.imports.globals.items.len - index;
-                    const global_def: *const GlobalDefinition = &module_def.globals.items[local_index];
-                    return global_def.valtype;
-                }
-                unreachable;
-            },
-        }
     }
 };
 
@@ -623,14 +592,8 @@ pub const FunctionExport = struct {
     returns: []const ValType,
 };
 
-pub const FunctionHandleType = enum(u8) {
-    Export,
-    Import,
-};
-
-pub const FunctionHandle = struct {
+pub const FunctionHandle = extern struct {
     index: u32,
-    type: FunctionHandleType,
 };
 
 pub const GlobalMut = enum(u8) {
@@ -921,10 +884,10 @@ pub const Instruction = struct {
 
         const wasm_op: WasmOpcode = try WasmOpcode.decode(reader);
 
-        var opcode: ?Opcode = null;
+        const opcode: Opcode = wasm_op.toOpcode();
         var immediate = InstructionImmediates{ .Void = {} };
 
-        switch (wasm_op) {
+        switch (opcode) {
             .Select_T => {
                 const num_types = try common.decodeLEB128(u32, reader);
                 if (num_types != 1) {
@@ -1032,15 +995,8 @@ pub const Instruction = struct {
                     try module.code.branch_table.append(branch_table);
                 }
             },
-            .Call => {
-                var index = try common.decodeLEB128(u32, reader);
-                if (module.imports.functions.items.len <= index) {
-                    index -= @intCast(module.imports.functions.items.len);
-                    opcode = .Call_Local;
-                } else {
-                    opcode = .Call_Import;
-                }
-
+            .Call_Local => {
+                const index = try common.decodeLEB128(u32, reader);
                 immediate = InstructionImmediates{ .Index = index }; // function index
             },
             .Call_Indirect => {
@@ -1300,13 +1256,8 @@ pub const Instruction = struct {
             else => {},
         }
 
-        // if the wasm opcode wasn't already translated to the internal opcode, use the default translation
-        if (opcode == null) {
-            opcode = wasm_op.toOpcode();
-        }
-
         return .{
-            .opcode = opcode.?,
+            .opcode = opcode,
             .immediate = immediate,
         };
     }
@@ -1318,36 +1269,14 @@ const CustomSection = struct {
 };
 
 pub const NameCustomSection = struct {
-    const NameAssoc = struct {
-        name: []const u8,
-        func_index: usize,
-
-        fn cmp(_: void, a: NameAssoc, b: NameAssoc) bool {
-            return a.func_index < b.func_index;
-        }
-
-        fn order(a: NameAssoc, b: NameAssoc) std.math.Order {
-            if (a.func_index < b.func_index) {
-                return .lt;
-            } else if (a.func_index > b.func_index) {
-                return .gt;
-            } else {
-                return .eq;
-            }
-        }
-    };
-
     // all string slices here are static strings or point into CustomSection.data - no need to free
     module_name: []const u8,
-    function_names: std.ArrayList(NameAssoc),
-
-    // function_index_to_local_names_begin: std.hash_map.AutoHashMap(u32, u32),
-    // local_names: std.ArrayList([]const u8),
+    function_names: std.AutoHashMap(u32, []const u8),
 
     fn init(allocator: std.mem.Allocator) NameCustomSection {
         return NameCustomSection{
             .module_name = "",
-            .function_names = std.ArrayList(NameAssoc).init(allocator),
+            .function_names = std.AutoHashMap(u32, []const u8).init(allocator),
         };
     }
 
@@ -1392,13 +1321,8 @@ pub const NameCustomSection = struct {
                     while (index < num_func_names) : (index += 1) {
                         const func_index = try common.decodeLEB128(u32, reader);
                         const func_name: []const u8 = try DecodeHelpers.readName(&fixed_buffer_stream);
-                        self.function_names.appendAssumeCapacity(NameAssoc{
-                            .name = func_name,
-                            .func_index = func_index,
-                        });
+                        try self.function_names.putNoClobber(func_index, func_name);
                     }
-
-                    std.sort.heap(NameAssoc, self.function_names.items, {}, NameAssoc.cmp);
                 },
                 2 => { // TODO locals
                     try fixed_buffer_stream.seekBy(section_size);
@@ -1423,19 +1347,8 @@ pub const NameCustomSection = struct {
     }
 
     pub fn findFunctionName(self: *const NameCustomSection, func_index: usize) []const u8 {
-        if (func_index < self.function_names.items.len) {
-            if (self.function_names.items[func_index].func_index == func_index) {
-                return self.function_names.items[func_index].name;
-            } else {
-                const search_item = NameAssoc{
-                    .name = "",
-                    .func_index = func_index,
-                };
-
-                if (std.sort.binarySearch(NameAssoc, self.function_names.items, search_item, NameAssoc.order)) |found_index| {
-                    return self.function_names.items[found_index].name;
-                }
-            }
+        if (self.function_names.get(@intCast(func_index))) |name| {
+            return name;
         }
         return "<unknown_function>";
     }
@@ -1516,7 +1429,9 @@ const ModuleValidator = struct {
     }
 
     fn validateFunctionIndex(index: u64, module: *const ModuleDefinition) !void {
-        if (module.imports.functions.items.len + module.functions.items.len <= index) {
+        // function imports are setup with 1:1 local function trampolines, so we can check the index against
+        // the local function array
+        if (module.functions.items.len <= index) {
             return error.ValidationUnknownFunction;
         }
     }
@@ -1817,15 +1732,13 @@ const ModuleValidator = struct {
                 try Helpers.markFrameInstructionsUnreachable(self);
             },
             .Call_Local => {
-                const local_func_index: u64 = instruction.immediate.Index;
-                if (module.functions.items.len <= local_func_index) {
+                // The wasm spec has local and import functions in different "index spaces", but because we create
+                // a local trampoline to each import function in the same index space, we can simply always check
+                // if a function index is valid against the local function array
+                const func_index: usize = instruction.immediate.Index;
+                if (module.functions.items.len <= func_index) {
                     return error.ValidationUnknownFunction;
                 }
-
-                // Local functions' index space is located after the imports, but the Call_Local instruction immediate
-                // has been setup to point directly into the local function index space.
-                const func_index = module.imports.functions.items.len + local_func_index;
-                std.debug.assert(func_index < std.math.maxInt(usize));
 
                 const type_index: usize = module.getFuncTypeIndex(@intCast(func_index));
                 try Helpers.popPushFuncTypes(self, type_index, module);
@@ -2102,8 +2015,7 @@ const ModuleValidator = struct {
                 const func_index: u32 = instruction.immediate.Index;
                 try validateFunctionIndex(func_index, module);
 
-                const is_referencing_current_function: bool = module.imports.functions.items.len <= func_index and
-                    &module.functions.items[func_index - module.imports.functions.items.len] == func;
+                const is_referencing_current_function: bool = &module.functions.items[func_index] == func;
 
                 // references to the current function must be declared in element segments
                 if (is_referencing_current_function) {
@@ -2947,14 +2859,45 @@ pub const ModuleDefinition = struct {
                             else => return error.MalformedInvalidImport,
                         }
                     }
+
+                    // to avoid special casing local vs import functions, we'll make a bunch of local functions
+                    // that simply trampoline to their corresponding import. Import trampolines come first since
+                    // that's the index space they occupy in vanilla wasm.
+                    try self.functions.ensureUnusedCapacity(self.imports.functions.items.len);
+                    for (0..self.imports.functions.items.len) |index| {
+                        const type_index: u32 = self.imports.functions.items[index].type_index;
+
+                        // trampoline function
+                        const instructions_begin = self.code.instructions.items.len;
+                        try self.code.instructions.append(Instruction{
+                            .opcode = .Call_Import,
+                            .immediate = InstructionImmediates{ .Index = @intCast(index) },
+                        });
+                        try self.code.instructions.append(Instruction{
+                            .opcode = .End,
+                            .immediate = InstructionImmediates{ .Void = {} },
+                        });
+                        const instructions_end = self.code.instructions.items.len;
+
+                        const func = FunctionDefinition{
+                            .type_index = type_index,
+                            .locals = std.ArrayList(ValType).init(allocator),
+
+                            .instructions_begin = instructions_begin,
+                            .instructions_end = instructions_end,
+                            .continuation = 0,
+                        };
+
+                        self.functions.addOneAssumeCapacity().* = func;
+                    }
                 },
                 .Function => {
                     const num_funcs = try common.decodeLEB128(u32, reader);
 
-                    try self.functions.ensureTotalCapacity(num_funcs);
+                    // the array could have already been populated with import trampolines
+                    try self.functions.ensureUnusedCapacity(num_funcs);
 
-                    var func_index: u32 = 0;
-                    while (func_index < num_funcs) : (func_index += 1) {
+                    for (0..num_funcs) |_| {
                         const func = FunctionDefinition{
                             .type_index = try common.decodeLEB128(u32, reader),
                             .locals = std.ArrayList(ValType).init(allocator),
@@ -3046,7 +2989,7 @@ pub const ModuleDefinition = struct {
                         if (std.meta.activeTag(expr) == .Value) {
                             if (expr.Value.type == .FuncRef) {
                                 if (expr.Value.val.isNull() == false) {
-                                    const index: u32 = expr.Value.val.FuncRef.index;
+                                    const index: u32 = @intCast(expr.Value.val.FuncRef.index);
                                     try ModuleValidator.validateFunctionIndex(index, self);
                                 }
                             }
@@ -3110,18 +3053,11 @@ pub const ModuleDefinition = struct {
 
                     self.start_func_index = try common.decodeLEB128(u32, reader);
 
-                    if (self.imports.functions.items.len + self.functions.items.len <= self.start_func_index.?) {
+                    if (self.functions.items.len <= self.start_func_index.?) {
                         return error.ValidationUnknownFunction;
                     }
 
-                    var func_type_index: usize = undefined;
-                    if (self.start_func_index.? < self.imports.functions.items.len) {
-                        func_type_index = self.imports.functions.items[self.start_func_index.?].type_index;
-                    } else {
-                        const local_func_index = self.start_func_index.? - self.imports.functions.items.len;
-                        func_type_index = self.functions.items[local_func_index].type_index;
-                    }
-
+                    const func_type_index: usize = self.functions.items[self.start_func_index.?].type_index;
                     const func_type: *const FunctionTypeDefinition = &self.types.items[func_type_index];
                     if (func_type.types.items.len > 0) {
                         return error.ValidationStartFunctionType;
@@ -3250,7 +3186,14 @@ pub const ModuleDefinition = struct {
 
                     const num_codes = try common.decodeLEB128(u32, reader);
 
-                    if (num_codes != self.functions.items.len) {
+                    // codes refer to local functions not including the trampoline funcs we've generated for calling imports
+                    if (num_codes != self.functions.items.len - self.imports.functions.items.len) {
+                        // std.debug.print(">>>>> num_codes: {}, num functions: {}, imports: {}, functions - imports: {}", .{
+                        //     num_codes,
+                        //     self.functions.items.len,
+                        //     self.imports.functions.items.len,
+                        //     self.functions.items.len - self.imports.functions.items.len,
+                        // });
                         return error.MalformedFunctionCodeSectionMismatch;
                     }
 
@@ -3261,7 +3204,7 @@ pub const ModuleDefinition = struct {
                         const code_size = try common.decodeLEB128(u32, reader);
                         const code_begin_pos = stream.pos;
 
-                        var func_def: *FunctionDefinition = &self.functions.items[code_index];
+                        var func_def: *FunctionDefinition = &self.functions.items[code_index + self.imports.functions.items.len];
 
                         // parse locals
                         {
@@ -3384,8 +3327,6 @@ pub const ModuleDefinition = struct {
 
                         code_index += 1;
                     }
-
-                    // TODO flatten all instructions into a binary stream
                 },
                 .Data => {
                     const num_datas = try common.decodeLEB128(u32, reader);
@@ -3425,7 +3366,8 @@ pub const ModuleDefinition = struct {
             return error.ValidationMultipleMemories;
         }
 
-        if (num_functions_parsed != self.functions.items.len) {
+        // std.debug.print(">>>>> parsed: {}, functions: {}, imports: {}\n", .{ num_functions_parsed, self.functions.items.len, self.imports.functions.items.len });
+        if (num_functions_parsed != self.functions.items.len - self.imports.functions.items.len) {
             return error.MalformedFunctionCodeSectionMismatch;
         }
     }
@@ -3520,20 +3462,19 @@ pub const ModuleDefinition = struct {
         return null;
     }
 
-    pub fn getFunctionExport(self: *const ModuleDefinition, func_handle: FunctionHandle) FunctionExport {
-        const type_index = switch (func_handle.type) {
-            .Export => self.functions.items[func_handle.index].type_index,
-            .Import => self.imports.functions.items[func_handle.index].type_index,
-        };
+    pub fn getFunctionExport(self: *const ModuleDefinition, func_handle: FunctionHandle) ?FunctionExport {
+        if (func_handle.index < self.functions.items.len) {
+            const type_index = self.functions.items[func_handle.index].type_index;
+            const type_def: *const FunctionTypeDefinition = &self.types.items[type_index];
+            const params: []const ValType = type_def.getParams();
+            const returns: []const ValType = type_def.getReturns();
 
-        const type_def: *const FunctionTypeDefinition = &self.types.items[type_index];
-        const params: []const ValType = type_def.getParams();
-        const returns: []const ValType = type_def.getReturns();
-
-        return FunctionExport{
-            .params = params,
-            .returns = returns,
-        };
+            return FunctionExport{
+                .params = params,
+                .returns = returns,
+            };
+        }
+        return null;
     }
 
     pub fn dump(self: *const ModuleDefinition, writer: anytype) !void {
@@ -3678,14 +3619,8 @@ pub const ModuleDefinition = struct {
     }
 
     fn getFuncTypeIndex(self: *const ModuleDefinition, func_index: usize) usize {
-        if (func_index < self.imports.functions.items.len) {
-            const func_def: *const FunctionImportDefinition = &self.imports.functions.items[func_index];
-            return func_def.type_index;
-        } else {
-            const module_func_index = func_index - self.imports.functions.items.len;
-            const func_def: *const FunctionDefinition = &self.functions.items[module_func_index];
-            return func_def.type_index;
-        }
+        const func_def: *const FunctionDefinition = &self.functions.items[func_index];
+        return func_def.type_index;
     }
 
     fn getMemoryLimits(module: *const ModuleDefinition) Limits {

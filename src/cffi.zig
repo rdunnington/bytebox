@@ -8,6 +8,7 @@ const Val = core.Val;
 const ModuleDefinition = core.ModuleDefinition;
 const ModuleInstance = core.ModuleInstance;
 const ModuleImportPackage = core.ModuleImportPackage;
+const FunctionHandle = core.FunctionHandle;
 
 const StableArray = @import("stable-array").StableArray;
 
@@ -61,11 +62,6 @@ const CModuleInstanceInstantiateOpts = extern struct {
 
 const CModuleInstanceInvokeOpts = extern struct {
     trap_on_start: bool,
-};
-
-const CFuncHandle = extern struct {
-    index: u32,
-    type: u32,
 };
 
 const CFuncInfo = extern struct {
@@ -418,7 +414,7 @@ export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModu
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[*:0]const u8, out_handle: ?*CFuncHandle) CError {
+export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[*:0]const u8, out_handle: ?*FunctionHandle) CError {
     if (module != null and c_func_name != null and out_handle != null) {
         const func_name = std.mem.sliceTo(c_func_name.?, 0);
 
@@ -426,7 +422,6 @@ export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[
 
         if (module.?.getFunctionHandle(func_name)) |handle| {
             out_handle.?.index = handle.index;
-            out_handle.?.type = @intFromEnum(handle.type);
             return CError.Ok;
         } else |err| {
             std.debug.assert(err == error.ExportUnknownFunction);
@@ -437,24 +432,17 @@ export fn bb_module_instance_find_func(module: ?*ModuleInstance, c_func_name: ?[
     return CError.InvalidParameter;
 }
 
-export fn bb_module_instance_func_info(module: ?*ModuleInstance, c_func_handle: CFuncHandle) CFuncInfo {
-    if (module != null and c_func_handle.index != INVALID_FUNC_INDEX) {
-        if (std.meta.intToEnum(core.FunctionHandleType, c_func_handle.type)) |handle_type| {
-            const func_handle = core.FunctionHandle{
-                .index = c_func_handle.index,
-                .type = handle_type,
+export fn bb_module_instance_func_info(module: ?*ModuleInstance, func_handle: FunctionHandle) CFuncInfo {
+    if (module != null and func_handle.index != INVALID_FUNC_INDEX) {
+        const maybe_info: ?core.FunctionExport = module.?.getFunctionInfo(func_handle);
+        if (maybe_info) |info| {
+            return CFuncInfo{
+                .params = if (info.params.len > 0) info.params.ptr else null,
+                .num_params = info.params.len,
+                .returns = if (info.returns.len > 0) info.returns.ptr else null,
+                .num_returns = info.returns.len,
             };
-
-            const maybe_info: ?core.FunctionExport = module.?.getFunctionInfo(func_handle);
-            if (maybe_info) |info| {
-                return CFuncInfo{
-                    .params = if (info.params.len > 0) info.params.ptr else null,
-                    .num_params = info.params.len,
-                    .returns = if (info.returns.len > 0) info.returns.ptr else null,
-                    .num_returns = info.returns.len,
-                };
-            }
-        } else |_| {} // intToEnum failed, user must have passed invalid data
+        }
     }
 
     return CFuncInfo{
@@ -465,13 +453,8 @@ export fn bb_module_instance_func_info(module: ?*ModuleInstance, c_func_handle: 
     };
 }
 
-export fn bb_module_instance_invoke(module: ?*ModuleInstance, c_handle: CFuncHandle, params: ?[*]const Val, num_params: usize, returns: ?[*]Val, num_returns: usize, opts: CModuleInstanceInvokeOpts) CError {
-    if (module != null and c_handle.index != INVALID_FUNC_INDEX) {
-        const handle = core.FunctionHandle{
-            .index = c_handle.index,
-            .type = @as(core.FunctionHandleType, @enumFromInt(c_handle.type)),
-        };
-
+export fn bb_module_instance_invoke(module: ?*ModuleInstance, handle: FunctionHandle, params: ?[*]const Val, num_params: usize, returns: ?[*]Val, num_returns: usize, opts: CModuleInstanceInvokeOpts) CError {
+    if (module != null and handle.index != INVALID_FUNC_INDEX) {
         const invoke_opts = core.InvokeOpts{
             .trap_on_start = opts.trap_on_start,
         };
@@ -580,8 +563,8 @@ export fn bb_module_instance_find_global(module: ?*ModuleInstance, c_global_name
     };
 }
 
-export fn bb_func_handle_isvalid(c_handle: CFuncHandle) bool {
-    return c_handle.index != INVALID_FUNC_INDEX;
+export fn bb_func_handle_isvalid(handle: FunctionHandle) bool {
+    return handle.index != INVALID_FUNC_INDEX;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
