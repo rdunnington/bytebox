@@ -104,7 +104,6 @@ typedef struct bb_module_instance_invoke_opts bb_module_instance_invoke_opts;
 struct bb_func_handle
 {
 	uint32_t index;
-	uint32_t type;
 };
 typedef struct bb_func_handle bb_func_handle;
 

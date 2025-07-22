@@ -285,7 +285,7 @@ pub fn main() !void {
         return RunErrors.MissingFunction;
     };
 
-    const func_export: bytebox.FunctionExport = module_def.getFunctionExport(func_handle);
+    const func_export: bytebox.FunctionExport = module_def.getFunctionExport(func_handle).?;
 
     const num_params: usize = invoke_args.len;
     if (func_export.params.len != num_params) {

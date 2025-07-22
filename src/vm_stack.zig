@@ -49,6 +49,7 @@ const TableDefinition = def.TableDefinition;
 const TablePairImmediates = def.TablePairImmediates;
 const Val = def.Val;
 const ValType = def.ValType;
+const FuncRef = def.FuncRef;
 
 const inst = @import("instance.zig");
 const UnlinkableError = inst.UnlinkableError;
@@ -3340,6 +3341,8 @@ pub const StackVM = struct {
                 // maximum number of values that can be on the stack for this function
                 .max_values = num_values + num_locals + num_params,
                 .max_labels = @intCast(def_func.stack_stats.labels),
+
+                .module = module,
             };
             try self.functions.append(f);
         }
@@ -3366,22 +3369,7 @@ pub const StackVM = struct {
             }
         }
 
-        switch (handle.type) {
-            .Export => try self.invokeInternal(module, handle.index, params, returns),
-            .Import => try invokeImportInternal(module, handle.index, params, returns, opts),
-        }
-    }
-
-    pub fn invokeWithIndex(vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void {
-        var self: *StackVM = fromVM(vm);
-
-        const num_imports = module.module_def.imports.functions.items.len;
-        if (func_index >= num_imports) {
-            const instance_index = func_index - num_imports;
-            try self.invokeInternal(module, instance_index, params, returns);
-        } else {
-            try invokeImportInternal(module, func_index, params, returns, .{});
-        }
+        try self.invokeInternal(module, handle.index, params, returns);
     }
 
     pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
@@ -3510,12 +3498,17 @@ pub const StackVM = struct {
         return buffer;
     }
 
-    pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition {
+    pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, func_index: usize) *const FunctionTypeDefinition {
         var self: *StackVM = fromVM(vm);
 
-        const func_instance: *const FunctionInstance = &self.functions.items[local_func_index];
+        const func_instance: *const FunctionInstance = &self.functions.items[func_index];
         const func_type_def: *const FunctionTypeDefinition = &module.module_def.types.items[func_instance.type_def_index];
         return func_type_def;
+    }
+
+    pub fn resolveFuncRef(vm: *VM, func: FuncRef) FuncRef {
+        var self: *StackVM = fromVM(vm);
+        return if (func.isNull()) func else FuncRef{ .func = &self.functions.items[func.index] };
     }
 
     fn invokeInternal(self: *StackVM, module: *ModuleInstance, func_instance_index: usize, params: [*]const Val, returns: [*]Val) !void {

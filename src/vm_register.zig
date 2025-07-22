@@ -51,6 +51,7 @@ const TablePairImmediates = def.TablePairImmediates;
 const Val = def.Val;
 const ValType = def.ValType;
 const TaggedVal = def.TaggedVal;
+const FuncRef = def.FuncRef;
 
 const inst = @import("instance.zig");
 const VM = inst.VM;
@@ -1167,6 +1168,12 @@ pub const RegisterVM = struct {
         _ = module;
         _ = local_func_index;
         return &dummy_func_type_def;
+    }
+
+    pub fn resolveFuncRef(vm: *VM, func: FuncRef) FuncRef {
+        _ = vm;
+        _ = func;
+        return FuncRef.nullRef();
     }
 
     pub fn compile(vm: *RegisterVM, module_def: ModuleDefinition) AllocError!void {

@@ -32,6 +32,8 @@ pub const FunctionInstance = struct {
 
     max_values: u32,
     max_labels: u32,
+
+    module: *ModuleInstance,
 };
 
 pub const Label = struct {

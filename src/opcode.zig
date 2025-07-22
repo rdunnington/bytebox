@@ -958,7 +958,7 @@ const ConversionTables = struct {
         Opcode.Branch_If, // 0x0D
         Opcode.Branch_Table, // 0x0E
         Opcode.Return, // 0x0F
-        Opcode.Invalid, // 0x10 (WasmOpcode.Call)
+        Opcode.Call_Local, // 0x10 (WasmOpcode.Call)
         Opcode.Call_Indirect, // 0x11
         Opcode.Invalid, // 0x12
         Opcode.Invalid, // 0x13

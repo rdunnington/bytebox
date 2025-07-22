@@ -3,6 +3,9 @@ const AllocError = std.mem.Allocator.Error;
 
 const builtin = @import("builtin");
 
+const root = @import("root");
+pub const HostFunctionError = if (@hasDecl(root, "HostFunctionError")) root.HostFunctionError else error{};
+
 const config = @import("config");
 const metering = @import("metering.zig");
 
@@ -30,6 +33,7 @@ const ModuleDefinition = def.ModuleDefinition;
 const NameCustomSection = def.NameCustomSection;
 const Val = def.Val;
 const ValType = def.ValType;
+const FuncRef = def.FuncRef;
 const GlobalExport = def.GlobalExport;
 
 pub const UnlinkableError = error{
@@ -115,11 +119,9 @@ pub const DebugTrace = struct {
 
     pub fn traceFunction(module_instance: *const ModuleInstance, indent: u32, func_index: usize) void {
         if (shouldTraceFunctions()) {
-            const func_name_index: usize = func_index + module_instance.module_def.imports.functions.items.len;
-
             const name_section: *const NameCustomSection = &module_instance.module_def.name_section;
             const module_name = name_section.getModuleName();
-            const function_name = name_section.findFunctionName(func_name_index);
+            const function_name = name_section.findFunctionName(func_index);
 
             printIndent(indent);
             std.debug.print("{s}!{s}\n", .{ module_name, function_name });
@@ -151,7 +153,9 @@ pub const TableInstance = struct {
         };
 
         if (limits.min > 0) {
-            try table.refs.appendNTimes(try Val.nullRef(reftype), @intCast(limits.min));
+            const nullref: ?Val = Val.nullRef(reftype);
+            std.debug.assert(nullref != null); // should have been validated in definition decode
+            try table.refs.appendNTimes(nullref.?, @intCast(limits.min));
         }
         return table;
     }
@@ -192,7 +196,7 @@ pub const TableInstance = struct {
             var val: Val = elem_range[index];
 
             if (table.reftype == .FuncRef) {
-                val.FuncRef.module_instance = module;
+                val.FuncRef = module.vm.resolveFuncRef(val.FuncRef);
             }
 
             table_range[index] = val;
@@ -208,18 +212,12 @@ pub const TableInstance = struct {
             return error.TrapOutOfBoundsTableAccess;
         }
 
-        var elem_range = elems[start_elem_index .. start_elem_index + init_length];
-        var table_range = table.refs.items[start_table_index .. start_table_index + init_length];
+        const elem_range = elems[start_elem_index .. start_elem_index + init_length];
+        const table_range = table.refs.items[start_table_index .. start_table_index + init_length];
 
         var index: u32 = 0;
         while (index < elem_range.len) : (index += 1) {
-            const val: Val = elem_range[index].resolve(module);
-
-            if (table.reftype == .FuncRef) {
-                // should be set in resolve() or global initialization
-                std.debug.assert(val.FuncRef.module_instance != null);
-            }
-
+            const val: Val = ConstantExpressionHelpers.resolve(elem_range[index], module);
             table_range[index] = val;
         }
     }
@@ -364,13 +362,44 @@ pub const ElementInstance = struct {
     reftype: ValType,
 };
 
+const ConstantExpressionHelpers = struct {
+    pub fn resolve(expr: ConstantExpression, module_instance: *ModuleInstance) Val {
+        switch (expr) {
+            .Value => |val| {
+                var inner_val: Val = val.val;
+                if (val.type == .FuncRef and inner_val.isNull() == false) {
+                    inner_val.FuncRef = module_instance.vm.resolveFuncRef(inner_val.FuncRef);
+                    std.debug.assert(inner_val.FuncRef.isNull() == false);
+                }
+                return inner_val;
+            },
+            .Global => |global_index| {
+                const store: *Store = &module_instance.store;
+                std.debug.assert(global_index < store.imports.globals.items.len + store.globals.items.len);
+                const global: *GlobalInstance = store.getGlobal(global_index);
+                return global.value;
+            },
+        }
+    }
+
+    pub fn resolveTo(expr: ConstantExpression, module_instance: *ModuleInstance, comptime T: type) T {
+        const val: Val = resolve(expr, module_instance);
+        switch (T) {
+            i32 => return val.I32,
+            u32 => return @as(u32, @bitCast(val.I32)),
+            i64 => return val.I64,
+            u64 => return @as(u64, @bitCast(val.I64)),
+            f32 => return val.F64,
+            f64 => return val.F64,
+            else => unreachable,
+        }
+    }
+};
+
 const ImportType = enum(u8) {
     Host,
     Wasm,
 };
-
-const root = @import("root");
-pub const HostFunctionError = if (@hasDecl(root, "HostFunctionError")) root.HostFunctionError else error{};
 
 const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) HostFunctionError!void;
 
@@ -693,22 +722,22 @@ pub const VM = struct {
     const DeinitFn = *const fn (vm: *VM) void;
     const InstantiateFn = *const fn (vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void;
     const InvokeFn = *const fn (vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void;
-    const InvokeWithIndexFn = *const fn (vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void;
     const ResumeInvokeFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void;
     const StepFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void;
     const SetDebugTrapFn = *const fn (vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) anyerror!bool;
     const FormatBacktraceFn = *const fn (vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8);
-    const FindFuncTypeDefFn = *const fn (vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition;
+    const FindFuncTypeDefFn = *const fn (vm: *VM, module: *ModuleInstance, func_index: usize) *const FunctionTypeDefinition;
+    const ResolveFuncRefFn = *const fn (vm: *VM, ref: FuncRef) FuncRef;
 
     deinit_fn: DeinitFn,
     instantiate_fn: InstantiateFn,
     invoke_fn: InvokeFn,
-    invoke_with_index_fn: InvokeWithIndexFn,
     resume_invoke_fn: ResumeInvokeFn,
     step_fn: StepFn,
     set_debug_trap_fn: SetDebugTrapFn,
     format_backtrace_fn: FormatBacktraceFn,
     find_func_type_def_fn: FindFuncTypeDefFn,
+    resolve_func_ref_fn: ResolveFuncRefFn,
 
     allocator: std.mem.Allocator,
     mem: []u8, // VM and impl memory live here
@@ -729,12 +758,12 @@ pub const VM = struct {
         vm.deinit_fn = T.deinit;
         vm.instantiate_fn = T.instantiate;
         vm.invoke_fn = T.invoke;
-        vm.invoke_with_index_fn = T.invokeWithIndex;
         vm.resume_invoke_fn = T.resumeInvoke;
         vm.step_fn = T.step;
         vm.set_debug_trap_fn = T.setDebugTrap;
         vm.format_backtrace_fn = T.formatBacktrace;
         vm.find_func_type_def_fn = T.findFuncTypeDef;
+        vm.resolve_func_ref_fn = T.resolveFuncRef;
         vm.allocator = allocator;
         vm.mem = mem;
         vm.impl = impl;
@@ -760,10 +789,6 @@ pub const VM = struct {
         try vm.invoke_fn(vm, module, handle, params, returns, opts);
     }
 
-    pub fn invokeWithIndex(vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void {
-        try vm.invoke_with_index_fn(vm, module, func_index, params, returns);
-    }
-
     pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
         try vm.resume_invoke_fn(vm, module, returns, opts);
     }
@@ -780,8 +805,12 @@ pub const VM = struct {
         return vm.format_backtrace_fn(vm, indent, allocator);
     }
 
-    pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition {
-        return vm.find_func_type_def_fn(vm, module, local_func_index);
+    pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, func_index: usize) *const FunctionTypeDefinition {
+        return vm.find_func_type_def_fn(vm, module, func_index);
+    }
+
+    pub fn resolveFuncRef(vm: *VM, func: FuncRef) FuncRef {
+        return vm.resolve_func_ref_fn(vm, func);
     }
 };
 
@@ -1052,13 +1081,10 @@ pub const ModuleInstance = struct {
         try store.globals.ensureTotalCapacity(module_def.imports.globals.items.len + module_def.globals.items.len);
 
         for (module_def.globals.items) |*def_global| {
-            var global = GlobalInstance{
+            const global = GlobalInstance{
                 .def = def_global,
-                .value = def_global.expr.resolve(self),
+                .value = ConstantExpressionHelpers.resolve(def_global.expr, self),
             };
-            if (def_global.valtype == .FuncRef) {
-                global.value.FuncRef.module_instance = self;
-            }
             try store.globals.append(global);
         }
 
@@ -1076,7 +1102,7 @@ pub const ModuleInstance = struct {
 
                 var table: *TableInstance = store.getTable(def_elem.table_index);
 
-                const start_table_index_i32: i32 = if (def_elem.offset) |*offset| offset.resolveTo(self, i32) else 0;
+                const start_table_index_i32: i32 = if (def_elem.offset) |*offset| ConstantExpressionHelpers.resolveTo(offset.*, self, i32) else 0;
                 if (start_table_index_i32 < 0) {
                     return error.UninstantiableOutOfBoundsTableAccess;
                 }
@@ -1093,21 +1119,16 @@ pub const ModuleInstance = struct {
             } else if (def_elem.mode == .Passive) {
                 if (def_elem.elems_value.items.len > 0) {
                     try elem.refs.resize(def_elem.elems_value.items.len);
-                    var index: usize = 0;
-                    while (index < elem.refs.items.len) : (index += 1) {
-                        elem.refs.items[index] = def_elem.elems_value.items[index];
+                    for (elem.refs.items, def_elem.elems_value.items) |*elem_inst, *elem_def| {
+                        elem_inst.* = elem_def.*;
                         if (elem.reftype == .FuncRef) {
-                            elem.refs.items[index].FuncRef.module_instance = self;
+                            elem_inst.FuncRef = self.vm.resolveFuncRef(elem_inst.FuncRef);
                         }
                     }
                 } else {
                     try elem.refs.resize(def_elem.elems_expr.items.len);
-                    var index: usize = 0;
-                    while (index < elem.refs.items.len) : (index += 1) {
-                        elem.refs.items[index] = def_elem.elems_expr.items[index].resolve(self);
-                        if (elem.reftype == .FuncRef) {
-                            elem.refs.items[index].FuncRef.module_instance = self;
-                        }
+                    for (elem.refs.items, def_elem.elems_expr.items) |*elem_inst, *elem_def| {
+                        elem_inst.* = ConstantExpressionHelpers.resolve(elem_def.*, self);
                     }
                 }
             }
@@ -1122,7 +1143,7 @@ pub const ModuleInstance = struct {
                 var memory: *MemoryInstance = store.getMemory(memory_index);
 
                 const num_bytes: usize = def_data.bytes.items.len;
-                const offset_begin: usize = (def_data.offset.?).resolveTo(self, u32);
+                const offset_begin: usize = ConstantExpressionHelpers.resolveTo(def_data.offset.?, self, u32);
                 const offset_end: usize = offset_begin + num_bytes;
 
                 const mem_buffer: []u8 = memory.buffer();
@@ -1138,7 +1159,8 @@ pub const ModuleInstance = struct {
 
         if (module_def.start_func_index) |func_index| {
             const no_vals: []Val = &[0]Val{};
-            try self.vm.invokeWithIndex(self, func_index, no_vals.ptr, no_vals.ptr);
+            const handle = FunctionHandle{ .index = func_index };
+            try self.vm.invoke(self, handle, no_vals.ptr, no_vals.ptr, .{});
         }
     }
 
@@ -1199,18 +1221,9 @@ pub const ModuleInstance = struct {
     pub fn getFunctionHandle(self: *const ModuleInstance, func_name: []const u8) ExportError!FunctionHandle {
         for (self.module_def.exports.functions.items) |func_export| {
             if (std.mem.eql(u8, func_name, func_export.name)) {
-                if (func_export.index >= self.module_def.imports.functions.items.len) {
-                    const func_index: usize = func_export.index - self.module_def.imports.functions.items.len;
-                    return FunctionHandle{
-                        .index = @as(u32, @intCast(func_index)),
-                        .type = .Export,
-                    };
-                } else {
-                    return FunctionHandle{
-                        .index = @as(u32, @intCast(func_export.index)),
-                        .type = .Import,
-                    };
-                }
+                return FunctionHandle{
+                    .index = @as(u32, @intCast(func_export.index)),
+                };
             }
         }
 
@@ -1218,7 +1231,6 @@ pub const ModuleInstance = struct {
             if (std.mem.eql(u8, func_name, func_import.name)) {
                 return FunctionHandle{
                     .index = @as(u32, @intCast(i)),
-                    .type = .Import,
                 };
             }
         }
@@ -1228,7 +1240,7 @@ pub const ModuleInstance = struct {
         return error.ExportUnknownFunction;
     }
 
-    pub fn getFunctionInfo(self: *const ModuleInstance, handle: FunctionHandle) FunctionExport {
+    pub fn getFunctionInfo(self: *const ModuleInstance, handle: FunctionHandle) ?FunctionExport {
         return self.module_def.getFunctionExport(handle);
     }
 
@@ -1313,18 +1325,18 @@ pub const ModuleInstance = struct {
     }
 
     fn findFuncTypeDef(self: *ModuleInstance, index: usize) *const FunctionTypeDefinition {
-        const num_imports: usize = self.store.imports.functions.items.len;
-        if (index >= num_imports) {
-            const local_func_index: usize = index - num_imports;
-            return self.vm.findFuncTypeDef(self, local_func_index);
-        } else {
-            const import: *const FunctionImport = &self.store.imports.functions.items[index];
-            const func_type_def: *const FunctionTypeDefinition = switch (import.data) {
-                .Host => |data| &data.func_def,
-                .Wasm => |data| data.module_instance.findFuncTypeDef(data.index),
-            };
-            return func_type_def;
-        }
+        // const num_imports: usize = self.store.imports.functions.items.len;
+        // if (index >= num_imports) {
+        //     const local_func_index: usize = index - num_imports;
+        return self.vm.findFuncTypeDef(self, index);
+        // } else {
+        //     const import: *const FunctionImport = &self.store.imports.functions.items[index];
+        //     const func_type_def: *const FunctionTypeDefinition = switch (import.data) {
+        //         .Host => |data| &data.func_def,
+        //         .Wasm => |data| data.module_instance.findFuncTypeDef(data.index),
+        //     };
+        //     return func_type_def;
+        // }
     }
 
     fn getGlobalWithIndex(self: *ModuleInstance, index: usize) *GlobalInstance {

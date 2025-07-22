@@ -234,35 +234,22 @@ pub inline fn callIndirect(pc: u32, code: [*]const Instruction, stack: *Stack) !
     if (ref.isNull()) {
         return error.TrapUninitializedElement;
     }
+    const maybe_func: ?*const FunctionInstance = @ptrCast(@alignCast(ref.FuncRef.func));
+    std.debug.assert(maybe_func != null);
+    const func = maybe_func.?;
 
-    const func_index = ref.FuncRef.index;
+    const call_module: *ModuleInstance = func.module;
 
-    std.debug.assert(ref.FuncRef.module_instance != null); // Should have been set in module instantiation
+    if (func.type_def_index != immediates.type_index) {
+        const func_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[func.type_def_index];
+        const immediate_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[immediates.type_index];
 
-    var call_module: *ModuleInstance = ref.FuncRef.module_instance.?;
-    var call_store = &call_module.store;
-    var call_stackvm = StackVM.fromVM(call_module.vm);
-
-    if (func_index >= call_store.imports.functions.items.len) {
-        const func: *const FunctionInstance = &call_stackvm.functions.items[func_index - call_store.imports.functions.items.len];
-        if (func.type_def_index != immediates.type_index) {
-            const func_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[func.type_def_index];
-            const immediate_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[immediates.type_index];
-
-            var type_comparer = FunctionTypeDefinition.SortContext{};
-            if (type_comparer.eql(func_type_def, immediate_type_def) == false) {
-                return error.TrapIndirectCallTypeMismatch;
-            }
-        }
-        return call(pc, stack, call_module, func);
-    } else {
-        var func_import: *const FunctionImport = &call_store.imports.functions.items[func_index];
-        const func_type_def: *const FunctionTypeDefinition = &call_module.module_def.types.items[immediates.type_index];
-        if (func_import.isTypeSignatureEql(func_type_def) == false) {
+        var type_comparer = FunctionTypeDefinition.SortContext{};
+        if (type_comparer.eql(func_type_def, immediate_type_def) == false) {
             return error.TrapIndirectCallTypeMismatch;
         }
-        return _callImport(pc, stack, func_import);
     }
+    return call(pc, stack, call_module, func);
 }
 
 pub inline fn drop(stack: *Stack) void {
@@ -1437,8 +1424,9 @@ pub inline fn i64Extend32S(stack: *Stack) void {
 
 pub inline fn refNull(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
     const valtype = code[pc].immediate.ValType;
-    const val = try Val.nullRef(valtype);
-    stack.pushValue(val);
+    const val: ?Val = Val.nullRef(valtype);
+    std.debug.assert(val != null); // should have been validated in debug
+    stack.pushValue(val.?);
 }
 
 pub inline fn refIsNull(stack: *Stack) void {
@@ -1448,8 +1436,9 @@ pub inline fn refIsNull(stack: *Stack) void {
 }
 
 pub inline fn refFunc(pc: u32, code: [*]const Instruction, stack: *Stack) void {
+    const stack_vm = StackVM.fromVM(stack.topFrame().module_instance.vm);
     const func_index: u32 = code[pc].immediate.Index;
-    const val = Val{ .FuncRef = .{ .index = func_index, .module_instance = stack.topFrame().module_instance } };
+    const val = Val{ .FuncRef = .{ .func = &stack_vm.functions.items[func_index] } };
     stack.pushValue(val);
 }
 

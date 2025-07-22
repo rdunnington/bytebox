@@ -288,7 +288,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
     } else if (strcmp("externref", json_type.string)) {
         const val: Val = blk: {
             if (strcmp("null", json_value.string)) {
-                break :blk Val.nullRef(ValType.ExternRef) catch unreachable;
+                break :blk Val.nullRef(ValType.ExternRef).?;
             } else {
                 const int = try std.fmt.parseInt(u32, json_value.string, 10);
                 break :blk Val{ .ExternRef = int };
@@ -296,7 +296,7 @@ fn parseVal(obj: std.json.ObjectMap) !TaggedVal {
         };
         return TaggedVal{ .type = .ExternRef, .val = val };
     } else if (strcmp("funcref", json_type.string) and strcmp("null", json_value.string)) {
-        return TaggedVal{ .type = .FuncRef, .val = Val.nullRef(ValType.FuncRef) catch unreachable };
+        return TaggedVal{ .type = .FuncRef, .val = Val.nullRef(ValType.FuncRef).? };
     } else {
         print("Failed to parse value of type '{s}' with value '{s}'\n", .{ json_type.string, json_value.string });
     }
@@ -1055,7 +1055,10 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                         };
 
                         const func_export = module.inst.?.module_def.getFunctionExport(func_handle);
-                        return_types = try allocator.dupe(ValType, func_export.returns);
+                        std.debug.assert(func_export != null);
+                        if (func_export) |f| {
+                            return_types = try allocator.dupe(ValType, f.returns);
+                        }
                     },
                     .Get => {
                         if ((module.inst.?).getGlobalExport(c.action.field)) |global_export| {
