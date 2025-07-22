@@ -381,37 +381,26 @@ pub const BlockTypeValue = extern union {
 
     fn getBlocktypeParamTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
         switch (block_type) {
-            else => return &BlockTypeStatics.empty,
+            else => return &.{},
             .TypeIndex => return module_def.types.items[value.TypeIndex].getParams(),
         }
     }
 
     fn getBlocktypeReturnTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
         switch (block_type) {
-            .Void => return &BlockTypeStatics.empty,
+            .Void => return &.{},
             .ValType => return switch (value.ValType) {
-                .I32 => &BlockTypeStatics.valtype_i32,
-                .I64 => &BlockTypeStatics.valtype_i64,
-                .F32 => &BlockTypeStatics.valtype_f32,
-                .F64 => &BlockTypeStatics.valtype_f64,
-                .V128 => &BlockTypeStatics.valtype_v128,
-                .FuncRef => &BlockTypeStatics.reftype_funcref,
-                .ExternRef => &BlockTypeStatics.reftype_externref,
+                .I32 => &.{.I32},
+                .I64 => &.{.I64},
+                .F32 => &.{.F32},
+                .F64 => &.{.F64},
+                .V128 => &.{.V128},
+                .FuncRef => &.{.FuncRef},
+                .ExternRef => &.{.ExternRef},
             },
             .TypeIndex => return module_def.types.items[value.TypeIndex].getReturns(),
         }
     }
-};
-
-pub const BlockTypeStatics = struct {
-    const empty = [_]ValType{};
-    const valtype_i32 = [_]ValType{.I32};
-    const valtype_i64 = [_]ValType{.I64};
-    const valtype_f32 = [_]ValType{.F32};
-    const valtype_f64 = [_]ValType{.F64};
-    const valtype_v128 = [_]ValType{.V128};
-    const reftype_funcref = [_]ValType{.FuncRef};
-    const reftype_externref = [_]ValType{.ExternRef};
 };
 
 const ConstantExpressionType = enum {
