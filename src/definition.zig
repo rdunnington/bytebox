@@ -546,20 +546,25 @@ pub const FunctionDefinition = struct {
     instructions_begin: usize,
     instructions_end: usize,
     continuation: usize,
-    locals: std.ArrayList(ValType), // TODO use a slice of a large contiguous array instead
+    locals_begin: usize,
+    locals_end: usize,
     stack_stats: FunctionStackStats = .{},
 
-    pub fn instructions(func: FunctionDefinition, module_def: ModuleDefinition) []Instruction {
+    pub fn locals(func: *const FunctionDefinition, module_def: *const ModuleDefinition) []const ValType {
+        return module_def.code.locals.items[func.locals_begin..func.locals_end];
+    }
+
+    pub fn instructions(func: *const FunctionDefinition, module_def: *const ModuleDefinition) []Instruction {
         return module_def.code.instructions.items[func.instructions_begin..func.instructions_end];
     }
 
-    pub fn numParamsAndLocals(func: FunctionDefinition, module_def: ModuleDefinition) usize {
+    pub fn numParamsAndLocals(func: *const FunctionDefinition, module_def: *const ModuleDefinition) usize {
         const func_type: *const FunctionTypeDefinition = func.typeDefinition(module_def);
         const param_types: []const ValType = func_type.getParams();
         return param_types.len + func.locals.items.len;
     }
 
-    pub fn typeDefinition(func: FunctionDefinition, module_def: ModuleDefinition) *const FunctionTypeDefinition {
+    pub fn typeDefinition(func: *const FunctionDefinition, module_def: *const ModuleDefinition) *const FunctionTypeDefinition {
         return &module_def.types.items[func.type_index];
     }
 };
@@ -1488,10 +1493,11 @@ const ModuleValidator = struct {
                     if (locals_index < func_type.num_params) {
                         return func_type.getParams()[@intCast(locals_index)];
                     } else {
-                        if (func_.locals.items.len <= locals_index - func_type.num_params) {
+                        const locals: []const ValType = func_.locals(module_);
+                        if (locals.len <= locals_index - func_type.num_params) {
                             return error.ValidationUnknownLocal;
                         }
-                        return func_.locals.items[@as(usize, @intCast(locals_index)) - func_type.num_params];
+                        return locals[@as(usize, @intCast(locals_index)) - func_type.num_params];
                     }
                 }
                 unreachable;
@@ -2567,6 +2573,7 @@ pub const ModuleDefinitionOpts = struct {
 
 pub const ModuleDefinition = struct {
     const Code = struct {
+        locals: std.ArrayList(ValType),
         instructions: std.ArrayList(Instruction),
 
         wasm_address_to_instruction_index: std.AutoHashMap(u32, u32),
@@ -2620,6 +2627,7 @@ pub const ModuleDefinition = struct {
             .allocator = allocator,
             .code = Code{
                 .instructions = std.ArrayList(Instruction).init(allocator),
+                .locals = std.ArrayList(ValType).init(allocator),
                 .wasm_address_to_instruction_index = std.AutoHashMap(u32, u32).init(allocator),
                 .branch_table = std.ArrayList(BranchTableImmediates).init(allocator),
                 .branch_table_ids = std.ArrayList(u32).init(allocator),
@@ -2870,10 +2878,10 @@ pub const ModuleDefinition = struct {
 
                         const func = FunctionDefinition{
                             .type_index = type_index,
-                            .locals = std.ArrayList(ValType).init(allocator),
-
                             .instructions_begin = instructions_begin,
                             .instructions_end = instructions_end,
+                            .locals_begin = 0,
+                            .locals_end = 0,
                             .continuation = 0,
                         };
 
@@ -2889,11 +2897,12 @@ pub const ModuleDefinition = struct {
                     for (0..num_funcs) |_| {
                         const func = FunctionDefinition{
                             .type_index = try common.decodeLEB128(u32, reader),
-                            .locals = std.ArrayList(ValType).init(allocator),
 
                             // we'll fix these up later when we find them in the Code section
                             .instructions_begin = 0,
                             .instructions_end = 0,
+                            .locals_begin = 0,
+                            .locals_end = 0,
                             .continuation = 0,
                         };
 
@@ -3177,16 +3186,17 @@ pub const ModuleDefinition = struct {
 
                     // codes refer to local functions not including the trampoline funcs we've generated for calling imports
                     if (num_codes != self.functions.items.len - self.imports.functions.items.len) {
-                        // std.debug.print(">>>>> num_codes: {}, num functions: {}, imports: {}, functions - imports: {}", .{
-                        //     num_codes,
-                        //     self.functions.items.len,
-                        //     self.imports.functions.items.len,
-                        //     self.functions.items.len - self.imports.functions.items.len,
-                        // });
                         return error.MalformedFunctionCodeSectionMismatch;
                     }
 
                     const wasm_code_address_begin: usize = stream.pos;
+
+                    const TypeCount = struct {
+                        valtype: ValType,
+                        count: u32,
+                    };
+                    var local_types_scratch = std.ArrayList(TypeCount).init(allocator);
+                    defer local_types_scratch.deinit();
 
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
@@ -3197,20 +3207,13 @@ pub const ModuleDefinition = struct {
 
                         // parse locals
                         {
-                            const num_locals = try common.decodeLEB128(u32, reader);
+                            func_def.locals_begin = self.code.locals.items.len;
 
-                            const TypeCount = struct {
-                                valtype: ValType,
-                                count: u32,
-                            };
-                            var local_types = std.ArrayList(TypeCount).init(allocator);
-                            defer local_types.deinit();
-                            try local_types.ensureTotalCapacity(num_locals);
+                            const num_locals = try common.decodeLEB128(u32, reader);
+                            try local_types_scratch.resize(num_locals);
 
                             var locals_total: usize = 0;
-                            var locals_index: u32 = 0;
-                            try func_def.locals.ensureTotalCapacity(num_locals);
-                            while (locals_index < num_locals) : (locals_index += 1) {
+                            for (local_types_scratch.items) |*item| {
                                 const n = try common.decodeLEB128(u32, reader);
                                 const local_type = try ValType.decode(reader);
 
@@ -3218,14 +3221,16 @@ pub const ModuleDefinition = struct {
                                 if (locals_total >= std.math.maxInt(u32)) {
                                     return error.MalformedTooManyLocals;
                                 }
-                                local_types.appendAssumeCapacity(TypeCount{ .valtype = local_type, .count = n });
+                                item.* = TypeCount{ .valtype = local_type, .count = n };
                             }
 
-                            try func_def.locals.ensureTotalCapacity(locals_total);
+                            try self.code.locals.ensureUnusedCapacity(locals_total);
 
-                            for (local_types.items) |type_count| {
-                                func_def.locals.appendNTimesAssumeCapacity(type_count.valtype, type_count.count);
+                            for (local_types_scratch.items) |type_count| {
+                                self.code.locals.appendNTimesAssumeCapacity(type_count.valtype, type_count.count);
                             }
+
+                            func_def.locals_end = self.code.locals.items.len;
                         }
 
                         func_def.instructions_begin = @intCast(instructions.items.len);
@@ -3355,7 +3360,6 @@ pub const ModuleDefinition = struct {
             return error.ValidationMultipleMemories;
         }
 
-        // std.debug.print(">>>>> parsed: {}, functions: {}, imports: {}\n", .{ num_functions_parsed, self.functions.items.len, self.imports.functions.items.len });
         if (num_functions_parsed != self.functions.items.len - self.imports.functions.items.len) {
             return error.MalformedFunctionCodeSectionMismatch;
         }
@@ -3363,6 +3367,7 @@ pub const ModuleDefinition = struct {
 
     pub fn destroy(self: *ModuleDefinition) void {
         self.code.instructions.deinit();
+        self.code.locals.deinit();
         self.code.wasm_address_to_instruction_index.deinit();
         self.code.branch_table.deinit();
         self.code.branch_table_ids.deinit();
@@ -3400,9 +3405,7 @@ pub const ModuleDefinition = struct {
         for (self.types.items) |*item| {
             item.types.deinit();
         }
-        for (self.functions.items) |*item| {
-            item.locals.deinit();
-        }
+
         for (self.elements.items) |*item| {
             item.elems_value.deinit();
             item.elems_expr.deinit();

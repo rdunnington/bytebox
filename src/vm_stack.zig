@@ -3325,7 +3325,8 @@ pub const StackVM = struct {
             const func_type: *const FunctionTypeDefinition = &module.module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
 
-            const num_locals: u32 = @intCast(def_func.locals.items.len);
+            const locals: []const ValType = def_func.locals(module.module_def);
+            const num_locals: u32 = @intCast(locals.len);
             const num_params: u16 = @intCast(param_types.len);
             const num_values: u32 = @intCast(def_func.stack_stats.values);
 
