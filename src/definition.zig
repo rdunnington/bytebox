@@ -189,7 +189,7 @@ pub const Val = extern union {
     F64: f64,
     V128: v128,
     FuncRef: FuncRef,
-    ExternRef: usize,
+    ExternRef: u64,
 
     pub fn default(valtype: ValType) Val {
         return switch (valtype) {
@@ -2680,7 +2680,8 @@ pub const ModuleDefinition = struct {
                         return Val.funcrefFromIndex(func_index);
                     },
                     .ExternRef => {
-                        unreachable; // TODO
+                        const ref = try common.decodeLEB128(u64, reader);
+                        return Val{ .ExternRef = ref };
                     },
                     else => unreachable,
                 }

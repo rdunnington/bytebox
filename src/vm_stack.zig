@@ -118,8 +118,6 @@ fn preamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack
     OpHelpers.traceInstruction(name, pc, stack);
 }
 
-// TODO move all definition stuff into definition.zig and vm stuff into vm_stack.zig
-
 // pc is the "program counter", which points to the next instruction to execute
 const InstructionFunc = *const fn (pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void;
 
@@ -3251,7 +3249,7 @@ pub const StackVM = struct {
     };
 
     const DebugState = struct {
-        trapped_opcodes: std.ArrayList(TrappedOpcode), // TODO multiarraylist?
+        trapped_opcodes: std.ArrayList(TrappedOpcode),
         pc: u32 = 0,
         trap_counter: u32 = 0, // used for trapping on step
         is_invoking: bool = false,
@@ -3553,22 +3551,6 @@ pub const StackVM = struct {
 
         if (metering.enabled and self.meter_state.enabled) {
             self.meter_state.onInvokeFinished();
-        }
-    }
-
-    fn invokeImportInternal(module: *ModuleInstance, import_index: usize, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) !void {
-        const func_import: *const FunctionImport = &module.store.imports.functions.items[import_index];
-        switch (func_import.data) {
-            .Host => |data| {
-                DebugTrace.traceHostFunction(module, 1, func_import.name);
-
-                try data.callback(data.userdata, module, params, returns);
-            },
-            .Wasm => |data| {
-                var import_instance: *ModuleInstance = data.module_instance;
-                const handle: FunctionHandle = try import_instance.getFunctionHandle(func_import.name); // TODO could cache this in the func_import
-                try import_instance.vm.invoke(import_instance, handle, params, returns, opts);
-            },
         }
     }
 
