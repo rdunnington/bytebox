@@ -3485,10 +3485,10 @@ pub const StackVM = struct {
                 try writer.print("\t", .{});
             }
 
-            const name_section: *const NameCustomSection = &frame.module_instance.module_def.name_section;
+            const name_section: *const NameCustomSection = &frame.func.module.module_def.name_section;
             const module_name = name_section.getModuleName();
 
-            const func_name_index: usize = frame.func.def_index + frame.module_instance.module_def.imports.functions.items.len;
+            const func_name_index: usize = frame.func.def_index + frame.func.module.module_def.imports.functions.items.len;
             const function_name = name_section.findFunctionName(func_name_index);
 
             try writer.print("{}: {s}!{s}\n", .{ reverse_index, module_name, function_name });
