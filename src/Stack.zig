@@ -45,7 +45,6 @@ pub const Label = struct {
 pub const CallFrame = struct {
     func: *const FunctionInstance,
     module_instance: *ModuleInstance,
-    locals: []Val,
     num_returns: u16,
     start_offset_values: u32,
     start_offset_labels: u16,
@@ -266,19 +265,17 @@ pub fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: 
     assert(stack.num_frames < stack.frames.len);
     assert(values_index_end < stack.values.len);
 
-    const locals_and_params: []Val = stack.values[values_index_begin..values_index_end];
-    const locals = stack.values[stack.num_values..values_index_end];
-
-    stack.num_values = values_index_end;
+    const func_locals = stack.values[stack.num_values..values_index_end];
 
     // All locals must be initialized to their default value
     // https://webassembly.github.io/spec/core/exec/instructions.html#exec-invoke
-    @memset(std.mem.sliceAsBytes(locals), 0);
+    @memset(std.mem.sliceAsBytes(func_locals), 0);
+
+    stack.num_values = values_index_end;
 
     stack.frames[stack.num_frames] = CallFrame{
         .func = func,
         .module_instance = module_instance,
-        .locals = locals_and_params,
         .num_returns = func.num_returns,
         .start_offset_values = values_index_begin,
         .start_offset_labels = stack.num_labels,
@@ -318,8 +315,13 @@ pub fn popFrame(stack: *Stack) ?FuncCallData {
     return null;
 }
 
-pub fn topFrame(stack: Stack) *CallFrame {
+pub fn topFrame(stack: *const Stack) *CallFrame {
     return &stack.frames[stack.num_frames - 1];
+}
+
+pub fn locals(stack: *const Stack) []Val {
+    const frame = stack.topFrame();
+    return stack.values[frame.start_offset_values..];
 }
 
 pub fn popAll(stack: *Stack) void {

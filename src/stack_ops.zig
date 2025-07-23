@@ -282,23 +282,23 @@ pub inline fn selectT(stack: *Stack) void {
 
 pub inline fn localGet(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const locals_index: u32 = code[pc].immediate.Index;
-    const frame: *const CallFrame = stack.topFrame();
-    const v: Val = frame.locals[locals_index];
+    const locals = stack.locals();
+    const v: Val = locals[locals_index];
     stack.pushValue(v);
 }
 
 pub inline fn localSet(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const locals_index: u32 = code[pc].immediate.Index;
-    var frame: *CallFrame = stack.topFrame();
+    const locals = stack.locals();
     const v: Val = stack.popValue();
-    frame.locals[locals_index] = v;
+    locals[locals_index] = v;
 }
 
 pub inline fn localTee(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const locals_index: u32 = code[pc].immediate.Index;
-    var frame: *CallFrame = stack.topFrame();
+    const locals = stack.locals();
     const v: Val = stack.topValue();
-    frame.locals[locals_index] = v;
+    locals[locals_index] = v;
 }
 
 pub inline fn globalGet(pc: u32, code: [*]const Instruction, stack: *Stack) void {
