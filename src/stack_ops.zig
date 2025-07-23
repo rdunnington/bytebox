@@ -161,7 +161,7 @@ pub inline fn end(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallD
 
 pub inline fn branch(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
     const label_id: u32 = code[pc].immediate.LabelId;
-    return _branch(stack, label_id);
+    return _branch(code, stack, label_id);
 }
 
 pub inline fn branchIf(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
@@ -169,7 +169,7 @@ pub inline fn branchIf(pc: u32, code: [*]const Instruction, stack: *Stack) ?Func
     const v = stack.popI32();
     if (v != 0) {
         const label_id: u32 = code[pc].immediate.LabelId;
-        next = _branch(stack, label_id);
+        next = _branch(code, stack, label_id);
     } else {
         next = FuncCallData{
             .code = code,
@@ -189,7 +189,7 @@ pub inline fn branchTable(pc: u32, code: [*]const Instruction, stack: *Stack) ?F
 
     const label_index = stack.popI32();
     const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@as(usize, @intCast(label_index))] else immediates.fallback_id;
-    return _branch(stack, label_id);
+    return _branch(code, stack, label_id);
 }
 
 pub inline fn @"return"(stack: *Stack) ?FuncCallData {
@@ -2994,7 +2994,7 @@ fn _callImport(pc: u32, stack: *Stack, func: *const FunctionImport) (TrapError |
     }
 }
 
-fn _branch(stack: *Stack, label_id: u32) ?FuncCallData {
+fn _branch(code: [*]const Instruction, stack: *Stack, label_id: u32) ?FuncCallData {
     const label: *const Label = stack.findLabel(@as(u32, @intCast(label_id)));
     const frame_label: *const Label = stack.frameLabel();
     // TODO generate BranchToFunctionEnd if this can be statically determined at decode time (or just generate a Return?)
@@ -3003,8 +3003,7 @@ fn _branch(stack: *Stack, label_id: u32) ?FuncCallData {
     }
 
     // TODO split branches up into different types to avoid this lookup and if statement
-    const module_def: *const ModuleDefinition = stack.topFrame().module_instance.module_def;
-    const is_loop_continuation: bool = module_def.code.instructions.items[label.continuation].opcode == .Loop;
+    const is_loop_continuation: bool = code[label.continuation].opcode == .Loop;
 
     if (is_loop_continuation == false or label_id != 0) {
         const pop_final_label = !is_loop_continuation;
@@ -3012,7 +3011,7 @@ fn _branch(stack: *Stack, label_id: u32) ?FuncCallData {
     }
 
     return FuncCallData{
-        .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
+        .code = code,
         .continuation = label.continuation + 1, // branching takes care of popping/pushing values so skip the End instruction
     };
 }
