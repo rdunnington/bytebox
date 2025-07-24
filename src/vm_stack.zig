@@ -42,7 +42,6 @@ const ImportNames = def.ImportNames;
 const Instruction = def.Instruction;
 const Limits = def.Limits;
 const MemoryDefinition = def.MemoryDefinition;
-const MemoryOffsetAndLaneImmediates = def.MemoryOffsetAndLaneImmediates;
 const ModuleDefinition = def.ModuleDefinition;
 const NameCustomSection = def.NameCustomSection;
 const TableDefinition = def.TableDefinition;
@@ -3657,7 +3656,7 @@ pub const StackVM = struct {
             },
 
             Opcode.Call_Local => {
-                try preamble("Call", pc, code, stack);
+                try preamble("Call_Local", pc, code, stack);
 
                 const next = try OpHelpers.callLocal(pc, code, stack);
                 pc = next.continuation;
@@ -3666,7 +3665,7 @@ pub const StackVM = struct {
             },
 
             Opcode.Call_Import => {
-                try preamble("Call", pc, code, stack);
+                try preamble("Call_Import", pc, code, stack);
 
                 const next = try OpHelpers.callImport(pc, code, stack);
 

@@ -95,44 +95,50 @@ inline fn getStore(stack: *Stack) *Store {
 }
 
 pub inline fn block(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    try stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
+    const immediate = code[pc].immediate.Block;
+    try stack.pushLabel(immediate.num_returns, immediate.continuation);
 }
 
 pub inline fn loop(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    try stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
+    const immediate = code[pc].immediate.Block;
+    try stack.pushLabel(immediate.num_returns, immediate.continuation);
 }
 
-pub inline fn @"if"(pc: u32, code: [*]const Instruction, stack: *Stack) u32 {
+pub fn @"if"(pc: u32, code: [*]const Instruction, stack: *Stack) u32 {
     var next_pc: u32 = undefined;
+
+    const immediate = code[pc].immediate.If;
 
     const condition = stack.popI32();
     if (condition != 0) {
-        try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
+        try stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
         next_pc = pc + 1;
     } else {
-        try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
-        next_pc = code[pc].immediate.If.else_continuation + 1;
+        try stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
+        next_pc = pc + immediate.else_continuation_relative + 1;
     }
     return next_pc;
 }
 
-pub inline fn ifNoElse(pc: u32, code: [*]const Instruction, stack: *Stack) u32 {
+pub fn ifNoElse(pc: u32, code: [*]const Instruction, stack: *Stack) u32 {
     var next_pc: u32 = undefined;
+
+    const immediate = code[pc].immediate.If;
 
     const condition = stack.popI32();
     if (condition != 0) {
-        try stack.pushLabel(code[pc].immediate.If.num_returns, code[pc].immediate.If.end_continuation);
+        try stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
         next_pc = pc + 1;
     } else {
-        next_pc = code[pc].immediate.If.else_continuation + 1;
+        next_pc = pc + immediate.end_continuation_relative + 1;
     }
 
     return next_pc;
 }
 
-pub inline fn @"else"(pc: u32, code: [*]const Instruction) u32 {
+pub fn @"else"(pc: u32, code: [*]const Instruction) u32 {
     // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
-    return code[pc].immediate.If.end_continuation;
+    return code[pc].immediate.Index;
 }
 
 pub inline fn end(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
@@ -185,7 +191,7 @@ pub inline fn branchIf(pc: u32, code: [*]const Instruction, stack: *Stack) ?Func
 
 pub inline fn branchTable(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
     const module_instance: *const ModuleInstance = stack.topFrame().module_instance;
-    const all_branch_table_immediates: []const BranchTableImmediates = module_instance.module_def.code.branch_table.items;
+    const all_branch_table_immediates: []const BranchTableImmediates = module_instance.module_def.code.branch_table_immediates.items;
     const immediate_index = code[pc].immediate.Index;
     const immediates: BranchTableImmediates = all_branch_table_immediates[immediate_index];
 
@@ -2052,14 +2058,16 @@ pub inline fn v128Store(pc: u32, code: [*]const Instruction, stack: *Stack) anye
 }
 
 pub inline fn v128Const(pc: u32, code: [*]const Instruction, stack: *Stack) void {
-    const v: v128 = code[pc].immediate.ValueVec;
+    const index = code[pc].immediate.Index;
+    const v: v128 = stack.topFrame().module_instance.module_def.code.v128_immediates.items[index];
     stack.pushV128(v);
 }
 
 pub inline fn i8x16Shuffle(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const v2 = @as(i8x16, @bitCast(stack.popV128()));
     const v1 = @as(i8x16, @bitCast(stack.popV128()));
-    const indices: u8x16 = code[pc].immediate.VecShuffle16;
+    const immediate_index = code[pc].immediate.Index;
+    const indices: u8x16 = stack.topFrame().module_instance.module_def.code.vec_shuffle_16_immediates.items[immediate_index];
 
     var concat: [32]i8 = undefined;
     for (concat[0..16], 0..) |_, i| {
@@ -3280,7 +3288,7 @@ fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) !vo
     const vec_type_info = @typeInfo(T).vector;
 
     var vec = @as(T, @bitCast(stack.popV128()));
-    const immediate = instruction.immediate.MemoryOffsetAndLane;
+    const immediate = stack.topFrame().module_instance.module_def.code.memory_offset_and_lane_immediates.items[instruction.immediate.Index];
     const scalar = try loadFromMem(vec_type_info.child, stack, immediate.offset);
     vec[immediate.laneidx] = scalar;
     stack.pushV128(@as(v128, @bitCast(vec)));
@@ -3306,7 +3314,7 @@ fn vectorLoadLaneZero(comptime T: type, instruction: Instruction, stack: *Stack)
 
 fn vectorStoreLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
     const vec = @as(T, @bitCast(stack.popV128()));
-    const immediate = instruction.immediate.MemoryOffsetAndLane;
+    const immediate = stack.topFrame().module_instance.module_def.code.memory_offset_and_lane_immediates.items[instruction.immediate.Index];
     const scalar = vec[immediate.laneidx];
     try storeInMem(scalar, stack, immediate.offset);
     stack.pushV128(@as(v128, @bitCast(vec)));
