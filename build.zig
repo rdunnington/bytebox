@@ -1,10 +1,11 @@
 const std = @import("std");
+const CrossTarget = std.zig.CrossTarget;
 
 const Build = std.Build;
 const Module = Build.Module;
 const ModuleImport = Module.Import;
-const CrossTarget = std.zig.CrossTarget;
-const CompileStep = std.Build.Step.Compile;
+const Compile = Build.Step.Compile;
+const Step = Build.Step;
 
 const ExeOpts = struct {
     exe_name: []const u8,
@@ -19,6 +20,16 @@ const ExeOpts = struct {
 const StackVmKind = enum {
     tailcall,
     labeled_switch,
+};
+
+const WasmArch = enum {
+    Wasm32,
+    Wasm64,
+};
+
+const WasmBuild = struct {
+    compile: *Compile,
+    install: *Step,
 };
 
 pub fn build(b: *Build) void {
@@ -45,9 +56,9 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
 
-    var bench_add_one_step: *CompileStep = buildWasmExe(b, "bench/samples/add-one.zig", .Wasm32);
-    var bench_fibonacci_step: *CompileStep = buildWasmExe(b, "bench/samples/fibonacci.zig", .Wasm32);
-    var bench_mandelbrot_step: *CompileStep = buildWasmExe(b, "bench/samples/mandelbrot.zig", .Wasm32);
+    const add_one_wasm: WasmBuild = buildWasmExe(b, "bench/samples/add-one.zig", .Wasm32);
+    const fibonacci_wasm: WasmBuild = buildWasmExe(b, "bench/samples/fibonacci.zig", .Wasm32);
+    const mandelbrot_wasm: WasmBuild = buildWasmExe(b, "bench/samples/mandelbrot.zig", .Wasm32);
 
     const stable_array_import = ModuleImport{ .name = "stable-array", .module = stable_array.module("zig-stable-array") };
 
@@ -65,7 +76,7 @@ pub fn build(b: *Build) void {
         .{ .name = "stable-array", .module = stable_array.module("zig-stable-array") },
     };
 
-    _ = buildExeWithRunStep(b, target, optimize, &imports, .{
+    const bytebox_exe_step = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "bytebox",
         .root_src = "run/main.zig",
         .step_name = "run",
@@ -75,9 +86,9 @@ pub fn build(b: *Build) void {
     });
 
     var bench_steps = [_]*Build.Step{
-        &bench_add_one_step.step,
-        &bench_fibonacci_step.step,
-        &bench_mandelbrot_step.step,
+        add_one_wasm.install,
+        fibonacci_wasm.install,
+        mandelbrot_wasm.install,
     };
     _ = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "bench",
@@ -88,7 +99,7 @@ pub fn build(b: *Build) void {
         .options = options,
     });
 
-    const lib_bytebox: *Build.Step.Compile = b.addStaticLibrary(.{
+    const lib_bytebox: *Compile = b.addStaticLibrary(.{
         .name = "bytebox",
         .root_source_file = b.path("src/cffi.zig"),
         .target = target,
@@ -100,7 +111,7 @@ pub fn build(b: *Build) void {
     b.installArtifact(lib_bytebox);
 
     // Unit tests
-    const unit_tests: *Build.Step.Compile = b.addTest(.{
+    const unit_tests: *Compile = b.addTest(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
@@ -123,12 +134,13 @@ pub fn build(b: *Build) void {
     // wasi tests
     const wasi_testsuite = b.addSystemCommand(&.{"python3"});
     wasi_testsuite.addArg("test/wasi/run.py");
+    wasi_testsuite.step.dependOn(bytebox_exe_step);
+
     const wasi_testsuite_step = b.step("test-wasi", "Run wasi testsuite");
     wasi_testsuite_step.dependOn(&wasi_testsuite.step);
 
     // mem64 test
-    const compile_mem64_test = buildWasmExe(b, "test/mem64/memtest.zig", .Wasm64);
-    b.getInstallStep().dependOn(&compile_mem64_test.step);
+    const compile_mem64_test: WasmBuild = buildWasmExe(b, "test/mem64/memtest.zig", .Wasm64);
 
     const mem64_test_step: *Build.Step = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "test-mem64",
@@ -137,6 +149,7 @@ pub fn build(b: *Build) void {
         .description = "Run the mem64 test",
         .options = options,
     });
+    mem64_test_step.dependOn(compile_mem64_test.install);
 
     // Cffi test
     const cffi_test_step = b.step("test-cffi", "Run cffi test");
@@ -152,10 +165,10 @@ pub fn build(b: *Build) void {
     cffi_build.linkLibC();
     cffi_build.linkLibrary(lib_bytebox);
 
-    const ffi_guest = buildWasmExe(b, "test/cffi/module.zig", .Wasm32);
+    const ffi_guest: WasmBuild = buildWasmExe(b, "test/cffi/module.zig", .Wasm32);
 
     const cffi_run_step = b.addRunArtifact(cffi_build);
-    cffi_run_step.addFileArg(ffi_guest.getEmittedBin());
+    cffi_run_step.addFileArg(ffi_guest.compile.getEmittedBin());
     cffi_test_step.dependOn(&cffi_run_step.step);
 
     // All tests
@@ -168,7 +181,7 @@ pub fn build(b: *Build) void {
 }
 
 fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, imports: []const ModuleImport, opts: ExeOpts) *Build.Step {
-    const exe: *Build.Step.Compile = b.addExecutable(.{
+    const exe: *Compile = b.addExecutable(.{
         .name = opts.exe_name,
         .root_source_file = b.path(opts.root_src),
         .target = target,
@@ -185,8 +198,6 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
         asm_step.dependOn(&b.addInstallFile(exe.getEmittedAsm(), asm_filename).step);
     }
 
-    b.installArtifact(exe);
-
     if (opts.step_dependencies) |steps| {
         for (steps) |step| {
             exe.step.dependOn(step);
@@ -199,18 +210,16 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
         run.addArgs(args);
     }
 
+    const install_exe = b.addInstallArtifact(exe, .{});
+
     const step: *Build.Step = b.step(opts.step_name, opts.description);
+    step.dependOn(&install_exe.step);
     step.dependOn(&run.step);
 
     return step;
 }
 
-const WasmArch = enum {
-    Wasm32,
-    Wasm64,
-};
-
-fn buildWasmExe(b: *Build, filepath: []const u8, arch: WasmArch) *CompileStep {
+fn buildWasmExe(b: *Build, filepath: []const u8, comptime arch: WasmArch) WasmBuild {
     var filename: []const u8 = std.fs.path.basename(filepath);
     const filename_no_extension: []const u8 = filename[0 .. filename.len - 4];
 
@@ -237,7 +246,10 @@ fn buildWasmExe(b: *Build, filepath: []const u8, arch: WasmArch) *CompileStep {
     exe.rdynamic = true;
     exe.entry = .disabled;
 
-    b.installArtifact(exe);
+    const install = b.addInstallArtifact(exe, .{});
 
-    return exe;
+    return WasmBuild{
+        .compile = exe,
+        .install = &install.step,
+    };
 }
