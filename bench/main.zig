@@ -53,7 +53,7 @@ pub fn main() !void {
     }, .{
         .name = "fibonacci",
         .filename = "zig-out/bin/fibonacci.wasm",
-        .param = 20,
+        .param = 39,
     }, .{
         .name = "mandelbrot",
         .filename = "zig-out/bin/mandelbrot.wasm",

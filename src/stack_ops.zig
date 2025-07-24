@@ -90,6 +90,10 @@ pub inline fn debugTrap(pc: u32, stack: *Stack) anyerror!void {
     return error.TrapDebug;
 }
 
+inline fn getStore(stack: *Stack) *Store {
+    return &stack.topFrame().module_instance.store;
+}
+
 pub inline fn block(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
     try stack.pushLabel(code[pc].immediate.Block.num_returns, code[pc].immediate.Block.continuation);
 }
@@ -161,7 +165,7 @@ pub inline fn end(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallD
 
 pub inline fn branch(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
     const label_id: u32 = code[pc].immediate.LabelId;
-    return _branch(stack, label_id);
+    return _branch(code, stack, label_id);
 }
 
 pub inline fn branchIf(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
@@ -169,7 +173,7 @@ pub inline fn branchIf(pc: u32, code: [*]const Instruction, stack: *Stack) ?Func
     const v = stack.popI32();
     if (v != 0) {
         const label_id: u32 = code[pc].immediate.LabelId;
-        next = _branch(stack, label_id);
+        next = _branch(code, stack, label_id);
     } else {
         next = FuncCallData{
             .code = code,
@@ -181,15 +185,15 @@ pub inline fn branchIf(pc: u32, code: [*]const Instruction, stack: *Stack) ?Func
 
 pub inline fn branchTable(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
     const module_instance: *const ModuleInstance = stack.topFrame().module_instance;
-    const all_branch_table_immediates: []const BranchTableImmediates = stack.topFrame().module_instance.module_def.code.branch_table.items;
+    const all_branch_table_immediates: []const BranchTableImmediates = module_instance.module_def.code.branch_table.items;
     const immediate_index = code[pc].immediate.Index;
-
     const immediates: BranchTableImmediates = all_branch_table_immediates[immediate_index];
+
     const table: []const u32 = immediates.getLabelIds(module_instance.module_def.*);
 
     const label_index = stack.popI32();
     const label_id: u32 = if (label_index >= 0 and label_index < table.len) table[@as(usize, @intCast(label_index))] else immediates.fallback_id;
-    return _branch(stack, label_id);
+    return _branch(code, stack, label_id);
 }
 
 pub inline fn @"return"(stack: *Stack) ?FuncCallData {
@@ -215,15 +219,50 @@ pub inline fn callImport(pc: u32, code: [*]const Instruction, stack: *Stack) !Fu
     std.debug.assert(func_index < store.imports.functions.items.len);
 
     const func_import = &store.imports.functions.items[func_index];
-    return _callImport(pc, stack, func_import);
+    switch (func_import.data) {
+        .Host => |data| {
+            const params_len: u32 = @as(u32, @intCast(data.func_def.getParams().len));
+            const returns_len: u32 = @as(u32, @intCast(data.func_def.calcNumReturns()));
+
+            std.debug.assert(stack.num_values + returns_len < stack.values.len);
+
+            const module: *ModuleInstance = stack.topFrame().module_instance;
+            const params = stack.values[stack.num_values - params_len .. stack.num_values];
+            const returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
+
+            DebugTrace.traceHostFunction(module, stack.num_frames + 1, func_import.name);
+
+            try data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
+
+            stack.num_values = (stack.num_values - params_len) + returns_len;
+            const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
+
+            if (params_len > 0) {
+                std.debug.assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
+                std.mem.copyForwards(Val, returns_dest, returns_temp);
+            } else {
+                // no copy needed in this case since the return values will go into the same location
+                std.debug.assert(returns_dest.ptr == returns_temp.ptr);
+            }
+
+            return FuncCallData{
+                .code = code,
+                .continuation = pc + 1,
+            };
+        },
+        .Wasm => |data| {
+            var stack_vm: *StackVM = StackVM.fromVM(data.module_instance.vm);
+            const func_instance: *const FunctionInstance = &stack_vm.functions.items[data.index];
+            return call(pc, stack, data.module_instance, func_instance);
+        },
+    }
 }
 
 pub inline fn callIndirect(pc: u32, code: [*]const Instruction, stack: *Stack) !FuncCallData {
-    const current_module: *ModuleInstance = stack.topFrame().module_instance;
     const immediates: *const CallIndirectImmediates = &code[pc].immediate.CallIndirect;
     const table_index: u32 = immediates.table_index;
 
-    const table: *const TableInstance = current_module.store.getTable(table_index);
+    const table: *const TableInstance = getStore(stack).getTable(table_index);
 
     const ref_index = stack.popI32();
     if (table.refs.items.len <= ref_index or ref_index < 0) {
@@ -282,40 +321,40 @@ pub inline fn selectT(stack: *Stack) void {
 
 pub inline fn localGet(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const locals_index: u32 = code[pc].immediate.Index;
-    const frame: *const CallFrame = stack.topFrame();
-    const v: Val = frame.locals[locals_index];
+    const locals = stack.locals();
+    const v: Val = locals[locals_index];
     stack.pushValue(v);
 }
 
 pub inline fn localSet(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const locals_index: u32 = code[pc].immediate.Index;
-    var frame: *CallFrame = stack.topFrame();
+    const locals = stack.locals();
     const v: Val = stack.popValue();
-    frame.locals[locals_index] = v;
+    locals[locals_index] = v;
 }
 
 pub inline fn localTee(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const locals_index: u32 = code[pc].immediate.Index;
-    var frame: *CallFrame = stack.topFrame();
+    const locals = stack.locals();
     const v: Val = stack.topValue();
-    frame.locals[locals_index] = v;
+    locals[locals_index] = v;
 }
 
 pub inline fn globalGet(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const global_index: u32 = code[pc].immediate.Index;
-    const global: *GlobalInstance = stack.topFrame().module_instance.store.getGlobal(global_index);
+    const global: *GlobalInstance = getStore(stack).getGlobal(global_index);
     stack.pushValue(global.value);
 }
 
 pub inline fn globalSet(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const global_index: u32 = code[pc].immediate.Index;
-    const global: *GlobalInstance = stack.topFrame().module_instance.store.getGlobal(global_index);
+    const global: *GlobalInstance = getStore(stack).getGlobal(global_index);
     global.value = stack.popValue();
 }
 
 pub inline fn tableGet(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
     const table_index: u32 = code[pc].immediate.Index;
-    const table: *const TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
+    const table: *const TableInstance = getStore(stack).getTable(table_index);
     const index: i32 = stack.popI32();
     if (table.refs.items.len <= index or index < 0) {
         return error.TrapOutOfBoundsTableAccess;
@@ -326,7 +365,7 @@ pub inline fn tableGet(pc: u32, code: [*]const Instruction, stack: *Stack) !void
 
 pub inline fn tableSet(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
     const table_index: u32 = code[pc].immediate.Index;
-    var table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
+    var table: *TableInstance = getStore(stack).getTable(table_index);
     const ref = stack.popValue();
     const index: i32 = stack.popI32();
     if (table.refs.items.len <= index or index < 0) {
@@ -452,7 +491,7 @@ pub inline fn i64Store32(pc: u32, code: [*]const Instruction, stack: *Stack) any
 
 pub inline fn memorySize(stack: *Stack) void {
     const memory_index: usize = 0;
-    var memory_instance: *const MemoryInstance = stack.topFrame().module_instance.store.getMemory(memory_index);
+    var memory_instance: *const MemoryInstance = getStore(stack).getMemory(memory_index);
 
     switch (memory_instance.limits.indexType()) {
         .I32 => stack.pushI32(@intCast(memory_instance.size())),
@@ -463,7 +502,7 @@ pub inline fn memorySize(stack: *Stack) void {
 
 pub inline fn memoryGrow(stack: *Stack) void {
     const memory_index: usize = 0;
-    var memory_instance: *MemoryInstance = stack.topFrame().module_instance.store.getMemory(memory_index);
+    var memory_instance: *MemoryInstance = getStore(stack).getMemory(memory_index);
 
     const old_num_pages: i32 = @as(i32, @intCast(memory_instance.limits.min));
     const num_pages: i64 = switch (memory_instance.limits.indexType()) {
@@ -1493,7 +1532,7 @@ pub inline fn i64TruncSatF64U(stack: *Stack) void {
 pub inline fn memoryInit(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
     const data_index: u32 = code[pc].immediate.Index;
     const data: *const DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
-    const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
+    const memory: *MemoryInstance = &getStore(stack).memories.items[0];
 
     const length = stack.popI32();
     const data_offset = stack.popI32();
@@ -1527,7 +1566,7 @@ pub inline fn dataDrop(pc: u32, code: [*]const Instruction, stack: *Stack) void 
 }
 
 pub inline fn memoryCopy(stack: *Stack) !void {
-    const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
+    const memory: *MemoryInstance = &getStore(stack).memories.items[0];
 
     const length_s = stack.popIndexType();
     const source_offset_s = stack.popIndexType();
@@ -1560,7 +1599,7 @@ pub inline fn memoryCopy(stack: *Stack) !void {
 }
 
 pub inline fn memoryFill(stack: *Stack) !void {
-    const memory: *MemoryInstance = &stack.topFrame().module_instance.store.memories.items[0];
+    const memory: *MemoryInstance = &getStore(stack).memories.items[0];
 
     const length_s: i64 = stack.popIndexType();
     const value: u8 = @as(u8, @truncate(@as(u32, @bitCast(stack.popI32()))));
@@ -1587,8 +1626,9 @@ pub inline fn tableInit(pc: u32, code: [*]const Instruction, stack: *Stack) !voi
     const elem_index = pair.index_x;
     const table_index = pair.index_y;
 
-    const elem: *const ElementInstance = &stack.topFrame().module_instance.store.elements.items[elem_index];
-    const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
+    const store: *Store = getStore(stack);
+    const elem: *const ElementInstance = &store.elements.items[elem_index];
+    const table: *TableInstance = store.getTable(table_index);
 
     const length_i32 = stack.popI32();
     const elem_start_index = stack.popI32();
@@ -1616,7 +1656,7 @@ pub inline fn tableInit(pc: u32, code: [*]const Instruction, stack: *Stack) !voi
 
 pub inline fn elemDrop(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const elem_index: u32 = code[pc].immediate.Index;
-    var elem: *ElementInstance = &stack.topFrame().module_instance.store.elements.items[elem_index];
+    var elem: *ElementInstance = &getStore(stack).elements.items[elem_index];
     elem.refs.clearAndFree();
 }
 
@@ -1625,8 +1665,9 @@ pub inline fn tableCopy(pc: u32, code: [*]const Instruction, stack: *Stack) !voi
     const dest_table_index = pair.index_x;
     const src_table_index = pair.index_y;
 
-    const dest_table: *TableInstance = stack.topFrame().module_instance.store.getTable(dest_table_index);
-    const src_table: *const TableInstance = stack.topFrame().module_instance.store.getTable(src_table_index);
+    const store = getStore(stack);
+    const dest_table: *TableInstance = store.getTable(dest_table_index);
+    const src_table: *const TableInstance = store.getTable(src_table_index);
 
     const length_i32 = stack.popI32();
     const src_start_index = stack.popI32();
@@ -1657,7 +1698,7 @@ pub inline fn tableCopy(pc: u32, code: [*]const Instruction, stack: *Stack) !voi
 
 pub inline fn tableGrow(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const table_index: u32 = code[pc].immediate.Index;
-    const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
+    const table: *TableInstance = getStore(stack).getTable(table_index);
     const length = @as(u32, @bitCast(stack.popI32()));
     const init_value = stack.popValue();
     const old_length = @as(i32, @intCast(table.refs.items.len));
@@ -1667,14 +1708,14 @@ pub inline fn tableGrow(pc: u32, code: [*]const Instruction, stack: *Stack) void
 
 pub inline fn tableSize(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const table_index: u32 = code[pc].immediate.Index;
-    const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
+    const table: *TableInstance = getStore(stack).getTable(table_index);
     const length = @as(i32, @intCast(table.refs.items.len));
     stack.pushI32(length);
 }
 
 pub inline fn tableFill(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
     const table_index: u32 = code[pc].immediate.Index;
-    const table: *TableInstance = stack.topFrame().module_instance.store.getTable(table_index);
+    const table: *TableInstance = getStore(stack).getTable(table_index);
 
     const length_i32 = stack.popI32();
     const funcref = stack.popValue();
@@ -2847,7 +2888,7 @@ fn loadFromMem(comptime T: type, stack: *Stack, offset_from_memarg: u64) TrapErr
         return error.TrapOutOfBoundsMemoryAccess;
     }
 
-    const store: *Store = &stack.topFrame().module_instance.store;
+    const store: *Store = getStore(stack);
     const memory: *const MemoryInstance = store.getMemory(0);
     const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
     std.debug.assert(offset_64 <= std.math.maxInt(usize));
@@ -2911,7 +2952,7 @@ fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: u64) TrapError!
         return error.TrapOutOfBoundsMemoryAccess;
     }
 
-    const store: *Store = &stack.topFrame().module_instance.store;
+    const store: *Store = getStore(stack);
     const memory: *MemoryInstance = store.getMemory(0);
     const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
     std.debug.assert(offset_64 <= std.math.maxInt(usize));
@@ -2954,47 +2995,7 @@ fn call(pc: u32, stack: *Stack, module_instance: *ModuleInstance, func: *const F
     };
 }
 
-fn _callImport(pc: u32, stack: *Stack, func: *const FunctionImport) (TrapError || HostFunctionError)!FuncCallData {
-    switch (func.data) {
-        .Host => |data| {
-            const params_len: u32 = @as(u32, @intCast(data.func_def.getParams().len));
-            const returns_len: u32 = @as(u32, @intCast(data.func_def.calcNumReturns()));
-
-            std.debug.assert(stack.num_values + returns_len < stack.values.len);
-
-            const module: *ModuleInstance = stack.topFrame().module_instance;
-            const params = stack.values[stack.num_values - params_len .. stack.num_values];
-            const returns_temp = stack.values[stack.num_values .. stack.num_values + returns_len];
-
-            DebugTrace.traceHostFunction(module, stack.num_frames + 1, func.name);
-
-            try data.callback(data.userdata, module, params.ptr, returns_temp.ptr);
-
-            stack.num_values = (stack.num_values - params_len) + returns_len;
-            const returns_dest = stack.values[stack.num_values - returns_len .. stack.num_values];
-
-            if (params_len > 0) {
-                std.debug.assert(@intFromPtr(returns_dest.ptr) < @intFromPtr(returns_temp.ptr));
-                std.mem.copyForwards(Val, returns_dest, returns_temp);
-            } else {
-                // no copy needed in this case since the return values will go into the same location
-                std.debug.assert(returns_dest.ptr == returns_temp.ptr);
-            }
-
-            return FuncCallData{
-                .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
-                .continuation = pc + 1,
-            };
-        },
-        .Wasm => |data| {
-            var stack_vm: *StackVM = StackVM.fromVM(data.module_instance.vm);
-            const func_instance: *const FunctionInstance = &stack_vm.functions.items[data.index];
-            return call(pc, stack, data.module_instance, func_instance);
-        },
-    }
-}
-
-fn _branch(stack: *Stack, label_id: u32) ?FuncCallData {
+fn _branch(code: [*]const Instruction, stack: *Stack, label_id: u32) ?FuncCallData {
     const label: *const Label = stack.findLabel(@as(u32, @intCast(label_id)));
     const frame_label: *const Label = stack.frameLabel();
     // TODO generate BranchToFunctionEnd if this can be statically determined at decode time (or just generate a Return?)
@@ -3003,8 +3004,7 @@ fn _branch(stack: *Stack, label_id: u32) ?FuncCallData {
     }
 
     // TODO split branches up into different types to avoid this lookup and if statement
-    const module_def: *const ModuleDefinition = stack.topFrame().module_instance.module_def;
-    const is_loop_continuation: bool = module_def.code.instructions.items[label.continuation].opcode == .Loop;
+    const is_loop_continuation: bool = code[label.continuation].opcode == .Loop;
 
     if (is_loop_continuation == false or label_id != 0) {
         const pop_final_label = !is_loop_continuation;
@@ -3012,7 +3012,7 @@ fn _branch(stack: *Stack, label_id: u32) ?FuncCallData {
     }
 
     return FuncCallData{
-        .code = stack.topFrame().module_instance.module_def.code.instructions.items.ptr,
+        .code = code,
         .continuation = label.continuation + 1, // branching takes care of popping/pushing values so skip the End instruction
     };
 }
@@ -3288,7 +3288,8 @@ fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) !vo
 
 fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptime len: usize, mem_offset: u64, stack: *Stack) !void {
     const offset_from_stack: i32 = stack.popI32();
-    const array: [len]extend_type = try loadArrayFromMem(mem_type, extend_type, len, &stack.topFrame().module_instance.store, mem_offset, offset_from_stack);
+    const store: *Store = getStore(stack);
+    const array: [len]extend_type = try loadArrayFromMem(mem_type, extend_type, len, store, mem_offset, offset_from_stack);
     const vec: @Vector(len, extend_type) = array;
     stack.pushV128(@as(v128, @bitCast(vec)));
 }
