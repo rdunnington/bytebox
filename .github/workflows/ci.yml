@@ -47,6 +47,10 @@ jobs:
         run: |
           zig build -Dvm_kind=${{ matrix.stack_kind }}
 
+      - name: Bench
+        run: |
+          zig build bench -Dvm_kind=${{ matrix.stack_kind }} -Doptimize=ReleaseFast
+
       - name: 32-bit builds
         if: runner.os == 'Linux'
         run: |
