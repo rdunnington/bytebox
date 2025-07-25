@@ -119,7 +119,11 @@ pub fn build(b: *Build) void {
     });
     unit_tests.root_module.addImport(stable_array_import.name, stable_array_import.module);
     unit_tests.root_module.addOptions("config", options);
+
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    run_unit_tests.step.dependOn(fibonacci_wasm.install);
+    run_unit_tests.step.dependOn(mandelbrot_wasm.install);
+
     const unit_test_step = b.step("test-unit", "Run unit tests");
     unit_test_step.dependOn(&run_unit_tests.step);
 

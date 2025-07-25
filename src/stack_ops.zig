@@ -142,12 +142,6 @@ pub fn @"else"(pc: u32, code: [*]const Instruction) u32 {
 }
 
 pub inline fn end(pc: u32, code: [*]const Instruction, stack: *Stack) ?FuncCallData {
-
-    // TODO - this instruction tries to determine at runtime what behavior to take, but we can
-    // probably determine this in the decode phase and split into 3 different end instructions
-    // to avoid branching. Probably could bake the return types length into the immediate to avoid
-    // cache misses on the lookup we're currently doing.
-
     var next: ?FuncCallData = null;
 
     // determine if this is a a scope or function call exit
@@ -1573,10 +1567,11 @@ pub inline fn dataDrop(pc: u32, code: [*]const Instruction, stack: *Stack) void 
 
 pub inline fn memoryCopy(stack: *Stack) !void {
     const memory: *MemoryInstance = &getStore(stack).memories.items[0];
+    const index_type: ValType = memory.limits.indexType();
 
-    const length_s = stack.popIndexType();
-    const source_offset_s = stack.popIndexType();
-    const dest_offset_s = stack.popIndexType();
+    const length_s = stack.popIndexType(index_type);
+    const source_offset_s = stack.popIndexType(index_type);
+    const dest_offset_s = stack.popIndexType(index_type);
 
     if (length_s < 0) {
         return error.TrapOutOfBoundsMemoryAccess;
@@ -1606,10 +1601,11 @@ pub inline fn memoryCopy(stack: *Stack) !void {
 
 pub inline fn memoryFill(stack: *Stack) !void {
     const memory: *MemoryInstance = &getStore(stack).memories.items[0];
+    const index_type: ValType = memory.limits.indexType();
 
-    const length_s: i64 = stack.popIndexType();
+    const length_s: i64 = stack.popIndexType(index_type);
     const value: u8 = @as(u8, @truncate(@as(u32, @bitCast(stack.popI32()))));
-    const offset_s: i64 = stack.popIndexType();
+    const offset_s: i64 = stack.popIndexType(index_type);
 
     if (length_s < 0) {
         return error.TrapOutOfBoundsMemoryAccess;
@@ -2891,13 +2887,15 @@ fn saturatedTruncateTo(comptime T: type, value: anytype) T {
 }
 
 fn loadFromMem(comptime T: type, stack: *Stack, offset_from_memarg: u64) TrapError!T {
-    const offset_from_stack: i64 = stack.popIndexType();
+    const store: *Store = getStore(stack);
+    const memory: *const MemoryInstance = store.getMemory(0);
+    const index_type: ValType = memory.limits.indexType();
+
+    const offset_from_stack: i64 = stack.popIndexType(index_type);
     if (offset_from_stack < 0) {
         return error.TrapOutOfBoundsMemoryAccess;
     }
 
-    const store: *Store = getStore(stack);
-    const memory: *const MemoryInstance = store.getMemory(0);
     const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
     std.debug.assert(offset_64 <= std.math.maxInt(usize));
     const offset: usize = @intCast(offset_64);
@@ -2909,7 +2907,7 @@ fn loadFromMem(comptime T: type, stack: *Stack, offset_from_memarg: u64) TrapErr
         32 => u32,
         64 => u64,
         128 => u128,
-        else => @compileError("Only types with bit counts of 8, 16, 32, or 64 are supported."),
+        else => @compileError("Only types with bit counts of 8, 16, 32, 64, or 128 are supported."),
     };
 
     const end_offset = offset + (bit_count / 8);
@@ -2955,13 +2953,15 @@ fn loadArrayFromMem(comptime read_type: type, comptime out_type: type, comptime 
 }
 
 fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: u64) TrapError!void {
-    const offset_from_stack: i64 = stack.popIndexType();
+    const store: *Store = getStore(stack);
+    const memory: *MemoryInstance = store.getMemory(0);
+    const index_type = memory.limits.indexType();
+
+    const offset_from_stack: i64 = stack.popIndexType(index_type);
     if (offset_from_stack < 0) {
         return error.TrapOutOfBoundsMemoryAccess;
     }
 
-    const store: *Store = getStore(stack);
-    const memory: *MemoryInstance = store.getMemory(0);
     const offset_64: u64 = offset_from_memarg + @as(u64, @intCast(offset_from_stack));
     std.debug.assert(offset_64 <= std.math.maxInt(usize));
     const offset: usize = @intCast(offset_64);
