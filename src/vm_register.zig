@@ -675,7 +675,10 @@ const ModuleIR = struct {
                 .I64 => Val{ .I64 = instruction.immediate.ValueI64 },
                 .F32 => Val{ .F32 = instruction.immediate.ValueF32 },
                 .F64 => Val{ .F64 = instruction.immediate.ValueF64 },
-                .V128 => Val{ .V128 = instruction.immediate.ValueVec },
+                .V128 => blk: {
+                    const v: v128 = mir.module_def.v128_immediates.items[instruction.immediate.Index];
+                    break :blk Val{ .V128 = v };
+                },
                 else => @compileError("Unsupported const instruction"),
             };
 

@@ -1,5 +1,5 @@
 // This file contains types and code shared between both the ModuleDefinition and VMs
-
+const builtin = @import("builtin");
 const std = @import("std");
 const AllocError = std.mem.Allocator.Error;
 
@@ -743,76 +743,100 @@ const MemArg = struct {
     }
 };
 
-pub const MemoryOffsetAndLaneImmediates = extern struct {
+pub const MemoryOffsetAndLaneImmediates = struct {
     offset: u64,
     laneidx: u8,
 };
 
-pub const CallIndirectImmediates = extern struct {
-    type_index: u32,
-    table_index: u32,
-};
-
-pub const BranchTableImmediates = extern struct {
+pub const BranchTableImmediates = struct {
     label_ids_begin: u32,
     label_ids_end: u32,
     fallback_id: u32,
 
     pub fn getLabelIds(self: BranchTableImmediates, module: ModuleDefinition) []const u32 {
-        return module.code.branch_table_ids.items[self.label_ids_begin..self.label_ids_end];
+        return module.code.branch_table_ids_immediates.items[self.label_ids_begin..self.label_ids_end];
     }
 };
 
-pub const TablePairImmediates = extern struct {
+pub const CallIndirectImmediates = struct {
+    type_index: u32,
+    table_index: u32,
+};
+
+pub const TablePairImmediates = struct {
     index_x: u32,
     index_y: u32,
 };
 
-pub const BlockImmediates = extern struct {
-    block_type: BlockType,
-    num_returns: u16,
-    block_value: BlockTypeValue,
+pub const BlockImmediates = struct {
     continuation: u32,
-};
-
-pub const IfImmediates = extern struct {
-    block_type: BlockType,
     num_returns: u16,
-    block_value: BlockTypeValue,
-    else_continuation: u32,
-    end_continuation: u32,
 };
 
-pub const InstructionImmediates = extern union {
+pub const IfImmediates = struct {
+    num_returns: u16,
+    else_continuation_relative: u16,
+    end_continuation_relative: u16,
+    _pad: u16 = undefined,
+};
+
+pub const InstructionImmediates = union {
     Void: void,
     ValType: ValType,
     ValueI32: i32,
     ValueF32: f32,
     ValueI64: i64,
     ValueF64: f64,
-    ValueVec: v128,
     Index: u32,
     LabelId: u32,
     MemoryOffset: u64,
-    MemoryOffsetAndLane: MemoryOffsetAndLaneImmediates,
     Block: BlockImmediates,
     CallIndirect: CallIndirectImmediates,
     TablePair: TablePairImmediates,
     If: IfImmediates,
-    VecShuffle16: [16]u8,
+
+    comptime {
+        if (builtin.mode == .ReleaseFast) {
+            std.debug.assert(@sizeOf(BlockImmediates) == 8);
+            std.debug.assert(@sizeOf(CallIndirectImmediates) == 8);
+            std.debug.assert(@sizeOf(TablePairImmediates) == 8);
+            std.debug.assert(@sizeOf(IfImmediates) == 8);
+            std.debug.assert(@sizeOf(InstructionImmediates) == 8);
+        }
+    }
 };
 
-comptime {
-    std.debug.assert(@sizeOf(InstructionImmediates) == 16);
-}
+const ValidationImmediates = union {
+    Void: void,
+    BlockOrIf: struct {
+        block_type: BlockType,
+        block_value: BlockTypeValue,
+    },
+};
+
+pub const DecodedInstruction = struct {
+    instruction: Instruction,
+    validation_immediates: ValidationImmediates,
+};
 
 pub const Instruction = struct {
     opcode: Opcode,
     immediate: InstructionImmediates,
 
-    fn decode(reader: anytype, module: *ModuleDefinition) !Instruction {
+    comptime {
+        if (builtin.mode == .ReleaseFast) {
+            std.debug.assert(@sizeOf(Instruction) == 16);
+        }
+    }
+
+    fn decode(reader: anytype, module: *ModuleDefinition) !DecodedInstruction {
         const Helpers = struct {
-            fn decodeBlockType(_reader: anytype, _module: *const ModuleDefinition) !InstructionImmediates {
+            fn decodeBlockType(
+                _reader: anytype,
+                _module: *ModuleDefinition,
+                out_immediates: *InstructionImmediates,
+                out_validation_immediates: *ValidationImmediates,
+            ) !void {
                 var block_type: BlockType = undefined;
                 var block_value: BlockTypeValue = undefined;
 
@@ -844,12 +868,16 @@ pub const Instruction = struct {
 
                 const num_returns: u16 = @intCast(block_value.getBlocktypeReturnTypes(block_type, _module).len);
 
-                return InstructionImmediates{
+                out_immediates.* = InstructionImmediates{
                     .Block = BlockImmediates{
+                        .num_returns = num_returns,
+                        .continuation = std.math.maxInt(u32), // will be set later in the code section decode
+                    },
+                };
+                out_validation_immediates.* = ValidationImmediates{
+                    .BlockOrIf = .{
                         .block_type = block_type,
                         .block_value = block_value,
-                        .num_returns = num_returns,
-                        .continuation = std.math.maxInt(u32), // will be set later in the code decode
                     },
                 };
             }
@@ -866,13 +894,16 @@ pub const Instruction = struct {
                 };
             }
 
-            fn decodeMemoryOffsetAndLane(_reader: anytype, comptime bitwidth: u32) !InstructionImmediates {
+            fn decodeMemoryOffsetAndLane(_reader: anytype, comptime bitwidth: u32, _module: *ModuleDefinition) !InstructionImmediates {
                 const memarg = try MemArg.decode(_reader, bitwidth);
                 const laneidx = try _reader.readByte();
-                return InstructionImmediates{ .MemoryOffsetAndLane = MemoryOffsetAndLaneImmediates{
+                const immediates = MemoryOffsetAndLaneImmediates{
                     .offset = memarg.offset,
                     .laneidx = laneidx,
-                } };
+                };
+                const index = _module.code.memory_offset_and_lane_immediates.items.len;
+                try _module.code.memory_offset_and_lane_immediates.append(immediates);
+                return InstructionImmediates{ .Index = @intCast(index) };
             }
         };
 
@@ -880,6 +911,7 @@ pub const Instruction = struct {
 
         const opcode: Opcode = wasm_op.toOpcode();
         var immediate = InstructionImmediates{ .Void = {} };
+        var validation_immediates = ValidationImmediates{ .Void = {} };
 
         switch (opcode) {
             .Select_T => {
@@ -923,20 +955,21 @@ pub const Instruction = struct {
                 immediate = InstructionImmediates{ .ValueF64 = try decodeFloat(f64, reader) };
             },
             .Block => {
-                immediate = try Helpers.decodeBlockType(reader, module);
+                try Helpers.decodeBlockType(reader, module, &immediate, &validation_immediates);
             },
             .Loop => {
-                immediate = try Helpers.decodeBlockType(reader, module);
+                try Helpers.decodeBlockType(reader, module, &immediate, &validation_immediates);
             },
             .If => {
-                const block_immediates: InstructionImmediates = try Helpers.decodeBlockType(reader, module);
+                var block_immediates: InstructionImmediates = undefined;
+                try Helpers.decodeBlockType(reader, module, &block_immediates, &validation_immediates);
+
+                // continuation values will be set later in the code section decode
                 immediate = InstructionImmediates{
                     .If = IfImmediates{
-                        .block_type = block_immediates.Block.block_type,
-                        .block_value = block_immediates.Block.block_value,
                         .num_returns = block_immediates.Block.num_returns,
-                        .else_continuation = block_immediates.Block.continuation,
-                        .end_continuation = block_immediates.Block.continuation,
+                        .else_continuation_relative = std.math.maxInt(u16),
+                        .end_continuation_relative = std.math.maxInt(u16),
                     },
                 };
             },
@@ -962,7 +995,7 @@ pub const Instruction = struct {
 
                 // check to see if there are any existing tables we can reuse
                 var needs_immediate: bool = true;
-                for (module.code.branch_table.items, 0..) |*item, i| {
+                for (module.code.branch_table_immediates.items, 0..) |*item, i| {
                     if (item.fallback_id == fallback_id) {
                         const item_label_ids: []const u32 = item.getLabelIds(module.*);
                         if (std.mem.eql(u32, item_label_ids, label_ids.items)) {
@@ -974,11 +1007,11 @@ pub const Instruction = struct {
                 }
 
                 if (needs_immediate) {
-                    immediate = InstructionImmediates{ .Index = @as(u32, @intCast(module.code.branch_table.items.len)) };
+                    immediate = InstructionImmediates{ .Index = @as(u32, @intCast(module.code.branch_table_immediates.items.len)) };
 
-                    const label_ids_begin: u32 = @intCast(module.code.branch_table_ids.items.len);
-                    try module.code.branch_table_ids.appendSlice(label_ids.items);
-                    const label_ids_end: u32 = @intCast(module.code.branch_table_ids.items.len);
+                    const label_ids_begin: u32 = @intCast(module.code.branch_table_ids_immediates.items.len);
+                    try module.code.branch_table_ids_immediates.appendSlice(label_ids.items);
+                    const label_ids_end: u32 = @intCast(module.code.branch_table_ids_immediates.items.len);
 
                     const branch_table = BranchTableImmediates{
                         .label_ids_begin = label_ids_begin,
@@ -986,7 +1019,7 @@ pub const Instruction = struct {
                         .fallback_id = fallback_id,
                     };
 
-                    try module.code.branch_table.append(branch_table);
+                    try module.code.branch_table_immediates.append(branch_table);
                 }
             },
             .Call_Local => {
@@ -1205,7 +1238,9 @@ pub const Instruction = struct {
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .V128_Const => {
-                immediate = InstructionImmediates{ .ValueVec = try decodeVec(reader) };
+                const vec: v128 = try decodeVec(reader);
+                immediate = InstructionImmediates{ .Index = @intCast(module.code.v128_immediates.items.len) };
+                try module.code.v128_immediates.append(vec);
             },
             .I8x16_Shuffle => {
                 var lane_indices: [16]u8 = undefined;
@@ -1213,31 +1248,33 @@ pub const Instruction = struct {
                     const laneidx: u8 = try reader.readByte();
                     v.* = laneidx;
                 }
-                immediate = InstructionImmediates{ .VecShuffle16 = lane_indices };
+
+                immediate = InstructionImmediates{ .Index = @intCast(module.code.vec_shuffle_16_immediates.items.len) };
+                try module.code.vec_shuffle_16_immediates.append(lane_indices);
             },
             .V128_Load8_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 8);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 8, module);
             },
             .V128_Load16_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 16);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 16, module);
             },
             .V128_Load32_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 32);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 32, module);
             },
             .V128_Load64_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 64);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 64, module);
             },
             .V128_Store8_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 8);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 8, module);
             },
             .V128_Store16_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 16);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 16, module);
             },
             .V128_Store32_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 32);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 32, module);
             },
             .V128_Store64_Lane => {
-                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 64);
+                immediate = try Helpers.decodeMemoryOffsetAndLane(reader, 64, module);
             },
             .V128_Load32_Zero => {
                 const memarg = try MemArg.decode(reader, 128);
@@ -1250,9 +1287,12 @@ pub const Instruction = struct {
             else => {},
         }
 
-        return .{
-            .opcode = opcode,
-            .immediate = immediate,
+        return DecodedInstruction{
+            .instruction = .{
+                .opcode = opcode,
+                .immediate = immediate,
+            },
+            .validation_immediates = validation_immediates,
         };
     }
 };
@@ -1457,7 +1497,13 @@ const ModuleValidator = struct {
         try self.pushControl(Opcode.Call_Local, func_type_def.getParams(), func_type_def.getReturns());
     }
 
-    fn validateCode(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition, instruction: Instruction) !void {
+    fn validateCode(
+        self: *ModuleValidator,
+        module: *const ModuleDefinition,
+        func: *const FunctionDefinition,
+        instruction: Instruction,
+        validation_immediates: ValidationImmediates,
+    ) !void {
         const Helpers = struct {
             fn popReturnTypes(validator: *ModuleValidator, types: []const ValType) !void {
                 var i = types.len;
@@ -1467,23 +1513,23 @@ const ModuleValidator = struct {
                 }
             }
 
-            fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction) !void {
-                const block_type: BlockType = switch (instruction_.opcode) {
-                    .Block, .Loop => instruction_.immediate.Block.block_type,
-                    .If => instruction_.immediate.If.block_type,
+            fn enterBlock(validator: *ModuleValidator, module_: *const ModuleDefinition, opcode: Opcode, immediate: ValidationImmediates) !void {
+                var block_type: BlockType = undefined;
+                var block_value: BlockTypeValue = undefined;
+
+                switch (opcode) {
+                    .Block, .Loop, .If => {
+                        block_type = immediate.BlockOrIf.block_type;
+                        block_value = immediate.BlockOrIf.block_value;
+                    },
                     else => unreachable,
-                };
-                const block_value: BlockTypeValue = switch (instruction_.opcode) {
-                    .Block, .Loop => instruction_.immediate.Block.block_value,
-                    .If => instruction_.immediate.If.block_value,
-                    else => unreachable,
-                };
+                }
 
                 const start_types: []const ValType = block_value.getBlocktypeParamTypes(block_type, module_);
                 const end_types: []const ValType = block_value.getBlocktypeReturnTypes(block_type, module_);
                 try popReturnTypes(validator, start_types);
 
-                try validator.pushControl(instruction_.opcode, start_types, end_types);
+                try validator.pushControl(opcode, start_types, end_types);
             }
 
             fn getLocalValtype(validator: *const ModuleValidator, module_: *const ModuleDefinition, func_: *const FunctionDefinition, locals_index: u64) !ValType {
@@ -1576,7 +1622,9 @@ const ModuleValidator = struct {
             }
 
             fn validateLoadLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
-                try validateVectorLane(T, instruction_.immediate.MemoryOffsetAndLane.laneidx);
+                const immediate_index = instruction_.immediate.Index;
+                const immediates: MemoryOffsetAndLaneImmediates = module_.code.memory_offset_and_lane_immediates.items[immediate_index];
+                try validateVectorLane(T, immediates.laneidx);
                 try validator.popType(.V128);
                 try validator.popType(.I32);
                 try validateMemoryIndex(module_);
@@ -1584,7 +1632,9 @@ const ModuleValidator = struct {
             }
 
             fn validateStoreLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
-                try validateVectorLane(T, instruction_.immediate.MemoryOffsetAndLane.laneidx);
+                const immediate_index = instruction_.immediate.Index;
+                const immediates: MemoryOffsetAndLaneImmediates = module_.code.memory_offset_and_lane_immediates.items[immediate_index];
+                try validateVectorLane(T, immediates.laneidx);
                 try validator.popType(.V128);
                 try validator.popType(.I32);
                 try validateMemoryIndex(module_);
@@ -1639,14 +1689,14 @@ const ModuleValidator = struct {
                 _ = try self.popAnyType();
             },
             .Block => {
-                try Helpers.enterBlock(self, module, instruction);
+                try Helpers.enterBlock(self, module, instruction.opcode, validation_immediates);
             },
             .Loop => {
-                try Helpers.enterBlock(self, module, instruction);
+                try Helpers.enterBlock(self, module, instruction.opcode, validation_immediates);
             },
             .If, .IfNoElse => {
                 try self.popType(.I32);
-                try Helpers.enterBlock(self, module, instruction);
+                try Helpers.enterBlock(self, module, instruction.opcode, validation_immediates);
             },
             .Else => {
                 const frame: ControlFrame = try self.popControl();
@@ -1688,7 +1738,7 @@ const ModuleValidator = struct {
                 }
             },
             .Branch_Table => {
-                const immediates: *const BranchTableImmediates = &module.code.branch_table.items[instruction.immediate.Index];
+                const immediates: *const BranchTableImmediates = &module.code.branch_table_immediates.items[instruction.immediate.Index];
                 const label_ids: []const u32 = immediates.getLabelIds(module.*);
 
                 const fallback_block_return_types: []const ValType = try Helpers.getControlTypes(self, immediates.fallback_id);
@@ -2221,7 +2271,8 @@ const ModuleValidator = struct {
                 try self.pushType(.V128);
             },
             .I8x16_Shuffle => {
-                for (instruction.immediate.VecShuffle16) |v| {
+                const indices = module.code.vec_shuffle_16_immediates.items[instruction.immediate.Index];
+                for (indices) |v| {
                     if (v >= 32) {
                         return ValidationError.ValidationInvalidLaneIndex;
                     }
@@ -2579,8 +2630,11 @@ pub const ModuleDefinition = struct {
         wasm_address_to_instruction_index: std.AutoHashMap(u32, u32),
 
         // Instruction.immediate indexes these arrays depending on the opcode
-        branch_table: std.ArrayList(BranchTableImmediates),
-        branch_table_ids: std.ArrayList(u32),
+        branch_table_immediates: std.ArrayList(BranchTableImmediates),
+        branch_table_ids_immediates: std.ArrayList(u32),
+        v128_immediates: std.ArrayList(v128),
+        memory_offset_and_lane_immediates: std.ArrayList(MemoryOffsetAndLaneImmediates),
+        vec_shuffle_16_immediates: std.ArrayList([16]u8),
     };
 
     const Imports = struct {
@@ -2629,8 +2683,12 @@ pub const ModuleDefinition = struct {
                 .instructions = std.ArrayList(Instruction).init(allocator),
                 .locals = std.ArrayList(ValType).init(allocator),
                 .wasm_address_to_instruction_index = std.AutoHashMap(u32, u32).init(allocator),
-                .branch_table = std.ArrayList(BranchTableImmediates).init(allocator),
-                .branch_table_ids = std.ArrayList(u32).init(allocator),
+
+                .branch_table_immediates = std.ArrayList(BranchTableImmediates).init(allocator),
+                .branch_table_ids_immediates = std.ArrayList(u32).init(allocator),
+                .v128_immediates = std.ArrayList(v128).init(allocator),
+                .memory_offset_and_lane_immediates = std.ArrayList(MemoryOffsetAndLaneImmediates).init(allocator),
+                .vec_shuffle_16_immediates = std.ArrayList([16]u8).init(allocator),
             },
             .types = std.ArrayList(FunctionTypeDefinition).init(allocator),
             .imports = Imports{
@@ -2866,15 +2924,17 @@ pub const ModuleDefinition = struct {
                         const type_index: u32 = self.imports.functions.items[index].type_index;
 
                         // trampoline function
+                        try self.code.instructions.ensureUnusedCapacity(2);
+
                         const instructions_begin = self.code.instructions.items.len;
-                        try self.code.instructions.append(Instruction{
+                        self.code.instructions.addOneAssumeCapacity().* = Instruction{
                             .opcode = .Call_Import,
                             .immediate = InstructionImmediates{ .Index = @intCast(index) },
-                        });
-                        try self.code.instructions.append(Instruction{
+                        };
+                        self.code.instructions.addOneAssumeCapacity().* = Instruction{
                             .opcode = .End,
-                            .immediate = InstructionImmediates{ .Void = {} },
-                        });
+                            .immediate = InstructionImmediates{ .Index = 0 },
+                        };
                         const instructions_end = self.code.instructions.items.len;
 
                         const func = FunctionDefinition{
@@ -3248,7 +3308,9 @@ pub const ModuleDefinition = struct {
 
                             const wasm_instruction_address = stream.pos - wasm_code_address_begin;
 
-                            var instruction: Instruction = try Instruction.decode(reader, self);
+                            const decoded_instruction: DecodedInstruction = try Instruction.decode(reader, self);
+                            const validation_immediates: ValidationImmediates = decoded_instruction.validation_immediates;
+                            var instruction: Instruction = decoded_instruction.instruction;
 
                             if (instruction.opcode.beginsBlock()) {
                                 try block_stack.append(BlockData{
@@ -3281,17 +3343,19 @@ pub const ModuleDefinition = struct {
                                         switch (block_instruction.opcode) {
                                             .Block => block_instruction.immediate.Block.continuation = instruction_index,
                                             .If => {
-                                                block_instruction.immediate.If.end_continuation = instruction_index;
-                                                block_instruction.immediate.If.else_continuation = instruction_index;
+                                                block_instruction.immediate.If.end_continuation_relative = @intCast(instruction_index - block.begin_index);
+                                                block_instruction.immediate.If.else_continuation_relative = @intCast(instruction_index - block.begin_index);
                                             },
                                             else => unreachable,
                                         }
 
                                         const else_index_or_null = if_to_else_offsets.get(block.begin_index);
-                                        if (else_index_or_null) |index| {
-                                            var else_instruction: *Instruction = &instructions.items[index];
-                                            else_instruction.immediate = block_instruction.immediate;
-                                            block_instruction.immediate.If.else_continuation = index;
+                                        if (else_index_or_null) |else_instruction_index| {
+                                            var else_instruction: *Instruction = &instructions.items[else_instruction_index];
+                                            std.debug.assert(else_instruction.opcode == .Else);
+
+                                            block_instruction.immediate.If.else_continuation_relative = @intCast(else_instruction_index - block.begin_index);
+                                            else_instruction.immediate = InstructionImmediates{ .Index = instruction_index };
                                         } else if (block_instruction.opcode == .If) {
                                             block_instruction.opcode = .IfNoElse;
                                         }
@@ -3299,7 +3363,7 @@ pub const ModuleDefinition = struct {
                                 }
                             }
 
-                            try validator.validateCode(self, func_def, instruction);
+                            try validator.validateCode(self, func_def, instruction, validation_immediates);
 
                             try self.code.wasm_address_to_instruction_index.put(@as(u32, @intCast(wasm_instruction_address)), instruction_index);
 
@@ -3370,8 +3434,11 @@ pub const ModuleDefinition = struct {
         self.code.instructions.deinit();
         self.code.locals.deinit();
         self.code.wasm_address_to_instruction_index.deinit();
-        self.code.branch_table.deinit();
-        self.code.branch_table_ids.deinit();
+        self.code.branch_table_immediates.deinit();
+        self.code.branch_table_ids_immediates.deinit();
+        self.code.v128_immediates.deinit();
+        self.code.memory_offset_and_lane_immediates.deinit();
+        self.code.vec_shuffle_16_immediates.deinit();
 
         for (self.imports.functions.items) |*item| {
             self.allocator.free(item.names.module_name);
