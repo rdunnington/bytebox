@@ -12,7 +12,7 @@ const ExeOpts = struct {
     root_src: []const u8,
     step_name: []const u8,
     description: []const u8,
-    step_dependencies: ?[]*Build.Step = null,
+    step_dependencies: ?[]const *Build.Step = null,
     emit_asm_step: ?*Build.Step = null,
     options: *Build.Step.Options,
 };
@@ -85,17 +85,16 @@ pub fn build(b: *Build) void {
         .options = options,
     });
 
-    var bench_steps = [_]*Build.Step{
-        add_one_wasm.install,
-        fibonacci_wasm.install,
-        mandelbrot_wasm.install,
-    };
     _ = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "bench",
         .root_src = "bench/main.zig",
         .step_name = "bench",
         .description = "Run the benchmark suite",
-        .step_dependencies = &bench_steps,
+        .step_dependencies = &.{
+            add_one_wasm.install,
+            fibonacci_wasm.install,
+            mandelbrot_wasm.install,
+        },
         .options = options,
     });
 
@@ -148,8 +147,8 @@ pub fn build(b: *Build) void {
         .step_name = "test-mem64",
         .description = "Run the mem64 test",
         .options = options,
+        .step_dependencies = &.{compile_mem64_test.install},
     });
-    mem64_test_step.dependOn(compile_mem64_test.install);
 
     // Cffi test
     const cffi_test_step = b.step("test-cffi", "Run cffi test");
