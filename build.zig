@@ -12,6 +12,7 @@ const ExeOpts = struct {
     root_src: []const u8,
     step_name: []const u8,
     description: []const u8,
+    always_install: bool = false,
     step_dependencies: ?[]const *Build.Step = null,
     emit_asm_step: ?*Build.Step = null,
     options: *Build.Step.Options,
@@ -81,6 +82,7 @@ pub fn build(b: *Build) void {
         .root_src = "run/main.zig",
         .step_name = "run",
         .description = "Run a wasm program",
+        .always_install = true,
         .emit_asm_step = emit_asm_step,
         .options = options,
     });
@@ -214,6 +216,10 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
     const step: *Build.Step = b.step(opts.step_name, opts.description);
     step.dependOn(&install_exe.step);
     step.dependOn(&run.step);
+
+    if (opts.always_install) {
+        b.getInstallStep().dependOn(&install_exe.step);
+    }
 
     return step;
 }
