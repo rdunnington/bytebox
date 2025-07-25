@@ -177,8 +177,7 @@ pub fn popV128(stack: *Stack) v128 {
     return stack.values[stack.num_values].V128;
 }
 
-pub fn popIndexType(stack: *Stack) i64 {
-    const index_type: ValType = stack.topFrame().module_instance.store.getMemory(0).limits.indexType();
+pub fn popIndexType(stack: *Stack, index_type: ValType) i64 {
     return switch (index_type) {
         .I32 => stack.popI32(),
         .I64 => stack.popI64(),
