@@ -23,12 +23,15 @@ deviates from the spec, as well as failed optimizations to document why they did
   pointer to a local function that will immediately handle the trampoline logic to the imported
   function, which allows it to fit in 8 bytes in the stack/register.
 
-* Bundling opcodes and immediates into a single "instruction" allows for close access to immediates
-  for common opcodes like i32.Const or Local.Set/Get. Getting immediates to be as small as possible,
-  i.e. 8 bytes, is important. Large immediates were moved to their own packed array, and the op
-  immediate is used to index this array. This should be OK since those ops aren't that common
-  anyway so an extra lookup won't have that large an impact on overall program perf. However,
-  the `if` op needs to store return values and block continuations. 
+* Packing bundled immediates into 8 bytes. Bundling opcodes and immediates into a single 
+  "instruction" allows for close access to immediates for common opcodes like i32.Const or 
+  Local.Set/Get. Getting immediates to be as small as possible, i.e. 8 bytes, is important. Large
+  immediates were moved to their own packed array, and the op immediate is used to index this array.
+  This should be OK since those ops aren't that common anyway so an extra lookup won't have that 
+  large an impact on overall program perf. However, the commonly-used `if` op needs to store the
+  number of return values (2 bytes) and block continuations 2x (32 bytes). Normally this would be 
+  12 bytes, but by using continuations relative to the location of the instruction, those offsets
+  can be compressed into 2 bytes each, resulting in a total size of 6 bytes for all immediates.
 
 * Labeled switch / computed goto. This backend is faster than the tailcall backend, but is harder
   to inspect the assembly for individual ops, which is why we keep the tailcall backend around.
