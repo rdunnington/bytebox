@@ -3,9 +3,10 @@ const CrossTarget = std.zig.CrossTarget;
 
 const Build = std.Build;
 const Module = Build.Module;
-const ModuleImport = Module.Import;
+const Import = Module.Import;
 const Compile = Build.Step.Compile;
 const Step = Build.Step;
+const ResolvedTarget = Build.ResolvedTarget;
 
 const ExeOpts = struct {
     exe_name: []const u8,
@@ -24,8 +25,8 @@ const StackVmKind = enum {
 };
 
 const WasmArch = enum {
-    Wasm32,
-    Wasm64,
+    wasm32,
+    wasm64,
 };
 
 const WasmBuild = struct {
@@ -57,22 +58,23 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
 
-    const add_one_wasm: WasmBuild = buildWasmExe(b, "bench/samples/add-one.zig", .Wasm32);
-    const fibonacci_wasm: WasmBuild = buildWasmExe(b, "bench/samples/fibonacci.zig", .Wasm32);
-    const mandelbrot_wasm: WasmBuild = buildWasmExe(b, "bench/samples/mandelbrot.zig", .Wasm32);
+    const add_one_wasm: WasmBuild = buildWasmExe(b, "bench/samples/add-one.zig", .wasm32);
+    const fibonacci_wasm: WasmBuild = buildWasmExe(b, "bench/samples/fibonacci.zig", .wasm32);
+    const mandelbrot_wasm: WasmBuild = buildWasmExe(b, "bench/samples/mandelbrot.zig", .wasm32);
+    const json_wasm: WasmBuild = buildWasmExe(b, "bench/samples/json.zig", .wasm32);
 
-    const stable_array_import = ModuleImport{ .name = "stable-array", .module = stable_array.module("zig-stable-array") };
+    const stable_array_import = Import{ .name = "stable-array", .module = stable_array.module("zig-stable-array") };
 
     const bytebox_module: *Build.Module = b.addModule("bytebox", .{
         .root_source_file = b.path("src/core.zig"),
-        .imports = &[_]ModuleImport{stable_array_import},
+        .imports = &[_]Import{stable_array_import},
     });
 
     bytebox_module.addOptions("config", options);
 
     const emit_asm_step: *Build.Step = b.step("asm", "Emit assembly");
 
-    const imports = [_]ModuleImport{
+    const imports = [_]Import{
         .{ .name = "bytebox", .module = bytebox_module },
         .{ .name = "stable-array", .module = stable_array.module("zig-stable-array") },
     };
@@ -96,6 +98,7 @@ pub fn build(b: *Build) void {
             add_one_wasm.install,
             fibonacci_wasm.install,
             mandelbrot_wasm.install,
+            json_wasm.install,
         },
         .options = options,
     });
@@ -145,7 +148,7 @@ pub fn build(b: *Build) void {
     wasi_testsuite_step.dependOn(&wasi_testsuite.step);
 
     // mem64 test
-    const compile_mem64_test: WasmBuild = buildWasmExe(b, "test/mem64/memtest.zig", .Wasm64);
+    const compile_mem64_test: WasmBuild = buildWasmExe(b, "test/mem64/memtest.zig", .wasm64);
 
     const mem64_test_step: *Build.Step = buildExeWithRunStep(b, target, optimize, &imports, .{
         .exe_name = "test-mem64",
@@ -170,7 +173,7 @@ pub fn build(b: *Build) void {
     cffi_build.linkLibC();
     cffi_build.linkLibrary(lib_bytebox);
 
-    const ffi_guest: WasmBuild = buildWasmExe(b, "test/cffi/module.zig", .Wasm32);
+    const ffi_guest: WasmBuild = buildWasmExe(b, "test/cffi/module.zig", .wasm32);
 
     const cffi_run_step = b.addRunArtifact(cffi_build);
     cffi_run_step.addFileArg(ffi_guest.compile.getEmittedBin());
@@ -185,7 +188,7 @@ pub fn build(b: *Build) void {
     all_tests_step.dependOn(cffi_test_step);
 }
 
-fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, imports: []const ModuleImport, opts: ExeOpts) *Build.Step {
+fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, imports: []const Import, opts: ExeOpts) *Build.Step {
     const exe: *Compile = b.addExecutable(.{
         .name = opts.exe_name,
         .root_source_file = b.path(opts.root_src),
@@ -232,7 +235,7 @@ fn buildWasmExe(b: *Build, filepath: []const u8, comptime arch: WasmArch) WasmBu
     var filename: []const u8 = std.fs.path.basename(filepath);
     const filename_no_extension: []const u8 = filename[0 .. filename.len - 4];
 
-    const cpu_arch: std.Target.Cpu.Arch = if (arch == .Wasm32) .wasm32 else .wasm64;
+    const cpu_arch: std.Target.Cpu.Arch = if (arch == .wasm32) .wasm32 else .wasm64;
 
     var target_query: std.Target.Query = .{
         .cpu_arch = cpu_arch,
