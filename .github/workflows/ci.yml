@@ -58,6 +58,11 @@ jobs:
           zig build -Dvm_kind=${{ matrix.stack_kind }} -Dtarget=x86-linux-gnu
           zig build -Dvm_kind=${{ matrix.stack_kind }} -Dtarget=arm-linux-gnueabi
 
+      - name: Aarch64 builds
+        if: runner.os == 'Linux'
+        run: |
+          zig build -Dvm_kind=${{ matrix.stack_kind }} -Dtarget=aarch64-linux-musl
+
       - name: Run unit tests
         run: |
           zig build -Dvm_kind=${{ matrix.stack_kind }} test-unit
