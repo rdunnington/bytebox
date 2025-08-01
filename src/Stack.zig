@@ -82,6 +82,7 @@ const Stack = @This();
 values: []StackVal,
 labels: []Label,
 frames: []CallFrame,
+locals: []StackVal, // references values
 num_values: u32,
 num_labels: u16,
 num_frames: u16,
@@ -99,6 +100,7 @@ pub fn init(allocator: std.mem.Allocator) Stack {
         .values = &[_]StackVal{},
         .labels = &[_]Label{},
         .frames = &[_]CallFrame{},
+        .locals = &.{},
         .num_values = 0,
         .num_labels = 0,
         .num_frames = 0,
@@ -297,6 +299,7 @@ pub fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: 
     @memset(std.mem.sliceAsBytes(func_locals), 0);
 
     stack.num_values = values_index_end;
+    stack.locals = stack.values[values_index_begin..values_index_end];
 
     stack.frames[stack.num_frames] = CallFrame{
         .func = func,
@@ -309,7 +312,7 @@ pub fn pushFrame(stack: *Stack, func: *const FunctionInstance, module_instance: 
 }
 
 pub fn popFrame(stack: *Stack) ?FuncCallData {
-    const frame: *CallFrame = stack.topFrame();
+    var frame: *CallFrame = stack.topFrame();
 
     const continuation: u32 = stack.labels[frame.start_offset_labels].continuation;
     const num_returns: usize = frame.num_returns;
@@ -331,8 +334,11 @@ pub fn popFrame(stack: *Stack) ?FuncCallData {
     stack.num_frames -= 1;
 
     if (stack.num_frames > 0) {
+        frame = stack.topFrame();
+        stack.locals = stack.values[frame.start_offset_values .. stack.num_values + frame.func.num_locals];
+
         return FuncCallData{
-            .code = stack.topFrame().func.code,
+            .code = frame.func.code,
             .continuation = continuation,
         };
     }
@@ -344,46 +350,35 @@ pub fn topFrame(stack: *const Stack) *CallFrame {
     return &stack.frames[stack.num_frames - 1];
 }
 
-pub fn locals(stack: *const Stack) []StackVal {
-    const frame = stack.topFrame();
-    return stack.values[frame.start_offset_values..];
-}
-
 pub fn localGet(stack: *Stack, local_index: usize) void {
-    const all_locals = stack.locals();
-    stack.values[stack.num_values] = all_locals[local_index];
+    stack.values[stack.num_values] = stack.locals[local_index];
     stack.num_values += 1;
 }
 
 pub fn localGetV128(stack: *Stack, local_index: usize) void {
-    const all_locals = stack.locals();
-    stack.values[stack.num_values + 0] = all_locals[local_index + 0];
-    stack.values[stack.num_values + 1] = all_locals[local_index + 1];
+    stack.values[stack.num_values + 0] = stack.locals[local_index + 0];
+    stack.values[stack.num_values + 1] = stack.locals[local_index + 1];
     stack.num_values += 2;
 }
 
 pub fn localSet(stack: *Stack, local_index: usize) void {
-    const all_locals = stack.locals();
     stack.num_values -= 1;
-    all_locals[local_index] = stack.values[stack.num_values];
+    stack.locals[local_index] = stack.values[stack.num_values];
 }
 
 pub fn localSetV128(stack: *Stack, local_index: usize) void {
-    const all_locals = stack.locals();
     stack.num_values -= 2;
-    all_locals[local_index + 0] = stack.values[stack.num_values + 0];
-    all_locals[local_index + 1] = stack.values[stack.num_values + 1];
+    stack.locals[local_index + 0] = stack.values[stack.num_values + 0];
+    stack.locals[local_index + 1] = stack.values[stack.num_values + 1];
 }
 
 pub fn localTee(stack: *Stack, local_index: usize) void {
-    const all_locals = stack.locals();
-    all_locals[local_index] = stack.values[stack.num_values - 1];
+    stack.locals[local_index] = stack.values[stack.num_values - 1];
 }
 
 pub fn localTeeV128(stack: *Stack, local_index: usize) void {
-    const all_locals = stack.locals();
-    all_locals[local_index + 0] = stack.values[stack.num_values - 2];
-    all_locals[local_index + 1] = stack.values[stack.num_values - 1];
+    stack.locals[local_index + 0] = stack.values[stack.num_values - 2];
+    stack.locals[local_index + 1] = stack.values[stack.num_values - 1];
 }
 
 pub fn select(stack: *Stack) void {
@@ -407,6 +402,7 @@ pub fn popAll(stack: *Stack) void {
     stack.num_values = 0;
     stack.num_labels = 0;
     stack.num_frames = 0;
+    stack.locals = &.{};
 }
 
 pub fn debugDump(stack: Stack) void {
