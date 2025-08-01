@@ -217,7 +217,7 @@ pub inline fn callLocal(pc: u32, code: [*]const Instruction, stack: *Stack) !Fun
     std.debug.assert(func_index < stack_vm.functions.items.len);
 
     const func: *const FunctionInstance = &stack_vm.functions.items[@as(usize, @intCast(func_index))];
-    return call(pc, stack, module_instance, func);
+    return @call(.always_inline, call, .{ pc, stack, module_instance, func });
 }
 
 pub inline fn callImport(pc: u32, code: [*]const Instruction, stack: *Stack) !FuncCallData {
