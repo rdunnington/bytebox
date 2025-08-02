@@ -77,6 +77,8 @@ pub const ValidationError = error{
     ValidationFuncRefUndeclared,
     ValidationIfElseMismatch,
     ValidationInvalidLaneIndex,
+    ValidationTooManyFunctionImportParams,
+    ValidationTooManyFunctionImportReturns,
 };
 
 pub const i8x16 = @Vector(16, i8);
@@ -164,7 +166,7 @@ pub const ValType = enum(c_int) {
 // data to which func points.
 pub const FuncRef = extern union {
     func: *const anyopaque,
-    index: usize,
+    index: u64,
 
     const k_null_sentinel: usize = std.math.maxInt(usize);
 
@@ -179,8 +181,11 @@ pub const FuncRef = extern union {
     comptime {
         std.debug.assert(@sizeOf(?*const anyopaque) == @sizeOf(usize));
         std.debug.assert(@sizeOf(FuncRef) == @sizeOf(usize));
+        std.debug.assert(@sizeOf(FuncRef) == @sizeOf(ExternRef));
     }
 };
+
+pub const ExternRef = usize;
 
 pub const Val = extern union {
     I32: i32,
@@ -189,7 +194,7 @@ pub const Val = extern union {
     F64: f64,
     V128: v128,
     FuncRef: FuncRef,
-    ExternRef: u64,
+    ExternRef: ExternRef,
 
     pub fn default(valtype: ValType) Val {
         return switch (valtype) {
@@ -386,7 +391,7 @@ pub const BlockTypeValue = extern union {
         }
     }
 
-    fn getBlocktypeReturnTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
+    pub fn getBlocktypeReturnTypes(value: BlockTypeValue, block_type: BlockType, module_def: *const ModuleDefinition) []const ValType {
         switch (block_type) {
             .Void => return &.{},
             .ValType => return switch (value.ValType) {
@@ -481,18 +486,15 @@ pub const ConstantExpression = union(ConstantExpressionType) {
 };
 
 pub const FunctionTypeDefinition = struct {
-    types: std.ArrayList(ValType),
+    types: std.ArrayList(ValType), // TODO replace this with offsets into a single array in the ModuleDefinition
     num_params: u32,
 
     pub fn getParams(self: *const FunctionTypeDefinition) []const ValType {
         return self.types.items[0..self.num_params];
     }
+
     pub fn getReturns(self: *const FunctionTypeDefinition) []const ValType {
         return self.types.items[self.num_params..];
-    }
-    pub fn calcNumReturns(self: *const FunctionTypeDefinition) u32 {
-        const total: u32 = @as(u32, @intCast(self.types.items.len));
-        return total - self.num_params;
     }
 
     pub const SortContext = struct {
@@ -698,6 +700,9 @@ pub const DataDefinition = struct {
     }
 };
 
+pub const MAX_FUNCTION_IMPORT_PARAMS = 256;
+pub const MAX_FUNCTION_IMPORT_RETURNS = 256;
+
 pub const ImportNames = struct {
     module_name: []const u8,
     import_name: []const u8,
@@ -806,7 +811,7 @@ pub const InstructionImmediates = union {
     }
 };
 
-const ValidationImmediates = union {
+pub const ValidationImmediates = union {
     Void: void,
     BlockOrIf: struct {
         block_type: BlockType,
@@ -829,7 +834,7 @@ pub const Instruction = struct {
         }
     }
 
-    fn decode(reader: anytype, module: *ModuleDefinition) !DecodedInstruction {
+    fn decode(reader: anytype, module: *ModuleDefinition, func: *FunctionDefinition) !DecodedInstruction {
         const Helpers = struct {
             fn decodeBlockType(
                 _reader: anytype,
@@ -909,7 +914,8 @@ pub const Instruction = struct {
 
         const wasm_op: WasmOpcode = try WasmOpcode.decode(reader);
 
-        const opcode: Opcode = wasm_op.toOpcode();
+        // note that this opcode can be remapped as we get more information about the instruction
+        var opcode: Opcode = wasm_op.toOpcode();
         var immediate = InstructionImmediates{ .Void = {} };
         var validation_immediates = ValidationImmediates{ .Void = {} };
 
@@ -921,20 +927,45 @@ pub const Instruction = struct {
                 }
                 immediate = InstructionImmediates{ .ValType = try ValType.decode(reader) };
             },
-            .Local_Get => {
-                immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) };
+            .Local_Get, .Local_Set, .Local_Tee => {
+                const index = try common.decodeLEB128(u32, reader);
+                immediate = InstructionImmediates{ .Index = index };
+
+                const type_def: *const FunctionTypeDefinition = func.typeDefinition(module);
+                const params = type_def.getParams();
+
+                // note we don't do validation here, we'll do that after decode
+                var is_local_v128: bool = false;
+                if (index < params.len) {
+                    is_local_v128 = params[index] == .V128;
+                } else {
+                    const locals = func.locals(module);
+                    const func_locals_index = index - params.len;
+                    if (func_locals_index < locals.len) {
+                        is_local_v128 = locals[func_locals_index] == .V128;
+                    }
+                }
+
+                if (is_local_v128) {
+                    opcode = switch (opcode) {
+                        .Local_Get => .Local_Get_V128,
+                        .Local_Set => .Local_Set_V128,
+                        .Local_Tee => .Local_Tee_V128,
+                        else => unreachable,
+                    };
+                }
             },
-            .Local_Set => {
+            .Global_Get, .Global_Set => {
                 immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) };
-            },
-            .Local_Tee => {
-                immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) };
-            },
-            .Global_Get => {
-                immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) };
-            },
-            .Global_Set => {
-                immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) };
+                if (immediate.Index < module.globals.items.len) {
+                    if (module.globals.items[immediate.Index].valtype == .V128) {
+                        opcode = switch (opcode) {
+                            .Global_Get => .Global_Get_V128,
+                            .Global_Set => .Global_Set_V128,
+                            else => unreachable,
+                        };
+                    }
+                }
             },
             .Table_Get => {
                 immediate = InstructionImmediates{ .Index = try common.decodeLEB128(u32, reader) };
@@ -1230,7 +1261,21 @@ pub const Instruction = struct {
                 const memarg = try MemArg.decode(reader, 64);
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
-            .I8x16_Extract_Lane_S, .I8x16_Extract_Lane_U, .I8x16_Replace_Lane, .I16x8_Extract_Lane_S, .I16x8_Extract_Lane_U, .I16x8_Replace_Lane, .I32x4_Extract_Lane, .I32x4_Replace_Lane, .I64x2_Extract_Lane, .I64x2_Replace_Lane, .F32x4_Extract_Lane, .F32x4_Replace_Lane, .F64x2_Extract_Lane, .F64x2_Replace_Lane => {
+            .I8x16_Extract_Lane_S,
+            .I8x16_Extract_Lane_U,
+            .I8x16_Replace_Lane,
+            .I16x8_Extract_Lane_S,
+            .I16x8_Extract_Lane_U,
+            .I16x8_Replace_Lane,
+            .I32x4_Extract_Lane,
+            .I32x4_Replace_Lane,
+            .I64x2_Extract_Lane,
+            .I64x2_Replace_Lane,
+            .F32x4_Extract_Lane,
+            .F32x4_Replace_Lane,
+            .F64x2_Extract_Lane,
+            .F64x2_Replace_Lane,
+            => {
                 immediate = InstructionImmediates{ .Index = try reader.readByte() }; // laneidx
             },
             .V128_Store => {
@@ -1497,11 +1542,13 @@ const ModuleValidator = struct {
         try self.pushControl(Opcode.Call_Local, func_type_def.getParams(), func_type_def.getReturns());
     }
 
+    // Note that validateCode() can modify the instruction depending on if the type information causes a change.
+    // For example, see Drop which is converted into Drop_V128 if the dropped type is a V128.
     fn validateCode(
         self: *ModuleValidator,
         module: *const ModuleDefinition,
         func: *const FunctionDefinition,
-        instruction: Instruction,
+        instruction: *Instruction,
         validation_immediates: ValidationImmediates,
     ) !void {
         const Helpers = struct {
@@ -1621,7 +1668,7 @@ const ModuleValidator = struct {
                 }
             }
 
-            fn validateLoadLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
+            fn validateLoadLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: *Instruction, comptime T: type) !void {
                 const immediate_index = instruction_.immediate.Index;
                 const immediates: MemoryOffsetAndLaneImmediates = module_.code.memory_offset_and_lane_immediates.items[immediate_index];
                 try validateVectorLane(T, immediates.laneidx);
@@ -1631,7 +1678,7 @@ const ModuleValidator = struct {
                 try validator.pushType(.V128);
             }
 
-            fn validateStoreLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: Instruction, comptime T: type) !void {
+            fn validateStoreLaneOp(validator: *ModuleValidator, module_: *const ModuleDefinition, instruction_: *Instruction, comptime T: type) !void {
                 const immediate_index = instruction_.immediate.Index;
                 const immediates: MemoryOffsetAndLaneImmediates = module_.code.memory_offset_and_lane_immediates.items[immediate_index];
                 try validateVectorLane(T, immediates.laneidx);
@@ -1640,14 +1687,14 @@ const ModuleValidator = struct {
                 try validateMemoryIndex(module_);
             }
 
-            fn validateVecExtractLane(comptime T: type, validator: *ModuleValidator, instruction_: Instruction) !void {
+            fn validateVecExtractLane(comptime T: type, validator: *ModuleValidator, instruction_: *Instruction) !void {
                 try validateVectorLane(T, instruction_.immediate.Index);
                 const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).vector.child);
                 try validator.popType(.V128);
                 try validator.pushType(lane_valtype);
             }
 
-            fn validateVecReplaceLane(comptime T: type, validator: *ModuleValidator, instruction_: Instruction) !void {
+            fn validateVecReplaceLane(comptime T: type, validator: *ModuleValidator, instruction_: *Instruction) !void {
                 try validateVectorLane(T, instruction_.immediate.Index);
                 const lane_valtype = vecLaneTypeToValtype(@typeInfo(T).vector.child);
                 try validator.popType(lane_valtype);
@@ -1686,8 +1733,16 @@ const ModuleValidator = struct {
             },
             .DebugTrap, .Noop => {},
             .Drop => {
-                _ = try self.popAnyType();
+                if (try self.popAnyType()) |valtype| {
+                    switch (valtype) {
+                        .V128 => {
+                            instruction.opcode = .Drop_V128;
+                        },
+                        else => {},
+                    }
+                }
             },
+            .Drop_V128 => unreachable, // validation generates this instruction, it shouldn't be generated externally
             .Block => {
                 try Helpers.enterBlock(self, module, instruction.opcode, validation_immediates);
             },
@@ -1828,6 +1883,9 @@ const ModuleValidator = struct {
                     }
                     try self.pushType(valtype1);
                 }
+
+                const valtype = self.type_stack.items[self.type_stack.items.len - 1];
+                instruction.opcode = if (valtype == .V128) .Select_V128 else .Select;
             },
             .Select_T => {
                 const valtype: ValType = instruction.immediate.ValType;
@@ -1835,25 +1893,28 @@ const ModuleValidator = struct {
                 try self.popType(valtype);
                 try self.popType(valtype);
                 try self.pushType(valtype);
+
+                instruction.opcode = if (valtype == .V128) .Select_V128 else .Select;
             },
-            .Local_Get => {
+            .Select_V128 => unreachable, // this opcode is generated by validation only
+            .Local_Get, .Local_Get_V128 => {
                 const valtype = try Helpers.getLocalValtype(self, module, func, instruction.immediate.Index);
                 try self.pushType(valtype);
             },
-            .Local_Set => {
+            .Local_Set, .Local_Set_V128 => {
                 const valtype = try Helpers.getLocalValtype(self, module, func, instruction.immediate.Index);
                 try self.popType(valtype);
             },
-            .Local_Tee => {
+            .Local_Tee, .Local_Tee_V128 => {
                 const valtype = try Helpers.getLocalValtype(self, module, func, instruction.immediate.Index);
                 try self.popType(valtype);
                 try self.pushType(valtype);
             },
-            .Global_Get => {
+            .Global_Get, .Global_Get_V128 => {
                 const valtype = try Helpers.getGlobalValtype(module, instruction.immediate.Index, .None);
                 try self.pushType(valtype);
             },
-            .Global_Set => {
+            .Global_Set, .Global_Set_V128 => {
                 const valtype = try Helpers.getGlobalValtype(module, instruction.immediate.Index, .Mutable);
                 try self.popType(valtype);
             },
@@ -2626,6 +2687,7 @@ pub const ModuleDefinition = struct {
     const Code = struct {
         locals: std.ArrayList(ValType),
         instructions: std.ArrayList(Instruction),
+        validation_immediates: std.ArrayList(ValidationImmediates),
 
         wasm_address_to_instruction_index: std.AutoHashMap(u32, u32),
 
@@ -2681,6 +2743,7 @@ pub const ModuleDefinition = struct {
             .allocator = allocator,
             .code = Code{
                 .instructions = std.ArrayList(Instruction).init(allocator),
+                .validation_immediates = std.ArrayList(ValidationImmediates).init(allocator),
                 .locals = std.ArrayList(ValType).init(allocator),
                 .wasm_address_to_instruction_index = std.AutoHashMap(u32, u32).init(allocator),
 
@@ -2720,7 +2783,7 @@ pub const ModuleDefinition = struct {
     pub fn decode(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
         std.debug.assert(self.is_decoded == false);
 
-        self.decode_internal(wasm) catch |e| {
+        self.decodeInternal(wasm) catch |e| {
             const wrapped_error: anyerror = switch (e) {
                 error.EndOfStream => error.MalformedUnexpectedEnd,
                 else => e,
@@ -2729,7 +2792,7 @@ pub const ModuleDefinition = struct {
         };
     }
 
-    fn decode_internal(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
+    fn decodeInternal(self: *ModuleDefinition, wasm: []const u8) anyerror!void {
         const DecodeHelpers = struct {
             fn readRefValue(valtype: ValType, reader: anytype) !Val {
                 switch (valtype) {
@@ -2878,6 +2941,13 @@ pub const ModuleDefinition = struct {
                             0x00 => {
                                 const type_index = try common.decodeLEB128(u32, reader);
                                 try ModuleValidator.validateTypeIndex(type_index, self);
+                                const func_type: *const FunctionTypeDefinition = &self.types.items[type_index];
+                                if (func_type.num_params >= MAX_FUNCTION_IMPORT_PARAMS) {
+                                    return ValidationError.ValidationTooManyFunctionImportParams;
+                                }
+                                if (func_type.getReturns().len >= MAX_FUNCTION_IMPORT_RETURNS) {
+                                    return ValidationError.ValidationTooManyFunctionImportReturns;
+                                }
                                 try self.imports.functions.append(FunctionImportDefinition{
                                     .names = names,
                                     .type_index = type_index,
@@ -2936,6 +3006,9 @@ pub const ModuleDefinition = struct {
                             .immediate = InstructionImmediates{ .Index = 0 },
                         };
                         const instructions_end = self.code.instructions.items.len;
+
+                        try self.code.validation_immediates.ensureUnusedCapacity(2);
+                        self.code.validation_immediates.appendNTimesAssumeCapacity(.{ .Void = {} }, 2);
 
                         const func = FunctionDefinition{
                             .type_index = type_index,
@@ -3242,6 +3315,8 @@ pub const ModuleDefinition = struct {
                     defer if_to_else_offsets.deinit();
 
                     var instructions = &self.code.instructions;
+                    var instruction_validation_immediates = &self.code.validation_immediates;
+                    std.debug.assert(instructions.items.len == instruction_validation_immediates.items.len);
 
                     const num_codes = try common.decodeLEB128(u32, reader);
 
@@ -3308,7 +3383,7 @@ pub const ModuleDefinition = struct {
 
                             const wasm_instruction_address = stream.pos - wasm_code_address_begin;
 
-                            const decoded_instruction: DecodedInstruction = try Instruction.decode(reader, self);
+                            const decoded_instruction: DecodedInstruction = try Instruction.decode(reader, self, func_def);
                             const validation_immediates: ValidationImmediates = decoded_instruction.validation_immediates;
                             var instruction: Instruction = decoded_instruction.instruction;
 
@@ -3363,7 +3438,7 @@ pub const ModuleDefinition = struct {
                                 }
                             }
 
-                            try validator.validateCode(self, func_def, instruction, validation_immediates);
+                            try validator.validateCode(self, func_def, &instruction, validation_immediates);
 
                             try self.code.wasm_address_to_instruction_index.put(@as(u32, @intCast(wasm_instruction_address)), instruction_index);
 
@@ -3371,6 +3446,8 @@ pub const ModuleDefinition = struct {
                                 .Noop => {}, // no need to emit noops since they don't do anything
                                 else => {
                                     try instructions.append(instruction);
+                                    try instruction_validation_immediates.append(validation_immediates);
+                                    std.debug.assert(instructions.items.len == instruction_validation_immediates.items.len);
                                 },
                             }
                         }
@@ -3432,6 +3509,7 @@ pub const ModuleDefinition = struct {
 
     pub fn destroy(self: *ModuleDefinition) void {
         self.code.instructions.deinit();
+        self.code.validation_immediates.deinit();
         self.code.locals.deinit();
         self.code.wasm_address_to_instruction_index.deinit();
         self.code.branch_table_immediates.deinit();

@@ -36,6 +36,7 @@ pub const ModuleDefinitionOpts = def.ModuleDefinitionOpts;
 pub const TaggedVal = def.TaggedVal;
 pub const Val = def.Val;
 pub const ValType = def.ValType;
+pub const ExternRef = def.ExternRef;
 
 pub const UnlinkableError = inst.UnlinkableError;
 pub const UninstantiableError = inst.UninstantiableError;

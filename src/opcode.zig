@@ -21,13 +21,20 @@ pub const Opcode = enum(u16) {
     Call_Import, // Has no corresponding mapping in WasmOpcode, only calls imported functions
     Call_Indirect,
     Drop,
+    Drop_V128, // Has no corresponding mapping in WasmOpcode
     Select,
     Select_T,
+    Select_V128,
     Local_Get,
     Local_Set,
     Local_Tee,
+    Local_Get_V128, // Has no corresponding mapping in WasmOpcode
+    Local_Set_V128, // Has no corresponding mapping in WasmOpcode
+    Local_Tee_V128, // Has no corresponding mapping in WasmOpcode
     Global_Get,
     Global_Set,
+    Global_Get_V128, // Has no corresponding mapping in WasmOpcode
+    Global_Set_V128, // Has no corresponding mapping in WasmOpcode
     Table_Get,
     Table_Set,
     I32_Load,

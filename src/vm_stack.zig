@@ -26,6 +26,8 @@ pub const v128 = def.v128;
 const BlockImmediates = def.BlockImmediates;
 const BranchTableImmediates = def.BranchTableImmediates;
 const CallIndirectImmediates = def.CallIndirectImmediates;
+const IfImmediates = def.IfImmediates;
+const ValidationImmediates = def.ValidationImmediates;
 const ConstantExpression = def.ConstantExpression;
 const DataDefinition = def.DataDefinition;
 const ElementDefinition = def.ElementDefinition;
@@ -37,7 +39,6 @@ const FunctionHandleType = def.FunctionHandleType;
 const FunctionTypeDefinition = def.FunctionTypeDefinition;
 const GlobalDefinition = def.GlobalDefinition;
 const GlobalMut = def.GlobalMut;
-const IfImmediates = def.IfImmediates;
 const ImportNames = def.ImportNames;
 const Instruction = def.Instruction;
 const Limits = def.Limits;
@@ -82,6 +83,7 @@ const FuncCallData = Stack.FuncCallData;
 const FunctionInstance = Stack.FunctionInstance;
 
 const OpHelpers = @import("stack_ops.zig");
+const HostFunctionData = OpHelpers.HostFunctionData;
 
 fn preamble(name: []const u8, pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     if (metering.enabled) {
@@ -149,13 +151,20 @@ const InstructionFuncs = struct {
         &op_Call_Import,
         &op_Call_Indirect,
         &op_Drop,
+        &op_Drop_V128,
         &op_Select,
-        &op_Select_T,
+        &op_Invalid, // Opcode.SelectT should have been replaced with either .Select or .SelectV128
+        &op_Select_V128,
         &op_Local_Get,
         &op_Local_Set,
         &op_Local_Tee,
+        &op_Local_Get_V128,
+        &op_Local_Set_V128,
+        &op_Local_Tee_V128,
         &op_Global_Get,
         &op_Global_Set,
+        &op_Global_Get_V128,
+        &op_Global_Set_V128,
         &op_Table_Get,
         &op_Table_Set,
         &op_I32_Load,
@@ -629,14 +638,12 @@ const InstructionFuncs = struct {
 
     fn op_Else(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Else", pc, code, stack);
-        // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
         const next_pc = OpHelpers.@"else"(pc, code);
         try @call(.always_tail, InstructionFuncs.lookup(code[next_pc].opcode), .{ next_pc, code, stack });
     }
 
     fn op_End(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("End", pc, code, stack);
-
         const next = OpHelpers.end(pc, code, stack) orelse return;
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
@@ -667,25 +674,19 @@ const InstructionFuncs = struct {
 
     fn op_Call_Local(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Call", pc, code, stack);
-
         const next = try OpHelpers.callLocal(pc, code, stack);
-
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
 
     fn op_Call_Import(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Call", pc, code, stack);
-
         const next = try OpHelpers.callImport(pc, code, stack);
-
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
 
     fn op_Call_Indirect(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Call_Indirect", pc, code, stack);
-
         const next = try OpHelpers.callIndirect(pc, code, stack);
-
         try @call(.always_tail, InstructionFuncs.lookup(next.code[next.continuation].opcode), .{ next.continuation, next.code, stack });
     }
 
@@ -695,19 +696,21 @@ const InstructionFuncs = struct {
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
-    fn op_Select(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        try preamble("Select", pc, code, stack);
-
-        OpHelpers.select(stack);
-
+    fn op_Drop_V128(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Drop_V128", pc, code, stack);
+        OpHelpers.dropV128(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
-    fn op_Select_T(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-        try preamble("Select_T", pc, code, stack);
+    fn op_Select(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Select", pc, code, stack);
+        OpHelpers.select(stack);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
 
-        OpHelpers.selectT(stack);
-
+    fn op_Select_V128(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Select_V128", pc, code, stack);
+        OpHelpers.selectV128(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -719,7 +722,6 @@ const InstructionFuncs = struct {
 
     fn op_Local_Set(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Local_Set", pc, code, stack);
-
         OpHelpers.localSet(pc, code, stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
@@ -727,6 +729,24 @@ const InstructionFuncs = struct {
     fn op_Local_Tee(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Local_Tee", pc, code, stack);
         OpHelpers.localTee(pc, code, stack);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_Local_Get_V128(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Local_Get_V128", pc, code, stack);
+        OpHelpers.localGetV128(pc, code, stack);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_Local_Set_V128(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Local_Set_V128", pc, code, stack);
+        OpHelpers.localSetV128(pc, code, stack);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_Local_Tee_V128(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Local_Tee_V128", pc, code, stack);
+        OpHelpers.localTeeV128(pc, code, stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -739,6 +759,18 @@ const InstructionFuncs = struct {
     fn op_Global_Set(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Global_Set", pc, code, stack);
         OpHelpers.globalSet(pc, code, stack);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_Global_Get_V128(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Global_Get_V128", pc, code, stack);
+        OpHelpers.globalGetV128(pc, code, stack);
+        try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
+    }
+
+    fn op_Global_Set_V128(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+        try preamble("Global_Set_V128", pc, code, stack);
+        OpHelpers.globalSetV128(pc, code, stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -1698,7 +1730,7 @@ const InstructionFuncs = struct {
 
     fn op_Ref_Null(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
         try preamble("Ref_Null", pc, code, stack);
-        try OpHelpers.refNull(pc, code, stack);
+        try OpHelpers.refNull(stack);
         try @call(.always_tail, InstructionFuncs.lookup(code[pc + 1].opcode), .{ pc + 1, code, stack });
     }
 
@@ -3235,6 +3267,17 @@ const InstructionFuncs = struct {
     }
 };
 
+fn calcNumValues(types: []const ValType) u16 {
+    var num: u16 = 0;
+    for (types) |valtype| {
+        num += switch (valtype) {
+            .V128 => 2,
+            else => 1,
+        };
+    }
+    return num;
+}
+
 pub const StackVM = struct {
     const TrapType = enum {
         Step,
@@ -3272,7 +3315,9 @@ pub const StackVM = struct {
     } else void;
 
     stack: Stack,
+    instructions: std.ArrayList(Instruction),
     functions: std.ArrayList(FunctionInstance),
+    host_function_import_data: std.ArrayList(HostFunctionData),
     debug_state: ?DebugState,
     meter_state: MeterState,
 
@@ -3283,7 +3328,9 @@ pub const StackVM = struct {
     pub fn init(vm: *VM) void {
         var self: *StackVM = fromVM(vm);
         self.stack = Stack.init(vm.allocator);
+        self.instructions = std.ArrayList(Instruction).init(vm.allocator);
         self.functions = std.ArrayList(FunctionInstance).init(vm.allocator);
+        self.host_function_import_data = std.ArrayList(HostFunctionData).init(vm.allocator);
         self.debug_state = null;
     }
 
@@ -3291,7 +3338,8 @@ pub const StackVM = struct {
         var self: *StackVM = fromVM(vm);
 
         self.functions.deinit();
-
+        self.host_function_import_data.deinit();
+        self.instructions.deinit();
         self.stack.deinit();
         if (self.debug_state) |*debug_state| {
             debug_state.trapped_opcodes.deinit();
@@ -3317,32 +3365,112 @@ pub const StackVM = struct {
             .max_frames = @as(u16, @intFromFloat(stack_size_f * 0.01)),
         });
 
+        // vm keeps a copy of the instructions to mutate some of them
+        try self.instructions.appendSlice(module.module_def.code.instructions.items);
+
+        var locals_remap: std.ArrayList(u32) = .init(vm.allocator);
+        defer locals_remap.deinit();
+        try locals_remap.ensureTotalCapacity(1024);
+
         try self.functions.ensureTotalCapacity(module.module_def.functions.items.len);
         for (module.module_def.functions.items, 0..) |*def_func, i| {
             const func_type: *const FunctionTypeDefinition = &module.module_def.types.items[def_func.type_index];
             const param_types: []const ValType = func_type.getParams();
+            const local_types: []const ValType = def_func.locals(module.module_def);
 
-            const locals: []const ValType = def_func.locals(module.module_def);
-            const num_locals: u32 = @intCast(locals.len);
-            const num_params: u16 = @intCast(param_types.len);
-            const num_values: u32 = @intCast(def_func.stack_stats.values);
+            var num_params: u16 = 0;
+            var num_locals: u32 = 0;
+
+            // remap local indices to ensure v128 gets 2 local slots
+            try locals_remap.resize(0);
+            {
+                for (param_types) |valtype| {
+                    const num_values: u16 = switch (valtype) {
+                        .V128 => 2,
+                        else => 1,
+                    };
+                    try locals_remap.append(num_params);
+                    num_params += num_values;
+                }
+
+                for (local_types) |valtype| {
+                    const num_values: u16 = switch (valtype) {
+                        .V128 => 2,
+                        else => 1,
+                    };
+                    try locals_remap.append(num_params + num_locals);
+                    num_locals += num_values;
+                }
+            }
+
+            const return_types: []const ValType = func_type.getReturns();
+            const num_returns: u16 = calcNumValues(return_types);
+
+            const max_values_on_stack: u32 = @intCast(def_func.stack_stats.values);
 
             const f = FunctionInstance{
                 .type_def_index = def_func.type_index,
                 .def_index = @as(u32, @intCast(i)),
-                .code = module.module_def.code.instructions.items.ptr,
+                .code = self.instructions.items.ptr,
                 .instructions_begin = def_func.instructions_begin,
                 .num_locals = num_locals,
                 .num_params = num_params,
-                .num_returns = @intCast(func_type.getReturns().len),
+                .num_returns = num_returns,
 
                 // maximum number of values that can be on the stack for this function
-                .max_values = num_values + num_locals + num_params,
+                .max_values = max_values_on_stack + num_locals + num_params,
                 .max_labels = @intCast(def_func.stack_stats.labels),
 
                 .module = module,
             };
             try self.functions.append(f);
+
+            // fixup immediates
+            std.debug.assert(self.instructions.items.len == module.module_def.code.validation_immediates.items.len);
+            const func_code: []Instruction = self.instructions.items[def_func.instructions_begin..def_func.instructions_end];
+            const func_validation_immediates: []ValidationImmediates = module.module_def.code.validation_immediates.items[def_func.instructions_begin..def_func.instructions_end];
+            for (func_code, func_validation_immediates) |*instruction, validation_immediates| {
+                switch (instruction.opcode) {
+                    .Local_Get, .Local_Set, .Local_Tee, .Local_Get_V128, .Local_Set_V128, .Local_Tee_V128 => {
+                        const remapped_index = locals_remap.items[instruction.immediate.Index];
+                        instruction.immediate.Index = remapped_index;
+                    },
+                    .Block, .Loop, .If => {
+                        const immediates = validation_immediates.BlockOrIf;
+                        const block_return_types = immediates.block_value.getBlocktypeReturnTypes(immediates.block_type, module.module_def);
+                        const num_block_returns: u16 = calcNumValues(block_return_types);
+
+                        if (instruction.opcode == .If) {
+                            instruction.immediate.If.num_returns = num_block_returns;
+                        } else {
+                            instruction.immediate.Block.num_returns = num_block_returns;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // precalculate some data for function imports to avoid having to do this at runtime
+        try self.host_function_import_data.ensureTotalCapacity(module.store.imports.functions.items.len);
+        for (module.store.imports.functions.items) |import| {
+            const data: HostFunctionData = switch (import.data) {
+                .Host => |host_import| blk: {
+                    const params: []const ValType = host_import.func_type_def.getParams();
+                    const returns: []const ValType = host_import.func_type_def.getReturns();
+
+                    const num_param_values: u16 = calcNumValues(params);
+                    const num_return_values: u16 = calcNumValues(returns);
+
+                    const data: HostFunctionData = .{
+                        .num_param_values = num_param_values,
+                        .num_return_values = num_return_values,
+                    };
+                    break :blk data;
+                },
+                .Wasm => .{},
+            };
+            self.host_function_import_data.appendAssumeCapacity(data);
         }
     }
 
@@ -3487,7 +3615,7 @@ pub const StackVM = struct {
             const name_section: *const NameCustomSection = &frame.func.module.module_def.name_section;
             const module_name = name_section.getModuleName();
 
-            const func_name_index: usize = frame.func.def_index + frame.func.module.module_def.imports.functions.items.len;
+            const func_name_index: usize = frame.func.def_index;
             const function_name = name_section.findFunctionName(func_name_index);
 
             try writer.print("{}: {s}!{s}\n", .{ reverse_index, module_name, function_name });
@@ -3510,22 +3638,34 @@ pub const StackVM = struct {
     }
 
     fn invokeInternal(self: *StackVM, module: *ModuleInstance, func_instance_index: usize, params: [*]const Val, returns: [*]Val) !void {
-        const func: FunctionInstance = self.functions.items[func_instance_index];
-        const func_def: FunctionDefinition = module.module_def.functions.items[func.def_index];
+        const func: *const FunctionInstance = &self.functions.items[func_instance_index];
+        const func_def: *const FunctionDefinition = &module.module_def.functions.items[func.def_index];
+        const type_def: *const FunctionTypeDefinition = func_def.typeDefinition(module.module_def);
+        const param_types: []const ValType = type_def.getParams();
+        const return_types: []const ValType = type_def.getReturns();
 
-        const params_slice = params[0..func.num_params];
-        var returns_slice = returns[0..func.num_returns];
+        // use the count of params/returns from the type since it corresponds to the number of Vals. The function instances' param/return
+        // counts double count V128 as 2 parameters.
+        const params_slice = params[0..param_types.len];
+        var returns_slice = returns[0..return_types.len];
 
         // Ensure any leftover stack state doesn't pollute this invoke. Can happen if the previous invoke returned an error.
         self.stack.popAll();
 
         // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
         // on the value stack
-        for (params_slice) |v| {
-            self.stack.pushValue(v);
+        for (params_slice, param_types) |v, valtype| {
+            switch (valtype) {
+                .V128 => {
+                    const vec2: f64x2 = @bitCast(v.V128);
+                    self.stack.pushF64(vec2[0]);
+                    self.stack.pushF64(vec2[1]);
+                },
+                else => self.stack.pushI64(v.I64),
+            }
         }
 
-        try self.stack.pushFrame(&func, module);
+        try self.stack.pushFrame(func, module);
         try self.stack.pushLabel(func.num_returns, @intCast(func_def.continuation));
 
         DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
@@ -3537,10 +3677,20 @@ pub const StackVM = struct {
         }
 
         if (returns_slice.len > 0) {
-            var index: i32 = @as(i32, @intCast(returns_slice.len - 1));
-            while (index >= 0) {
-                returns_slice[@as(usize, @intCast(index))] = self.stack.popValue();
-                index -= 1;
+            std.debug.assert(returns_slice.len == return_types.len);
+            for (0..returns_slice.len) |i| {
+                const index = returns_slice.len - 1 - i;
+                switch (return_types[index]) {
+                    .V128 => {
+                        var vec2: f64x2 = undefined;
+                        vec2[1] = self.stack.popF64();
+                        vec2[0] = self.stack.popF64();
+                        returns_slice[index].V128 = @bitCast(vec2);
+                    },
+                    else => {
+                        returns_slice[index].I64 = self.stack.popI64();
+                    },
+                }
             }
         }
 
@@ -3609,14 +3759,12 @@ pub const StackVM = struct {
 
             Opcode.Else => {
                 try preamble("Else", pc, code, stack);
-                // getting here means we reached the end of the if opcode chain, so skip to the true end opcode
                 pc = OpHelpers.@"else"(pc, code);
                 continue :interpret code[pc].opcode;
             },
 
             Opcode.End => {
                 try preamble("End", pc, code, stack);
-
                 const next = OpHelpers.end(pc, code, stack) orelse return;
                 pc = next.continuation;
                 code = next.code;
@@ -3657,7 +3805,6 @@ pub const StackVM = struct {
 
             Opcode.Call_Local => {
                 try preamble("Call_Local", pc, code, stack);
-
                 const next = try OpHelpers.callLocal(pc, code, stack);
                 pc = next.continuation;
                 code = next.code;
@@ -3666,9 +3813,7 @@ pub const StackVM = struct {
 
             Opcode.Call_Import => {
                 try preamble("Call_Import", pc, code, stack);
-
                 const next = try OpHelpers.callImport(pc, code, stack);
-
                 pc = next.continuation;
                 code = next.code;
                 continue :interpret code[pc].opcode;
@@ -3676,9 +3821,7 @@ pub const StackVM = struct {
 
             Opcode.Call_Indirect => {
                 try preamble("Call_Indirect", pc, code, stack);
-
                 const next = try OpHelpers.callIndirect(pc, code, stack);
-
                 pc = next.continuation;
                 code = next.code;
                 continue :interpret code[pc].opcode;
@@ -3691,20 +3834,28 @@ pub const StackVM = struct {
                 continue :interpret code[pc].opcode;
             },
 
+            Opcode.Drop_V128 => {
+                try preamble("Drop_V128", pc, code, stack);
+                OpHelpers.dropV128(stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
             Opcode.Select => {
                 try preamble("Select", pc, code, stack);
-
                 OpHelpers.select(stack);
-
                 pc += 1;
                 continue :interpret code[pc].opcode;
             },
 
             Opcode.Select_T => {
-                try preamble("Select_T", pc, code, stack);
+                // should have been switched to Select in validation
+                unreachable;
+            },
 
-                OpHelpers.selectT(stack);
-
+            Opcode.Select_V128 => {
+                try preamble("SelectV128", pc, code, stack);
+                OpHelpers.selectV128(stack);
                 pc += 1;
                 continue :interpret code[pc].opcode;
             },
@@ -3718,7 +3869,6 @@ pub const StackVM = struct {
 
             Opcode.Local_Set => {
                 try preamble("Local_Set", pc, code, stack);
-
                 OpHelpers.localSet(pc, code, stack);
                 pc += 1;
                 continue :interpret code[pc].opcode;
@@ -3727,6 +3877,27 @@ pub const StackVM = struct {
             Opcode.Local_Tee => {
                 try preamble("Local_Tee", pc, code, stack);
                 OpHelpers.localTee(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Local_Get_V128 => {
+                try preamble("Local_Get_V128", pc, code, stack);
+                OpHelpers.localGetV128(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Local_Set_V128 => {
+                try preamble("Local_Set_V128", pc, code, stack);
+                OpHelpers.localSetV128(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Local_Tee_V128 => {
+                try preamble("Local_Tee_V128", pc, code, stack);
+                OpHelpers.localTeeV128(pc, code, stack);
                 pc += 1;
                 continue :interpret code[pc].opcode;
             },
@@ -3741,6 +3912,20 @@ pub const StackVM = struct {
             Opcode.Global_Set => {
                 try preamble("Global_Set", pc, code, stack);
                 OpHelpers.globalSet(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Global_Get_V128 => {
+                try preamble("Global_Get_V128", pc, code, stack);
+                OpHelpers.globalGetV128(pc, code, stack);
+                pc += 1;
+                continue :interpret code[pc].opcode;
+            },
+
+            Opcode.Global_Set_V128 => {
+                try preamble("Global_Set_V128", pc, code, stack);
+                OpHelpers.globalSetV128(pc, code, stack);
                 pc += 1;
                 continue :interpret code[pc].opcode;
             },
@@ -4860,7 +5045,7 @@ pub const StackVM = struct {
 
             Opcode.Ref_Null => {
                 try preamble("Ref_Null", pc, code, stack);
-                try OpHelpers.refNull(pc, code, stack);
+                try OpHelpers.refNull(stack);
                 pc += 1;
                 continue :interpret code[pc].opcode;
             },
