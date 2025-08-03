@@ -166,7 +166,7 @@ pub const ValType = enum(c_int) {
 // data to which func points.
 pub const FuncRef = extern union {
     func: *const anyopaque,
-    index: u64,
+    index: usize,
 
     const k_null_sentinel: usize = std.math.maxInt(usize);
 
@@ -2801,7 +2801,7 @@ pub const ModuleDefinition = struct {
                         return Val.funcrefFromIndex(func_index);
                     },
                     .ExternRef => {
-                        const ref = try common.decodeLEB128(u64, reader);
+                        const ref = try common.decodeLEB128(usize, reader);
                         return Val{ .ExternRef = ref };
                     },
                     else => unreachable,

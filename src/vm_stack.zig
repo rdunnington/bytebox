@@ -3495,7 +3495,69 @@ pub const StackVM = struct {
             }
         }
 
-        try self.invokeInternal(module, handle.index, params, returns);
+        const func: *const FunctionInstance = &self.functions.items[handle.index];
+        const func_def: *const FunctionDefinition = &module.module_def.functions.items[func.def_index];
+        const type_def: *const FunctionTypeDefinition = func_def.typeDefinition(module.module_def);
+        const param_types: []const ValType = type_def.getParams();
+        const return_types: []const ValType = type_def.getReturns();
+
+        // use the count of params/returns from the type since it corresponds to the number of Vals. The function instances' param/return
+        // counts double count V128 as 2 parameters.
+        const params_slice = params[0..param_types.len];
+        var returns_slice = returns[0..return_types.len];
+
+        // Ensure any leftover stack state doesn't pollute this invoke. Can happen if the previous invoke returned an error.
+        self.stack.popAll();
+
+        // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
+        // on the value stack
+        for (params_slice, param_types) |v, valtype| {
+            switch (valtype) {
+                .V128 => {
+                    const vec2: f64x2 = @bitCast(v.V128);
+                    self.stack.pushF64(vec2[0]);
+                    self.stack.pushF64(vec2[1]);
+                },
+                else => self.stack.pushI64(v.I64),
+            }
+        }
+
+        try self.stack.pushFrame(func, module);
+        try self.stack.pushLabel(func.num_returns, @intCast(func_def.continuation));
+
+        DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
+
+        if (config.vm_kind == .tailcall) {
+            try InstructionFuncs.run(@intCast(func.instructions_begin), func.code, &self.stack);
+        } else {
+            try self.run(@intCast(func.instructions_begin), func.code);
+        }
+
+        if (returns_slice.len > 0) {
+            std.debug.assert(returns_slice.len == return_types.len);
+            for (0..returns_slice.len) |i| {
+                const index = returns_slice.len - 1 - i;
+                switch (return_types[index]) {
+                    .V128 => {
+                        var vec2: f64x2 = undefined;
+                        vec2[1] = self.stack.popF64();
+                        vec2[0] = self.stack.popF64();
+                        returns_slice[index].V128 = @bitCast(vec2);
+                    },
+                    else => {
+                        returns_slice[index].I64 = self.stack.popI64();
+                    },
+                }
+            }
+        }
+
+        if (self.debug_state) |*debug_state| {
+            debug_state.onInvokeFinished();
+        }
+
+        if (metering.enabled and self.meter_state.enabled) {
+            self.meter_state.onInvokeFinished();
+        }
     }
 
     pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
@@ -3526,14 +3588,33 @@ pub const StackVM = struct {
             return error.TrapInvalidResume;
         }
 
-        const op_func = InstructionFuncs.lookup(opcode);
-        try op_func(pc, module.module_def.code.instructions.items.ptr, &self.stack);
+        const func: *const FunctionInstance = self.stack.topFrame().func;
+
+        if (config.vm_kind == .tailcall) {
+            try InstructionFuncs.run(pc, func.code, &self.stack);
+        } else {
+            try self.run(pc, func.code);
+        }
 
         if (returns.len > 0) {
-            var index: i32 = @as(i32, @intCast(returns.len - 1));
-            while (index >= 0) {
-                returns[@as(usize, @intCast(index))] = self.stack.popValue();
-                index -= 1;
+            const func_def: *const FunctionDefinition = &module.module_def.functions.items[func.def_index];
+            const type_def: *const FunctionTypeDefinition = func_def.typeDefinition(module.module_def);
+            const return_types: []const ValType = type_def.getReturns();
+            std.debug.assert(returns.len == return_types.len);
+
+            for (0..returns.len) |i| {
+                const index = returns.len - 1 - i;
+                switch (return_types[index]) {
+                    .V128 => {
+                        var vec2: f64x2 = undefined;
+                        vec2[1] = self.stack.popF64();
+                        vec2[0] = self.stack.popF64();
+                        returns[index].V128 = @bitCast(vec2);
+                    },
+                    else => {
+                        returns[index].I64 = self.stack.popI64();
+                    },
+                }
             }
         }
 
@@ -3635,72 +3716,6 @@ pub const StackVM = struct {
     pub fn resolveFuncRef(vm: *VM, func: FuncRef) FuncRef {
         var self: *StackVM = fromVM(vm);
         return if (func.isNull()) func else FuncRef{ .func = &self.functions.items[func.index] };
-    }
-
-    fn invokeInternal(self: *StackVM, module: *ModuleInstance, func_instance_index: usize, params: [*]const Val, returns: [*]Val) !void {
-        const func: *const FunctionInstance = &self.functions.items[func_instance_index];
-        const func_def: *const FunctionDefinition = &module.module_def.functions.items[func.def_index];
-        const type_def: *const FunctionTypeDefinition = func_def.typeDefinition(module.module_def);
-        const param_types: []const ValType = type_def.getParams();
-        const return_types: []const ValType = type_def.getReturns();
-
-        // use the count of params/returns from the type since it corresponds to the number of Vals. The function instances' param/return
-        // counts double count V128 as 2 parameters.
-        const params_slice = params[0..param_types.len];
-        var returns_slice = returns[0..return_types.len];
-
-        // Ensure any leftover stack state doesn't pollute this invoke. Can happen if the previous invoke returned an error.
-        self.stack.popAll();
-
-        // pushFrame() assumes the stack already contains the params to the function, so ensure they exist
-        // on the value stack
-        for (params_slice, param_types) |v, valtype| {
-            switch (valtype) {
-                .V128 => {
-                    const vec2: f64x2 = @bitCast(v.V128);
-                    self.stack.pushF64(vec2[0]);
-                    self.stack.pushF64(vec2[1]);
-                },
-                else => self.stack.pushI64(v.I64),
-            }
-        }
-
-        try self.stack.pushFrame(func, module);
-        try self.stack.pushLabel(func.num_returns, @intCast(func_def.continuation));
-
-        DebugTrace.traceFunction(module, self.stack.num_frames, func.def_index);
-
-        if (config.vm_kind == .tailcall) {
-            try InstructionFuncs.run(@intCast(func.instructions_begin), func.code, &self.stack);
-        } else {
-            try self.run(@intCast(func.instructions_begin), func.code);
-        }
-
-        if (returns_slice.len > 0) {
-            std.debug.assert(returns_slice.len == return_types.len);
-            for (0..returns_slice.len) |i| {
-                const index = returns_slice.len - 1 - i;
-                switch (return_types[index]) {
-                    .V128 => {
-                        var vec2: f64x2 = undefined;
-                        vec2[1] = self.stack.popF64();
-                        vec2[0] = self.stack.popF64();
-                        returns_slice[index].V128 = @bitCast(vec2);
-                    },
-                    else => {
-                        returns_slice[index].I64 = self.stack.popI64();
-                    },
-                }
-            }
-        }
-
-        if (self.debug_state) |*debug_state| {
-            debug_state.onInvokeFinished();
-        }
-
-        if (metering.enabled and self.meter_state.enabled) {
-            self.meter_state.onInvokeFinished();
-        }
     }
 
     fn run(self: *StackVM, start_pc: u32, start_code: [*]const Instruction) anyerror!void {
