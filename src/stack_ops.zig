@@ -78,6 +78,18 @@ pub const HostFunctionData = struct {
     num_return_values: u16 = 0,
 };
 
+fn trappedMod(comptime T: type, numerator: T, denominator: T) TrapError!T {
+    return std.math.mod(T, numerator, denominator) catch |e| {
+        if (e == error.DivisionByZero) {
+            return error.TrapIntegerDivisionByZero;
+        } else if (e == error.NegativeDenominator) {
+            return error.TrapNegativeDenominator;
+        } else {
+            unreachable;
+        }
+    };
+}
+
 pub fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Stack) void {
     if (config.enable_debug_trace and DebugTrace.shouldTraceInstructions()) {
         const frame: *const CallFrame = stack.topFrame();
@@ -89,7 +101,7 @@ pub fn traceInstruction(instruction_name: []const u8, pc: u32, stack: *const Sta
     }
 }
 
-pub inline fn debugTrap(pc: u32, stack: *Stack) anyerror!void {
+pub inline fn debugTrap(pc: u32, stack: *Stack) TrapError!void {
     const root_module_instance: *ModuleInstance = stack.frames[0].module_instance;
     const stack_vm = StackVM.fromVM(root_module_instance.vm);
 
@@ -103,14 +115,14 @@ inline fn getStore(stack: *Stack) *Store {
     return &stack.topFrame().module_instance.store;
 }
 
-pub inline fn block(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn block(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const immediate = code[pc].immediate.Block;
-    try stack.pushLabel(immediate.num_returns, immediate.continuation);
+    stack.pushLabel(immediate.num_returns, immediate.continuation);
 }
 
-pub inline fn loop(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn loop(pc: u32, code: [*]const Instruction, stack: *Stack) void {
     const immediate = code[pc].immediate.Block;
-    try stack.pushLabel(immediate.num_returns, immediate.continuation);
+    stack.pushLabel(immediate.num_returns, immediate.continuation);
 }
 
 pub fn @"if"(pc: u32, code: [*]const Instruction, stack: *Stack) u32 {
@@ -120,10 +132,10 @@ pub fn @"if"(pc: u32, code: [*]const Instruction, stack: *Stack) u32 {
 
     const condition = stack.popI32();
     if (condition != 0) {
-        try stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
+        stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
         next_pc = pc + 1;
     } else {
-        try stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
+        stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
         next_pc = pc + immediate.else_continuation_relative + 1;
     }
     return next_pc;
@@ -136,7 +148,7 @@ pub fn ifNoElse(pc: u32, code: [*]const Instruction, stack: *Stack) u32 {
 
     const condition = stack.popI32();
     if (condition != 0) {
-        try stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
+        stack.pushLabel(immediate.num_returns, pc + immediate.end_continuation_relative);
         next_pc = pc + 1;
     } else {
         next_pc = pc + immediate.end_continuation_relative + 1;
@@ -220,7 +232,7 @@ pub inline fn callLocal(pc: u32, code: [*]const Instruction, stack: *Stack) !Fun
     return @call(.always_inline, call, .{ pc, stack, module_instance, func });
 }
 
-pub inline fn callImport(pc: u32, code: [*]const Instruction, stack: *Stack) !FuncCallData {
+pub inline fn callImport(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!FuncCallData {
     const func_index: u32 = code[pc].immediate.Index;
     const module_instance: *ModuleInstance = stack.topFrame().module_instance;
     const store: *const Store = &module_instance.store;
@@ -308,7 +320,7 @@ pub inline fn callImport(pc: u32, code: [*]const Instruction, stack: *Stack) !Fu
     }
 }
 
-pub inline fn callIndirect(pc: u32, code: [*]const Instruction, stack: *Stack) !FuncCallData {
+pub inline fn callIndirect(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!FuncCallData {
     const immediates: *const CallIndirectImmediates = &code[pc].immediate.CallIndirect;
     const table_index: u32 = immediates.table_index;
 
@@ -411,7 +423,7 @@ pub inline fn globalSetV128(pc: u32, code: [*]const Instruction, stack: *Stack) 
     global.value.V128 = stack.popV128();
 }
 
-pub inline fn tableGet(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
+pub inline fn tableGet(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const table_index: u32 = code[pc].immediate.Index;
     const table: *const TableInstance = getStore(stack).getTable(table_index);
     const index: i32 = stack.popI32();
@@ -422,7 +434,7 @@ pub inline fn tableGet(pc: u32, code: [*]const Instruction, stack: *Stack) !void
     stack.pushFuncRef(ref.FuncRef);
 }
 
-pub inline fn tableSet(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
+pub inline fn tableSet(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const table_index: u32 = code[pc].immediate.Index;
     var table: *TableInstance = getStore(stack).getTable(table_index);
     const ref = stack.popFuncRef();
@@ -433,117 +445,117 @@ pub inline fn tableSet(pc: u32, code: [*]const Instruction, stack: *Stack) !void
     table.refs.items[@as(usize, @intCast(index))].FuncRef = ref;
 }
 
-pub inline fn i32Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Load(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value = try loadFromMem(i32, stack, code[pc].immediate.MemoryOffset);
     stack.pushI32(value);
 }
 
-pub inline fn i64Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Load(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value = try loadFromMem(i64, stack, code[pc].immediate.MemoryOffset);
     stack.pushI64(value);
 }
 
-pub inline fn f32Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn f32Load(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value = try loadFromMem(f32, stack, code[pc].immediate.MemoryOffset);
     stack.pushF32(value);
 }
 
-pub inline fn f64Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn f64Load(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value = try loadFromMem(f64, stack, code[pc].immediate.MemoryOffset);
     stack.pushF64(value);
 }
 
-pub inline fn i32Load8S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Load8S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i32 = try loadFromMem(i8, stack, code[pc].immediate.MemoryOffset);
     stack.pushI32(value);
 }
 
-pub inline fn i32Load8U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Load8U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: u32 = try loadFromMem(u8, stack, code[pc].immediate.MemoryOffset);
     stack.pushI32(@as(i32, @bitCast(value)));
 }
 
-pub inline fn i32Load16S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Load16S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i32 = try loadFromMem(i16, stack, code[pc].immediate.MemoryOffset);
     stack.pushI32(value);
 }
 
-pub inline fn i32Load16U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Load16U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: u32 = try loadFromMem(u16, stack, code[pc].immediate.MemoryOffset);
     stack.pushI32(@as(i32, @bitCast(value)));
 }
 
-pub inline fn i64Load8S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Load8S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i64 = try loadFromMem(i8, stack, code[pc].immediate.MemoryOffset);
     stack.pushI64(value);
 }
 
-pub inline fn i64Load8U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Load8U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: u64 = try loadFromMem(u8, stack, code[pc].immediate.MemoryOffset);
     stack.pushI64(@as(i64, @bitCast(value)));
 }
 
-pub inline fn i64Load16S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Load16S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i64 = try loadFromMem(i16, stack, code[pc].immediate.MemoryOffset);
     stack.pushI64(value);
 }
 
-pub inline fn i64Load16U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Load16U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: u64 = try loadFromMem(u16, stack, code[pc].immediate.MemoryOffset);
     stack.pushI64(@as(i64, @bitCast(value)));
 }
 
-pub inline fn i64Load32S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Load32S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i64 = try loadFromMem(i32, stack, code[pc].immediate.MemoryOffset);
     stack.pushI64(value);
 }
 
-pub inline fn i64Load32U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Load32U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: u64 = try loadFromMem(u32, stack, code[pc].immediate.MemoryOffset);
     stack.pushI64(@as(i64, @bitCast(value)));
 }
 
-pub inline fn i32Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Store(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i32 = stack.popI32();
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn i64Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Store(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i64 = stack.popI64();
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn f32Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn f32Store(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: f32 = stack.popF32();
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn f64Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn f64Store(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: f64 = stack.popF64();
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn i32Store8(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Store8(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i8 = @as(i8, @truncate(stack.popI32()));
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn i32Store16(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i32Store16(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i16 = @as(i16, @truncate(stack.popI32()));
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn i64Store8(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Store8(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i8 = @as(i8, @truncate(stack.popI64()));
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn i64Store16(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Store16(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i16 = @as(i16, @truncate(stack.popI64()));
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
-pub inline fn i64Store32(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn i64Store32(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: i32 = @as(i32, @truncate(stack.popI64()));
     return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
@@ -880,7 +892,7 @@ pub inline fn i32Mul(stack: *Stack) void {
     stack.pushI32(value);
 }
 
-pub inline fn i32DivS(stack: *Stack) anyerror!void {
+pub inline fn i32DivS(stack: *Stack) TrapError!void {
     const v2: i32 = stack.popI32();
     const v1: i32 = stack.popI32();
     const value = std.math.divTrunc(i32, v1, v2) catch |e| {
@@ -889,13 +901,13 @@ pub inline fn i32DivS(stack: *Stack) anyerror!void {
         } else if (e == error.Overflow) {
             return error.TrapIntegerOverflow;
         } else {
-            return e;
+            unreachable;
         }
     };
     stack.pushI32(value);
 }
 
-pub inline fn i32DivU(stack: *Stack) anyerror!void {
+pub inline fn i32DivU(stack: *Stack) TrapError!void {
     const v2: u32 = @as(u32, @bitCast(stack.popI32()));
     const v1: u32 = @as(u32, @bitCast(stack.popI32()));
     const value_unsigned = std.math.divFloor(u32, v1, v2) catch |e| {
@@ -904,14 +916,14 @@ pub inline fn i32DivU(stack: *Stack) anyerror!void {
         } else if (e == error.Overflow) {
             return error.TrapIntegerOverflow;
         } else {
-            return e;
+            unreachable;
         }
     };
     const value = @as(i32, @bitCast(value_unsigned));
     stack.pushI32(value);
 }
 
-pub inline fn i32RemS(stack: *Stack) anyerror!void {
+pub inline fn i32RemS(stack: *Stack) TrapError!void {
     const v2: i32 = stack.popI32();
     const v1: i32 = stack.popI32();
     const denom: i32 = @intCast(@abs(v2));
@@ -919,20 +931,20 @@ pub inline fn i32RemS(stack: *Stack) anyerror!void {
         if (e == error.DivisionByZero) {
             return error.TrapIntegerDivisionByZero;
         } else {
-            return e;
+            unreachable;
         }
     };
     stack.pushI32(value);
 }
 
-pub inline fn i32RemU(stack: *Stack) anyerror!void {
+pub inline fn i32RemU(stack: *Stack) TrapError!void {
     const v2: u32 = @as(u32, @bitCast(stack.popI32()));
     const v1: u32 = @as(u32, @bitCast(stack.popI32()));
     const value_unsigned = std.math.rem(u32, v1, v2) catch |e| {
         if (e == error.DivisionByZero) {
             return error.TrapIntegerDivisionByZero;
         } else {
-            return e;
+            unreachable;
         }
     };
     const value = @as(i32, @bitCast(value_unsigned));
@@ -960,26 +972,27 @@ pub inline fn i32Xor(stack: *Stack) void {
     stack.pushI32(value);
 }
 
-pub inline fn i32Shl(stack: *Stack) anyerror!void {
+pub inline fn i32Shl(stack: *Stack) TrapError!void {
     const shift_unsafe: i32 = stack.popI32();
     const int: i32 = stack.popI32();
-    const shift: i32 = try std.math.mod(i32, shift_unsafe, 32);
+    const shift: i32 = try trappedMod(i32, shift_unsafe, 32);
+
     const value = std.math.shl(i32, int, shift);
     stack.pushI32(value);
 }
 
-pub inline fn i32ShrS(stack: *Stack) anyerror!void {
+pub inline fn i32ShrS(stack: *Stack) TrapError!void {
     const shift_unsafe: i32 = stack.popI32();
     const int: i32 = stack.popI32();
-    const shift = try std.math.mod(i32, shift_unsafe, 32);
+    const shift = try trappedMod(i32, shift_unsafe, 32);
     const value = std.math.shr(i32, int, shift);
     stack.pushI32(value);
 }
 
-pub inline fn i32ShrU(stack: *Stack) anyerror!void {
+pub inline fn i32ShrU(stack: *Stack) TrapError!void {
     const shift_unsafe: u32 = @as(u32, @bitCast(stack.popI32()));
     const int: u32 = @as(u32, @bitCast(stack.popI32()));
-    const shift = try std.math.mod(u32, shift_unsafe, 32);
+    const shift = try trappedMod(u32, shift_unsafe, 32);
     const value = @as(i32, @bitCast(std.math.shr(u32, int, shift)));
     stack.pushI32(value);
 }
@@ -1037,7 +1050,7 @@ pub inline fn i64Mul(stack: *Stack) void {
     stack.pushI64(value);
 }
 
-pub inline fn i64DivS(stack: *Stack) anyerror!void {
+pub inline fn i64DivS(stack: *Stack) TrapError!void {
     const v2: i64 = stack.popI64();
     const v1: i64 = stack.popI64();
     const value = std.math.divTrunc(i64, v1, v2) catch |e| {
@@ -1046,13 +1059,13 @@ pub inline fn i64DivS(stack: *Stack) anyerror!void {
         } else if (e == error.Overflow) {
             return error.TrapIntegerOverflow;
         } else {
-            return e;
+            unreachable;
         }
     };
     stack.pushI64(value);
 }
 
-pub inline fn i64DivU(stack: *Stack) anyerror!void {
+pub inline fn i64DivU(stack: *Stack) TrapError!void {
     const v2: u64 = @as(u64, @bitCast(stack.popI64()));
     const v1: u64 = @as(u64, @bitCast(stack.popI64()));
     const value_unsigned = std.math.divFloor(u64, v1, v2) catch |e| {
@@ -1061,14 +1074,14 @@ pub inline fn i64DivU(stack: *Stack) anyerror!void {
         } else if (e == error.Overflow) {
             return error.TrapIntegerOverflow;
         } else {
-            return e;
+            unreachable;
         }
     };
     const value = @as(i64, @bitCast(value_unsigned));
     stack.pushI64(value);
 }
 
-pub inline fn i64RemS(stack: *Stack) anyerror!void {
+pub inline fn i64RemS(stack: *Stack) TrapError!void {
     const v2: i64 = stack.popI64();
     const v1: i64 = stack.popI64();
     const denom: i64 = @intCast(@abs(v2));
@@ -1076,20 +1089,20 @@ pub inline fn i64RemS(stack: *Stack) anyerror!void {
         if (e == error.DivisionByZero) {
             return error.TrapIntegerDivisionByZero;
         } else {
-            return e;
+            unreachable;
         }
     };
     stack.pushI64(value);
 }
 
-pub inline fn i64RemU(stack: *Stack) anyerror!void {
+pub inline fn i64RemU(stack: *Stack) TrapError!void {
     const v2: u64 = @as(u64, @bitCast(stack.popI64()));
     const v1: u64 = @as(u64, @bitCast(stack.popI64()));
     const value_unsigned = std.math.rem(u64, v1, v2) catch |e| {
         if (e == error.DivisionByZero) {
             return error.TrapIntegerDivisionByZero;
         } else {
-            return e;
+            unreachable;
         }
     };
     const value = @as(i64, @bitCast(value_unsigned));
@@ -1117,26 +1130,26 @@ pub inline fn i64Xor(stack: *Stack) void {
     stack.pushI64(value);
 }
 
-pub inline fn i64Shl(stack: *Stack) anyerror!void {
+pub inline fn i64Shl(stack: *Stack) TrapError!void {
     const shift_unsafe: i64 = stack.popI64();
     const int: i64 = stack.popI64();
-    const shift: i64 = try std.math.mod(i64, shift_unsafe, 64);
+    const shift: i64 = try trappedMod(i64, shift_unsafe, 64);
     const value = std.math.shl(i64, int, shift);
     stack.pushI64(value);
 }
 
-pub inline fn i64ShrS(stack: *Stack) anyerror!void {
+pub inline fn i64ShrS(stack: *Stack) TrapError!void {
     const shift_unsafe: i64 = stack.popI64();
     const int: i64 = stack.popI64();
-    const shift = try std.math.mod(i64, shift_unsafe, 64);
+    const shift = try trappedMod(i64, shift_unsafe, 64);
     const value = std.math.shr(i64, int, shift);
     stack.pushI64(value);
 }
 
-pub inline fn i64ShrU(stack: *Stack) anyerror!void {
+pub inline fn i64ShrU(stack: *Stack) TrapError!void {
     const shift_unsafe: u64 = @as(u64, @bitCast(stack.popI64()));
     const int: u64 = @as(u64, @bitCast(stack.popI64()));
-    const shift = try std.math.mod(u64, shift_unsafe, 64);
+    const shift = try trappedMod(u64, shift_unsafe, 64);
     const value = @as(i64, @bitCast(std.math.shr(u64, int, shift)));
     stack.pushI64(value);
 }
@@ -1355,25 +1368,25 @@ pub inline fn i32WrapI64(stack: *Stack) void {
     stack.pushI32(mod);
 }
 
-pub inline fn i32TruncF32S(stack: *Stack) anyerror!void {
+pub inline fn i32TruncF32S(stack: *Stack) TrapError!void {
     const v = stack.popF32();
     const int = try truncateTo(i32, v);
     stack.pushI32(int);
 }
 
-pub inline fn i32TruncF32U(stack: *Stack) anyerror!void {
+pub inline fn i32TruncF32U(stack: *Stack) TrapError!void {
     const v = stack.popF32();
     const int = try truncateTo(u32, v);
     stack.pushI32(@as(i32, @bitCast(int)));
 }
 
-pub inline fn i32TruncF64S(stack: *Stack) anyerror!void {
+pub inline fn i32TruncF64S(stack: *Stack) TrapError!void {
     const v = stack.popF64();
     const int = try truncateTo(i32, v);
     stack.pushI32(int);
 }
 
-pub inline fn i32TruncF64U(stack: *Stack) anyerror!void {
+pub inline fn i32TruncF64U(stack: *Stack) TrapError!void {
     const v = stack.popF64();
     const int = try truncateTo(u32, v);
     stack.pushI32(@as(i32, @bitCast(int)));
@@ -1391,25 +1404,25 @@ pub inline fn i64ExtendI32U(stack: *Stack) void {
     stack.pushI64(@as(i64, @bitCast(v64)));
 }
 
-pub inline fn i64TruncF32S(stack: *Stack) anyerror!void {
+pub inline fn i64TruncF32S(stack: *Stack) TrapError!void {
     const v = stack.popF32();
     const int = try truncateTo(i64, v);
     stack.pushI64(int);
 }
 
-pub inline fn i64TruncF32U(stack: *Stack) anyerror!void {
+pub inline fn i64TruncF32U(stack: *Stack) TrapError!void {
     const v = stack.popF32();
     const int = try truncateTo(u64, v);
     stack.pushI64(@as(i64, @bitCast(int)));
 }
 
-pub inline fn i64TruncF64S(stack: *Stack) anyerror!void {
+pub inline fn i64TruncF64S(stack: *Stack) TrapError!void {
     const v = stack.popF64();
     const int = try truncateTo(i64, v);
     stack.pushI64(int);
 }
 
-pub inline fn i64TruncF64U(stack: *Stack) anyerror!void {
+pub inline fn i64TruncF64U(stack: *Stack) TrapError!void {
     const v = stack.popF64();
     const int = try truncateTo(u64, v);
     stack.pushI64(@as(i64, @bitCast(int)));
@@ -1520,7 +1533,7 @@ pub inline fn i64Extend32S(stack: *Stack) void {
     stack.pushI64(v_extended);
 }
 
-pub inline fn refNull(stack: *Stack) anyerror!void {
+pub inline fn refNull(stack: *Stack) TrapError!void {
     const ref = FuncRef.nullRef();
     stack.pushFuncRef(ref);
 }
@@ -1586,7 +1599,7 @@ pub inline fn i64TruncSatF64U(stack: *Stack) void {
     stack.pushI64(@as(i64, @bitCast(int)));
 }
 
-pub inline fn memoryInit(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
+pub inline fn memoryInit(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const data_index: u32 = code[pc].immediate.Index;
     const data: *const DataDefinition = &stack.topFrame().module_instance.module_def.datas.items[data_index];
     const memory: *MemoryInstance = &getStore(stack).memories.items[0];
@@ -1622,7 +1635,7 @@ pub inline fn dataDrop(pc: u32, code: [*]const Instruction, stack: *Stack) void 
     data.bytes.clearAndFree();
 }
 
-pub inline fn memoryCopy(stack: *Stack) !void {
+pub inline fn memoryCopy(stack: *Stack) TrapError!void {
     const memory: *MemoryInstance = &getStore(stack).memories.items[0];
     const index_type: ValType = memory.limits.indexType();
 
@@ -1656,7 +1669,7 @@ pub inline fn memoryCopy(stack: *Stack) !void {
     }
 }
 
-pub inline fn memoryFill(stack: *Stack) !void {
+pub inline fn memoryFill(stack: *Stack) TrapError!void {
     const memory: *MemoryInstance = &getStore(stack).memories.items[0];
     const index_type: ValType = memory.limits.indexType();
 
@@ -1680,7 +1693,7 @@ pub inline fn memoryFill(stack: *Stack) !void {
     @memset(destination, value);
 }
 
-pub inline fn tableInit(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
+pub inline fn tableInit(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const pair: TablePairImmediates = code[pc].immediate.TablePair;
     const elem_index = pair.index_x;
     const table_index = pair.index_y;
@@ -1719,7 +1732,7 @@ pub inline fn elemDrop(pc: u32, code: [*]const Instruction, stack: *Stack) void 
     elem.refs.clearAndFree();
 }
 
-pub inline fn tableCopy(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
+pub inline fn tableCopy(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const pair: TablePairImmediates = code[pc].immediate.TablePair;
     const dest_table_index = pair.index_x;
     const src_table_index = pair.index_y;
@@ -1772,7 +1785,7 @@ pub inline fn tableSize(pc: u32, code: [*]const Instruction, stack: *Stack) void
     stack.pushI32(length);
 }
 
-pub inline fn tableFill(pc: u32, code: [*]const Instruction, stack: *Stack) !void {
+pub inline fn tableFill(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const table_index: u32 = code[pc].immediate.Index;
     const table: *TableInstance = getStore(stack).getTable(table_index);
 
@@ -1792,54 +1805,54 @@ pub inline fn tableFill(pc: u32, code: [*]const Instruction, stack: *Stack) !voi
     @memset(dest, funcref);
 }
 
-pub inline fn v128Load(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn v128Load(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value = try loadFromMem(v128, stack, code[pc].immediate.MemoryOffset);
     stack.pushV128(value);
 }
 
-pub inline fn v128Load8x8S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    return vectorLoadExtend(i8, i16, 8, code[pc].immediate.MemoryOffset, stack);
+pub inline fn v128Load8x8S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
+    return try vectorLoadExtend(i8, i16, 8, code[pc].immediate.MemoryOffset, stack);
 }
 
-pub inline fn v128Load8x8U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    return vectorLoadExtend(u8, i16, 8, code[pc].immediate.MemoryOffset, stack);
+pub inline fn v128Load8x8U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
+    return try vectorLoadExtend(u8, i16, 8, code[pc].immediate.MemoryOffset, stack);
 }
 
-pub inline fn v128Load16x4S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    return vectorLoadExtend(i16, i32, 4, code[pc].immediate.MemoryOffset, stack);
+pub inline fn v128Load16x4S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
+    return try vectorLoadExtend(i16, i32, 4, code[pc].immediate.MemoryOffset, stack);
 }
 
-pub inline fn v128Load16x4U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    return vectorLoadExtend(u16, i32, 4, code[pc].immediate.MemoryOffset, stack);
+pub inline fn v128Load16x4U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
+    return try vectorLoadExtend(u16, i32, 4, code[pc].immediate.MemoryOffset, stack);
 }
 
-pub inline fn v128Load32x2S(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    return vectorLoadExtend(i32, i64, 2, code[pc].immediate.MemoryOffset, stack);
+pub inline fn v128Load32x2S(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
+    return try vectorLoadExtend(i32, i64, 2, code[pc].immediate.MemoryOffset, stack);
 }
 
-pub inline fn v128Load32x2U(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
-    return vectorLoadExtend(u32, i64, 2, code[pc].immediate.MemoryOffset, stack);
+pub inline fn v128Load32x2U(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
+    return try vectorLoadExtend(u32, i64, 2, code[pc].immediate.MemoryOffset, stack);
 }
 
-pub inline fn v128Load8Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn v128Load8Splat(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const scalar = try loadFromMem(u8, stack, code[pc].immediate.MemoryOffset);
     const vec: u8x16 = @splat(scalar);
     stack.pushV128(@as(v128, @bitCast(vec)));
 }
 
-pub inline fn v128Load16Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn v128Load16Splat(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const scalar = try loadFromMem(u16, stack, code[pc].immediate.MemoryOffset);
     const vec: u16x8 = @splat(scalar);
     stack.pushV128(@as(v128, @bitCast(vec)));
 }
 
-pub inline fn v128Load32Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn v128Load32Splat(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const scalar = try loadFromMem(u32, stack, code[pc].immediate.MemoryOffset);
     const vec: u32x4 = @splat(scalar);
     stack.pushV128(@as(v128, @bitCast(vec)));
 }
 
-pub inline fn v128Load64Splat(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn v128Load64Splat(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const scalar = try loadFromMem(u64, stack, code[pc].immediate.MemoryOffset);
     const vec: u64x2 = @splat(scalar);
     stack.pushV128(@as(v128, @bitCast(vec)));
@@ -2105,9 +2118,9 @@ pub inline fn f64x2GE(stack: *Stack) void {
     vectorBoolOp(f64x2, .Ge, stack);
 }
 
-pub inline fn v128Store(pc: u32, code: [*]const Instruction, stack: *Stack) anyerror!void {
+pub inline fn v128Store(pc: u32, code: [*]const Instruction, stack: *Stack) TrapError!void {
     const value: v128 = stack.popV128();
-    return storeInMem(value, stack, code[pc].immediate.MemoryOffset);
+    return try storeInMem(value, stack, code[pc].immediate.MemoryOffset);
 }
 
 pub inline fn v128Const(pc: u32, code: [*]const Instruction, stack: *Stack) void {
@@ -3050,7 +3063,7 @@ fn storeInMem(value: anytype, stack: *Stack, offset_from_memarg: u64) TrapError!
 fn call(pc: u32, stack: *Stack, module_instance: *ModuleInstance, func: *const FunctionInstance) TrapError!FuncCallData {
     const continuation: u32 = pc + 1;
     try stack.pushFrame(func, module_instance);
-    try stack.pushLabel(func.num_returns, continuation);
+    stack.pushLabel(func.num_returns, continuation);
 
     DebugTrace.traceFunction(module_instance, stack.num_frames, func.def_index);
 
@@ -3341,7 +3354,7 @@ fn vectorBitmask(comptime T: type, vec: v128) i32 {
     }
 }
 
-fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
+fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) TrapError!void {
     const vec_type_info = @typeInfo(T).vector;
 
     var vec = @as(T, @bitCast(stack.popV128()));
@@ -3351,7 +3364,7 @@ fn vectorLoadLane(comptime T: type, instruction: Instruction, stack: *Stack) !vo
     stack.pushV128(@as(v128, @bitCast(vec)));
 }
 
-fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptime len: usize, mem_offset: u64, stack: *Stack) !void {
+fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptime len: usize, mem_offset: u64, stack: *Stack) TrapError!void {
     const offset_from_stack: i32 = stack.popI32();
     const store: *Store = getStore(stack);
     const array: [len]extend_type = try loadArrayFromMem(mem_type, extend_type, len, store, mem_offset, offset_from_stack);
@@ -3359,7 +3372,7 @@ fn vectorLoadExtend(comptime mem_type: type, comptime extend_type: type, comptim
     stack.pushV128(@as(v128, @bitCast(vec)));
 }
 
-fn vectorLoadLaneZero(comptime T: type, instruction: Instruction, stack: *Stack) !void {
+fn vectorLoadLaneZero(comptime T: type, instruction: Instruction, stack: *Stack) TrapError!void {
     const vec_type_info = @typeInfo(T).vector;
 
     const mem_offset = instruction.immediate.MemoryOffset;
@@ -3369,7 +3382,7 @@ fn vectorLoadLaneZero(comptime T: type, instruction: Instruction, stack: *Stack)
     stack.pushV128(@as(v128, @bitCast(vec)));
 }
 
-fn vectorStoreLane(comptime T: type, instruction: Instruction, stack: *Stack) !void {
+fn vectorStoreLane(comptime T: type, instruction: Instruction, stack: *Stack) TrapError!void {
     const vec = @as(T, @bitCast(stack.popV128()));
     const immediate = stack.topFrame().module_instance.module_def.code.memory_offset_and_lane_immediates.items[instruction.immediate.Index];
     const scalar = vec[immediate.laneidx];

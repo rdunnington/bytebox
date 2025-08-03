@@ -58,6 +58,7 @@ pub const TrapError = error{
     TrapUnreachable,
     TrapIntegerDivisionByZero,
     TrapIntegerOverflow,
+    TrapNegativeDenominator,
     TrapIndirectCallTypeMismatch,
     TrapInvalidIntegerConversion,
     TrapOutOfBoundsMemoryAccess,
@@ -66,7 +67,9 @@ pub const TrapError = error{
     TrapOutOfBoundsTableAccess,
     TrapStackExhausted,
     TrapUnknown,
-} || metering.MeteringTrapError;
+} || metering.MeteringTrapError || HostFunctionError;
+
+pub const InstantiateError = AllocError || UnlinkableError || UninstantiableError || TrapError;
 
 pub const DebugTrace = struct {
     pub const Mode = enum {
@@ -179,7 +182,7 @@ pub const TableInstance = struct {
         return true;
     }
 
-    fn init_range_val(table: *TableInstance, module: *ModuleInstance, elems: []const Val, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
+    fn init_range_val(table: *TableInstance, module: *ModuleInstance, elems: []const Val, init_length: u32, start_elem_index: u32, start_table_index: u32) TrapError!void {
         if (table.refs.items.len < start_table_index + init_length) {
             return error.TrapOutOfBoundsTableAccess;
         }
@@ -203,7 +206,7 @@ pub const TableInstance = struct {
         }
     }
 
-    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32) !void {
+    fn init_range_expr(table: *TableInstance, module: *ModuleInstance, elems: []ConstantExpression, init_length: u32, start_elem_index: u32, start_table_index: u32) TrapError!void {
         if (start_table_index < 0 or table.refs.items.len < start_table_index + init_length) {
             return error.TrapOutOfBoundsTableAccess;
         }
@@ -720,11 +723,11 @@ pub const DebugTrapInstructionMode = enum {
 pub const VM = struct {
     const InitFn = *const fn (vm: *VM) void;
     const DeinitFn = *const fn (vm: *VM) void;
-    const InstantiateFn = *const fn (vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void;
-    const InvokeFn = *const fn (vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void;
-    const ResumeInvokeFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void;
-    const StepFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void;
-    const SetDebugTrapFn = *const fn (vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) anyerror!bool;
+    const InstantiateFn = *const fn (vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) InstantiateError!void;
+    const InvokeFn = *const fn (vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) TrapError!void;
+    const ResumeInvokeFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) TrapError!void;
+    const StepFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val) TrapError!void;
+    const SetDebugTrapFn = *const fn (vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) AllocError!bool;
     const FormatBacktraceFn = *const fn (vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8);
     const FindFuncTypeDefFn = *const fn (vm: *VM, module: *ModuleInstance, func_index: usize) *const FunctionTypeDefinition;
     const ResolveFuncRefFn = *const fn (vm: *VM, ref: FuncRef) FuncRef;
@@ -781,23 +784,23 @@ pub const VM = struct {
         allocator.free(mem);
     }
 
-    fn instantiate(vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void {
+    fn instantiate(vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) InstantiateError!void {
         try vm.instantiate_fn(vm, module, opts);
     }
 
-    pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void {
+    pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) TrapError!void {
         try vm.invoke_fn(vm, module, handle, params, returns, opts);
     }
 
-    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
+    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) TrapError!void {
         try vm.resume_invoke_fn(vm, module, returns, opts);
     }
 
-    pub fn step(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
+    pub fn step(vm: *VM, module: *ModuleInstance, returns: []Val) TrapError!void {
         try vm.step_fn(vm, module, returns);
     }
 
-    pub fn setDebugTrap(vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) anyerror!bool {
+    pub fn setDebugTrap(vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) AllocError!bool {
         return try vm.set_debug_trap_fn(vm, module, wasm_address, mode);
     }
 
@@ -843,7 +846,7 @@ pub const ModuleInstance = struct {
         allocator.destroy(self);
     }
 
-    pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) !void {
+    pub fn instantiate(self: *ModuleInstance, opts: ModuleInstantiateOpts) InstantiateError!void {
         const Helpers = struct {
             fn areLimitsCompatible(def_limits: *const Limits, instance_limits: *const Limits) bool {
                 // if (def_limits.limit_type != instance_limits.limit_type) {
@@ -1165,7 +1168,7 @@ pub const ModuleInstance = struct {
         }
     }
 
-    pub fn exports(self: *ModuleInstance, name: []const u8) !ModuleImportPackage {
+    pub fn exports(self: *ModuleInstance, name: []const u8) AllocError!ModuleImportPackage {
         var imports = try ModuleImportPackage.init(name, self, null, self.allocator);
 
         for (self.module_def.exports.functions.items) |*item| {
@@ -1262,20 +1265,20 @@ pub const ModuleInstance = struct {
         return error.ExportUnknownGlobal;
     }
 
-    pub fn invoke(self: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void {
+    pub fn invoke(self: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) TrapError!void {
         try self.vm.invoke(self, handle, params, returns, opts);
     }
 
     /// Use to resume an invoked function after it returned error.DebugTrap
-    pub fn resumeInvoke(self: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
+    pub fn resumeInvoke(self: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) TrapError!void {
         try self.vm.resumeInvoke(self, returns, opts);
     }
 
-    pub fn step(self: *ModuleInstance, returns: []Val) anyerror!void {
+    pub fn step(self: *ModuleInstance, returns: []Val) TrapError!void {
         try self.vm.step(self, returns);
     }
 
-    pub fn setDebugTrap(self: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) anyerror!bool {
+    pub fn setDebugTrap(self: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) AllocError!bool {
         try self.vm.setDebugTrap(self, wasm_address, mode);
     }
 

@@ -213,7 +213,7 @@ pub fn popIndexType(stack: *Stack, index_type: ValType) i64 {
     };
 }
 
-pub fn pushLabel(stack: *Stack, num_returns: u32, continuation: u32) !void {
+pub fn pushLabel(stack: *Stack, num_returns: u32, continuation: u32) void {
     assert(stack.num_labels < stack.labels.len);
 
     stack.labels[stack.num_labels] = Label{
