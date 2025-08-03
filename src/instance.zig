@@ -405,7 +405,7 @@ const HostFunctionCallback = *const fn (userdata: ?*anyopaque, module: *ModuleIn
 
 const HostFunction = struct {
     userdata: ?*anyopaque,
-    func_def: FunctionTypeDefinition,
+    func_type_def: FunctionTypeDefinition,
     callback: HostFunctionCallback,
 };
 
@@ -426,12 +426,12 @@ pub const FunctionImport = struct {
         copy.name = try allocator.dupe(u8, copy.name);
         switch (copy.data) {
             .Host => |*data| {
-                var func_def = FunctionTypeDefinition{
+                var func_type_def = FunctionTypeDefinition{
                     .types = std.ArrayList(ValType).init(allocator),
-                    .num_params = data.func_def.num_params,
+                    .num_params = data.func_type_def.num_params,
                 };
-                try func_def.types.appendSlice(data.func_def.types.items);
-                data.func_def = func_def;
+                try func_type_def.types.appendSlice(data.func_type_def.types.items);
+                data.func_type_def = func_type_def;
             },
             .Wasm => {},
         }
@@ -444,7 +444,7 @@ pub const FunctionImport = struct {
 
         switch (import.data) {
             .Host => |*data| {
-                data.func_def.types.deinit();
+                data.func_type_def.types.deinit();
             },
             .Wasm => {},
         }
@@ -454,7 +454,7 @@ pub const FunctionImport = struct {
         var type_comparer = FunctionTypeDefinition.SortContext{};
         switch (import.data) {
             .Host => |data| {
-                return type_comparer.eql(&data.func_def, type_signature);
+                return type_comparer.eql(&data.func_type_def, type_signature);
             },
             .Wasm => |data| {
                 const func_type_def: *const FunctionTypeDefinition = data.module_instance.findFuncTypeDef(data.index);
@@ -553,7 +553,7 @@ pub const ModuleImportPackage = struct {
             .data = .{
                 .Host = HostFunction{
                     .userdata = userdata,
-                    .func_def = FunctionTypeDefinition{
+                    .func_type_def = FunctionTypeDefinition{
                         .types = type_list,
                         .num_params = @as(u32, @intCast(param_types.len)),
                     },
@@ -569,7 +569,7 @@ pub const ModuleImportPackage = struct {
         for (self.functions.items) |*item| {
             self.allocator.free(item.name);
             switch (item.data) {
-                .Host => |h| h.func_def.types.deinit(),
+                .Host => |h| h.func_type_def.types.deinit(),
                 else => {},
             }
         }
@@ -982,6 +982,7 @@ pub const ModuleInstance = struct {
                 return error.UnlinkableIncompatibleImportType;
             }
 
+            // NOTE: the
             try store.imports.functions.append(try import_func.dupe(allocator));
         }
 
@@ -1325,18 +1326,7 @@ pub const ModuleInstance = struct {
     }
 
     fn findFuncTypeDef(self: *ModuleInstance, index: usize) *const FunctionTypeDefinition {
-        // const num_imports: usize = self.store.imports.functions.items.len;
-        // if (index >= num_imports) {
-        //     const local_func_index: usize = index - num_imports;
         return self.vm.findFuncTypeDef(self, index);
-        // } else {
-        //     const import: *const FunctionImport = &self.store.imports.functions.items[index];
-        //     const func_type_def: *const FunctionTypeDefinition = switch (import.data) {
-        //         .Host => |data| &data.func_def,
-        //         .Wasm => |data| data.module_instance.findFuncTypeDef(data.index),
-        //     };
-        //     return func_type_def;
-        // }
     }
 
     fn getGlobalWithIndex(self: *ModuleInstance, index: usize) *GlobalInstance {
