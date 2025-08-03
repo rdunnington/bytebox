@@ -1,9 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const AllocError = std.mem.Allocator.Error;
 
 const builtin = @import("builtin");
-
-const AllocError = std.mem.Allocator.Error;
 
 const common = @import("common.zig");
 const StableArray = common.StableArray;
@@ -55,6 +54,8 @@ const FuncRef = def.FuncRef;
 
 const inst = @import("instance.zig");
 const VM = inst.VM;
+const InstantiateError = inst.InstantiateError;
+const TrapError = inst.TrapError;
 const ModuleInstance = inst.ModuleInstance;
 const InvokeOpts = inst.InvokeOpts;
 const ResumeInvokeOpts = inst.ResumeInvokeOpts;
@@ -1110,60 +1111,60 @@ pub const RegisterVM = struct {
         _ = vm;
     }
 
-    pub fn instantiate(vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) anyerror!void {
+    pub fn instantiate(vm: *VM, module: *ModuleInstance, opts: ModuleInstantiateOpts) InstantiateError!void {
         _ = vm;
         _ = module;
         _ = opts;
-        return error.Unimplemented;
+        unreachable;
     }
 
-    pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) anyerror!void {
+    pub fn invoke(vm: *VM, module: *ModuleInstance, handle: FunctionHandle, params: [*]const Val, returns: [*]Val, opts: InvokeOpts) TrapError!void {
         _ = vm;
         _ = module;
         _ = handle;
         _ = params;
         _ = returns;
         _ = opts;
-        return error.Unimplemented;
+        unreachable;
     }
 
-    pub fn invokeWithIndex(vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) anyerror!void {
+    pub fn invokeWithIndex(vm: *VM, module: *ModuleInstance, func_index: usize, params: [*]const Val, returns: [*]Val) TrapError!void {
         _ = vm;
         _ = module;
         _ = func_index;
         _ = params;
         _ = returns;
-        return error.Unimplemented;
+        unreachable;
     }
 
-    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) anyerror!void {
+    pub fn resumeInvoke(vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) TrapError!void {
         _ = vm;
         _ = module;
         _ = returns;
         _ = opts;
-        return error.Unimplemented;
+        unreachable;
     }
 
-    pub fn step(vm: *VM, module: *ModuleInstance, returns: []Val) anyerror!void {
+    pub fn step(vm: *VM, module: *ModuleInstance, returns: []Val) TrapError!void {
         _ = vm;
         _ = module;
         _ = returns;
-        return error.Unimplemented;
+        unreachable;
     }
 
-    pub fn setDebugTrap(vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) anyerror!bool {
+    pub fn setDebugTrap(vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) AllocError!bool {
         _ = vm;
         _ = module;
         _ = wasm_address;
         _ = mode;
-        return error.Unimplemented;
+        unreachable;
     }
 
     pub fn formatBacktrace(vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8) {
         _ = vm;
         _ = indent;
         _ = allocator;
-        return error.Unimplemented;
+        unreachable;
     }
 
     pub fn findFuncTypeDef(vm: *VM, module: *ModuleInstance, local_func_index: usize) *const FunctionTypeDefinition {
