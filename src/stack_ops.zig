@@ -2914,7 +2914,7 @@ fn truncateTo(comptime T: type, value: anytype) TrapError!T {
                 return error.TrapIntegerOverflow;
             }
         } else {
-            if (truncated >= std.math.maxInt(T)) {
+            if (truncated >= @as(@TypeOf(truncated), @floatFromInt(std.math.maxInt(T)))) {
                 return error.TrapIntegerOverflow;
             }
         }
@@ -2948,7 +2948,7 @@ fn saturatedTruncateTo(comptime T: type, value: anytype) T {
                 return std.math.maxInt(T);
             }
         } else {
-            if (truncated >= std.math.maxInt(T)) {
+            if (truncated >= @as(@TypeOf(truncated), @floatFromInt(std.math.maxInt(T)))) {
                 return std.math.maxInt(T);
             }
         }
