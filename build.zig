@@ -103,11 +103,14 @@ pub fn build(b: *Build) void {
         .options = options,
     });
 
-    const lib_bytebox: *Compile = b.addStaticLibrary(.{
+    const lib_bytebox: *Compile = b.addLibrary(.{
         .name = "bytebox",
-        .root_source_file = b.path("src/cffi.zig"),
-        .target = target,
-        .optimize = optimize,
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cffi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     lib_bytebox.root_module.addImport(stable_array_import.name, stable_array_import.module);
     lib_bytebox.root_module.addOptions("config", options);
@@ -116,9 +119,11 @@ pub fn build(b: *Build) void {
 
     // Unit tests
     const unit_tests: *Compile = b.addTest(.{
-        .root_source_file = b.path("src/tests.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     unit_tests.root_module.addImport(stable_array_import.name, stable_array_import.module);
     unit_tests.root_module.addOptions("config", options);
@@ -161,11 +166,10 @@ pub fn build(b: *Build) void {
 
     // Cffi test
     const cffi_test_step = b.step("test-cffi", "Run cffi test");
-    const cffi_build = b.addExecutable(.{
-        .name = "test-cffi",
+    const cffi_build = b.addExecutable(.{ .name = "test-cffi", .root_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
-    });
+    }) });
     cffi_build.addCSourceFile(.{
         .file = b.path("test/cffi/main.c"),
     });
@@ -188,12 +192,14 @@ pub fn build(b: *Build) void {
     all_tests_step.dependOn(cffi_test_step);
 }
 
-fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.Mode, imports: []const Import, opts: ExeOpts) *Build.Step {
+fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const Import, opts: ExeOpts) *Build.Step {
     const exe: *Compile = b.addExecutable(.{
         .name = opts.exe_name,
-        .root_source_file = b.path(opts.root_src),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(opts.root_src),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     for (imports) |import| {
@@ -251,9 +257,11 @@ fn buildWasmExe(b: *Build, filepath: []const u8, comptime arch: WasmArch) WasmBu
 
     var exe = b.addExecutable(.{
         .name = filename_no_extension,
-        .root_source_file = b.path(filepath),
-        .target = b.resolveTargetQuery(target_query),
-        .optimize = .ReleaseSmall,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(filepath),
+            .target = b.resolveTargetQuery(target_query),
+            .optimize = .ReleaseSmall,
+        }),
     });
     exe.rdynamic = true;
     exe.entry = .disabled;
