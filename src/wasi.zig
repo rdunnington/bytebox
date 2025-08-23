@@ -80,9 +80,9 @@ const WasiContext = struct {
         const empty_dir_entries = std.array_list.Managed(WasiDirEntry).init(allocator);
 
         try context.fd_table.ensureTotalCapacity(3 + context.dirs.len);
-        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.fs.File.stdin().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.fs.File.stdout().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.fs.File.stderr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
         try context.fd_wasi_table.put(0, 0);
         try context.fd_wasi_table.put(1, 1);
         try context.fd_wasi_table.put(2, 2);
