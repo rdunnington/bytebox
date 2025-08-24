@@ -380,7 +380,7 @@ export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModu
         const packages: []?*const ModuleImportPackage = c_opts.packages.?[0..c_opts.num_packages];
 
         const allocator = cffi_gpa.allocator();
-        var flat_packages = std.ArrayList(ModuleImportPackage).init(allocator);
+        var flat_packages = std.array_list.Managed(ModuleImportPackage).init(allocator);
         defer flat_packages.deinit();
 
         flat_packages.ensureTotalCapacityPrecise(packages.len) catch return CError.OutOfMemory;

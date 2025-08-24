@@ -3293,7 +3293,7 @@ pub const StackVM = struct {
     };
 
     const DebugState = struct {
-        trapped_opcodes: std.ArrayList(TrappedOpcode),
+        trapped_opcodes: std.array_list.Managed(TrappedOpcode),
         pc: u32 = 0,
         trap_counter: u32 = 0, // used for trapping on step
         is_invoking: bool = false,
@@ -3317,22 +3317,22 @@ pub const StackVM = struct {
     } else void;
 
     stack: Stack,
-    instructions: std.ArrayList(Instruction),
-    functions: std.ArrayList(FunctionInstance),
-    host_function_import_data: std.ArrayList(HostFunctionData),
+    instructions: std.array_list.Managed(Instruction),
+    functions: std.array_list.Managed(FunctionInstance),
+    host_function_import_data: std.array_list.Managed(HostFunctionData),
     debug_state: ?DebugState,
     meter_state: MeterState,
 
     pub fn fromVM(vm: *VM) *StackVM {
-        return @as(*StackVM, @alignCast(@ptrCast(vm.impl)));
+        return @as(*StackVM, @ptrCast(@alignCast(vm.impl)));
     }
 
     pub fn init(vm: *VM) void {
         var self: *StackVM = fromVM(vm);
         self.stack = Stack.init(vm.allocator);
-        self.instructions = std.ArrayList(Instruction).init(vm.allocator);
-        self.functions = std.ArrayList(FunctionInstance).init(vm.allocator);
-        self.host_function_import_data = std.ArrayList(HostFunctionData).init(vm.allocator);
+        self.instructions = std.array_list.Managed(Instruction).init(vm.allocator);
+        self.functions = std.array_list.Managed(FunctionInstance).init(vm.allocator);
+        self.host_function_import_data = std.array_list.Managed(HostFunctionData).init(vm.allocator);
         self.debug_state = null;
     }
 
@@ -3354,7 +3354,7 @@ pub const StackVM = struct {
         if (opts.enable_debug) {
             self.debug_state = DebugState{
                 .pc = 0,
-                .trapped_opcodes = std.ArrayList(TrappedOpcode).init(vm.allocator),
+                .trapped_opcodes = std.array_list.Managed(TrappedOpcode).init(vm.allocator),
             };
         }
 
@@ -3370,7 +3370,7 @@ pub const StackVM = struct {
         // vm keeps a copy of the instructions to mutate some of them
         try self.instructions.appendSlice(module.module_def.code.instructions.items);
 
-        var locals_remap: std.ArrayList(u32) = .init(vm.allocator);
+        var locals_remap: std.array_list.Managed(u32) = .init(vm.allocator);
         defer locals_remap.deinit();
         try locals_remap.ensureTotalCapacity(1024);
 
@@ -3679,10 +3679,10 @@ pub const StackVM = struct {
         return false;
     }
 
-    pub fn formatBacktrace(vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8) {
+    pub fn formatBacktrace(vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.array_list.Managed(u8) {
         var self: *StackVM = fromVM(vm);
 
-        var buffer = std.ArrayList(u8).init(allocator);
+        var buffer = std.array_list.Managed(u8).init(allocator);
         try buffer.ensureTotalCapacity(512);
         var writer = buffer.writer();
 

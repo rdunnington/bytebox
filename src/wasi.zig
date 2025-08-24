@@ -16,7 +16,7 @@ const WasiContext = struct {
         rights: WasiRights,
         is_preopen: bool,
         open_handles: u32 = 1,
-        dir_entries: std.ArrayList(WasiDirEntry),
+        dir_entries: std.array_list.Managed(WasiDirEntry),
     };
 
     cwd: []const u8,
@@ -26,8 +26,8 @@ const WasiContext = struct {
 
     // having a master table with a side table of wasi file descriptors lets us map multiple wasi fds into the same
     // master entry and avoid duplicating OS handles, which has proved buggy on win32
-    fd_table: std.ArrayList(FdInfo),
-    fd_table_freelist: std.ArrayList(u32),
+    fd_table: std.array_list.Managed(FdInfo),
+    fd_table_freelist: std.array_list.Managed(u32),
     fd_wasi_table: std.AutoHashMap(u32, u32), // fd_wasi -> fd_table index
     fd_path_lookup: std.StringHashMap(u32), // path_absolute -> fd_table index
 
@@ -38,8 +38,8 @@ const WasiContext = struct {
     fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) !WasiContext {
         var context = WasiContext{
             .cwd = "",
-            .fd_table = std.ArrayList(FdInfo).init(allocator),
-            .fd_table_freelist = std.ArrayList(u32).init(allocator),
+            .fd_table = std.array_list.Managed(FdInfo).init(allocator),
+            .fd_table_freelist = std.array_list.Managed(u32).init(allocator),
             .fd_wasi_table = std.AutoHashMap(u32, u32).init(allocator),
             .fd_path_lookup = std.StringHashMap(u32).init(allocator),
             .strings = StringPool.init(1024 * 1024 * 4, allocator), // 4MB for absolute paths
@@ -77,7 +77,7 @@ const WasiContext = struct {
         const path_stdout = try context.strings.put("stdout");
         const path_stderr = try context.strings.put("stderr");
 
-        const empty_dir_entries = std.ArrayList(WasiDirEntry).init(allocator);
+        const empty_dir_entries = std.array_list.Managed(WasiDirEntry).init(allocator);
 
         try context.fd_table.ensureTotalCapacity(3 + context.dirs.len);
         context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
@@ -243,7 +243,7 @@ const WasiContext = struct {
                 info.rights = rights;
                 info.is_preopen = is_preopen;
                 info.open_handles = 1;
-                info.dir_entries = std.ArrayList(WasiDirEntry).init(self.allocator);
+                info.dir_entries = std.array_list.Managed(WasiDirEntry).init(self.allocator);
 
                 self.fd_wasi_table.put(fd_wasi, fd_table_index) catch |err| {
                     errno.* = Errno.translateError(err);

@@ -550,7 +550,7 @@ pub const ConstantExpression = union(ConstantExpressionType) {
 };
 
 pub const FunctionTypeDefinition = struct {
-    types: std.ArrayList(ValType), // TODO replace this with offsets into a single array in the ModuleDefinition
+    types: std.array_list.Managed(ValType), // TODO replace this with offsets into a single array in the ModuleDefinition
     num_params: u32,
 
     pub fn getParams(self: *const FunctionTypeDefinition) []const ValType {
@@ -703,8 +703,8 @@ pub const ElementDefinition = struct {
     mode: ElementMode,
     reftype: ValType,
     offset: ?ConstantExpression,
-    elems_value: std.ArrayList(Val),
-    elems_expr: std.ArrayList(ConstantExpression),
+    elems_value: std.array_list.Managed(Val),
+    elems_expr: std.array_list.Managed(ConstantExpression),
 };
 
 pub const DataMode = enum {
@@ -713,7 +713,7 @@ pub const DataMode = enum {
 };
 
 pub const DataDefinition = struct {
-    bytes: std.ArrayList(u8),
+    bytes: std.array_list.Managed(u8),
     memory_index: ?u32,
     offset: ?ConstantExpression,
     mode: DataMode,
@@ -748,7 +748,7 @@ pub const DataDefinition = struct {
         }
 
         const num_bytes = try decodeLEB128(u32, reader);
-        var bytes = std.ArrayList(u8).init(allocator);
+        var bytes = std.array_list.Managed(u8).init(allocator);
         try bytes.resize(num_bytes);
         const num_read = try readBytes(reader, bytes.items);
         if (num_read != num_bytes) {
@@ -1077,7 +1077,7 @@ pub const Instruction = struct {
             .Branch_Table => {
                 const table_length = try decodeLEB128(u32, reader);
 
-                var label_ids = std.ArrayList(u32).init(module.allocator);
+                var label_ids = std.array_list.Managed(u32).init(module.allocator);
                 defer label_ids.deinit();
                 try label_ids.ensureTotalCapacity(table_length);
 
@@ -1408,7 +1408,7 @@ pub const Instruction = struct {
 
 const CustomSection = struct {
     name: []const u8,
-    data: std.ArrayList(u8),
+    data: std.array_list.Managed(u8),
 };
 
 pub const NameCustomSection = struct {
@@ -1517,8 +1517,8 @@ const ModuleValidator = struct {
 
     // Note that we use a nullable ValType here to map to the "Unknown" value type as described in the wasm spec
     // validation algorithm: https://webassembly.github.io/spec/core/appendix/algorithm.html
-    type_stack: std.ArrayList(?ValType),
-    control_stack: std.ArrayList(ControlFrame),
+    type_stack: std.array_list.Managed(?ValType),
+    control_stack: std.array_list.Managed(ControlFrame),
     control_types: StableArray(ValType),
     log: Logger,
 
@@ -1527,8 +1527,8 @@ const ModuleValidator = struct {
 
     fn init(allocator: std.mem.Allocator, log: Logger) ModuleValidator {
         return ModuleValidator{
-            .type_stack = std.ArrayList(?ValType).init(allocator),
-            .control_stack = std.ArrayList(ControlFrame).init(allocator),
+            .type_stack = std.array_list.Managed(?ValType).init(allocator),
+            .control_stack = std.array_list.Managed(ControlFrame).init(allocator),
             .control_types = StableArray(ValType).init(1 * 1024 * 1024),
             .log = log,
         };
@@ -2749,48 +2749,48 @@ pub const ModuleDefinitionOpts = struct {
 
 pub const ModuleDefinition = struct {
     const Code = struct {
-        locals: std.ArrayList(ValType),
-        instructions: std.ArrayList(Instruction),
-        validation_immediates: std.ArrayList(ValidationImmediates),
+        locals: std.array_list.Managed(ValType),
+        instructions: std.array_list.Managed(Instruction),
+        validation_immediates: std.array_list.Managed(ValidationImmediates),
 
         wasm_address_to_instruction_index: std.AutoHashMap(u32, u32),
 
         // Instruction.immediate indexes these arrays depending on the opcode
-        branch_table_immediates: std.ArrayList(BranchTableImmediates),
-        branch_table_ids_immediates: std.ArrayList(u32),
-        v128_immediates: std.ArrayList(v128),
-        memory_offset_and_lane_immediates: std.ArrayList(MemoryOffsetAndLaneImmediates),
-        vec_shuffle_16_immediates: std.ArrayList([16]u8),
+        branch_table_immediates: std.array_list.Managed(BranchTableImmediates),
+        branch_table_ids_immediates: std.array_list.Managed(u32),
+        v128_immediates: std.array_list.Managed(v128),
+        memory_offset_and_lane_immediates: std.array_list.Managed(MemoryOffsetAndLaneImmediates),
+        vec_shuffle_16_immediates: std.array_list.Managed([16]u8),
     };
 
     const Imports = struct {
-        functions: std.ArrayList(FunctionImportDefinition),
-        tables: std.ArrayList(TableImportDefinition),
-        memories: std.ArrayList(MemoryImportDefinition),
-        globals: std.ArrayList(GlobalImportDefinition),
+        functions: std.array_list.Managed(FunctionImportDefinition),
+        tables: std.array_list.Managed(TableImportDefinition),
+        memories: std.array_list.Managed(MemoryImportDefinition),
+        globals: std.array_list.Managed(GlobalImportDefinition),
     };
 
     const Exports = struct {
-        functions: std.ArrayList(ExportDefinition),
-        tables: std.ArrayList(ExportDefinition),
-        memories: std.ArrayList(ExportDefinition),
-        globals: std.ArrayList(ExportDefinition),
+        functions: std.array_list.Managed(ExportDefinition),
+        tables: std.array_list.Managed(ExportDefinition),
+        memories: std.array_list.Managed(ExportDefinition),
+        globals: std.array_list.Managed(ExportDefinition),
     };
 
     allocator: std.mem.Allocator,
 
     code: Code,
 
-    types: std.ArrayList(FunctionTypeDefinition),
+    types: std.array_list.Managed(FunctionTypeDefinition),
     imports: Imports,
-    functions: std.ArrayList(FunctionDefinition),
-    globals: std.ArrayList(GlobalDefinition),
-    tables: std.ArrayList(TableDefinition),
-    memories: std.ArrayList(MemoryDefinition),
-    elements: std.ArrayList(ElementDefinition),
+    functions: std.array_list.Managed(FunctionDefinition),
+    globals: std.array_list.Managed(GlobalDefinition),
+    tables: std.array_list.Managed(TableDefinition),
+    memories: std.array_list.Managed(MemoryDefinition),
+    elements: std.array_list.Managed(ElementDefinition),
     exports: Exports,
-    datas: std.ArrayList(DataDefinition),
-    custom_sections: std.ArrayList(CustomSection),
+    datas: std.array_list.Managed(DataDefinition),
+    custom_sections: std.array_list.Managed(CustomSection),
 
     name_section: NameCustomSection,
 
@@ -2806,37 +2806,37 @@ pub const ModuleDefinition = struct {
         def.* = ModuleDefinition{
             .allocator = allocator,
             .code = Code{
-                .instructions = std.ArrayList(Instruction).init(allocator),
-                .validation_immediates = std.ArrayList(ValidationImmediates).init(allocator),
-                .locals = std.ArrayList(ValType).init(allocator),
+                .instructions = std.array_list.Managed(Instruction).init(allocator),
+                .validation_immediates = std.array_list.Managed(ValidationImmediates).init(allocator),
+                .locals = std.array_list.Managed(ValType).init(allocator),
                 .wasm_address_to_instruction_index = std.AutoHashMap(u32, u32).init(allocator),
 
-                .branch_table_immediates = std.ArrayList(BranchTableImmediates).init(allocator),
-                .branch_table_ids_immediates = std.ArrayList(u32).init(allocator),
-                .v128_immediates = std.ArrayList(v128).init(allocator),
-                .memory_offset_and_lane_immediates = std.ArrayList(MemoryOffsetAndLaneImmediates).init(allocator),
-                .vec_shuffle_16_immediates = std.ArrayList([16]u8).init(allocator),
+                .branch_table_immediates = std.array_list.Managed(BranchTableImmediates).init(allocator),
+                .branch_table_ids_immediates = std.array_list.Managed(u32).init(allocator),
+                .v128_immediates = std.array_list.Managed(v128).init(allocator),
+                .memory_offset_and_lane_immediates = std.array_list.Managed(MemoryOffsetAndLaneImmediates).init(allocator),
+                .vec_shuffle_16_immediates = std.array_list.Managed([16]u8).init(allocator),
             },
-            .types = std.ArrayList(FunctionTypeDefinition).init(allocator),
+            .types = std.array_list.Managed(FunctionTypeDefinition).init(allocator),
             .imports = Imports{
-                .functions = std.ArrayList(FunctionImportDefinition).init(allocator),
-                .tables = std.ArrayList(TableImportDefinition).init(allocator),
-                .memories = std.ArrayList(MemoryImportDefinition).init(allocator),
-                .globals = std.ArrayList(GlobalImportDefinition).init(allocator),
+                .functions = std.array_list.Managed(FunctionImportDefinition).init(allocator),
+                .tables = std.array_list.Managed(TableImportDefinition).init(allocator),
+                .memories = std.array_list.Managed(MemoryImportDefinition).init(allocator),
+                .globals = std.array_list.Managed(GlobalImportDefinition).init(allocator),
             },
-            .functions = std.ArrayList(FunctionDefinition).init(allocator),
-            .globals = std.ArrayList(GlobalDefinition).init(allocator),
-            .tables = std.ArrayList(TableDefinition).init(allocator),
-            .memories = std.ArrayList(MemoryDefinition).init(allocator),
-            .elements = std.ArrayList(ElementDefinition).init(allocator),
+            .functions = std.array_list.Managed(FunctionDefinition).init(allocator),
+            .globals = std.array_list.Managed(GlobalDefinition).init(allocator),
+            .tables = std.array_list.Managed(TableDefinition).init(allocator),
+            .memories = std.array_list.Managed(MemoryDefinition).init(allocator),
+            .elements = std.array_list.Managed(ElementDefinition).init(allocator),
             .exports = Exports{
-                .functions = std.ArrayList(ExportDefinition).init(allocator),
-                .tables = std.ArrayList(ExportDefinition).init(allocator),
-                .memories = std.ArrayList(ExportDefinition).init(allocator),
-                .globals = std.ArrayList(ExportDefinition).init(allocator),
+                .functions = std.array_list.Managed(ExportDefinition).init(allocator),
+                .tables = std.array_list.Managed(ExportDefinition).init(allocator),
+                .memories = std.array_list.Managed(ExportDefinition).init(allocator),
+                .globals = std.array_list.Managed(ExportDefinition).init(allocator),
             },
-            .datas = std.ArrayList(DataDefinition).init(allocator),
-            .custom_sections = std.ArrayList(CustomSection).init(allocator),
+            .datas = std.array_list.Managed(DataDefinition).init(allocator),
+            .custom_sections = std.array_list.Managed(CustomSection).init(allocator),
             .name_section = NameCustomSection.init(allocator),
             .log = if (opts.log) |log| log else Logger.empty(),
             .debug_name = try allocator.dupe(u8, opts.debug_name),
@@ -2920,7 +2920,7 @@ pub const ModuleDefinition = struct {
 
                     var section = CustomSection{
                         .name = name,
-                        .data = std.ArrayList(u8).init(allocator),
+                        .data = std.array_list.Managed(u8).init(allocator),
                     };
 
                     const name_length: usize = stream.pos - section_start_pos;
@@ -2951,7 +2951,7 @@ pub const ModuleDefinition = struct {
 
                         const num_params = try decodeLEB128(u32, reader);
 
-                        var func = FunctionTypeDefinition{ .num_params = num_params, .types = std.ArrayList(ValType).init(allocator) };
+                        var func = FunctionTypeDefinition{ .num_params = num_params, .types = std.array_list.Managed(ValType).init(allocator) };
                         errdefer func.types.deinit();
 
                         var params_left = num_params;
@@ -3256,7 +3256,7 @@ pub const ModuleDefinition = struct {
                             return expr;
                         }
 
-                        fn readElemsVal(elems: *std.ArrayList(Val), valtype: ValType, _reader: anytype, _module: *const ModuleDefinition) !void {
+                        fn readElemsVal(elems: *std.array_list.Managed(Val), valtype: ValType, _reader: anytype, _module: *const ModuleDefinition) !void {
                             const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
@@ -3270,7 +3270,7 @@ pub const ModuleDefinition = struct {
                             }
                         }
 
-                        fn readElemsExpr(elems: *std.ArrayList(ConstantExpression), _reader: anytype, _module: *const ModuleDefinition, expected_reftype: ValType) !void {
+                        fn readElemsExpr(elems: *std.array_list.Managed(ConstantExpression), _reader: anytype, _module: *const ModuleDefinition, expected_reftype: ValType) !void {
                             const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
@@ -3302,8 +3302,8 @@ pub const ModuleDefinition = struct {
                             .reftype = ValType.FuncRef,
                             .table_index = 0,
                             .offset = null,
-                            .elems_value = std.ArrayList(Val).init(allocator),
-                            .elems_expr = std.ArrayList(ConstantExpression).init(allocator),
+                            .elems_value = std.array_list.Managed(Val).init(allocator),
+                            .elems_expr = std.array_list.Managed(ConstantExpression).init(allocator),
                         };
                         errdefer def.elems_value.deinit();
                         errdefer def.elems_expr.deinit();
@@ -3362,7 +3362,7 @@ pub const ModuleDefinition = struct {
                         begin_index: u32,
                         opcode: Opcode,
                     };
-                    var block_stack = std.ArrayList(BlockData).init(allocator);
+                    var block_stack = std.array_list.Managed(BlockData).init(allocator);
                     defer block_stack.deinit();
 
                     var if_to_else_offsets = std.AutoHashMap(u32, u32).init(allocator);
@@ -3385,7 +3385,7 @@ pub const ModuleDefinition = struct {
                         valtype: ValType,
                         count: u32,
                     };
-                    var local_types_scratch = std.ArrayList(TypeCount).init(allocator);
+                    var local_types_scratch = std.array_list.Managed(TypeCount).init(allocator);
                     defer local_types_scratch.deinit();
 
                     var code_index: u32 = 0;

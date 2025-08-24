@@ -47,7 +47,7 @@ const Action = struct {
     type: ActionType,
     module: []const u8,
     field: []const u8,
-    args: std.ArrayList(LaneTypedVal),
+    args: std.array_list.Managed(LaneTypedVal),
 };
 
 const BadModuleError = struct {
@@ -68,7 +68,7 @@ const CommandRegister = struct {
 
 const CommandAssertReturn = struct {
     action: Action,
-    expected_returns: ?std.ArrayList(LaneTypedVal),
+    expected_returns: ?std.array_list.Managed(LaneTypedVal),
 };
 
 const CommandAssertTrap = struct {
@@ -335,8 +335,8 @@ const LaneTypedVal = struct {
     v: TaggedVal,
     lane_type: V128LaneType, // only valid when v contains a V128
 
-    fn toValArrayList(typed: []const LaneTypedVal, allocator: std.mem.Allocator) !std.ArrayList(Val) {
-        var vals = std.ArrayList(Val).init(allocator);
+    fn toValArrayList(typed: []const LaneTypedVal, allocator: std.mem.Allocator) !std.array_list.Managed(Val) {
+        var vals = std.array_list.Managed(Val).init(allocator);
         try vals.ensureTotalCapacityPrecise(typed.len);
         for (typed) |v| {
             try vals.append(v.v.val);
@@ -444,7 +444,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
     };
 }
 
-fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.ArrayList(Command) {
+fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(Command) {
     const Helpers = struct {
         fn parseAction(json_action: *std.json.Value, fallback_module: []const u8, _allocator: std.mem.Allocator) !Action {
             const json_type = json_action.object.getPtr("type").?;
@@ -460,7 +460,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
             const json_field = json_action.object.getPtr("field").?;
 
             const json_args_or_null = json_action.object.getPtr("args");
-            var args = std.ArrayList(LaneTypedVal).init(_allocator);
+            var args = std.array_list.Managed(LaneTypedVal).init(_allocator);
             if (json_args_or_null) |json_args| {
                 for (json_args.array.items) |item| {
                     const val: LaneTypedVal = try parseLaneTypedVal(item.object);
@@ -500,7 +500,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
     var fallback_module: []const u8 = "";
     defer allocator.free(fallback_module);
 
-    var commands = std.ArrayList(Command).init(allocator);
+    var commands = std.array_list.Managed(Command).init(allocator);
 
     const json_commands = parsed.value.object.getPtr("commands").?;
     for (json_commands.array.items) |json_command| {
@@ -546,10 +546,10 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.Array
 
             const action = try Helpers.parseAction(json_action, fallback_module, allocator);
 
-            var expected_returns_or_null: ?std.ArrayList(LaneTypedVal) = null;
+            var expected_returns_or_null: ?std.array_list.Managed(LaneTypedVal) = null;
             const json_expected_or_null = json_command.object.getPtr("expected");
             if (json_expected_or_null) |json_expected| {
-                var expected_returns = std.ArrayList(LaneTypedVal).init(allocator);
+                var expected_returns = std.array_list.Managed(LaneTypedVal).init(allocator);
                 for (json_expected.array.items) |item| {
                     try expected_returns.append(try parseLaneTypedVal(item.object));
                 }
@@ -751,7 +751,7 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
 fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOpts) !bool {
     var did_fail_any_test: bool = false;
 
-    var commands: std.ArrayList(Command) = try parseCommands(suite_path, allocator);
+    var commands: std.array_list.Managed(Command) = try parseCommands(suite_path, allocator);
     defer {
         for (commands.items) |*command| {
             command.deinit(allocator);
@@ -783,7 +783,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     name_to_module.ensureTotalCapacity(256) catch unreachable;
 
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
-    var imports = std.ArrayList(bytebox.ModuleImportPackage).init(allocator);
+    var imports = std.array_list.Managed(bytebox.ModuleImportPackage).init(allocator);
     defer {
         const spectest_imports = imports.items[0];
         for (spectest_imports.tables.items) |*item| {
@@ -1027,7 +1027,7 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                 }
 
                 const num_expected_returns = if (c.expected_returns) |returns| returns.items.len else 0;
-                var returns_placeholder = std.ArrayList(bytebox.Val).init(allocator);
+                var returns_placeholder = std.array_list.Managed(bytebox.Val).init(allocator);
                 defer returns_placeholder.deinit();
 
                 try returns_placeholder.resize(num_expected_returns);

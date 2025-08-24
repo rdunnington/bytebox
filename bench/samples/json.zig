@@ -108,7 +108,7 @@ fn generate(n: usize, allocator: std.mem.Allocator) AllTables {
     var rng = prng.random();
 
     // generate some json text
-    var json = std.ArrayList(u8).init(allocator);
+    var json = std.array_list.Managed(u8).init(allocator);
     {
         const products = allocator.alloc(AllTables.Product, n) catch @panic("OOM");
         for (products) |*entry| {

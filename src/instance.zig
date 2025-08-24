@@ -140,7 +140,7 @@ pub const GlobalInstance = struct {
 };
 
 pub const TableInstance = struct {
-    refs: std.ArrayList(Val), // should only be reftypes
+    refs: std.array_list.Managed(Val), // should only be reftypes
     reftype: ValType,
     limits: Limits,
 
@@ -150,7 +150,7 @@ pub const TableInstance = struct {
         try verifyLimitsAreInstantiable(limits);
 
         var table = TableInstance{
-            .refs = std.ArrayList(Val).init(allocator),
+            .refs = std.array_list.Managed(Val).init(allocator),
             .reftype = reftype,
             .limits = limits,
         };
@@ -361,7 +361,7 @@ pub const MemoryInstance = struct {
 };
 
 pub const ElementInstance = struct {
-    refs: std.ArrayList(Val),
+    refs: std.array_list.Managed(Val),
     reftype: ValType,
 };
 
@@ -430,7 +430,7 @@ pub const FunctionImport = struct {
         switch (copy.data) {
             .Host => |*data| {
                 var func_type_def = FunctionTypeDefinition{
-                    .types = std.ArrayList(ValType).init(allocator),
+                    .types = std.array_list.Managed(ValType).init(allocator),
                     .num_params = data.func_type_def.num_params,
                 };
                 try func_type_def.types.appendSlice(data.func_type_def.types.items);
@@ -525,10 +525,10 @@ pub const ModuleImportPackage = struct {
     name: []const u8,
     instance: ?*ModuleInstance,
     userdata: ?*anyopaque,
-    functions: std.ArrayList(FunctionImport),
-    tables: std.ArrayList(TableImport),
-    memories: std.ArrayList(MemoryImport),
-    globals: std.ArrayList(GlobalImport),
+    functions: std.array_list.Managed(FunctionImport),
+    tables: std.array_list.Managed(TableImport),
+    memories: std.array_list.Managed(MemoryImport),
+    globals: std.array_list.Managed(GlobalImport),
     allocator: std.mem.Allocator,
 
     pub fn init(name: []const u8, instance: ?*ModuleInstance, userdata: ?*anyopaque, allocator: std.mem.Allocator) std.mem.Allocator.Error!ModuleImportPackage {
@@ -536,10 +536,10 @@ pub const ModuleImportPackage = struct {
             .name = try allocator.dupe(u8, name),
             .instance = instance,
             .userdata = userdata,
-            .functions = std.ArrayList(FunctionImport).init(allocator),
-            .tables = std.ArrayList(TableImport).init(allocator),
-            .memories = std.ArrayList(MemoryImport).init(allocator),
-            .globals = std.ArrayList(GlobalImport).init(allocator),
+            .functions = std.array_list.Managed(FunctionImport).init(allocator),
+            .tables = std.array_list.Managed(TableImport).init(allocator),
+            .memories = std.array_list.Managed(MemoryImport).init(allocator),
+            .globals = std.array_list.Managed(GlobalImport).init(allocator),
             .allocator = allocator,
         };
     }
@@ -547,7 +547,7 @@ pub const ModuleImportPackage = struct {
     pub fn addHostFunction(self: *ModuleImportPackage, name: []const u8, param_types: []const ValType, return_types: []const ValType, callback: HostFunctionCallback, userdata: ?*anyopaque) std.mem.Allocator.Error!void {
         std.debug.assert(self.instance == null); // cannot add host functions to an imports that is intended to be bound to a module instance
 
-        var type_list = std.ArrayList(ValType).init(self.allocator);
+        var type_list = std.array_list.Managed(ValType).init(self.allocator);
         try type_list.appendSlice(param_types);
         try type_list.appendSlice(return_types);
 
@@ -596,30 +596,30 @@ pub const ModuleImportPackage = struct {
 };
 
 pub const Store = struct {
-    tables: std.ArrayList(TableInstance),
-    memories: std.ArrayList(MemoryInstance),
-    globals: std.ArrayList(GlobalInstance),
-    elements: std.ArrayList(ElementInstance),
+    tables: std.array_list.Managed(TableInstance),
+    memories: std.array_list.Managed(MemoryInstance),
+    globals: std.array_list.Managed(GlobalInstance),
+    elements: std.array_list.Managed(ElementInstance),
     imports: struct {
-        functions: std.ArrayList(FunctionImport),
-        tables: std.ArrayList(TableImport),
-        memories: std.ArrayList(MemoryImport),
-        globals: std.ArrayList(GlobalImport),
+        functions: std.array_list.Managed(FunctionImport),
+        tables: std.array_list.Managed(TableImport),
+        memories: std.array_list.Managed(MemoryImport),
+        globals: std.array_list.Managed(GlobalImport),
     },
     allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator) Store {
         const store = Store{
             .imports = .{
-                .functions = std.ArrayList(FunctionImport).init(allocator),
-                .tables = std.ArrayList(TableImport).init(allocator),
-                .memories = std.ArrayList(MemoryImport).init(allocator),
-                .globals = std.ArrayList(GlobalImport).init(allocator),
+                .functions = std.array_list.Managed(FunctionImport).init(allocator),
+                .tables = std.array_list.Managed(TableImport).init(allocator),
+                .memories = std.array_list.Managed(MemoryImport).init(allocator),
+                .globals = std.array_list.Managed(GlobalImport).init(allocator),
             },
-            .tables = std.ArrayList(TableInstance).init(allocator),
-            .memories = std.ArrayList(MemoryInstance).init(allocator),
-            .globals = std.ArrayList(GlobalInstance).init(allocator),
-            .elements = std.ArrayList(ElementInstance).init(allocator),
+            .tables = std.array_list.Managed(TableInstance).init(allocator),
+            .memories = std.array_list.Managed(MemoryInstance).init(allocator),
+            .globals = std.array_list.Managed(GlobalInstance).init(allocator),
+            .elements = std.array_list.Managed(ElementInstance).init(allocator),
             .allocator = allocator,
         };
 
@@ -728,7 +728,7 @@ pub const VM = struct {
     const ResumeInvokeFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val, opts: ResumeInvokeOpts) TrapError!void;
     const StepFn = *const fn (vm: *VM, module: *ModuleInstance, returns: []Val) TrapError!void;
     const SetDebugTrapFn = *const fn (vm: *VM, module: *ModuleInstance, wasm_address: u32, mode: DebugTrapInstructionMode) AllocError!bool;
-    const FormatBacktraceFn = *const fn (vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8);
+    const FormatBacktraceFn = *const fn (vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.array_list.Managed(u8);
     const FindFuncTypeDefFn = *const fn (vm: *VM, module: *ModuleInstance, func_index: usize) *const FunctionTypeDefinition;
     const ResolveFuncRefFn = *const fn (vm: *VM, ref: FuncRef) FuncRef;
 
@@ -755,8 +755,8 @@ pub const VM = struct {
 
         var mem = try allocator.alloc(u8, total_alloc_size);
 
-        var vm: *VM = @as(*VM, @alignCast(@ptrCast(mem.ptr)));
-        const impl: *T = @as(*T, @alignCast(@ptrCast(mem[vm_alloc_size..].ptr)));
+        var vm: *VM = @as(*VM, @ptrCast(@alignCast(mem.ptr)));
+        const impl: *T = @as(*T, @ptrCast(@alignCast(mem[vm_alloc_size..].ptr)));
 
         vm.deinit_fn = T.deinit;
         vm.instantiate_fn = T.instantiate;
@@ -804,7 +804,7 @@ pub const VM = struct {
         return try vm.set_debug_trap_fn(vm, module, wasm_address, mode);
     }
 
-    pub fn formatBacktrace(vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8) {
+    pub fn formatBacktrace(vm: *VM, indent: u8, allocator: std.mem.Allocator) anyerror!std.array_list.Managed(u8) {
         return vm.format_backtrace_fn(vm, indent, allocator);
     }
 
@@ -1096,7 +1096,7 @@ pub const ModuleInstance = struct {
         try store.elements.ensureTotalCapacity(module_def.elements.items.len);
         for (module_def.elements.items) |*def_elem| {
             var elem = ElementInstance{
-                .refs = std.ArrayList(Val).init(allocator),
+                .refs = std.array_list.Managed(Val).init(allocator),
                 .reftype = def_elem.reftype,
             };
 
@@ -1324,7 +1324,7 @@ pub const ModuleInstance = struct {
     }
 
     /// Caller owns returned memory and must free via allocator.free()
-    pub fn formatBacktrace(self: *ModuleInstance, indent: u8, allocator: std.mem.Allocator) anyerror!std.ArrayList(u8) {
+    pub fn formatBacktrace(self: *ModuleInstance, indent: u8, allocator: std.mem.Allocator) anyerror!std.array_list.Managed(u8) {
         return self.vm.format_backtrace_fn(self.vm, indent, allocator);
     }
 
