@@ -28,12 +28,20 @@ pub const Logger = struct {
 
     fn defaultLog(level: LogLevel, text: [:0]const u8) void {
         var fd = switch (level) {
-            .Info => std.io.getStdOut(),
-            .Error => std.io.getStdErr(),
+            .Info => std.fs.File.stdout(),
+            .Error => std.fs.File.stderr(),
         };
-        var writer = fd.writer();
-        nosuspend writer.writeAll(text) catch |e| {
+
+        var buffer: [1024]u8 = undefined;
+        var writer = fd.writer(&buffer);
+        const w: *std.io.Writer = &writer.interface;
+
+        nosuspend w.writeAll(text) catch |e| {
             std.debug.print("Failed logging due to error: {}\n", .{e});
+        };
+
+        nosuspend w.flush() catch |e| {
+            std.debug.print("Failed flushing log due to error: {}\n", .{e});
         };
     }
 
