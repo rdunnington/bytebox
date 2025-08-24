@@ -53,7 +53,7 @@ pub fn build(b: *Build) void {
     options.addOption(bool, "enable_debug_trap", enable_debug_trap);
     options.addOption(StackVmKind, "vm_kind", vm_kind);
 
-    const stable_array = b.dependency("stable_array", .{
+    const stable_array = b.dependency("zig-stable-array", .{
         .target = target,
         .optimize = optimize,
     });
