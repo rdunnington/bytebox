@@ -120,7 +120,7 @@ fn readBytes(reader: anytype, bytes: []u8) MalformedError!usize {
 
 fn decodeLEB128(comptime T: type, reader: anytype) MalformedError!T {
     if (@typeInfo(T).int.signedness == .signed) {
-        return std.leb.readILEB128(T, reader) catch |e| {
+        return std.leb.readIleb128(T, reader) catch |e| {
             if (e == error.Overflow) {
                 return error.MalformedLEB128;
             } else {
@@ -128,7 +128,7 @@ fn decodeLEB128(comptime T: type, reader: anytype) MalformedError!T {
             }
         };
     } else {
-        return std.leb.readULEB128(T, reader) catch |e| {
+        return std.leb.readUleb128(T, reader) catch |e| {
             if (e == error.Overflow) {
                 return error.MalformedLEB128;
             } else {
