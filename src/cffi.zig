@@ -44,7 +44,7 @@ const CModuleDefinitionInitOpts = extern struct {
     debug_name: ?[*:0]u8,
 };
 
-const CHostFunction = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) callconv(.C) void;
+const CHostFunction = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) callconv(.c) void;
 
 const CWasmMemoryConfig = extern struct {
     resize: ?core.WasmMemoryResizeFunction,
@@ -258,7 +258,7 @@ const HostFunc = extern struct {
 };
 
 fn trampoline(userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) error{}!void {
-    const host: *HostFunc = @alignCast(@ptrCast(userdata));
+    const host: *HostFunc = @ptrCast(@alignCast(userdata));
 
     @call(.auto, host.callback, .{ host.userdata, module, params, returns });
 }
