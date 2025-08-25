@@ -22,7 +22,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.15.1
+          version: 0.15.0
 
       - name: Setup Python
         uses: actions/setup-python@v4
