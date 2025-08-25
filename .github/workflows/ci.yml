@@ -20,9 +20,9 @@ jobs:
           submodules: 'true'
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: 0.15.1
 
       - name: Setup Python
         uses: actions/setup-python@v4
