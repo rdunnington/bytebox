@@ -579,7 +579,6 @@ const WindowsApi = struct {
     const LARGE_INTEGER = windows.LARGE_INTEGER;
     const ULONG = windows.ULONG;
     const WCHAR = windows.WCHAR;
-    const WINAPI = windows.WINAPI;
     const LPCWSTR = windows.LPCWSTR;
 
     const CLOCK = struct {
@@ -622,13 +621,13 @@ const WindowsApi = struct {
     const SYMBOLIC_LINK_FLAG_DIRECTORY: DWORD = 0x1;
     const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: DWORD = 0x2;
 
-    extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
-    extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(WINAPI) BOOL;
-    extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
-    extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(WINAPI) BOOL;
-    extern "kernel32" fn SetEndOfFile(file: HANDLE) callconv(WINAPI) BOOL;
-    extern "kernel32" fn GetSystemTimeAsFileTime(systemTimeAsFileTime: *FILETIME) callconv(WINAPI) void;
-    extern "kernel32" fn GetProcessTimes(hProcess: HANDLE, lpCreationTime: *FILETIME, lpExitTime: *FILETIME, lpKernelTime: *FILETIME, lpUserTime: *FILETIME) callconv(WINAPI) BOOL;
+    extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(.winapi) BOOL;
+    extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(.winapi) BOOL;
+    extern "kernel32" fn SetEndOfFile(file: HANDLE) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetSystemTimeAsFileTime(systemTimeAsFileTime: *FILETIME) callconv(.winapi) void;
+    extern "kernel32" fn GetProcessTimes(hProcess: HANDLE, lpCreationTime: *FILETIME, lpExitTime: *FILETIME, lpKernelTime: *FILETIME, lpUserTime: *FILETIME) callconv(.winapi) BOOL;
 
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };
