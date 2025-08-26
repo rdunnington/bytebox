@@ -3,9 +3,9 @@
     .version = "0.0.1",
     .fingerprint = 0x5a2a0eadb1367749,
     .dependencies = .{
-        .stable_array = .{
-            .url = "https://github.com/rdunnington/zig-stable-array/archive/f8940119afd6864702f543befa76d558a1a23ec5.tar.gz",
-            .hash = "stable_array-0.1.0-3ihgvUVbAADlJAqXJOXZ2xEIHUY5-32i8d6fk7hraKju",
+        .@"zig-stable-array" = .{
+            .url = "git+https://github.com/rdunnington/zig-stable-array#9e4f089bd3abf127eafd307ecf9796455871becc",
+            .hash = "stable_array-0.1.0-3ihgvVxbAACET5MoiUn2T5ENunG_da_X3kGbji-f4QTF",
         },
     },
     .minimum_zig_version = "0.13.0",

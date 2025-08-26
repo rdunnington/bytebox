@@ -16,7 +16,7 @@ const WasiContext = struct {
         rights: WasiRights,
         is_preopen: bool,
         open_handles: u32 = 1,
-        dir_entries: std.ArrayList(WasiDirEntry),
+        dir_entries: std.array_list.Managed(WasiDirEntry),
     };
 
     cwd: []const u8,
@@ -26,8 +26,8 @@ const WasiContext = struct {
 
     // having a master table with a side table of wasi file descriptors lets us map multiple wasi fds into the same
     // master entry and avoid duplicating OS handles, which has proved buggy on win32
-    fd_table: std.ArrayList(FdInfo),
-    fd_table_freelist: std.ArrayList(u32),
+    fd_table: std.array_list.Managed(FdInfo),
+    fd_table_freelist: std.array_list.Managed(u32),
     fd_wasi_table: std.AutoHashMap(u32, u32), // fd_wasi -> fd_table index
     fd_path_lookup: std.StringHashMap(u32), // path_absolute -> fd_table index
 
@@ -38,8 +38,8 @@ const WasiContext = struct {
     fn init(opts: *const WasiOpts, allocator: std.mem.Allocator) !WasiContext {
         var context = WasiContext{
             .cwd = "",
-            .fd_table = std.ArrayList(FdInfo).init(allocator),
-            .fd_table_freelist = std.ArrayList(u32).init(allocator),
+            .fd_table = std.array_list.Managed(FdInfo).init(allocator),
+            .fd_table_freelist = std.array_list.Managed(u32).init(allocator),
             .fd_wasi_table = std.AutoHashMap(u32, u32).init(allocator),
             .fd_path_lookup = std.StringHashMap(u32).init(allocator),
             .strings = StringPool.init(1024 * 1024 * 4, allocator), // 4MB for absolute paths
@@ -77,12 +77,12 @@ const WasiContext = struct {
         const path_stdout = try context.strings.put("stdout");
         const path_stderr = try context.strings.put("stderr");
 
-        const empty_dir_entries = std.ArrayList(WasiDirEntry).init(allocator);
+        const empty_dir_entries = std.array_list.Managed(WasiDirEntry).init(allocator);
 
         try context.fd_table.ensureTotalCapacity(3 + context.dirs.len);
-        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdIn().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdOut().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
-        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.io.getStdErr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.fs.File.stdin().handle, .path_absolute = path_stdin, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.fs.File.stdout().handle, .path_absolute = path_stdout, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
+        context.fd_table.appendAssumeCapacity(FdInfo{ .fd = std.fs.File.stderr().handle, .path_absolute = path_stderr, .rights = .{}, .is_preopen = true, .dir_entries = empty_dir_entries });
         try context.fd_wasi_table.put(0, 0);
         try context.fd_wasi_table.put(1, 1);
         try context.fd_wasi_table.put(2, 2);
@@ -243,7 +243,7 @@ const WasiContext = struct {
                 info.rights = rights;
                 info.is_preopen = is_preopen;
                 info.open_handles = 1;
-                info.dir_entries = std.ArrayList(WasiDirEntry).init(self.allocator);
+                info.dir_entries = std.array_list.Managed(WasiDirEntry).init(self.allocator);
 
                 self.fd_wasi_table.put(fd_wasi, fd_table_index) catch |err| {
                     errno.* = Errno.translateError(err);
@@ -579,7 +579,6 @@ const WindowsApi = struct {
     const LARGE_INTEGER = windows.LARGE_INTEGER;
     const ULONG = windows.ULONG;
     const WCHAR = windows.WCHAR;
-    const WINAPI = windows.WINAPI;
     const LPCWSTR = windows.LPCWSTR;
 
     const CLOCK = struct {
@@ -622,13 +621,13 @@ const WindowsApi = struct {
     const SYMBOLIC_LINK_FLAG_DIRECTORY: DWORD = 0x1;
     const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: DWORD = 0x2;
 
-    extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(WINAPI) BOOL;
-    extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(WINAPI) BOOL;
-    extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(WINAPI) BOOL;
-    extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(WINAPI) BOOL;
-    extern "kernel32" fn SetEndOfFile(file: HANDLE) callconv(WINAPI) BOOL;
-    extern "kernel32" fn GetSystemTimeAsFileTime(systemTimeAsFileTime: *FILETIME) callconv(WINAPI) void;
-    extern "kernel32" fn GetProcessTimes(hProcess: HANDLE, lpCreationTime: *FILETIME, lpExitTime: *FILETIME, lpKernelTime: *FILETIME, lpUserTime: *FILETIME) callconv(WINAPI) BOOL;
+    extern "kernel32" fn GetSystemTimeAdjustment(timeAdjustment: *DWORD, timeIncrement: *DWORD, timeAdjustmentDisabled: *BOOL) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetThreadTimes(in_hProcess: HANDLE, creationTime: *FILETIME, exitTime: *FILETIME, kernelTime: *FILETIME, userTime: *FILETIME) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetFileInformationByHandle(file: HANDLE, fileInformation: *BY_HANDLE_FILE_INFORMATION) callconv(.winapi) BOOL;
+    extern "kernel32" fn CreateSymbolicLinkW(symlinkFileName: LPCWSTR, lpTargetFileName: LPCWSTR, flags: DWORD) callconv(.winapi) BOOL;
+    extern "kernel32" fn SetEndOfFile(file: HANDLE) callconv(.winapi) BOOL;
+    extern "kernel32" fn GetSystemTimeAsFileTime(systemTimeAsFileTime: *FILETIME) callconv(.winapi) void;
+    extern "kernel32" fn GetProcessTimes(hProcess: HANDLE, lpCreationTime: *FILETIME, lpExitTime: *FILETIME, lpKernelTime: *FILETIME, lpUserTime: *FILETIME) callconv(.winapi) BOOL;
 
     const GetCurrentProcess = std.os.windows.kernel32.GetCurrentProcess;
 };

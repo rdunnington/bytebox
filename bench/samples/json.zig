@@ -108,7 +108,8 @@ fn generate(n: usize, allocator: std.mem.Allocator) AllTables {
     var rng = prng.random();
 
     // generate some json text
-    var json = std.ArrayList(u8).init(allocator);
+    var json_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer json_writer.deinit();
     {
         const products = allocator.alloc(AllTables.Product, n) catch @panic("OOM");
         for (products) |*entry| {
@@ -152,11 +153,11 @@ fn generate(n: usize, allocator: std.mem.Allocator) AllTables {
             .stores = stores,
         };
 
-        std.json.stringify(tables, .{}, json.writer()) catch @panic("can't serialize json");
+        std.json.Stringify.value(tables, .{}, &json_writer.writer) catch @panic("can't serialize json");
     }
 
     // parse the json text into a native type
-    const parsed = std.json.parseFromSlice(AllTables, allocator, json.items, .{}) catch @panic("bad json");
+    const parsed = std.json.parseFromSlice(AllTables, allocator, json_writer.written(), .{}) catch @panic("bad json");
     return parsed.value;
 }
 

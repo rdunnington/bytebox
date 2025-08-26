@@ -44,7 +44,7 @@ const CModuleDefinitionInitOpts = extern struct {
     debug_name: ?[*:0]u8,
 };
 
-const CHostFunction = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) callconv(.C) void;
+const CHostFunction = *const fn (userdata: ?*anyopaque, module: *ModuleInstance, params: [*]const Val, returns: [*]Val) callconv(.c) void;
 
 const CWasmMemoryConfig = extern struct {
     resize: ?core.WasmMemoryResizeFunction,
@@ -258,7 +258,7 @@ const HostFunc = extern struct {
 };
 
 fn trampoline(userdata: ?*anyopaque, module: *core.ModuleInstance, params: [*]const Val, returns: [*]Val) error{}!void {
-    const host: *HostFunc = @alignCast(@ptrCast(userdata));
+    const host: *HostFunc = @ptrCast(@alignCast(userdata));
 
     @call(.auto, host.callback, .{ host.userdata, module, params, returns });
 }
@@ -380,7 +380,7 @@ export fn bb_module_instance_instantiate(module: ?*ModuleInstance, c_opts: CModu
         const packages: []?*const ModuleImportPackage = c_opts.packages.?[0..c_opts.num_packages];
 
         const allocator = cffi_gpa.allocator();
-        var flat_packages = std.ArrayList(ModuleImportPackage).init(allocator);
+        var flat_packages = std.array_list.Managed(ModuleImportPackage).init(allocator);
         defer flat_packages.deinit();
 
         flat_packages.ensureTotalCapacityPrecise(packages.len) catch return CError.OutOfMemory;
@@ -629,7 +629,7 @@ comptime {
 }
 
 // Zig's own stack-probe routine (available only on x86 and x86_64)
-fn zig_probe_stack() callconv(.Naked) void {
+fn zig_probe_stack() callconv(.naked) void {
     @setRuntimeSafety(false);
 
     // Versions of the Linux kernel before 5.1 treat any access below SP as
@@ -823,11 +823,11 @@ fn win_probe_stack_adjust_sp() void {
 // ___chkstk (__alloca) | yes    | yes    |
 // ___chkstk_ms         | no     | no     |
 
-fn _chkstk() callconv(.Naked) void {
+fn _chkstk() callconv(.naked) void {
     @setRuntimeSafety(false);
     @call(.always_inline, win_probe_stack_adjust_sp, .{});
 }
-fn __chkstk() callconv(.Naked) void {
+fn __chkstk() callconv(.naked) void {
     @setRuntimeSafety(false);
     if (comptime builtin.cpu.arch.isAARCH64()) {
         @call(.always_inline, win_probe_stack_only, .{});
@@ -837,15 +837,15 @@ fn __chkstk() callconv(.Naked) void {
         else => unreachable,
     }
 }
-fn ___chkstk() callconv(.Naked) void {
+fn ___chkstk() callconv(.naked) void {
     @setRuntimeSafety(false);
     @call(.always_inline, win_probe_stack_adjust_sp, .{});
 }
-fn __chkstk_ms() callconv(.Naked) void {
+fn __chkstk_ms() callconv(.naked) void {
     @setRuntimeSafety(false);
     @call(.always_inline, win_probe_stack_only, .{});
 }
-fn ___chkstk_ms() callconv(.Naked) void {
+fn ___chkstk_ms() callconv(.naked) void {
     @setRuntimeSafety(false);
     @call(.always_inline, win_probe_stack_only, .{});
 }
