@@ -34,6 +34,9 @@ const WasmBuild = struct {
     install: *Step,
 };
 
+// At the time of this writing, zig's stage2 codegen backend can't handle tailcalls, so we'll default to using LLVM for simplicity
+const use_llvm = true;
+
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -111,6 +114,7 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = use_llvm,
     });
     lib_bytebox.root_module.addImport(stable_array_import.name, stable_array_import.module);
     lib_bytebox.root_module.addOptions("config", options);
@@ -124,6 +128,7 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = use_llvm,
     });
     unit_tests.root_module.addImport(stable_array_import.name, stable_array_import.module);
     unit_tests.root_module.addOptions("config", options);
@@ -165,22 +170,27 @@ pub fn build(b: *Build) void {
     });
 
     // Cffi test
-    const cffi_test_step = b.step("test-cffi", "Run cffi test");
-    const cffi_build = b.addExecutable(.{ .name = "test-cffi", .root_module = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-    }) });
-    cffi_build.addCSourceFile(.{
+    const cffi_test = b.addExecutable(.{
+        .name = "test-cffi",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+        .use_llvm = use_llvm,
+    });
+    cffi_test.addCSourceFile(.{
         .file = b.path("test/cffi/main.c"),
     });
-    cffi_build.addIncludePath(b.path("src/bytebox.h"));
-    cffi_build.linkLibC();
-    cffi_build.linkLibrary(lib_bytebox);
+    cffi_test.addIncludePath(b.path("src/bytebox.h"));
+    cffi_test.linkLibC();
+    cffi_test.linkLibrary(lib_bytebox);
 
     const ffi_guest: WasmBuild = buildWasmExe(b, "test/cffi/module.zig", .wasm32);
 
-    const cffi_run_step = b.addRunArtifact(cffi_build);
+    const cffi_run_step = b.addRunArtifact(cffi_test);
     cffi_run_step.addFileArg(ffi_guest.compile.getEmittedBin());
+
+    const cffi_test_step = b.step("test-cffi", "Run cffi test");
     cffi_test_step.dependOn(&cffi_run_step.step);
 
     // All tests
@@ -200,6 +210,7 @@ fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.bu
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = use_llvm,
     });
 
     for (imports) |import| {
@@ -262,6 +273,7 @@ fn buildWasmExe(b: *Build, filepath: []const u8, comptime arch: WasmArch) WasmBu
             .target = b.resolveTargetQuery(target_query),
             .optimize = .ReleaseSmall,
         }),
+        .use_llvm = use_llvm,
     });
     exe.rdynamic = true;
     exe.entry = .disabled;
