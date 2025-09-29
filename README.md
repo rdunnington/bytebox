@@ -9,7 +9,7 @@ Bytebox is a WebAssembly VM.
 # Getting started
 
 ### Requirements
-Bytebox currently builds with [Zig 0.14.x](https://ziglang.org/download) to avoid churn on zig master.
+Bytebox currently builds with [Zig 0.15.x](https://ziglang.org/download) to avoid churn on zig master.
 
 To run the tests:
 * `wasm-tools` is required to run the wasm testsuite. You can install it via the rust toolchain `cargo install wasm-tools` or directly from the [release page](https://github.com/bytecodealliance/wasm-tools/releases).
