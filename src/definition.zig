@@ -11,12 +11,6 @@ const opcodes = @import("opcode.zig");
 const Opcode = opcodes.Opcode;
 const WasmOpcode = opcodes.WasmOpcode;
 
-// HACK: just get the code working, will need to resolve anything dependent on this eventually
-const inst = @import("instance.zig");
-const ModuleInstance = inst.ModuleInstance;
-const Store = inst.Store;
-const GlobalInstance = inst.GlobalInstance;
-
 pub const MalformedError = error{
     MalformedBytecode,
     MalformedCustomSection,

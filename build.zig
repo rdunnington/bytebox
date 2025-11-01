@@ -41,9 +41,15 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const enable_metering = b.option(bool, "meter", "Enable metering") orelse false;
-    const enable_debug_trace = b.option(bool, "debug_trace", "Enable debug tracing feature") orelse false;
-    const enable_debug_trap = b.option(bool, "debug_trap", "Enable debug trap features") orelse false;
+    const enable_metering = b.option(bool, "meter", "Enable metering (default: false)") orelse false;
+    const enable_debug_trace = b.option(bool, "debug_trace", "Enable debug tracing feature (default: false)") orelse false;
+    const enable_debug_trap = b.option(bool, "debug_trap", "Enable debug trap features (default: false)") orelse false;
+    const enable_wasi = b.option(bool, "wasi", "Enable wasi support (default: true if target has support)") orelse blk: {
+        if (target.result.cpu.arch.isWasm() and target.result.os.tag != .wasi) {
+            break :blk false;
+        }
+        break :blk true;
+    };
     const vm_kind = b.option(
         StackVmKind,
         "vm_kind",
@@ -54,6 +60,7 @@ pub fn build(b: *Build) void {
     options.addOption(bool, "enable_metering", enable_metering);
     options.addOption(bool, "enable_debug_trace", enable_debug_trace);
     options.addOption(bool, "enable_debug_trap", enable_debug_trap);
+    options.addOption(bool, "enable_wasi", enable_wasi);
     options.addOption(StackVmKind, "vm_kind", vm_kind);
 
     const stable_array = b.dependency("zig-stable-array", .{
@@ -150,12 +157,15 @@ pub fn build(b: *Build) void {
     });
 
     // wasi tests
-    const wasi_testsuite = b.addSystemCommand(&.{"python3"});
-    wasi_testsuite.addArg("test/wasi/run.py");
-    wasi_testsuite.step.dependOn(bytebox_exe_step);
+    var maybe_wasi_testsuite_step: ?*Step = null;
+    if (enable_wasi) {
+        const wasi_testsuite = b.addSystemCommand(&.{"python3"});
+        wasi_testsuite.addArg("test/wasi/run.py");
+        wasi_testsuite.step.dependOn(bytebox_exe_step);
 
-    const wasi_testsuite_step = b.step("test-wasi", "Run wasi testsuite");
-    wasi_testsuite_step.dependOn(&wasi_testsuite.step);
+        maybe_wasi_testsuite_step = b.step("test-wasi", "Run wasi testsuite");
+        maybe_wasi_testsuite_step.?.dependOn(&wasi_testsuite.step);
+    }
 
     // mem64 test
     const compile_mem64_test: WasmBuild = buildWasmExe(b, "test/mem64/memtest.zig", .wasm64);
@@ -197,9 +207,11 @@ pub fn build(b: *Build) void {
     const all_tests_step = b.step("test", "Run unit, wasm, and wasi tests");
     all_tests_step.dependOn(unit_test_step);
     all_tests_step.dependOn(wasm_testsuite_step);
-    all_tests_step.dependOn(wasi_testsuite_step);
     all_tests_step.dependOn(mem64_test_step);
     all_tests_step.dependOn(cffi_test_step);
+    if (maybe_wasi_testsuite_step) |wasi_testsuite_step| {
+        all_tests_step.dependOn(wasi_testsuite_step);
+    }
 }
 
 fn buildExeWithRunStep(b: *Build, target: Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const Import, opts: ExeOpts) *Build.Step {

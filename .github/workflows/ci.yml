@@ -47,6 +47,10 @@ jobs:
         run: |
           zig build -Dvm_kind=${{ matrix.stack_kind }}
 
+      - name: Build (no wasi)
+        run: |
+          zig build -Dvm_kind=${{ matrix.stack_kind }} -Dwasi=false
+
       - name: Bench
         run: |
           zig build bench -Dvm_kind=${{ matrix.stack_kind }} -Doptimize=ReleaseFast
