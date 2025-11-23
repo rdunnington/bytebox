@@ -1503,17 +1503,27 @@ pub const FunctionStackStats = struct {
 const ModuleValidator = struct {
     const ControlFrame = struct {
         opcode: Opcode,
-        start_types: []const ValType,
-        end_types: []const ValType,
+        start_types_begin: usize, // indexes control_types
+        start_types_end: usize, // indexes control_types
+        end_types_begin: usize, // indexes control_types
+        end_types_end: usize, // indexes control_types
         types_stack_height: usize,
         is_unreachable: bool,
+
+        fn startTypes(self: *const ControlFrame, slice: []const ValType) []const ValType {
+            return slice[self.start_types_begin..self.start_types_end];
+        }
+
+        fn endTypes(self: *const ControlFrame, slice: []const ValType) []const ValType {
+            return slice[self.end_types_begin..self.end_types_end];
+        }
     };
 
     // Note that we use a nullable ValType here to map to the "Unknown" value type as described in the wasm spec
     // validation algorithm: https://webassembly.github.io/spec/core/appendix/algorithm.html
     type_stack: std.array_list.Managed(?ValType),
     control_stack: std.array_list.Managed(ControlFrame),
-    control_types: StableArray(ValType),
+    control_types: std.array_list.Managed(ValType),
     log: Logger,
 
     // tracks stack usage per-function
@@ -1523,7 +1533,7 @@ const ModuleValidator = struct {
         return ModuleValidator{
             .type_stack = std.array_list.Managed(?ValType).init(allocator),
             .control_stack = std.array_list.Managed(ControlFrame).init(allocator),
-            .control_types = StableArray(ValType).init(1 * 1024 * 1024),
+            .control_types = std.array_list.Managed(ValType).init(allocator),
             .log = log,
         };
     }
@@ -1591,7 +1601,10 @@ const ModuleValidator = struct {
         }
     }
 
-    fn beginValidateCode(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition) !void {
+    fn beginValidateCode(self: *ModuleValidator, module: *const ModuleDefinition, func: *const FunctionDefinition, code_size_hint: usize) !void {
+        const num_control_types = @min(1024, code_size_hint / 64); // use code size as a janky heuristic
+        try self.control_types.ensureTotalCapacity(num_control_types);
+
         try validateTypeIndex(func.type_index, module);
 
         self.stack_stats = .{};
@@ -1766,7 +1779,7 @@ const ModuleValidator = struct {
                 }
                 const stack_index = validator.control_stack.items.len - control_index - 1;
                 const frame: *ControlFrame = &validator.control_stack.items[stack_index];
-                return if (frame.opcode != .Loop) frame.end_types else frame.start_types;
+                return if (frame.opcode != .Loop) frame.endTypes(validator.control_types.items) else frame.startTypes(validator.control_types.items);
             }
 
             fn markFrameInstructionsUnreachable(validator: *ModuleValidator) !void {
@@ -1816,18 +1829,22 @@ const ModuleValidator = struct {
                 if (frame.opcode.isIf() == false) {
                     return error.ValidationIfElseMismatch;
                 }
-                try self.pushControl(.Else, frame.start_types, frame.end_types);
+                const start_types = frame.startTypes(self.control_types.items);
+                const end_types = frame.endTypes(self.control_types.items);
+                try self.pushControl(.Else, start_types, end_types);
             },
             .End => {
                 const frame: ControlFrame = try self.popControl();
 
                 // if must have matching else block when returns are expected and the params don't match
-                if (frame.opcode.isIf() and !std.mem.eql(ValType, frame.start_types, frame.end_types)) {
+                const start_types = frame.startTypes(self.control_types.items);
+                const end_types = frame.endTypes(self.control_types.items);
+                if (frame.opcode.isIf() and !std.mem.eql(ValType, start_types, end_types)) {
                     return error.ValidationTypeMismatch;
                 }
 
                 if (self.control_stack.items.len > 0) {
-                    for (frame.end_types) |valtype| {
+                    for (end_types) |valtype| {
                         try self.pushType(valtype);
                     }
                 }
@@ -2685,18 +2702,20 @@ const ModuleValidator = struct {
     }
 
     fn pushControl(self: *ModuleValidator, opcode: Opcode, start_types: []const ValType, end_types: []const ValType) !void {
-        const control_types_start_index: usize = self.control_types.items.len;
+        const start_types_begin: usize = self.control_types.items.len;
         try self.control_types.appendSlice(start_types);
-        const control_start_types: []const ValType = self.control_types.items[control_types_start_index..self.control_types.items.len];
+        const start_types_end: usize = self.control_types.items.len;
 
-        const control_types_end_index: usize = self.control_types.items.len;
+        const end_types_begin: usize = self.control_types.items.len;
         try self.control_types.appendSlice(end_types);
-        const control_end_types: []const ValType = self.control_types.items[control_types_end_index..self.control_types.items.len];
+        const end_types_end: usize = self.control_types.items.len;
 
         try self.control_stack.append(ControlFrame{
             .opcode = opcode,
-            .start_types = control_start_types,
-            .end_types = control_end_types,
+            .start_types_begin = start_types_begin,
+            .start_types_end = start_types_end,
+            .end_types_begin = end_types_begin,
+            .end_types_end = end_types_end,
             .types_stack_height = self.type_stack.items.len,
             .is_unreachable = false,
         });
@@ -2713,12 +2732,14 @@ const ModuleValidator = struct {
     fn popControl(self: *ModuleValidator) !ControlFrame {
         const frame: *const ControlFrame = &self.control_stack.items[self.control_stack.items.len - 1];
 
-        var i = frame.end_types.len;
+        const end_types_len: usize = frame.end_types_end - frame.end_types_begin;
+        var i: usize = end_types_len;
         while (i > 0) : (i -= 1) {
             if (frame.is_unreachable and self.type_stack.items.len == frame.types_stack_height) {
                 break;
             }
-            try self.popType(frame.end_types[i - 1]);
+            const end_types = self.control_types.items[frame.end_types_begin..frame.end_types_end];
+            try self.popType(end_types[i - 1]);
         }
 
         if (self.type_stack.items.len != frame.types_stack_height) {
@@ -2731,7 +2752,9 @@ const ModuleValidator = struct {
     }
 
     fn freeControlTypes(self: *ModuleValidator, frame: *const ControlFrame) !void {
-        const num_used_types: usize = frame.start_types.len + frame.end_types.len;
+        const start_types_len = frame.start_types_end - frame.start_types_begin;
+        const end_types_len = frame.end_types_end - frame.end_types_begin;
+        const num_used_types: usize = start_types_len + end_types_len;
         try self.control_types.resize(self.control_types.items.len - num_used_types);
     }
 };
@@ -3423,7 +3446,7 @@ pub const ModuleDefinition = struct {
                             .opcode = .Block,
                         });
 
-                        try validator.beginValidateCode(self, func_def);
+                        try validator.beginValidateCode(self, func_def, code_size);
 
                         var parsing_code = true;
                         while (parsing_code) {
