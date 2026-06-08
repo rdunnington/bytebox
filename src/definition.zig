@@ -94,46 +94,52 @@ const Section = enum(u8) { Custom, FunctionType, Import, Function, Table, Memory
 const k_function_type_sentinel_byte: u8 = 0x60;
 const k_block_type_void_sentinel_byte: u8 = 0x40;
 
+fn intToEnum(comptime E: type, value: @typeInfo(E).@"enum".tag_type) ?E {
+    const fields = @typeInfo(E).@"enum".fields;
+    inline for (fields) |field| {
+        if (field.value == value) return @enumFromInt(value);
+    }
+    return null;
+}
+
 fn eosError(e: anyerror) MalformedError {
-    if (e == error.EndOfStream) {
-        return MalformedError.MalformedUnexpectedEnd;
-    } else if (e == error.EndOfBuffer) {
+    if (e == error.EndOfStream or e == error.EndOfBuffer or e == error.ReadFailed) {
         return MalformedError.MalformedUnexpectedEnd;
     } else {
         unreachable;
     }
 }
 
-fn readByte(reader: anytype) MalformedError!u8 {
-    return reader.readByte() catch |e| return eosError(e);
+const Reader = std.Io.Reader;
+
+fn readByte(reader: *Reader) MalformedError!u8 {
+    return reader.takeByte() catch |e| return eosError(e);
 }
 
-fn readBytes(reader: anytype, bytes: []u8) MalformedError!usize {
-    return reader.read(bytes) catch |e| return eosError(e);
+fn readBytes(reader: *Reader, bytes: []u8) MalformedError!usize {
+    return reader.readSliceShort(bytes) catch |e| return eosError(e);
 }
 
-fn decodeLEB128(comptime T: type, reader: anytype) MalformedError!T {
-    if (@typeInfo(T).int.signedness == .signed) {
-        return std.leb.readIleb128(T, reader) catch |e| {
-            if (e == error.Overflow) {
-                return error.MalformedLEB128;
-            } else {
-                return eosError(e);
-            }
-        };
-    } else {
-        return std.leb.readUleb128(T, reader) catch |e| {
-            if (e == error.Overflow) {
-                return error.MalformedLEB128;
-            } else {
-                return eosError(e);
-            }
-        };
+fn decodeLEB128(comptime T: type, reader: *Reader) MalformedError!T {
+    const info = @typeInfo(T).int;
+    const max_bytes = (info.bits + 6) / 7; // ceil(bits/7)
+    const pos_before = reader.seek;
+    const result = reader.takeLeb128(T) catch |e| {
+        if (e == error.Overflow) {
+            return error.MalformedLEB128;
+        } else {
+            return eosError(e);
+        }
+    };
+    const bytes_consumed = reader.seek - pos_before;
+    if (bytes_consumed > max_bytes) {
+        return error.MalformedLEB128;
     }
+    return result;
 }
 
-fn decodeWasmOpcode(reader: anytype) MalformedError!WasmOpcode {
-    const byte = try readByte(&reader);
+fn decodeWasmOpcode(reader: *Reader) MalformedError!WasmOpcode {
+    const byte = try readByte(reader);
     var wasm_op: WasmOpcode = undefined;
     if (byte == 0xFC or byte == 0xFD) {
         const type_opcode = try decodeLEB128(u32, reader);
@@ -145,28 +151,28 @@ fn decodeWasmOpcode(reader: anytype) MalformedError!WasmOpcode {
         extended = extended << 8;
         extended |= byte2;
 
-        wasm_op = std.meta.intToEnum(WasmOpcode, extended) catch {
+        wasm_op = intToEnum(WasmOpcode, extended) orelse {
             return error.MalformedIllegalOpcode;
         };
     } else {
-        wasm_op = std.meta.intToEnum(WasmOpcode, byte) catch {
+        wasm_op = intToEnum(WasmOpcode, byte) orelse {
             return error.MalformedIllegalOpcode;
         };
     }
     return wasm_op;
 }
 
-fn decodeFloat(comptime T: type, reader: anytype) MalformedError!T {
+fn decodeFloat(comptime T: type, reader: *Reader) MalformedError!T {
     return switch (T) {
-        f32 => @as(f32, @bitCast(reader.readInt(u32, .little) catch |e| return eosError(e))),
-        f64 => @as(f64, @bitCast(reader.readInt(u64, .little) catch |e| return eosError(e))),
+        f32 => @as(f32, @bitCast(reader.takeInt(u32, .little) catch |e| return eosError(e))),
+        f64 => @as(f64, @bitCast(reader.takeInt(u64, .little) catch |e| return eosError(e))),
         else => unreachable,
     };
 }
 
-fn decodeVec(reader: anytype) MalformedError!v128 {
+fn decodeVec(reader: *Reader) MalformedError!v128 {
     var bytes: [16]u8 = undefined;
-    _ = reader.read(&bytes) catch |e| eosError(e);
+    _ = reader.readSliceShort(&bytes) catch |e| return eosError(e);
     return std.mem.bytesToValue(v128, &bytes);
 }
 
@@ -194,11 +200,11 @@ pub const ValType = enum(c_int) {
         };
     }
 
-    fn decode(reader: anytype) MalformedError!ValType {
-        return try bytecodeToValtype(try readByte(&reader));
+    fn decode(reader: *Reader) MalformedError!ValType {
+        return try bytecodeToValtype(try readByte(reader));
     }
 
-    fn decodeReftype(reader: anytype) MalformedError!ValType {
+    fn decodeReftype(reader: *Reader) MalformedError!ValType {
         const valtype = try decode(reader);
         if (isRefType(valtype) == false) {
             return error.MalformedReferenceType;
@@ -374,8 +380,8 @@ pub const Limits = struct {
     pub const k_max_bytes_i64 = (1024 * 1024 * 1024 * 128);
     pub const k_max_pages_i64 = k_max_bytes_i64 / MemoryDefinition.k_page_size;
 
-    fn decode(reader: anytype) !Limits {
-        const limit_type: u8 = try readByte(&reader);
+    fn decode(reader: *Reader) !Limits {
+        const limit_type: u8 = try readByte(reader);
 
         if (limit_type > 7) {
             return error.MalformedLimits;
@@ -480,7 +486,7 @@ pub const ConstantExpression = union(ConstantExpressionType) {
         Immutable,
     };
 
-    fn decode(reader: anytype, module_def: *const ModuleDefinition, comptime expected_global_mut: ExpectedGlobalMut, expected_valtype: ValType) !ConstantExpression {
+    fn decode(reader: *Reader, module_def: *const ModuleDefinition, comptime expected_global_mut: ExpectedGlobalMut, expected_valtype: ValType) !ConstantExpression {
         const opcode = try decodeWasmOpcode(reader);
 
         const expr = switch (opcode) {
@@ -534,7 +540,7 @@ pub const ConstantExpression = union(ConstantExpressionType) {
             }
         }
 
-        const end = @as(WasmOpcode, @enumFromInt(try readByte(&reader)));
+        const end = @as(WasmOpcode, @enumFromInt(try readByte(reader)));
         if (end != .End) {
             return error.ValidationBadConstantExpression;
         }
@@ -654,9 +660,9 @@ pub const GlobalMut = enum(u8) {
     Immutable = 0,
     Mutable = 1,
 
-    fn decode(reader: anytype) !GlobalMut {
-        const byte = try readByte(&reader);
-        const value = std.meta.intToEnum(GlobalMut, byte) catch {
+    fn decode(reader: *Reader) !GlobalMut {
+        const byte = try readByte(reader);
+        const value = intToEnum(GlobalMut, byte) orelse {
             return error.MalformedMutability;
         };
         return value;
@@ -712,7 +718,7 @@ pub const DataDefinition = struct {
     offset: ?ConstantExpression,
     mode: DataMode,
 
-    fn decode(reader: anytype, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) DecodeError!DataDefinition {
+    fn decode(reader: *Reader, module_def: *const ModuleDefinition, allocator: std.mem.Allocator) DecodeError!DataDefinition {
         const data_type: u32 = try decodeLEB128(u32, reader);
         if (data_type > 2) {
             return error.MalformedDataType;
@@ -744,6 +750,7 @@ pub const DataDefinition = struct {
         const num_bytes = try decodeLEB128(u32, reader);
         var bytes = std.array_list.Managed(u8).init(allocator);
         try bytes.resize(num_bytes);
+        errdefer bytes.deinit();
         const num_read = try readBytes(reader, bytes.items);
         if (num_read != num_bytes) {
             return error.MalformedUnexpectedEnd;
@@ -792,7 +799,7 @@ const MemArg = struct {
     alignment: u32,
     offset: u64,
 
-    fn decode(reader: anytype, comptime bitwidth: u32) !MemArg {
+    fn decode(reader: *Reader, comptime bitwidth: u32) !MemArg {
         std.debug.assert(bitwidth % 8 == 0);
         const memarg = MemArg{
             .alignment = try decodeLEB128(u32, reader),
@@ -892,10 +899,10 @@ pub const Instruction = struct {
         }
     }
 
-    fn decode(reader: anytype, module: *ModuleDefinition, func: *FunctionDefinition) !DecodedInstruction {
+    fn decode(reader: *Reader, module: *ModuleDefinition, func: *FunctionDefinition) !DecodedInstruction {
         const Helpers = struct {
             fn decodeBlockType(
-                _reader: anytype,
+                _reader: *Reader,
                 _module: *ModuleDefinition,
                 out_immediates: *InstructionImmediates,
                 out_validation_immediates: *ValidationImmediates,
@@ -903,14 +910,14 @@ pub const Instruction = struct {
                 var block_type: BlockType = undefined;
                 var block_value: BlockTypeValue = undefined;
 
-                const blocktype_raw = try readByte(&_reader);
+                const blocktype_raw = try readByte(_reader);
                 const valtype_or_err = ValType.bytecodeToValtype(blocktype_raw);
                 if (std.meta.isError(valtype_or_err)) {
                     if (blocktype_raw == k_block_type_void_sentinel_byte) {
                         block_type = .Void;
                         block_value = BlockTypeValue{ .TypeIndex = 0 };
                     } else {
-                        _reader.context.pos -= 1; // move the stream backwards 1 byte to reconstruct the integer
+                        _reader.seek -= 1; // move the stream backwards 1 byte to reconstruct the integer
                         const index_33bit = try decodeLEB128(i33, _reader);
                         if (index_33bit < 0) {
                             return error.MalformedBytecode;
@@ -945,7 +952,7 @@ pub const Instruction = struct {
                 };
             }
 
-            fn decodeTablePair(_reader: anytype) !InstructionImmediates {
+            fn decodeTablePair(_reader: *Reader) !InstructionImmediates {
                 const elem_index = try decodeLEB128(u32, _reader);
                 const table_index = try decodeLEB128(u32, _reader);
 
@@ -957,9 +964,9 @@ pub const Instruction = struct {
                 };
             }
 
-            fn decodeMemoryOffsetAndLane(_reader: anytype, comptime bitwidth: u32, _module: *ModuleDefinition) DecodeError!InstructionImmediates {
+            fn decodeMemoryOffsetAndLane(_reader: *Reader, comptime bitwidth: u32, _module: *ModuleDefinition) DecodeError!InstructionImmediates {
                 const memarg = try MemArg.decode(_reader, bitwidth);
-                const laneidx = try readByte(&_reader);
+                const laneidx = try readByte(_reader);
                 const immediates = MemoryOffsetAndLaneImmediates{
                     .offset = memarg.offset,
                     .laneidx = laneidx,
@@ -1214,13 +1221,13 @@ pub const Instruction = struct {
                 immediate = InstructionImmediates{ .MemoryOffset = memarg.offset };
             },
             .Memory_Size => {
-                const reserved = try readByte(&reader);
+                const reserved = try readByte(reader);
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
             },
             .Memory_Grow => {
-                const reserved = try readByte(&reader);
+                const reserved = try readByte(reader);
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
@@ -1234,7 +1241,7 @@ pub const Instruction = struct {
 
                 immediate = InstructionImmediates{ .Index = try decodeLEB128(u32, reader) }; // dataidx
 
-                const reserved = try readByte(&reader);
+                const reserved = try readByte(reader);
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
@@ -1254,17 +1261,17 @@ pub const Instruction = struct {
                 immediate = InstructionImmediates{ .Index = try decodeLEB128(u32, reader) }; // dataidx
             },
             .Memory_Copy => {
-                var reserved = try readByte(&reader);
+                var reserved = try readByte(reader);
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
-                reserved = try readByte(&reader);
+                reserved = try readByte(reader);
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
             },
             .Memory_Fill => {
-                const reserved = try readByte(&reader);
+                const reserved = try readByte(reader);
                 if (reserved != 0x00) {
                     return error.MalformedMissingZeroByte;
                 }
@@ -1334,7 +1341,7 @@ pub const Instruction = struct {
             .F64x2_Extract_Lane,
             .F64x2_Replace_Lane,
             => {
-                immediate = InstructionImmediates{ .Index = try readByte(&reader) }; // laneidx
+                immediate = InstructionImmediates{ .Index = try readByte(reader) }; // laneidx
             },
             .V128_Store => {
                 const memarg = try MemArg.decode(reader, 128);
@@ -1348,7 +1355,7 @@ pub const Instruction = struct {
             .I8x16_Shuffle => {
                 var lane_indices: [16]u8 = undefined;
                 for (&lane_indices) |*v| {
-                    const laneidx: u8 = try readByte(&reader);
+                    const laneidx: u8 = try readByte(reader);
                     v.* = laneidx;
                 }
 
@@ -1430,42 +1437,40 @@ pub const NameCustomSection = struct {
 
     fn decodeInternal(self: *NameCustomSection, module_definition: *const ModuleDefinition, bytes: []const u8) !void {
         const DecodeHelpers = struct {
-            fn readName(stream: anytype) ![]const u8 {
-                const reader = stream.reader();
+            fn readName(reader: *Reader) ![]const u8 {
                 const name_length = try decodeLEB128(u32, reader);
-                const name: []const u8 = stream.buffer[stream.pos .. stream.pos + name_length];
-                try stream.seekBy(name_length);
+                const name: []const u8 = reader.buffer[reader.seek .. reader.seek + name_length];
+                try reader.discardAll(name_length);
                 return name;
             }
         };
 
-        var fixed_buffer_stream = std.io.fixedBufferStream(bytes);
-        var reader = fixed_buffer_stream.reader();
+        var reader: Reader = .fixed(bytes);
 
-        while (try fixed_buffer_stream.getPos() != try fixed_buffer_stream.getEndPos()) {
+        while (reader.seek < reader.end) {
             const section_code = try readByte(&reader);
-            const section_size = try decodeLEB128(u32, reader);
+            const section_size = try decodeLEB128(u32, &reader);
 
             switch (section_code) {
                 0 => {
-                    self.module_name = try DecodeHelpers.readName(&fixed_buffer_stream);
+                    self.module_name = try DecodeHelpers.readName(&reader);
                 },
                 1 => {
-                    const num_func_names = try decodeLEB128(u32, reader);
+                    const num_func_names = try decodeLEB128(u32, &reader);
                     try self.function_names.ensureTotalCapacity(num_func_names);
 
                     var index: u32 = 0;
                     while (index < num_func_names) : (index += 1) {
-                        const func_index = try decodeLEB128(u32, reader);
-                        const func_name: []const u8 = try DecodeHelpers.readName(&fixed_buffer_stream);
+                        const func_index = try decodeLEB128(u32, &reader);
+                        const func_name: []const u8 = try DecodeHelpers.readName(&reader);
                         try self.function_names.putNoClobber(func_index, func_name);
                     }
                 },
                 2 => { // TODO locals
-                    try fixed_buffer_stream.seekBy(section_size);
+                    try reader.discardAll(section_size);
                 },
                 else => {
-                    try fixed_buffer_stream.seekBy(section_size);
+                    try reader.discardAll(section_size);
                 },
             }
         }
@@ -2725,9 +2730,10 @@ const ModuleValidator = struct {
             return error.ValidationTypeStackHeightMismatch;
         }
 
+        const result = frame.*;
         _ = self.control_stack.pop();
 
-        return frame.*;
+        return result;
     }
 
     fn freeControlTypes(self: *ModuleValidator, frame: *const ControlFrame) !void {
@@ -2842,7 +2848,7 @@ pub const ModuleDefinition = struct {
         std.debug.assert(self.is_decoded == false);
 
         const DecodeHelpers = struct {
-            fn readRefValue(valtype: ValType, reader: anytype) MalformedError!Val {
+            fn readRefValue(valtype: ValType, reader: *Reader) MalformedError!Val {
                 switch (valtype) {
                     .FuncRef => {
                         const func_index = try decodeLEB128(u32, reader);
@@ -2857,12 +2863,12 @@ pub const ModuleDefinition = struct {
             }
 
             // TODO move these names into a string pool
-            fn readName(reader: anytype, _allocator: std.mem.Allocator) DecodeError![]const u8 {
+            fn readName(reader: *Reader, _allocator: std.mem.Allocator) DecodeError![]const u8 {
                 const name_length = try decodeLEB128(u32, reader);
 
                 const name: []u8 = try _allocator.alloc(u8, name_length);
                 errdefer _allocator.free(name);
-                const read_length = try reader.read(name);
+                const read_length = reader.readSliceShort(name) catch return error.MalformedUnexpectedEnd;
                 if (read_length != name_length) {
                     return error.MalformedUnexpectedEnd;
                 }
@@ -2879,16 +2885,16 @@ pub const ModuleDefinition = struct {
         var validator = ModuleValidator.init(allocator, self.log);
         defer validator.deinit();
 
-        var stream = std.io.fixedBufferStream(wasm);
-        var reader = stream.reader();
+        var _main_reader: Reader = .fixed(wasm);
+        const reader = &_main_reader;
 
         // wasm header
         {
-            const magic = reader.readInt(u32, .big) catch |e| return eosError(e);
+            const magic = reader.takeInt(u32, .big) catch |e| return eosError(e);
             if (magic != 0x0061736D) {
                 return error.MalformedMagicSignature;
             }
-            const version = reader.readInt(u32, .little) catch |e| return eosError(e);
+            const version = reader.takeInt(u32, .little) catch |e| return eosError(e);
             if (version != 1) {
                 return error.MalformedUnsupportedWasmVersion;
             }
@@ -2896,12 +2902,12 @@ pub const ModuleDefinition = struct {
 
         var num_functions_parsed: u32 = 0;
 
-        while (stream.pos < stream.buffer.len) {
-            const section_id: Section = std.meta.intToEnum(Section, try readByte(&reader)) catch {
+        while (reader.seek < reader.end) {
+            const section_id: Section = intToEnum(Section, try readByte(reader)) orelse {
                 return error.MalformedSectionId;
             };
             const section_size_bytes: usize = try decodeLEB128(u32, reader);
-            const section_start_pos = stream.pos;
+            const section_start_pos = reader.seek;
 
             switch (section_id) {
                 .Custom => {
@@ -2917,15 +2923,18 @@ pub const ModuleDefinition = struct {
                         .data = std.array_list.Managed(u8).init(allocator),
                     };
 
-                    const name_length: usize = stream.pos - section_start_pos;
+                    const name_length: usize = reader.seek - section_start_pos;
                     const data_length: usize = section_size_bytes - name_length;
-                    try section.data.resize(data_length);
-                    const data_length_read = try reader.read(section.data.items);
-                    if (data_length != data_length_read) {
-                        return error.MalformedUnexpectedEnd;
-                    }
 
-                    try self.custom_sections.append(section);
+                    {
+                        errdefer section.data.deinit();
+                        try section.data.resize(data_length);
+                        const data_length_read = reader.readSliceShort(section.data.items) catch return error.MalformedUnexpectedEnd;
+                        if (data_length != data_length_read) {
+                            return error.MalformedUnexpectedEnd;
+                        }
+                        try self.custom_sections.append(section);
+                    }
 
                     if (std.mem.eql(u8, section.name, "name")) {
                         try self.name_section.decode(self, section.data.items);
@@ -2938,7 +2947,7 @@ pub const ModuleDefinition = struct {
 
                     var types_index: u32 = 0;
                     while (types_index < num_types) : (types_index += 1) {
-                        const sentinel = try readByte(&reader);
+                        const sentinel = try readByte(reader);
                         if (sentinel != k_function_type_sentinel_byte) {
                             return error.MalformedTypeSentinel;
                         }
@@ -2984,7 +2993,7 @@ pub const ModuleDefinition = struct {
                             .import_name = import_name,
                         };
 
-                        const desc = try readByte(&reader);
+                        const desc = try readByte(reader);
                         switch (desc) {
                             0x00 => {
                                 const type_index = try decodeLEB128(u32, reader);
@@ -3200,7 +3209,7 @@ pub const ModuleDefinition = struct {
                             }
                         }
 
-                        const exportType = @as(ExportType, @enumFromInt(try readByte(&reader)));
+                        const exportType = @as(ExportType, @enumFromInt(try readByte(reader)));
                         const item_index = try decodeLEB128(u32, reader);
                         const def = ExportDefinition{ .name = name, .index = item_index };
 
@@ -3245,12 +3254,12 @@ pub const ModuleDefinition = struct {
                 },
                 .Element => {
                     const ElementHelpers = struct {
-                        fn readOffsetExpr(_reader: anytype, _module: *const ModuleDefinition) !ConstantExpression {
+                        fn readOffsetExpr(_reader: *Reader, _module: *const ModuleDefinition) !ConstantExpression {
                             const expr = try ConstantExpression.decode(_reader, _module, .Immutable, .I32);
                             return expr;
                         }
 
-                        fn readElemsVal(elems: *std.array_list.Managed(Val), valtype: ValType, _reader: anytype, _module: *const ModuleDefinition) !void {
+                        fn readElemsVal(elems: *std.array_list.Managed(Val), valtype: ValType, _reader: *Reader, _module: *const ModuleDefinition) !void {
                             const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
@@ -3264,7 +3273,7 @@ pub const ModuleDefinition = struct {
                             }
                         }
 
-                        fn readElemsExpr(elems: *std.array_list.Managed(ConstantExpression), _reader: anytype, _module: *const ModuleDefinition, expected_reftype: ValType) !void {
+                        fn readElemsExpr(elems: *std.array_list.Managed(ConstantExpression), _reader: *Reader, _module: *const ModuleDefinition, expected_reftype: ValType) !void {
                             const num_elems = try decodeLEB128(u32, _reader);
                             try elems.ensureTotalCapacity(num_elems);
 
@@ -3275,8 +3284,8 @@ pub const ModuleDefinition = struct {
                             }
                         }
 
-                        fn readNullElemkind(_reader: anytype) !void {
-                            const null_elemkind = try readByte(&_reader);
+                        fn readNullElemkind(_reader: *Reader) !void {
+                            const null_elemkind = try readByte(_reader);
                             if (null_elemkind != 0x00) {
                                 return error.MalformedBytecode;
                             }
@@ -3373,7 +3382,7 @@ pub const ModuleDefinition = struct {
                         return error.MalformedFunctionCodeSectionMismatch;
                     }
 
-                    const wasm_code_address_begin: usize = stream.pos;
+                    const wasm_code_address_begin: usize = reader.seek;
 
                     const TypeCount = struct {
                         valtype: ValType,
@@ -3385,7 +3394,7 @@ pub const ModuleDefinition = struct {
                     var code_index: u32 = 0;
                     while (code_index < num_codes) {
                         const code_size = try decodeLEB128(u32, reader);
-                        const code_begin_pos = stream.pos;
+                        const code_begin_pos = reader.seek;
 
                         var func_def: *FunctionDefinition = &self.functions.items[code_index + self.imports.functions.items.len];
 
@@ -3429,7 +3438,7 @@ pub const ModuleDefinition = struct {
                         while (parsing_code) {
                             const instruction_index = @as(u32, @intCast(instructions.items.len));
 
-                            const wasm_instruction_address = stream.pos - wasm_code_address_begin;
+                            const wasm_instruction_address = reader.seek - wasm_code_address_begin;
 
                             const decoded_instruction: DecodedInstruction = try Instruction.decode(reader, self, func_def);
                             const validation_immediates: ValidationImmediates = decoded_instruction.validation_immediates;
@@ -3504,7 +3513,7 @@ pub const ModuleDefinition = struct {
 
                         func_def.instructions_end = @intCast(instructions.items.len);
 
-                        const code_actual_size = stream.pos - code_begin_pos;
+                        const code_actual_size = reader.seek - code_begin_pos;
                         if (code_actual_size != code_size) {
                             return error.MalformedSectionSizeMismatch;
                         }
@@ -3521,7 +3530,8 @@ pub const ModuleDefinition = struct {
 
                     var data_index: u32 = 0;
                     while (data_index < num_datas) : (data_index += 1) {
-                        const data = try DataDefinition.decode(reader, self, allocator);
+                        var data = try DataDefinition.decode(reader, self, allocator);
+                        errdefer data.bytes.deinit();
                         try self.datas.append(data);
                     }
                 },
@@ -3531,7 +3541,7 @@ pub const ModuleDefinition = struct {
                 },
             }
 
-            const consumed_bytes = stream.pos - section_start_pos;
+            const consumed_bytes = reader.seek - section_start_pos;
             if (section_size_bytes != consumed_bytes) {
                 return error.MalformedSectionSizeMismatch;
             }

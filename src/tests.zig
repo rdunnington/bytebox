@@ -13,8 +13,7 @@ test "StackVM.Integration" {
 
     var allocator = std.testing.allocator;
 
-    var cwd = std.fs.cwd();
-    const wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
+    const wasm_data: []u8 = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, wasm_filepath, allocator, .limited(1024 * 1024 * 128));
     defer allocator.free(wasm_data);
 
     const module_def_opts = core.ModuleDefinitionOpts{
@@ -37,8 +36,7 @@ test "StackVM.Metering" {
 
     var allocator = std.testing.allocator;
 
-    var cwd = std.fs.cwd();
-    const wasm_data: []u8 = try cwd.readFileAlloc(allocator, wasm_filepath, 1024 * 1024 * 128);
+    const wasm_data: []u8 = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, wasm_filepath, allocator, .limited(1024 * 1024 * 128));
     defer allocator.free(wasm_data);
 
     const module_def_opts = core.ModuleDefinitionOpts{

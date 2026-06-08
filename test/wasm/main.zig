@@ -444,7 +444,7 @@ fn isSameError(err: anyerror, err_string: []const u8) bool {
     };
 }
 
-fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(Command) {
+fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator, io: std.Io) !std.array_list.Managed(Command) {
     const Helpers = struct {
         fn parseAction(json_action: *std.json.Value, fallback_module: []const u8, _allocator: std.mem.Allocator) !Action {
             const json_type = json_action.object.getPtr("type").?;
@@ -471,6 +471,7 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.array
             var module: []const u8 = try _allocator.dupe(u8, fallback_module);
             const json_module_or_null = json_action.object.getPtr("module");
             if (json_module_or_null) |json_module| {
+                _allocator.free(module);
                 module = try _allocator.dupe(u8, json_module.string);
             }
 
@@ -494,10 +495,12 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.array
     };
 
     // print("json_path: {s}\n", .{json_path});
-    const json_data = try std.fs.cwd().readFileAlloc(allocator, json_path, 1024 * 1024 * 8);
+    const json_data = try std.Io.Dir.cwd().readFileAlloc(io, json_path, allocator, .limited(1024 * 1024 * 8));
+    defer allocator.free(json_data);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
+    defer parsed.deinit();
 
-    var fallback_module: []const u8 = "";
+    var fallback_module: []const u8 = try allocator.dupe(u8, "");
     defer allocator.free(fallback_module);
 
     var commands = std.array_list.Managed(Command).init(allocator);
@@ -509,10 +512,12 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.array
         if (strcmp("module", json_command_type.string)) {
             const json_filename = json_command.object.getPtr("filename").?;
             const filename: []const u8 = try allocator.dupe(u8, json_filename.string);
+            allocator.free(fallback_module);
             fallback_module = filename;
 
             var name = try allocator.dupe(u8, filename);
             if (json_command.object.getPtr("name")) |json_module_name| {
+                allocator.free(name);
                 name = try allocator.dupe(u8, json_module_name.string);
             }
 
@@ -578,22 +583,26 @@ fn parseCommands(json_path: []const u8, allocator: std.mem.Allocator) !std.array
             };
             try commands.append(command);
         } else if (strcmp("assert_malformed", json_command_type.string)) {
-            const command = Command{
+            var command = Command{
                 .AssertMalformed = CommandAssertMalformed{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
             if (std.mem.endsWith(u8, command.AssertMalformed.err.module, ".wasm")) {
                 try commands.append(command);
+            } else {
+                command.deinit(allocator);
             }
         } else if (strcmp("assert_invalid", json_command_type.string)) {
-            const command = Command{
+            var command = Command{
                 .AssertInvalid = CommandAssertInvalid{
                     .err = try Helpers.parseBadModuleError(&json_command, allocator),
                 },
             };
             if (std.mem.endsWith(u8, command.AssertInvalid.err.module, ".wasm")) {
                 try commands.append(command);
+            } else {
+                command.deinit(allocator);
             }
         } else if (strcmp("assert_unlinkable", json_command_type.string)) {
             const command = Command{
@@ -748,10 +757,10 @@ fn makeSpectestImports(allocator: std.mem.Allocator) !bytebox.ModuleImportPackag
     return imports;
 }
 
-fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOpts) !bool {
+fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOpts, io: std.Io) !bool {
     var did_fail_any_test: bool = false;
 
-    var commands: std.array_list.Managed(Command) = try parseCommands(suite_path, allocator);
+    var commands: std.array_list.Managed(Command) = try parseCommands(suite_path, allocator, io);
     defer {
         for (commands.items) |*command| {
             command.deinit(allocator);
@@ -785,22 +794,22 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
     // NOTE this shares the same copies of the import arrays, since the modules must share instances
     var imports = std.array_list.Managed(bytebox.ModuleImportPackage).init(allocator);
     defer {
-        const spectest_imports = imports.items[0];
+        // Destroy host-created objects before deinit frees the names/arrays
+        var spectest_imports = &imports.items[0];
         for (spectest_imports.tables.items) |*item| {
-            allocator.free(item.name);
             item.data.Host.deinit();
             allocator.destroy(item.data.Host);
         }
         for (spectest_imports.memories.items) |*item| {
-            allocator.free(item.name);
             item.data.Host.deinit();
             allocator.destroy(item.data.Host);
         }
         for (spectest_imports.globals.items) |*item| {
-            allocator.free(item.name);
             allocator.destroy(item.data.Host.def);
             allocator.destroy(item.data.Host);
         }
+        // deinit frees names, type lists, and backing arrays
+        spectest_imports.deinit();
 
         for (imports.items[1..]) |*item| {
             item.deinit();
@@ -854,9 +863,10 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
 
         if (module.inst == null) {
             const module_path = try std.fs.path.join(allocator, &[_][]const u8{ suite_dir, module_filename });
+            defer allocator.free(module_path);
 
-            var cwd = std.fs.cwd();
-            const module_data = try cwd.readFileAlloc(allocator, module_path, 1024 * 1024 * 8);
+            const module_data = try std.Io.Dir.cwd().readFileAlloc(io, module_path, allocator, .limited(1024 * 1024 * 8));
+            defer allocator.free(module_data);
 
             var decode_expected_error: ?[]const u8 = null;
             switch (command.*) {
@@ -1121,12 +1131,14 @@ fn run(allocator: std.mem.Allocator, suite_path: []const u8, opts: *const TestOp
                                             },
                                             f32, f64 => {
                                                 const len = @typeInfo(VectorType).vector.len;
+                                                const expected_arr: [len]child_type = expected_typed;
+                                                const actual_arr: [len]child_type = actual_typed;
                                                 var vec_i: u32 = 0;
                                                 while (vec_i < len) : (vec_i += 1) {
-                                                    if (std.math.isNan(expected_typed[vec_i])) {
-                                                        is_equal = is_equal and std.math.isNan(actual_typed[vec_i]);
+                                                    if (std.math.isNan(expected_arr[vec_i])) {
+                                                        is_equal = is_equal and std.math.isNan(actual_arr[vec_i]);
                                                     } else {
-                                                        is_equal = is_equal and expected_typed[vec_i] == actual_typed[vec_i];
+                                                        is_equal = is_equal and expected_arr[vec_i] == actual_arr[vec_i];
                                                     }
                                                 }
                                             },
@@ -1260,8 +1272,8 @@ pub fn parseVmType(backend_str: []const u8) VmType {
     }
 }
 
-fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{ .mode = .read_only }) catch |e| {
+fn pathExists(path: []const u8, io: std.Io) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch |e| {
         return switch (e) {
             error.PermissionDenied,
             error.FileBusy,
@@ -1276,7 +1288,6 @@ fn pathExists(path: []const u8) bool {
             error.SystemResources,
             error.BadPathName,
             error.SymLinkLoop,
-            error.InvalidUtf8,
             => false,
             else => false,
         };
@@ -1294,12 +1305,17 @@ fn getNextArg(args: []const []const u8, index: *usize, print_help: *bool) ?[]con
     return null;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var allocator: std.mem.Allocator = gpa.allocator();
+pub fn main(process_init: std.process.Init) !void {
+    const allocator: std.mem.Allocator = process_init.gpa;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_list = std.ArrayList([:0]const u8).empty;
+    defer args_list.deinit(allocator);
+    var args_iter = std.process.Args.Iterator.init(process_init.minimal.args);
+    defer args_iter.deinit();
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args: []const [:0]const u8 = args_list.items;
 
     var opts = TestOpts{};
 
@@ -1576,7 +1592,7 @@ pub fn main() !void {
 
         const suite_wast_path = blk: {
             const is_64bit_arch = @sizeOf(usize) >= @sizeOf(u64);
-            if (is_64bit_arch and pathExists(suite_wast_mem64_path)) {
+            if (is_64bit_arch and pathExists(suite_wast_mem64_path, process_init.io)) {
                 if (opts.log_suite) {
                     print("Using memory64 for suite {s}\n", .{suite});
                 }
@@ -1597,7 +1613,7 @@ pub fn main() !void {
         if (opts.force_wasm_regen_only) {
             needs_regen = true;
         } else {
-            needs_regen = pathExists(suite_path) == false;
+            needs_regen = pathExists(suite_path, process_init.io) == false;
         }
 
         if (needs_regen) {
@@ -1613,23 +1629,24 @@ pub fn main() !void {
             const suite_wasm_folder: []const u8 = try std.fs.path.join(allocator, &[_][]const u8{ "test", "wasm", "wasm-generated", suite });
             defer allocator.free(suite_wasm_folder);
 
-            std.fs.cwd().makeDir("test/wasm/wasm-generated") catch |e| {
+            std.Io.Dir.cwd().createDir(process_init.io, "test/wasm/wasm-generated", .default_dir) catch |e| {
                 if (e != error.PathAlreadyExists) {
                     return e;
                 }
             };
 
-            std.fs.cwd().makeDir(suite_wasm_folder) catch |e| {
+            std.Io.Dir.cwd().createDir(process_init.io, suite_wasm_folder, .default_dir) catch |e| {
                 if (e != error.PathAlreadyExists) {
                     return e;
                 }
             };
 
-            var process = std.process.Child.init(&[_][]const u8{ "wasm-tools", "json-from-wast", "--pretty", "-o", suite_json_filename, suite_wast_path_relative }, allocator);
+            var child = try std.process.spawn(process_init.io, .{
+                .argv = &[_][]const u8{ "wasm-tools", "json-from-wast", "--pretty", "-o", suite_json_filename, suite_wast_path_relative },
+                .cwd = .{ .path = suite_wasm_folder },
+            });
 
-            process.cwd = suite_wasm_folder;
-
-            _ = try process.spawnAndWait();
+            _ = try child.wait(process_init.io);
         }
 
         if (opts.force_wasm_regen_only == false) {
@@ -1637,7 +1654,7 @@ pub fn main() !void {
                 print("Running test suite: {s}\n", .{suite});
             }
 
-            const success: bool = try run(allocator, suite_path, &opts);
+            const success: bool = try run(allocator, suite_path, &opts, process_init.io);
             did_all_succeed = did_all_succeed and success;
 
             if (success and opts.log_suite and !g_verbose_logging) {

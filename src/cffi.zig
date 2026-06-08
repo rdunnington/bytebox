@@ -101,7 +101,7 @@ const CGlobalExport = extern struct {
 
 const INVALID_FUNC_INDEX = std.math.maxInt(u32);
 
-var cffi_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var cffi_gpa = std.heap.DebugAllocator(.{}){};
 
 // const CAllocator = struct {
 //  const AllocError = std.mem.Allocator.Error;

@@ -184,12 +184,17 @@ fn printHelp(args: []const []const u8) void {
     log.info(usage_string, .{args[0]});
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var allocator: std.mem.Allocator = gpa.allocator();
+pub fn main(process_init: std.process.Init) !void {
+    const allocator: std.mem.Allocator = process_init.gpa;
 
-    const args: []const [:0]u8 = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_list = std.ArrayList([:0]const u8).empty;
+    defer args_list.deinit(allocator);
+    var args_iter = std.process.Args.Iterator.init(process_init.minimal.args);
+    defer args_iter.deinit();
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args: []const [:0]const u8 = args_list.items;
 
     var env_buffer = std.array_list.Managed([]const u8).init(allocator);
     defer env_buffer.deinit();
@@ -227,8 +232,7 @@ pub fn main() !void {
 
     std.debug.assert(opts.filename != null);
 
-    var cwd = std.fs.cwd();
-    const wasm_data: []u8 = cwd.readFileAlloc(allocator, opts.filename.?, 1024 * 1024 * 128) catch |e| {
+    const wasm_data: []u8 = std.Io.Dir.cwd().readFileAlloc(process_init.io, opts.filename.?, allocator, .limited(1024 * 1024 * 128)) catch |e| {
         std.log.err("Failed to read file '{s}' into memory: {}", .{ opts.filename.?, e });
         return RunErrors.IoError;
     };
@@ -247,10 +251,10 @@ pub fn main() !void {
     };
 
     if (opts.print_dump) {
-        var strbuf = std.array_list.Managed(u8).init(allocator);
-        try strbuf.ensureTotalCapacity(1024 * 16);
-        try module_def.dump(strbuf.writer());
-        log.info("{s}", .{strbuf.items});
+        var aw = try std.Io.Writer.Allocating.initCapacity(allocator, 1024 * 16);
+        defer aw.deinit();
+        try module_def.dump(&aw.writer);
+        log.info("{s}", .{aw.writer.buffered()});
         return;
     }
 
@@ -301,14 +305,14 @@ pub fn main() !void {
 
     const num_params: usize = invoke_args.len;
     if (func_export.params.len != num_params) {
-        var strbuf = std.array_list.Managed(u8).init(allocator);
-        defer strbuf.deinit();
-        try writeSignature(&strbuf, &func_export);
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        try writeSignature(&aw.writer, &func_export);
         std.log.err("Specified {} params but expected {}. The signature of '{s}' is:\n{s}", .{
             num_params,
             func_export.params.len,
             invoke_funcname,
-            strbuf.items,
+            aw.writer.buffered(),
         });
         return RunErrors.FunctionParamMismatch;
     }
@@ -375,51 +379,50 @@ pub fn main() !void {
     };
 
     {
-        var strbuf = std.array_list.Managed(u8).init(allocator);
-        defer strbuf.deinit();
-        const writer = strbuf.writer();
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        const writer = &aw.writer;
 
         if (returns.items.len > 0) {
             const return_types = func_export.returns;
-            try std.fmt.format(writer, "return:\n", .{});
+            try writer.print("return:\n", .{});
             for (returns.items, 0..) |_, i| {
                 switch (return_types[i]) {
-                    .I32 => try std.fmt.format(writer, "  {} (i32)\n", .{returns.items[i].I32}),
-                    .I64 => try std.fmt.format(writer, "  {} (i64)\n", .{returns.items[i].I64}),
-                    .F32 => try std.fmt.format(writer, "  {} (f32)\n", .{returns.items[i].F32}),
-                    .F64 => try std.fmt.format(writer, "  {} (f64)\n", .{returns.items[i].F64}),
+                    .I32 => try writer.print("  {} (i32)\n", .{returns.items[i].I32}),
+                    .I64 => try writer.print("  {} (i64)\n", .{returns.items[i].I64}),
+                    .F32 => try writer.print("  {} (f32)\n", .{returns.items[i].F32}),
+                    .F64 => try writer.print("  {} (f64)\n", .{returns.items[i].F64}),
                     .V128 => unreachable, // TODO support
-                    .FuncRef => try std.fmt.format(writer, "  (funcref)\n", .{}),
-                    .ExternRef => try std.fmt.format(writer, "  (externref)\n", .{}),
+                    .FuncRef => try writer.print("  (funcref)\n", .{}),
+                    .ExternRef => try writer.print("  (externref)\n", .{}),
                 }
             }
-            try std.fmt.format(writer, "\n", .{});
+            try writer.print("\n", .{});
         }
-        if (strbuf.items.len > 0) {
-            log.info("{s}\n", .{strbuf.items});
+        if (aw.writer.end > 0) {
+            log.info("{s}\n", .{aw.writer.buffered()});
         }
     }
 }
 
-fn writeSignature(strbuf: *std.array_list.Managed(u8), info: *const bytebox.FunctionExport) !void {
-    const writer = strbuf.writer();
+fn writeSignature(writer: *std.Io.Writer, info: *const bytebox.FunctionExport) !void {
     if (info.params.len == 0) {
-        try std.fmt.format(writer, "  params: none\n", .{});
+        try writer.print("  params: none\n", .{});
     } else {
-        try std.fmt.format(writer, "  params:\n", .{});
+        try writer.print("  params:\n", .{});
         for (info.params) |valtype| {
             const name: []const u8 = valtypeToString(valtype);
-            try std.fmt.format(writer, "    {s}\n", .{name});
+            try writer.print("    {s}\n", .{name});
         }
     }
 
     if (info.returns.len == 0) {
-        try std.fmt.format(writer, "  returns: none\n", .{});
+        try writer.print("  returns: none\n", .{});
     } else {
-        try std.fmt.format(writer, "  returns:\n", .{});
+        try writer.print("  returns:\n", .{});
         for (info.returns) |valtype| {
             const name: []const u8 = valtypeToString(valtype);
-            try std.fmt.format(writer, "    {s}\n", .{name});
+            try writer.print("    {s}\n", .{name});
         }
     }
 }

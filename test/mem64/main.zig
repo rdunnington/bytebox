@@ -2,13 +2,12 @@ const std = @import("std");
 const bytebox = @import("bytebox");
 const Val = bytebox.Val;
 
-pub fn main() !void {
+pub fn main(process_init: std.process.Init) !void {
     std.debug.print("\nRunning mem64 test...\n", .{});
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var allocator: std.mem.Allocator = gpa.allocator();
+    const allocator: std.mem.Allocator = process_init.gpa;
 
-    const wasm_data: []u8 = try std.fs.cwd().readFileAlloc(allocator, "zig-out/bin/memtest.wasm", 1024 * 512);
+    const wasm_data: []u8 = try std.Io.Dir.cwd().readFileAlloc(process_init.io, "zig-out/bin/memtest.wasm", allocator, .limited(1024 * 512));
     defer allocator.free(wasm_data);
 
     const module_def = try bytebox.createModuleDefinition(allocator, .{});

@@ -638,6 +638,10 @@ pub const Store = struct {
         self.memories.deinit();
 
         self.globals.deinit();
+
+        for (self.elements.items) |*item| {
+            item.refs.deinit();
+        }
         self.elements.deinit();
 
         for (self.imports.functions.items) |*item| {

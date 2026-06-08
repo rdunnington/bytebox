@@ -1,5 +1,6 @@
 .zig-cache
 zig-out
+zig-pkg
 test/wasm/wasm-generated
 *.wasm
 *.wasm.o

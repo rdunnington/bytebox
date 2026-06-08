@@ -26,23 +26,8 @@ pub const Logger = struct {
         };
     }
 
-    fn defaultLog(level: LogLevel, text: [:0]const u8) void {
-        var fd = switch (level) {
-            .Info => std.fs.File.stdout(),
-            .Error => std.fs.File.stderr(),
-        };
-
-        var buffer: [1024]u8 = undefined;
-        var writer = fd.writer(&buffer);
-        const w: *std.io.Writer = &writer.interface;
-
-        nosuspend w.writeAll(text) catch |e| {
-            std.debug.print("Failed logging due to error: {}\n", .{e});
-        };
-
-        nosuspend w.flush() catch |e| {
-            std.debug.print("Failed flushing log due to error: {}\n", .{e});
-        };
+    fn defaultLog(_: LogLevel, text: [:0]const u8) void {
+        std.debug.print("{s}", .{text});
     }
 
     pub fn info(self: Logger, comptime format: []const u8, args: anytype) void {
@@ -79,7 +64,15 @@ pub const ScratchAllocator = struct {
     }
 
     pub fn allocator(self: *ScratchAllocator) std.mem.Allocator {
-        return std.mem.Allocator.init(self, alloc, resize, free);
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = @ptrCast(&alloc),
+                .resize = @ptrCast(&resize),
+                .remap = std.mem.Allocator.noRemap,
+                .free = @ptrCast(&free),
+            },
+        };
     }
 
     pub fn reset(self: *ScratchAllocator) void {
@@ -89,50 +82,34 @@ pub const ScratchAllocator = struct {
     fn alloc(
         self: *ScratchAllocator,
         len: usize,
-        ptr_align: u29,
-        len_align: u29,
-        ret_addr: usize,
-    ) std.mem.Allocator.Error![]u8 {
-        _ = ret_addr;
-        _ = len_align;
-
+        alignment: std.mem.Alignment,
+        _: usize,
+    ) ?[*]u8 {
         const alloc_size = len;
-        const offset_begin = std.mem.alignForward(self.buffer.items.len, ptr_align);
+        const offset_begin = std.mem.alignForward(usize, self.buffer.items.len, alignment.toByteUnits());
         const offset_end = offset_begin + alloc_size;
         self.buffer.resize(offset_end) catch {
-            return std.mem.Allocator.Error.OutOfMemory;
+            return null;
         };
-        return self.buffer.items[offset_begin..offset_end];
+        return self.buffer.items[offset_begin..offset_end].ptr;
     }
 
     fn resize(
-        self: *ScratchAllocator,
+        _: *ScratchAllocator,
         old_mem: []u8,
-        old_align: u29,
+        _: std.mem.Alignment,
         new_size: usize,
-        len_align: u29,
-        ret_addr: usize,
-    ) ?usize {
-        _ = self;
-        _ = old_align;
-        _ = ret_addr;
-
-        if (new_size > old_mem.len) {
-            return null;
-        }
-        const aligned_size: usize = if (len_align == 0) new_size else std.mem.alignForward(new_size, len_align);
-        return aligned_size;
+        _: usize,
+    ) bool {
+        return new_size <= old_mem.len;
     }
 
     fn free(
         self: *ScratchAllocator,
-        old_mem: []u8,
-        old_align: u29,
-        ret_addr: usize,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
     ) void {
         _ = self;
-        _ = old_mem;
-        _ = old_align;
-        _ = ret_addr;
     }
 };
