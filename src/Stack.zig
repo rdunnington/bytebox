@@ -113,7 +113,8 @@ pub fn init(allocator: std.mem.Allocator) Stack {
 
 pub fn deinit(stack: *Stack) void {
     if (stack.mem.len > 0) {
-        stack.allocator.free(stack.mem);
+        const alignment = @max(@alignOf(StackVal), @alignOf(Label), @alignOf(CallFrame));
+        stack.allocator.rawFree(stack.mem, comptime std.mem.Alignment.fromByteUnits(alignment), @returnAddress());
     }
 }
 
@@ -127,12 +128,12 @@ pub fn allocMemory(stack: *Stack, opts: AllocOpts) !void {
     const begin_labels = values_alloc_size;
     const begin_frames = values_alloc_size + labels_alloc_size;
 
-    stack.mem = try stack.allocator.alloc(u8, total_alloc_size);
-    stack.values.ptr = @as([*]StackVal, @alignCast(@ptrCast(stack.mem.ptr)));
+    stack.mem = try stack.allocator.alignedAlloc(u8, comptime std.mem.Alignment.fromByteUnits(alignment), total_alloc_size);
+    stack.values.ptr = @as([*]StackVal, @ptrCast(@alignCast(stack.mem.ptr)));
     stack.values.len = opts.max_values;
-    stack.labels.ptr = @as([*]Label, @alignCast(@ptrCast(stack.mem[begin_labels..].ptr)));
+    stack.labels.ptr = @as([*]Label, @ptrCast(@alignCast(stack.mem[begin_labels..].ptr)));
     stack.labels.len = opts.max_labels;
-    stack.frames.ptr = @as([*]CallFrame, @alignCast(@ptrCast(stack.mem[begin_frames..].ptr)));
+    stack.frames.ptr = @as([*]CallFrame, @ptrCast(@alignCast(stack.mem[begin_frames..].ptr)));
     stack.frames.len = opts.max_frames;
 }
 
